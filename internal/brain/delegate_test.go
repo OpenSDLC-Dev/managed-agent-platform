@@ -709,6 +709,40 @@ func TestSubmitResultSharingItsTurnWithAToolCallReportsNothing(t *testing.T) {
 	}
 }
 
+// A call the output cap cut off is answered in the same commit as a report
+// beside it, but its work was never done, so the report is refused as it is
+// beside a call that runs: the child makes the call again, then reports.
+func TestSubmitResultBesideACutCallReportsNothing(t *testing.T) {
+	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done, wrote report.md"}`),
+		toolCall("t2", "lookup", `{"q":"write report.m`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE session_threads SET agent = jsonb_set(agent, '{tools}',
+		   '[{"type":"custom","name":"lookup","description":"d","input_schema":{"type":"object"}}]'::jsonb)
+		 WHERE id = $1`, child.String()); err != nil {
+		t.Fatal(err)
+	}
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 || !got[0].isErr || !strings.Contains(got[0].text, "after your tool calls") ||
+		!got[1].isErr || !strings.Contains(got[1].text, "cut off") {
+		t.Fatalf("answers = %+v, want the report refused and the cut call answered", got)
+	}
+	if n := h.countType(t, "agent.thread_message_sent"); n != 0 {
+		t.Errorf("a refused report still messaged the coordinator")
+	}
+	if s := h.threadStatus(t, child); s != "running" {
+		t.Errorf("child = %q, want running with its next turn queued", s)
+	}
+	if n := h.liveTurns(t, child); n != 1 {
+		t.Errorf("child turns queued = %d, want 1", n)
+	}
+}
+
 // send_to_agent addresses by agent name when one live thread runs it, and the
 // delivery wakes a target nothing else would move.
 func TestSendToAgentWakesAnIdleChild(t *testing.T) {

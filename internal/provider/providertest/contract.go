@@ -50,7 +50,8 @@ type ToolCall struct {
 	ID   string
 	Name string
 	// Input is a compact JSON object the accumulated tool input must equal,
-	// e.g. `{"command":"ls"}` or `{}` for an argument-less call.
+	// e.g. `{"command":"ls"}` or `{}` for an argument-less call — or, when the
+	// Script is Cut, the prefix of one the output cap left.
 	Input string
 }
 
@@ -61,6 +62,9 @@ type Script struct {
 	Text  string             // assistant text streamed before any tool call
 	Tool  *ToolCall          // an optional tool call the turn makes
 	Usage *domain.ModelUsage // usage the upstream reports, or nil for "reported none"
+	// Cut ends the turn at the output cap partway through Tool.Input, the
+	// way this protocol ends a turn the cap cut off.
+	Cut bool
 }
 
 // Backend renders Scripts into running providers for one protocol.
@@ -209,6 +213,39 @@ func Run(t *testing.T, b Backend) {
 		}
 		if done.Usage.InputTokens != 3 || done.Usage.OutputTokens != 4 {
 			t.Errorf("usage = %+v, want in=3 out=4", *done.Usage)
+		}
+	})
+
+	// A call the output cap cut off reaches the caller with its input as far
+	// as it got — not repaired, not dropped, not replaced — and a max_tokens
+	// stop: the brain tells such a call from a malformed one by the two
+	// together (#951).
+	t.Run("CutToolCallKeepsItsInputAndTheCapStop", func(t *testing.T) {
+		const cut = `{"command":"ls -la /t`
+		p := b.Turn(t, Script{Tool: &ToolCall{ID: "call_1", Name: "bash", Input: cut}, Cut: true})
+		stream, err := p.Generate(context.Background(), req())
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		defer stream.Close()
+		chunks, err := drain(stream)
+		if err != nil {
+			t.Fatalf("stream error: %v", err)
+		}
+		var tools []provider.Chunk
+		for _, c := range chunks {
+			if c.Kind == provider.KindToolUse {
+				tools = append(tools, c)
+			}
+		}
+		if len(tools) != 1 || tools[0].ToolUse == nil {
+			t.Fatalf("tool_use chunks = %+v, want exactly one", tools)
+		}
+		if got := string(tools[0].ToolUse.Input); got != cut {
+			t.Errorf("input = %q, want %q as it streamed", got, cut)
+		}
+		if done := lastChunk(t, chunks); done.Kind != provider.KindDone || done.StopReason != "max_tokens" {
+			t.Errorf("done = %+v, want stop_reason max_tokens", done)
 		}
 	})
 

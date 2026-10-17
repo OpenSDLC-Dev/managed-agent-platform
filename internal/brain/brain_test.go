@@ -1461,11 +1461,10 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	// A tool_use whose input is not a JSON object must never reach the log:
 	// a valid non-object would replay into a request the model rejects,
 	// wedging the session forever on an append-only log, and malformed JSON
-	// would abort every settlement (a silent reclaim loop). An object cut off
-	// before it closed is the one exception: it reaches the log as {},
-	// answered rather than run (TestCutToolCallIsAnsweredNotRun). A cut that
-	// is not an object, or one followed by more input, is the model's own
-	// malformation.
+	// would abort every settlement (a silent reclaim loop). An input the
+	// output cap cut off is the one exception: it reaches the log as {},
+	// answered rather than run (TestCutToolCallIsAnsweredNotRun). Under a
+	// tool_use stop nothing was cut, so an unfinished input is malformed too.
 	for _, bad := range []string{`"oops"`, `[1,2]`, `42`, `{"a" 1}`, `{"a":1}{`, `[1,`, `"oo`} {
 		t.Run(bad, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
@@ -1492,13 +1491,15 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
-// A tool call cut off before its arguments were complete is answered, not run:
-// {} would be a broader call for a tool whose arguments are all optional, and
-// a tool's own required-argument error would not tell the model what
-// happened. The call commits as agent.tool_use with {} as its input, stamped
-// deny, and the settlement answers it in the same commit with how the stream
-// ended (docs/DIVERGENCES.md, turn classification; #951). A complete call
-// ahead of it goes out as usual.
+// A tool call the output cap cut off is answered, not run: {} would be a
+// broader call for a tool whose arguments are all optional, and a tool's own
+// required-argument error would not tell the model what happened. The cap cuts
+// a response's last block, so a cut call is the last call, under a stop reason
+// that says the turn was cut off, with an input that is unfinished or empty. It
+// commits as agent.tool_use with {} as its input, stamped deny, and the
+// settlement answers it in the same commit with how the stream ended
+// (docs/DIVERGENCES.md, turn classification; #951). A complete call ahead of it
+// goes out as usual.
 func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 	call := func(id, input string) provider.Chunk {
 		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
@@ -1506,13 +1507,32 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		chunks []provider.Chunk
-		asked  int // custom tool calls the client is asked to run
+		asked  int    // custom tool calls the client is asked to run
+		note   string // how the answer says the stream ended
 	}{
 		"cut at the cap": {
 			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		"cut at the context window": {
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), done("model_context_window_exceeded", 4000)}, 0,
+			"(stop_reason model_context_window_exceeded, 4000 output tokens)",
+		},
+		// Cut after nothing but whitespace, before the object began.
+		"cut before the object": {
+			[]provider.Chunk{call("toolu_x", "\n "), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		// Cut before any input arrived: an adapter hands such a block on as
+		// {}, and under a cut-off stop nothing tells it from a call the model
+		// meant to make with no arguments.
+		"cut before any input": {
+			[]provider.Chunk{call("toolu_x", `{}`), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
 		},
 		"a complete call before the cut": {
-			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", ` {"query":"batch 9`), done("max_tokens", 8192)}, 1,
+			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)}, 1,
+			"(stop_reason max_tokens, 8192 output tokens)",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1544,22 +1564,53 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 			}
 			got := h.answers(t)
 			if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "cut off") ||
-				!strings.Contains(got[0].text, "(stop_reason max_tokens, 8192 output tokens)") {
-				t.Errorf("answers = %+v, want one is_error saying the call was cut off and how the stream ended", got)
+				!strings.Contains(got[0].text, tc.note) {
+				t.Errorf("answers = %+v, want one is_error saying the call was cut off %s", got, tc.note)
 			}
 		})
 	}
 }
 
-// A cut call is answered whatever routing its tool would take and whatever
-// stop reason came with it: an ask-gated built-in asks nobody and queues no
-// tool work, and an object left open under a tool_use stop is answered with
-// that stop reason, so the model reads what actually ended the stream.
+// Only the response's last call can be the one the cap cut, so an empty call
+// ahead of another is a call the model made with no arguments, and runs,
+// whether or not the cap cut the last one.
+func TestOnlyTheLastCallCanBeCut(t *testing.T) {
+	call := func(id, input string) provider.Chunk {
+		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: id, Name: "lookup", Input: json.RawMessage(input)}}
+	}
+	for name, tc := range map[string]struct {
+		last     string
+		answered int
+	}{
+		"the last call complete": {`{"query":"batch 8"}`, 0},
+		"the last call cut":      {`{"query":"batch 9`, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, [][]provider.Chunk{{
+				call("toolu_a", `{}`), call("toolu_b", tc.last), done("max_tokens", 8192),
+			}}, nil)
+			h.customTool(t, "lookup")
+			h.wake(t, "use the tool")
+			h.runOnce(t)
+
+			if n, want := h.countType(t, "agent.custom_tool_use"), 2-tc.answered; n != want {
+				t.Errorf("agent.custom_tool_use events = %d, want %d: the empty call goes to the client", n, want)
+			}
+			if got := h.answers(t); len(got) != tc.answered {
+				t.Errorf("answers = %+v, want %d", got, tc.answered)
+			}
+		})
+	}
+}
+
+// A cut call is answered whatever routing its tool would take: an ask-gated
+// built-in asks nobody and queues no tool work.
 func TestACutCallIsNeitherAskedNorQueued(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{
 		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 			ID: "toolu_x", Name: "bash", Input: json.RawMessage(`{"command":"ls -la /tm`)}},
-		done("tool_use", 40),
+		done("max_tokens", 8192),
 	}}, nil)
 	agentJSON := `{"type":"agent","id":"agent_x","version":1,"name":"n",
 		"model":{"id":"fixture-model"},"system":"do the task","description":"",
@@ -1576,8 +1627,8 @@ func TestACutCallIsNeitherAskedNorQueued(t *testing.T) {
 		t.Errorf("session.error events = %d, want 0", n)
 	}
 	got := h.answers(t)
-	if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "(stop_reason tool_use, 40 output tokens)") {
-		t.Errorf("answers = %+v, want one is_error naming the tool_use stop", got)
+	if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "(stop_reason max_tokens, 8192 output tokens)") {
+		t.Errorf("answers = %+v, want one is_error naming the cut", got)
 	}
 	if s := h.status(t); s != "running" {
 		t.Errorf("status = %q, want running with the next turn queued, not waiting on a confirmation", s)
@@ -1587,13 +1638,120 @@ func TestACutCallIsNeitherAskedNorQueued(t *testing.T) {
 	}
 }
 
+// A tool input that stops before its JSON object is complete, where the output
+// cap cannot have cut it, is the model's own malformation, and its turn fails
+// saying how the stream ended (#951). The cap cuts the response's last block
+// under a stop reason that says so, so an unfinished input fails when the
+// stream ends any other way or carries anything after it. Nothing the stream
+// carries after the block is kept or broadcast, and what the call spent is
+// recorded as for any turn. Any other bad input fails its turn at once.
+func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
+	cut := json.RawMessage(`{"query":"batch 9`)
+	after := func(end ...provider.Chunk) []provider.Chunk {
+		return append([]provider.Chunk{
+			{Kind: provider.KindThinkingDelta, Index: 1, Text: "after the cut"},
+			textChunk(2, "after the cut"),
+		}, end...)
+	}
+	for name, tc := range map[string]struct {
+		input  json.RawMessage
+		tail   []provider.Chunk
+		err    error
+		want   string
+		output int64 // the output tokens the token metric records
+	}{
+		"under a tool_use stop": {
+			cut, []provider.Chunk{done("tool_use", 40)}, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason tool_use, 40 output tokens)`,
+			40,
+		},
+		"with more after it": {
+			cut, after(done("max_tokens", 8192)), nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
+		},
+		"before another call": {
+			json.RawMessage("\n"), []provider.Chunk{
+				{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+					ID: "toolu_b", Name: "lookup", Input: json.RawMessage(`{"query":"batch 8"}`)}},
+				done("max_tokens", 8192),
+			}, nil,
+			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
+		},
+		"no done chunk": {
+			cut, nil, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
+			0,
+		},
+		// The stream's own failure is part of how it ended, so it is named
+		// beside the bad block rather than hidden behind it.
+		"stream failed after it": {
+			cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
+			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
+			0,
+		},
+		"malformed, not cut": {
+			json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
+			`tool "lookup": input must be a JSON object: json: cannot unmarshal string into Go value of type map[string]interface {}`,
+			0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			collect := collectBrainMetrics(t)
+			h := newHarness(t, [][]provider.Chunk{
+				append([]provider.Chunk{{Kind: provider.KindToolUse,
+					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}}, tc.tail...),
+			}, []error{tc.err})
+			h.customTool(t, "lookup")
+			h.wake(t, "use the tool")
+			frames := drainFrames(t, h)
+
+			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
+			if len(evs) != 1 {
+				t.Fatalf("session.error events = %d, want 1", len(evs))
+			}
+			var p struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Error.Message != tc.want {
+				t.Errorf("session.error message = %q, want %q", p.Error.Message, tc.want)
+			}
+			if n := h.countType(t, "agent.thinking"); n != 0 {
+				t.Errorf("agent.thinking events = %d, want 0: thinking after the bad block was kept", n)
+			}
+			for _, typ := range []string{"agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use", "agent.tool_result"} {
+				if n := h.countType(t, typ); n != 0 {
+					t.Errorf("%s events = %d, want 0: a call of the failed turn was committed", typ, n)
+				}
+			}
+			for _, f := range frames {
+				if raw, _ := json.Marshal(f); strings.Contains(string(raw), "after the cut") {
+					t.Errorf("frame %s: text after the bad block was broadcast", raw)
+				}
+			}
+			if got := tokenSums(t, collect())["output"]; got != tc.output {
+				t.Errorf("output tokens recorded = %d, want %d", got, tc.output)
+			}
+			if n := h.liveWork(t); n != 0 {
+				t.Errorf("%d work items still live (reclaim loop)", n)
+			}
+		})
+	}
+}
+
 func TestNullToolInputBecomesEmptyObject(t *testing.T) {
-	// An absent, blank or null input is legal and means "no arguments"; it
-	// lands as {} so the emitted event carries a JSON object. Whitespace-padded
+	// An absent or null input is legal and means "no arguments"; it lands
+	// as {} so the emitted event carries a JSON object. Whitespace-padded
 	// null counts: unmarshalling any JSON null into a map reports no error,
 	// so a byte comparison against "null" would let ` null ` through and
 	// emit a null input.
-	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("null"), json.RawMessage(" null "), json.RawMessage("\n"), json.RawMessage("  ")} {
+	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("null"), json.RawMessage(" null ")} {
 		t.Run(fmt.Sprintf("%q", string(in)), func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{
 				{

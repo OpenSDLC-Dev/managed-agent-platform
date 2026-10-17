@@ -770,7 +770,10 @@ func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) 
 // instead of dispatching one of the six (#567). This is deliberately distinct
 // from the settlement-executed-but-unoffered case just above (a coordinator
 // reaching for a worker's tool, or the reverse): that name IS in class — every
-// role classes all six, offered or not — so it keeps going to wrongRole.
+// role classes all six, offered or not — so it keeps going to wrongRole. A call
+// the output cap cut off (turnResult.cut) takes the same shape, stamped deny,
+// and delegatedCall.cut marks it so d.run answers it with how the stream ended
+// (#951).
 func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, delegated []delegatedCall, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
@@ -792,7 +795,7 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		// answers it with how the stream ended so the model makes it again,
 		// shorter (#951). The reference sends it to the tool with {} instead
 		// (docs/DIVERGENCES.md, turn classification).
-		cut := offered && turn.cut[i]
+		cut := offered && turn.cut && i == len(turn.toolUses)-1
 		if !offered || cut {
 			// A name the model was not offered: not a declared custom tool (a
 			// client would answer that one), not a platform tool this thread's
@@ -873,9 +876,10 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 	return batch, kind, askIDs, delegated, nil
 }
 
-// delegatedCall is one settlement-executed delegation call, as turnEvents
-// committed it: the id its agent.tool_result must answer, the tool the model
-// named, and the input it sent. Model order, because the calls of one turn are
+// delegatedCall is one call the settlement answers itself — a delegation call,
+// a name the model was not offered, or a call the output cap cut off — as
+// turnEvents committed it: the id its agent.tool_result must answer, the tool
+// the model named, and the input it sent. Model order, because the calls of one turn are
 // resolved in the order the model made them.
 type delegatedCall struct {
 	eventID domain.ID
@@ -1005,11 +1009,10 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// tool turns: a tool_use stop with no blocks fails, and a refusal arrives
 	// here with its blocks dropped.
 	//
-	// A block cut mid-input arrives here with {} as its input, marked cut
+	// The block the cap cut off arrives here with {} as its input, marked cut
 	// (streamTurn), and turnEvents hands it to the settlement to answer with
 	// how the stream ended: recoverable, where a stranded call is not, and
-	// never run (docs/DIVERGENCES.md; #951). A block cut before its first
-	// input delta is indistinguishable from a call with no arguments, and runs.
+	// never run (docs/DIVERGENCES.md; #951).
 	if len(turn.toolUses) > 0 {
 		if len(delegated) > 0 {
 			// A delegation call — or a name the model was not offered at all

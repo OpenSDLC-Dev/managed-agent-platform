@@ -421,7 +421,8 @@ func (s *stream) Next() bool {
 			// as it stands, ahead of the done chunk, and the brain reads its
 			// unfinished input as a cut one. Any other stop reason, or none,
 			// leaves an open block unexplained.
-			cut := s.stopReason == "max_tokens" || s.stopReason == "model_context_window_exceeded"
+			cut := s.stopReason == string(sdk.StopReasonMaxTokens) ||
+				s.stopReason == string(sdk.StopReasonModelContextWindowExceeded)
 			if s.inTool && !cut {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
 					s.toolIndex, s.stopNote())

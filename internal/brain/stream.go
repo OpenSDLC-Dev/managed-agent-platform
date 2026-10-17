@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -25,10 +26,9 @@ type turnResult struct {
 	// must be appended under (zero when the turn produced no text).
 	messageEventID domain.ID
 	toolUses       []provider.ToolUse
-	// cut marks, by index into toolUses, the calls whose input was cut off
-	// before its object closed. Each holds {} as its input and is answered
-	// rather than run (turnEvents).
-	cut        map[int]bool
+	// cut is set when the output cap cut off the last of toolUses. That call
+	// holds {} as its input and is answered rather than run (turnEvents).
+	cut        bool
 	stopReason string
 	// usage is what the model reported, or nil when the endpoint reported
 	// nothing — the two are different facts and only the first belongs in
@@ -161,8 +161,23 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
+	// unfinished is a tool input that stops before its JSON object is
+	// complete, or before it began (io.ErrUnexpectedEOF, or io.EOF for
+	// whitespace alone). Whether the output cap cut it off is known only once
+	// the stream has ended: the cap cuts a response's last block, under a stop
+	// reason that arrives after the block (#951). So the call holds {} until
+	// then, and anything the stream carries after it but the done chunk makes
+	// it the model's own malformation (late), whose turn fails. Reading on is
+	// bounded as every turn's reading is, by the route's stall guard, and
+	// nothing else the stream carries after the block is kept.
+	var unfinished error
+	late := false
 	for stream.Next() {
 		c := stream.Chunk()
+		if unfinished != nil && c.Kind != provider.KindDone {
+			late = true
+			continue
+		}
 		switch c.Kind {
 		case provider.KindThinkingDelta:
 			// Thinking is the first content a reasoning model streams, so it is
@@ -254,19 +269,8 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
-			if errors.Is(err, io.ErrUnexpectedEOF) && bytes.HasPrefix(bytes.TrimSpace(tu.Input), []byte("{")) {
-				// An object cut off before it closed: the shape the output
-				// cap leaves (#951), and whatever else ended one early is
-				// treated alike. It is answered, not run — {} would be a
-				// broader call for a tool whose arguments are all optional —
-				// so it holds {} only to keep the log storable (turnEvents;
-				// docs/DIVERGENCES.md, turn classification). A cut that is
-				// not an object, or more input after a closed one, is a
-				// malformation and fails the turn below.
-				if turn.cut == nil {
-					turn.cut = map[int]bool{}
-				}
-				turn.cut[len(turn.toolUses)] = true
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				unfinished = fmt.Errorf("tool %q: %w", tu.Name, err)
 				input, err = json.RawMessage("{}"), nil
 			}
 			if err != nil {
@@ -286,11 +290,33 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			turn.usage = copyUsage(c.Usage)
 		}
 	}
+	cutStop := turn.stopReason == "max_tokens" || turn.stopReason == "model_context_window_exceeded"
+	if unfinished != nil && (late || !cutStop || stream.Err() != nil) {
+		// The turn goes back with the error, because what the call spent is
+		// a fact of the call: runTurn records it for a failed turn too.
+		note := provider.StopNote(turn.stopReason, turn.usage)
+		if err := stream.Err(); err != nil {
+			return turn, fmt.Errorf("%w (%s; model stream: %w)", unfinished, note, err)
+		}
+		return turn, fmt.Errorf("%w (%s)", unfinished, note)
+	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)
 	}
 	if turn.stopReason == "" {
 		return nil, fmt.Errorf("model stream ended without a stop reason")
+	}
+	// The cap cut the response's last call if its input was unfinished or
+	// empty: an adapter hands on a block cut before any input as {}, which a
+	// stop reason saying the turn was cut off tells from a call the model
+	// meant to make with no arguments. The call is answered, not run (#951):
+	// {} would be a broader call for a tool whose arguments are all
+	// optional (turnEvents; docs/DIVERGENCES.md, turn classification).
+	if n := len(turn.toolUses); cutStop && n > 0 && string(turn.toolUses[n-1].Input) == "{}" {
+		turn.cut = true
+		slog.WarnContext(ctx, "brain: the output cap cut off a tool call; it is answered, not run",
+			"session_id", sid.String(), "tool", turn.toolUses[n-1].Name,
+			"stop", provider.StopNote(turn.stopReason, turn.usage))
 	}
 	return turn, nil
 }
@@ -372,7 +398,7 @@ func copyUsage(u *domain.ModelUsage) *domain.ModelUsage {
 	return &c
 }
 
-// normalizeToolInput accepts an absent, blank or null input as the empty object,
+// normalizeToolInput accepts an absent or null input as the empty object,
 // rejects anything that is not a JSON object, and re-encodes what it accepts
 // through Go rather than passing the model's bytes along. The rewrite is what
 // makes the payload storable: the input is the one model-produced value that
@@ -386,7 +412,7 @@ func copyUsage(u *domain.ModelUsage) *domain.ModelUsage {
 // padded with whitespace or not — into a map leaves it nil and reports no
 // error, so a byte comparison would wave ` null ` through as a valid object.
 func normalizeToolInput(raw json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
+	if len(raw) == 0 {
 		return json.RawMessage("{}"), nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))

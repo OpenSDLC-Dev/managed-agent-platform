@@ -80,6 +80,9 @@ func renderOpenAITurn(s providertest.Script) []string {
 				`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":%s}}]},"finish_reason":null}]}`, jsonString(frag)))
 		}
 	}
+	if s.Cut {
+		finish = "length"
+	}
 	frames = append(frames, fmt.Sprintf(`{"choices":[{"index":0,"delta":{},"finish_reason":%s}]}`, jsonString(finish)))
 	if s.Usage != nil {
 		frames = append(frames, fmt.Sprintf(

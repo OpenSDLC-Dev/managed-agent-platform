@@ -158,9 +158,10 @@ type Chunk struct {
 	ThinkingAnyPrefix bool
 }
 
-// StopNote says how far a stream got, for the error that ends it early: the
-// stop reason and the output count tell a stream the output cap ended from one
-// that failed on its own (#951). A nil usage is an endpoint that reported
+// StopNote says how far a stream got, for the error that ends it early and for
+// the answer to a call the output cap cut off: the stop reason and the output
+// count tell a stream the output cap ended from one that failed on its own
+// (#951). A nil usage is an endpoint that reported
 // none. Without a stop reason the count is left out: the message_delta that
 // carries both never came, so any count is message_start's opening snapshot.
 func StopNote(reason string, usage *domain.ModelUsage) string {
