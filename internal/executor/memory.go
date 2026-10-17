@@ -765,7 +765,9 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 // shape internal/api's insertMemoryVersion writes with a session_actor for
 // its created_by (decision 6; migration 0029 names the columns), under the
 // id the head row was given: a `deleted` version carries its path and
-// nothing else.
+// nothing else. created_at is clock_timestamp() for insertMemoryVersion's
+// reason, and for one more: a settlement writes all its versions in one
+// transaction, which now() would stamp identically (#552).
 func insertSessionVersion(ctx context.Context, tx pgx.Tx, versionID, storeID, memoryID, operation, p string,
 	content *string, actor json.RawMessage) error {
 	var body, sha, size any
@@ -775,8 +777,8 @@ func insertSessionVersion(ctx context.Context, tx pgx.Tx, versionID, storeID, me
 	_, err := tx.Exec(ctx,
 		`INSERT INTO memory_versions
 		   (id, memory_store_id, memory_id, operation, path, content, content_sha256,
-		    content_size_bytes, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		    content_size_bytes, created_by, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())`,
 		versionID, storeID, memoryID, operation, p, body, sha, size, actor)
 	return err
 }
