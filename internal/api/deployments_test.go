@@ -468,6 +468,10 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 			"`schedule.expression` is not a valid 5-field cron expression: expected 5 fields, got 1"},
 		"L is unsupported": {map[string]any{"type": "cron", "expression": "0 0 L * *", "timezone": "UTC"},
 			"`schedule.expression` is not a valid 5-field cron expression: \"L\" in day-of-month field is not a number"},
+		// The recorded body and sentence (2026-09-02 batch2
+		// `deployment.create.dom+dow-cron`; #543).
+		"both day fields": {map[string]any{"type": "cron", "expression": "0 0 1 * 1", "timezone": "UTC"},
+			"`schedule.expression` cannot restrict both day-of-month and day-of-week; use `*` for one"},
 		"unknown zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Mars/Olympus"},
 			"`schedule.timezone` \"Mars/Olympus\" is not a valid IANA timezone"},
 		"host-local zone": {map[string]any{"type": "cron", "expression": "0 9 * * *", "timezone": "Local"},
@@ -498,6 +502,26 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
 		"schedule": map[string]any{"type": "cron", "expression": "0 9 * * *"}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "schedule.timezone: Field required")
+	// So does a schedule that restricts both day fields.
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{
+		"schedule": map[string]any{"type": "cron", "expression": "0 0 13 * 5", "timezone": "UTC"}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"`schedule.expression` cannot restrict both day-of-month and day-of-week; use `*` for one")
+
+	// A schedule stored before that refusal still reads: the matcher keeps the
+	// POSIX union for it, so its upcoming runs render rather than the read
+	// failing.
+	if _, err := s.pool.Exec(t.Context(), `UPDATE deployments
+	    SET schedule_expression = '0 0 13 * 5', schedule_timezone = 'UTC' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	status, res = s.do(http.MethodGet, "/v1/deployments/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("get a stored two-day schedule: status %d (%v)", status, res)
+	}
+	if up, _ := res["schedule"].(map[string]any)["upcoming_runs_at"].([]any); len(up) != 5 {
+		t.Errorf("a stored two-day schedule's upcoming_runs_at = %v, want 5", res["schedule"])
+	}
 }
 
 // The two recorded schedule refusals that drop server-side detail keep it in

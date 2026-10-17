@@ -120,6 +120,19 @@ func Upcoming(expr, timezone string, after time.Time, n int) ([]time.Time, error
 	return s.walk(loc, after, time.Time{}, n), nil
 }
 
+// RestrictsBothDays reports whether expr restricts both day-of-month and
+// day-of-week, writing neither as "*". The reference refuses such an
+// expression when a deployment is written (#543), so the API asks this before
+// it stores one. The matcher keeps the POSIX union, which still serves a
+// schedule stored before that refusal.
+func RestrictsBothDays(expr string) (bool, error) {
+	s, err := parse(expr)
+	if err != nil {
+		return false, err
+	}
+	return s.domRestricted && s.dowRestricted, nil
+}
+
 // schedule is five bitmasks. dowRestricted and domRestricted carry the POSIX
 // union rule, which needs to know whether a field was written as "*" — a
 // restricted day-of-month and a restricted day-of-week match on either.
