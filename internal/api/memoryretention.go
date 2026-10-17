@@ -107,7 +107,8 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 // id after that one — ids are random and never reused, and a re-create at the
 // same path mints a new memory. That is insert order, and timestamp order too
 // as far as the database clock keeps it: created_at is clock_timestamp() at
-// the insert, which every writer reaches only after the store lock (#552), so
+// the insert, which every writer reaches only after the store lock or, for a
+// dream's clone, inside the transaction that creates the store (#552), so
 // the marker is stamped after every earlier version of its memory unless the
 // clock steps backwards between them (#411). The listable promise does not
 // depend on it either way. The reference's own wording, that versions "persist after

@@ -505,12 +505,14 @@ func (s *server) cloneDreamStore(ctx context.Context, tx pgx.Tx, d dreamRow, in 
 			fmt.Fprintf(&mem, "($%d, $1, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
 			n = len(verArgs)
 			verArgs = append(verArgs, versionID, memoryID, m.path, m.content, m.sha, m.size)
-			fmt.Fprintf(&ver, "($%d, $1, $%d, 'created', $%d, $%d, $%d, $%d, $2)",
+			fmt.Fprintf(&ver, "($%d, $1, $%d, 'created', $%d, $%d, $%d, $%d, $2, clock_timestamp())",
 				n+1, n+2, n+3, n+4, n+5, n+6)
 		}
+		// created_at is clock_timestamp(), as every writer of memory_versions
+		// stamps it (insertMemoryVersion, #552): the time each row is written.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO memory_versions (id, memory_store_id, memory_id, operation, path,
-				content, content_sha256, content_size_bytes, created_by) VALUES `+ver.String(), verArgs...); err != nil {
+				content, content_sha256, content_size_bytes, created_by, created_at) VALUES `+ver.String(), verArgs...); err != nil {
 			return "", err
 		}
 		if _, err := tx.Exec(ctx, `
