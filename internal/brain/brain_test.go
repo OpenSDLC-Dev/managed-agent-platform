@@ -1540,8 +1540,28 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), textChunk(1, ""), done("max_tokens", 8192)}, 0,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
+		"a NUL-only delta after the cut": {
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), textChunk(1, "\x00\x00"), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		"an empty thinking delta after the cut": {
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), thinkingChunk(1, ""), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
 		"an empty delta after a call cut before any input": {
 			[]provider.Chunk{call("toolu_x", `{}`), textChunk(1, ""), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		// A signature seals a thinking block the model wrote before the call;
+		// it is not more of the response.
+		"a signature for an earlier block after the cut": {
+			[]provider.Chunk{thinkingChunk(0, "plan the batch"), call("toolu_x", `{"query":"batch 9`),
+				signatureChunk(0, "sig"), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		"a signature after a call cut before any input": {
+			[]provider.Chunk{thinkingChunk(0, "plan the batch"), call("toolu_x", `{}`),
+				signatureChunk(0, "sig"), done("max_tokens", 8192)}, 0,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
 		// Text after an earlier call does not count against the last one.
@@ -1587,9 +1607,9 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 	}
 }
 
-// Only the response's last block can be the one the cap cut, so an empty call
-// ahead of another call, or of text, is a call the model made with no
-// arguments, and runs, whether or not the cap cut the last one.
+// Only the last call, with nothing generated after it, can be the one the cap
+// cut, so an empty call ahead of another call, or of text, is a call the model
+// made with no arguments, and runs, whether or not the cap cut the last one.
 func TestOnlyTheLastCallCanBeCut(t *testing.T) {
 	call := func(id, input string) provider.Chunk {
 		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
@@ -1741,10 +1761,12 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 		},
 		// Only an object can be a cut one, so a cut string or array fails
 		// at once, whatever ends the stream.
+		// Only an object can be a cut one; the stream is still read to its
+		// end for how it ended and what it spent.
 		"not an object": {
 			nil, json.RawMessage(`["a",`), []provider.Chunk{done("max_tokens", 8192)}, nil,
-			`tool "lookup": input must be a JSON object: unexpected EOF`,
-			0,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
 		},
 		"malformed, not cut": {
 			nil, json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,

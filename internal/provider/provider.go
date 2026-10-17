@@ -159,8 +159,8 @@ type Chunk struct {
 }
 
 // CutOff reports whether a stop reason says the output cap cut the response
-// off, so its last block may be incomplete: the two the SDK's own tool loop
-// treats so (#951).
+// off, so a block still open when it was reached may be incomplete: the two
+// the SDK's own tool loop treats so (#951).
 func CutOff(stopReason string) bool {
 	return stopReason == "max_tokens" || stopReason == "model_context_window_exceeded"
 }

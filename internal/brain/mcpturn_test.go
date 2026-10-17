@@ -139,6 +139,49 @@ func TestAListedMCPToolIsOfferedAndGated(t *testing.T) {
 	}
 }
 
+// A call the output cap cut off is answered by the settlement, never by the MCP
+// driver, so it commits as agent.tool_use under the prefixed name the model
+// called: replay rebuilds an agent.tool_use from its name as it stands (#951).
+func TestACutMCPCallIsAnsweredUnderItsPrefixedName(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_1", Name: "mcp__docs__search", Input: json.RawMessage(`{"query":"how the cap cu`)}},
+		done("max_tokens", 8192),
+	}}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs",
+		 "default_config":{"permission_policy":{"type":"always_allow"}}}`)
+	listing(t, h, "ready", searchTool)
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	if n := h.countType(t, string(domain.EventAgentMCPToolUse)); n != 0 {
+		t.Errorf("agent.mcp_tool_use events = %d, want 0: the cut call went to the MCP driver", n)
+	}
+	if got := h.liveOf(t, queue.MCPExec); got != 0 {
+		t.Errorf("mcp_exec items = %d, want 0", got)
+	}
+	useEvs, _ := h.log.List(context.Background(), h.sessionID,
+		events.ListQuery{Types: []string{string(domain.EventAgentToolUse)}})
+	if len(useEvs) != 1 {
+		t.Fatalf("agent.tool_use events = %d, want 1: the cut call", len(useEvs))
+	}
+	var use struct {
+		Name       string         `json:"name"`
+		Input      map[string]any `json:"input"`
+		Permission string         `json:"evaluated_permission"`
+	}
+	if err := json.Unmarshal(useEvs[0].Body, &use); err != nil {
+		t.Fatal(err)
+	}
+	if use.Name != "mcp__docs__search" || use.Input == nil || len(use.Input) != 0 || use.Permission != "deny" {
+		t.Errorf("cut call = %s, want mcp__docs__search with input {}, stamped deny", useEvs[0].Body)
+	}
+	if got := h.answers(t); len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, "cut off") {
+		t.Errorf("answers = %+v, want one is_error saying the call was cut off", got)
+	}
+}
+
 // A turn mixing an allowed MCP call with a sandbox tool enqueues mcp_exec and
 // nothing else. Only this platform's MCP driver answers an agent.mcp_tool_use,
 // and a tool_exec is the one kind a BYOC worker claims — it would take the item,

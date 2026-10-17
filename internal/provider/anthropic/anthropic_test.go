@@ -918,6 +918,77 @@ func TestGenerateEndsAToolBlockOpenAtMessageStop(t *testing.T) {
 	}
 }
 
+// Blocks may interleave: the SDK accumulates deltas and stops by index
+// (messageutil.go checkContentBlockIndex). A tool block is emitted when it
+// closes, after the text that streamed beside it, so the brain reads what came
+// after the call as what the model generated after its block closed (#951).
+func TestGenerateInterleavedBlocks(t *testing.T) {
+	head := []string{
+		`{"type":"message_start","message":{"id":"msg_6","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_id","name":"get_weather","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": "}}`,
+	}
+	for name, tc := range map[string]struct {
+		tail  []string
+		input string
+		stop  string
+	}{
+		// The SDK's own interleaved fixture, ended with a stop reason.
+		"whole": {
+			[]string{
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"!"}}`,
+				`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Los Angeles\"}"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_stop","index":1}`,
+				`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":30}}`,
+				`{"type":"message_stop"}`,
+			},
+			`{"city": "Los Angeles"}`, "tool_use",
+		},
+		"cut with the text": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+				`{"type":"message_stop"}`,
+			},
+			`{"city": `, "max_tokens",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := start(t, &fakeServer{sse: append(append([]string(nil), head...), tc.tail...)})
+			stream, err := p.Generate(context.Background(), provider.Request{
+				Messages: []provider.Message{{Role: "user", Content: json.RawMessage(`"weather?"`)}},
+			})
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			got := collect(t, stream)
+			n := len(got)
+			if n < 3 || got[n-2].Kind != provider.KindToolUse || got[n-1].Kind != provider.KindDone {
+				t.Fatalf("chunks = %+v, want the text, then the tool block, then done", got)
+			}
+			var text string
+			for _, c := range got[:n-2] {
+				if c.Kind != provider.KindTextDelta || c.Index != 0 {
+					t.Fatalf("chunk %+v before the tool block, want text of block 0", c)
+				}
+				text += c.Text
+			}
+			if want := map[bool]string{true: "Hello world!", false: "Hello world"}[tc.stop == "tool_use"]; text != want {
+				t.Errorf("text = %q, want %q", text, want)
+			}
+			if tu := got[n-2].ToolUse; got[n-2].Index != 1 || string(tu.Input) != tc.input {
+				t.Errorf("tool chunk = index %d, %+v, want block 1 with input %s", got[n-2].Index, tu, tc.input)
+			}
+			if got[n-1].StopReason != tc.stop {
+				t.Errorf("stop = %q, want %q", got[n-1].StopReason, tc.stop)
+			}
+		})
+	}
+}
+
 // A stream that ends with a tool block open, and without what message_stop
 // would have settled, fails. The error says how far the stream got: the stop
 // reason and the output count, when message_delta sent them (#951).
@@ -944,25 +1015,6 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 				`{"type":"message_stop"}`,
 			},
 			[]string{"message_stop with tool_use block 0 still open (stop_reason end_turn, 50 output tokens)"},
-		},
-		// Blocks run one at a time, so a block that begins, or streams,
-		// inside the open one fails the stream before message_stop.
-		"a later block began": {
-			[]string{
-				`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`,
-				`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"after"}}`,
-				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
-				`{"type":"message_stop"}`,
-			},
-			[]string{"text block 1 started before tool_use block 0 closed"},
-		},
-		"a later block streamed": {
-			[]string{
-				`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"after"}}`,
-				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
-				`{"type":"message_stop"}`,
-			},
-			[]string{"delta for block 1 before tool_use block 0 closed"},
 		},
 		// A stream that drops before message_stop says how far it got,
 		// whether it ends cleanly or on an error.

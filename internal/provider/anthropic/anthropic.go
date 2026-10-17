@@ -313,15 +313,6 @@ func (s *stream) Next() bool {
 			}
 
 		case "content_block_start":
-			if s.inTool && ev.ContentBlock.Type != "tool_use" {
-				// Blocks run one at a time. One that began inside an open
-				// tool block would be emitted ahead of it, and the brain
-				// reads the order to tell a call the output cap cut off
-				// (#951), so a malformed stream fails here as well.
-				s.err = fmt.Errorf("%s block %d started before tool_use block %d closed",
-					ev.ContentBlock.Type, ev.Index, s.toolIndex)
-				return false
-			}
 			switch ev.ContentBlock.Type {
 			case "redacted_thinking":
 				// No delta follows: the whole opaque payload is on the start.
@@ -377,10 +368,6 @@ func (s *stream) Next() bool {
 			}
 
 		case "content_block_delta":
-			if s.inTool && ev.Index != s.toolIndex {
-				s.err = fmt.Errorf("delta for block %d before tool_use block %d closed", ev.Index, s.toolIndex)
-				return false
-			}
 			switch ev.Delta.Type {
 			case "text_delta":
 				s.cur = provider.Chunk{Kind: provider.KindTextDelta, Index: ev.Index, Text: ev.Delta.Text}
@@ -432,7 +419,9 @@ func (s *stream) Next() bool {
 			// says the turn was cut off — the two the SDK's own tool loop
 			// treats so — message_stop ends the block as surely: it goes out
 			// as it stands, ahead of the done chunk, and the brain reads its
-			// unfinished input as a cut one. Any other stop reason, or none,
+			// unfinished input as a cut one, whatever streamed beside it:
+			// blocks may interleave, and a block open at the end was open
+			// when the cap was reached. Any other stop reason, or none,
 			// leaves an open block unexplained.
 			if s.inTool && !provider.CutOff(s.stopReason) {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",

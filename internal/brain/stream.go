@@ -164,24 +164,28 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// unfinished is a tool input that stops before its JSON object is
 	// complete, or before it began (io.ErrUnexpectedEOF, or io.EOF for
 	// whitespace alone). Whether the output cap cut it off is known only once
-	// the stream has ended: the cap cuts a response's last block, under a stop
-	// reason that arrives after the block (#951). So the call holds {} until
-	// then, and anything the stream carries after it but the done chunk makes
-	// it the model's own malformation (late). When the turn fails on it,
+	// the stream has ended: the cap cuts what is still open when it is
+	// reached, under a stop reason that arrives after it (#951). An adapter
+	// hands a tool call on when its block closes, so the call holds {} until
+	// then, and anything generated after it makes its input the model's own
+	// malformation (late). When the turn fails on it,
 	// nothing of the response is kept but how the stream ended, and reading on
 	// is bounded as every turn's reading is, by the route's stall guard.
 	var unfinished error
 	late := false
+	// notObject marks an unfinished string or array: only an object, or
+	// nothing yet, can be a cut one, so its turn fails whatever ended it.
+	notObject := false
 	// passed is set when the stream carried content after its last tool call:
 	// the cap then cut that content, not the call. Each tool call clears it.
 	passed := false
 	for stream.Next() {
 		c := stream.Chunk()
-		// A chunk with no content — an empty or NUL-only text or thinking
-		// delta, which the paths below skip too — moves neither late nor
-		// passed.
-		content := (c.Kind != provider.KindTextDelta && c.Kind != provider.KindThinkingDelta) ||
-			toolset.SanitizeText(c.Text) != ""
+		// A chunk with no content moves neither late nor passed: an empty or
+		// NUL-only text or thinking delta, which the paths below skip too, or
+		// the signature that seals a thinking block the model wrote before.
+		content := (c.Kind != provider.KindTextDelta && c.Kind != provider.KindThinkingDelta &&
+			c.Kind != provider.KindThinkingSignature) || toolset.SanitizeText(c.Text) != ""
 		if unfinished != nil {
 			if c.Kind != provider.KindDone {
 				late = late || content
@@ -288,11 +292,10 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
-			// Only an object, or nothing yet, can be a cut one: a cut
-			// string or array is malformed whatever ended it.
-			start := bytes.TrimLeft(tu.Input, " \t\r\n")
-			if (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)) && (len(start) == 0 || start[0] == '{') {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 				unfinished = fmt.Errorf("tool %q: %w", tu.Name, err)
+				start := bytes.TrimLeft(tu.Input, " \t\r\n")
+				notObject = len(start) > 0 && start[0] != '{'
 				input, err = json.RawMessage("{}"), nil
 			}
 			if err != nil {
@@ -312,7 +315,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			turn.usage = copyUsage(c.Usage)
 		}
 	}
-	// The cap cut the response's last block if that is a tool call whose
+	// The cap cut the last tool call if nothing generated followed it and its
 	// input was unfinished or empty: an adapter hands on a block cut before
 	// any input as {}, which a stop reason saying the turn was cut off tells
 	// from a call the model meant to make with no arguments. The call is
@@ -321,7 +324,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	// classification).
 	n := len(turn.toolUses)
 	cut := provider.CutOff(turn.stopReason) && n > 0 && !passed && string(turn.toolUses[n-1].Input) == "{}"
-	if unfinished != nil && (late || !cut || stream.Err() != nil) {
+	if unfinished != nil && (late || notObject || !cut || stream.Err() != nil) {
 		// An unfinished input the cap did not cut is the model's own
 		// malformation, and never goes out. The turn goes back with the
 		// error, because what the call spent is a fact of the call: runTurn
@@ -344,7 +347,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 	if cut {
 		turn.cut = true
 		slog.WarnContext(ctx, "brain: the output cap cut off a tool call; it is answered, not run",
-			"session_id", sid.String(), "tool", turn.toolUses[n-1].Name,
+			"session_id", sid.String(), "tool", noteLabel(turn.toolUses[n-1].Name),
 			"stop", provider.StopNote(turn.stopReason, turn.usage))
 	}
 	return turn, nil

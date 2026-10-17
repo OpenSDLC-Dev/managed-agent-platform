@@ -167,6 +167,14 @@ type delegate struct {
 // model can see neither its own role nor the half it was not offered — it has
 // simply called something that is not in front of it, and the only useful
 // answer says what is.
+// foreign reports a call that is not this thread's to make: a name the model
+// was not offered, or one of the six that belongs to the other half. d.run
+// answers it as any call to that name, cut or not, and it spends no delegation
+// budget nor leaves work owed (#567, #951).
+func (d *delegate) foreign(call delegatedCall) bool {
+	return call.unoffered || (call.six && d.wrongRole(call.name) != "")
+}
+
 func (d *delegate) wrongRole(name string) string {
 	child := d.caller.ThreadID != ""
 	switch {
@@ -194,11 +202,11 @@ func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) er
 		switch {
 		case call.unoffered:
 			text = unknownToolAnswer(call.name)
-		case call.cut != "" && !(call.six && d.wrongRole(call.name) != ""):
+		case call.cut != "" && !d.foreign(call):
 			text = cutCallAnswer(call.cut)
 		}
 		if text != "" {
-			// Not one of the six: the model called a name nothing offered it
+			// An unoffered name is not one of the six: nothing offered it
 			// at all (#567). wrongRole and the switch below both assume a
 			// genuine delegation call, so this is answered here instead of
 			// either — otherwise a hallucinated "create_agent" in a
@@ -787,7 +795,7 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		genuine := false
 		for _, dc := range delegated {
 			switch {
-			case dc.unoffered || (dc.six && d.wrongRole(dc.name) != ""):
+			case d.foreign(dc):
 			case dc.cut != "":
 				d.cut = true
 			default:

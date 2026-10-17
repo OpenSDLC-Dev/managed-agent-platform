@@ -772,8 +772,8 @@ func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) 
 // reaching for a worker's tool, or the reverse): that name IS in class — every
 // role classes all six, offered or not — so it keeps going to wrongRole. A call
 // the output cap cut off (turnResult.cut) takes the same shape, stamped deny,
-// and delegatedCall.cut marks it so d.run answers it with how the stream ended
-// (#951).
+// and delegatedCall.cut marks it so d.run answers it with how the stream ended,
+// unless it is one of the other half's six, which wrongRole answers (#951).
 func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.NewEvent, kind queue.Kind, askIDs []domain.ID, delegated []delegatedCall, err error) {
 	if len(turn.text) > 0 {
 		content, err := json.Marshal(map[string]any{"content": turn.text})
@@ -895,7 +895,8 @@ type delegatedCall struct {
 	// createAgent or the rest on their say-so is not what either promises.
 	unoffered bool
 	// cut is set for a call the output cap cut off: how the stream ended,
-	// which d.run answers it with instead of running it (#951).
+	// which d.run answers it with instead of running it, unless the call is
+	// foreign (#951).
 	cut string
 	// six marks a call to one of the six delegation tools, as this thread's
 	// classes resolved the name. Only those meet the role gate: a cut call to
@@ -1018,9 +1019,9 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// here with its blocks dropped.
 	//
 	// The block the cap cut off arrives here with {} as its input, marked cut
-	// (streamTurn), and turnEvents hands it to the settlement to answer with
-	// how the stream ended: recoverable, where a stranded call is not, and
-	// never run (docs/DIVERGENCES.md; #951).
+	// (streamTurn), and turnEvents hands it to the settlement to answer, with
+	// how the stream ended or as any call to the other half's six: recoverable,
+	// where a stranded call is not, and never run (docs/DIVERGENCES.md; #951).
 	if len(turn.toolUses) > 0 {
 		if len(delegated) > 0 {
 			// A delegation call — or a name the model was not offered at all
