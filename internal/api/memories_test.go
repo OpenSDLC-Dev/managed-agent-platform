@@ -771,7 +771,7 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "tree")
 	for _, path := range []string{
-		"/100%/x", "/1000/x", "/a_b", "/acb/x",
+		"/100%/x", "/1000/x", "/a_b/x", "/acb/x",
 		"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md", "/notes-archive/old.md",
 		"/z.md",
 	} {
@@ -791,21 +791,44 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		[]string{"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md"}) {
 		t.Errorf("path_prefix=/notes/ = %v", got)
 	}
-	// Literal metacharacters: neither `_` nor `%` is a wildcard.
-	if got := list(t, "path_prefix="+url.QueryEscape("/a_b")); !slices.Equal(got, []string{"/a_b"}) {
-		t.Errorf("path_prefix=/a_b = %v", got)
+	// Literal metacharacters: neither `_` nor `%` is a wildcard. As patterns,
+	// /a_b/ would reach /acb/x and /100%/ would reach /1000/x.
+	if got := list(t, "path_prefix="+url.QueryEscape("/a_b/")); !slices.Equal(got, []string{"/a_b/x"}) {
+		t.Errorf("path_prefix=/a_b/ = %v", got)
 	}
-	if got := list(t, "path_prefix="+url.QueryEscape("/100%")); !slices.Equal(got, []string{"/100%/x"}) {
-		t.Errorf("path_prefix=/100%% = %v", got)
+	if got := list(t, "path_prefix="+url.QueryEscape("/100%/")); !slices.Equal(got, []string{"/100%/x"}) {
+		t.Errorf("path_prefix=/100%%/ = %v", got)
 	}
-	// An omitted prefix means "/", which is every path.
-	if got := list(t, "depth=0"); len(got) != 9 {
-		t.Errorf("depth=0 returned %d rows, want all 9: %v", len(got), got)
+	// A prefix that does not end with "/" is refused in the reference's words
+	// (2026-09-02 free_batch1 `mem.list.prefix/x`; #549), at either depth, so
+	// /notes cannot reach /notes-archive/ by matching bytes.
+	// It comes before depth is read and before the store is looked up, an
+	// order docs/DIVERGENCES.md registers as inferred.
+	const unslashed = "path_prefix must be segment-aligned and end with /"
+	for _, q := range []string{"path_prefix=%2Fx", "path_prefix=%2Fnotes", "depth=1&path_prefix=%2Fnotes",
+		"path_prefix=" + url.QueryEscape("/a_b"), "path_prefix=%2Fx&depth=2"} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
+		wantInvalidRequest(t, q, status, body, unslashed)
+	}
+	status, body := s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx", nil)
+	wantInvalidRequest(t, "a missing store", status, body, unslashed)
+	// An omitted prefix means "/", which is every path, and so does one
+	// supplied empty, which the console sends for a cleared box. The
+	// unrecorded "segment-aligned" neighbours still match literally.
+	for _, q := range []string{"depth=0", "path_prefix="} {
+		if got := list(t, q); len(got) != 9 {
+			t.Errorf("%s returned %d rows, want all 9: %v", q, len(got), got)
+		}
+	}
+	for _, q := range []string{"path_prefix=notes%2F", "path_prefix=%2Fnotes%2F%2F"} {
+		if got := list(t, q); len(got) != 0 {
+			t.Errorf("%s = %v, want none", q, got)
+		}
 	}
 
 	// depth=1 is ls: immediate children, everything deeper rolled up.
 	if got := list(t, "depth=1"); !slices.Equal(got, []string{
-		"prefix:/100%/", "prefix:/1000/", "/a_b", "prefix:/acb/",
+		"prefix:/100%/", "prefix:/1000/", "prefix:/a_b/", "prefix:/acb/",
 		"prefix:/notes-archive/", "prefix:/notes/", "/z.md",
 	}) {
 		t.Errorf("depth=1 at the root = %v", got)
@@ -838,7 +861,7 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		query = "/v1/memory_stores/" + store + "/memories?depth=1&limit=2&page=" + cursor
 	}
 	if !slices.Equal(seen, []string{
-		"prefix:/100%/", "prefix:/1000/", "/a_b", "prefix:/acb/",
+		"prefix:/100%/", "prefix:/1000/", "prefix:/a_b/", "prefix:/acb/",
 		"prefix:/notes-archive/", "prefix:/notes/", "/z.md",
 	}) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
