@@ -121,10 +121,10 @@ func Upcoming(expr, timezone string, after time.Time, n int) ([]time.Time, error
 }
 
 // RestrictsBothDays reports whether expr restricts both day-of-month and
-// day-of-week, writing neither as "*". The reference refuses such an
-// expression when a deployment is written (#543), so the API asks this before
-// it stores one. The matcher keeps the POSIX union, which still serves a
-// schedule stored before that refusal.
+// day-of-week, writing neither as "*". The reference was recorded refusing
+// such an expression on a deployment create (#543), so the API asks this
+// before it stores one. The matcher keeps the POSIX union, which still serves
+// a schedule stored before that refusal.
 func RestrictsBothDays(expr string) (bool, error) {
 	s, err := parse(expr)
 	if err != nil {
@@ -279,9 +279,9 @@ func parseValue(s string, f fieldSpec) (int, error) {
 
 // matchesDay applies the POSIX union: with both day fields restricted, either
 // matching is enough. With one restricted, only that one decides. The
-// reference refuses to store an expression that restricts both (#543;
-// RestrictsBothDays), so the union now decides only for a schedule stored
-// before this platform refused it too.
+// reference was recorded refusing to create an expression that restricts both
+// (#543; RestrictsBothDays), so the union now decides only for a schedule
+// stored before this platform refused it too.
 func (s *schedule) matchesDay(y int, mo time.Month, d int) bool {
 	dom := s.dom[d]
 	dow := s.dow[int(time.Date(y, mo, d, 12, 0, 0, 0, time.UTC).Weekday())]

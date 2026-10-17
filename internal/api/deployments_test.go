@@ -526,7 +526,8 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 	}
 	// Every run is a 13th or a Friday, and five runs always hold a Friday
 	// that is not the 13th, which intersection or a 13th-only reading would
-	// never list.
+	// never list. A Friday-only reading would pass here; the cron package's
+	// TestDayOfMonthUnionDayOfWeek is what pins the union itself.
 	var plainFriday bool
 	for _, r := range up {
 		at := stamp(t, r)
@@ -536,7 +537,13 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 		plainFriday = plainFriday || (at.Weekday() == time.Friday && at.Day() != 13)
 	}
 	if !plainFriday {
-		t.Errorf("upcoming runs %v hold no Friday that is not the 13th: not the union", up)
+		t.Errorf("upcoming runs %v hold no Friday that is not the 13th: an intersection or a 13th-only reading", up)
+	}
+	// An update that leaves the schedule out keeps a stored two-day one; only
+	// a write of the expression is refused.
+	status, res = s.do(http.MethodPost, "/v1/deployments/"+id, map[string]any{"name": "renamed"})
+	if status != http.StatusOK || res["schedule"].(map[string]any)["expression"] != "0 0 13 * 5" {
+		t.Errorf("a rename of a stored two-day schedule: status %d (%v), want 200 keeping it", status, res)
 	}
 }
 

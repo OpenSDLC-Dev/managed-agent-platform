@@ -122,8 +122,9 @@ func TestDayOfMonthUnionDayOfWeek(t *testing.T) {
 	// POSIX union, not intersection: with both fields restricted, a match on
 	// EITHER fires. "0 0 13 * 5" is the 13th of any month OR any Friday, so
 	// Friday the 13th is not the only match (plan 37 §3.1, entry 15). The API
-	// refuses to store this shape since #543 (TestRestrictsBothDays); the
-	// union serves the schedules stored before that.
+	// refuses to store this shape since #543 (internal/api
+	// TestDeploymentScheduleRejections); the union serves the schedules
+	// stored before that.
 	got, err := cron.Upcoming("0 0 13 * 5", "UTC", time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), 5)
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +154,7 @@ func TestRestrictsBothDays(t *testing.T) {
 		"0 0 13 * 5":    true,
 		"0 0 */2 * 1-5": true,
 		"0 0 1-31 * 0":  true,
+		"0 0 */1 * 0-7": true, // both fields cover every day, but neither is "*"
 		"0 0 1 * *":     false,
 		"0 0 * * 1":     false,
 		"* * * * *":     false,
