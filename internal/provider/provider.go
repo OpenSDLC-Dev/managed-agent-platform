@@ -158,6 +158,13 @@ type Chunk struct {
 	ThinkingAnyPrefix bool
 }
 
+// CutOff reports whether a stop reason says the output cap cut the response
+// off, so its last block may be incomplete: the two the SDK's own tool loop
+// treats so (#951).
+func CutOff(stopReason string) bool {
+	return stopReason == "max_tokens" || stopReason == "model_context_window_exceeded"
+}
+
 // StopNote says how far a stream got, for the error that ends it early and for
 // the answer to a call the output cap cut off: the stop reason and the output
 // count tell a stream the output cap ended from one that failed on its own

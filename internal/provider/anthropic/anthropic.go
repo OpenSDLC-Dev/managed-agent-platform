@@ -223,6 +223,10 @@ type stream struct {
 	toolJSON  []byte
 	toolSeed  json.RawMessage // complete input carried on content_block_start
 	inTool    bool
+	// toolPassed is set when a later block began, or streamed, while the
+	// tool block was still open. A cut ends the response's last block, so
+	// message_stop cannot end this one as a cut (#951).
+	toolPassed bool
 
 	usage domain.ModelUsage
 	// sawUsage records that a usage object actually arrived on the wire, so
@@ -313,6 +317,9 @@ func (s *stream) Next() bool {
 			}
 
 		case "content_block_start":
+			if s.inTool && ev.ContentBlock.Type != "tool_use" {
+				s.toolPassed = true
+			}
 			switch ev.ContentBlock.Type {
 			case "redacted_thinking":
 				// No delta follows: the whole opaque payload is on the start.
@@ -355,6 +362,7 @@ func (s *stream) Next() bool {
 				s.toolName = ev.ContentBlock.Name
 				s.toolJSON = s.toolJSON[:0]
 				s.toolSeed = nil
+				s.toolPassed = false
 				// The official protocol starts tool blocks with input {}
 				// and streams the JSON via deltas, but other
 				// Anthropic-protocol endpoints may put the complete input
@@ -368,6 +376,9 @@ func (s *stream) Next() bool {
 			}
 
 		case "content_block_delta":
+			if s.inTool && ev.Index != s.toolIndex {
+				s.toolPassed = true
+			}
 			switch ev.Delta.Type {
 			case "text_delta":
 				s.cur = provider.Chunk{Kind: provider.KindTextDelta, Index: ev.Index, Text: ev.Delta.Text}
@@ -420,10 +431,9 @@ func (s *stream) Next() bool {
 			// treats so — message_stop ends the block as surely: it goes out
 			// as it stands, ahead of the done chunk, and the brain reads its
 			// unfinished input as a cut one. Any other stop reason, or none,
-			// leaves an open block unexplained.
-			cut := s.stopReason == string(sdk.StopReasonMaxTokens) ||
-				s.stopReason == string(sdk.StopReasonModelContextWindowExceeded)
-			if s.inTool && !cut {
+			// leaves an open block unexplained, and so does a later block
+			// that began while it was open: the cut ends the last block.
+			if s.inTool && (!provider.CutOff(s.stopReason) || s.toolPassed) {
 				s.err = fmt.Errorf("message_stop with tool_use block %d still open (%s)",
 					s.toolIndex, s.stopNote())
 				return false

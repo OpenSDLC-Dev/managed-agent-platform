@@ -1472,10 +1472,11 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 					ID: "toolu_x", Name: "lookup", Input: json.RawMessage(bad)}},
 				done("tool_use", 3),
 			}}, nil)
+			h.customTool(t, "lookup")
 			h.wake(t, "use the tool")
 			h.runOnce(t)
 
-			if n := h.countType(t, "agent.custom_tool_use"); n != 0 {
+			if n := h.countType(t, "agent.custom_tool_use") + h.countType(t, "agent.tool_use"); n != 0 {
 				t.Errorf("malformed tool input %s reached the log", bad)
 			}
 			if n := h.countType(t, "session.error"); n != 1 {
@@ -1571,36 +1572,58 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 	}
 }
 
-// Only the response's last call can be the one the cap cut, so an empty call
-// ahead of another is a call the model made with no arguments, and runs,
-// whether or not the cap cut the last one.
+// Only the response's last block can be the one the cap cut, so an empty call
+// ahead of another call, or of text, is a call the model made with no
+// arguments, and runs, whether or not the cap cut the last one.
 func TestOnlyTheLastCallCanBeCut(t *testing.T) {
 	call := func(id, input string) provider.Chunk {
 		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 			ID: id, Name: "lookup", Input: json.RawMessage(input)}}
 	}
 	for name, tc := range map[string]struct {
-		last     string
+		last     provider.Chunk
 		answered int
 	}{
-		"the last call complete": {`{"query":"batch 8"}`, 0},
-		"the last call cut":      {`{"query":"batch 9`, 1},
+		"the last call complete": {call("toolu_b", `{"query":"batch 8"}`), 0},
+		"the last call cut":      {call("toolu_b", `{"query":"batch 9`), 1},
+		"text after it":          {textChunk(1, "the cap cut this text"), 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
-				call("toolu_a", `{}`), call("toolu_b", tc.last), done("max_tokens", 8192),
+				call("toolu_a", `{}`), tc.last, done("max_tokens", 8192),
 			}}, nil)
 			h.customTool(t, "lookup")
 			h.wake(t, "use the tool")
 			h.runOnce(t)
 
-			if n, want := h.countType(t, "agent.custom_tool_use"), 2-tc.answered; n != want {
+			calls := 1
+			if tc.last.Kind == provider.KindToolUse {
+				calls = 2
+			}
+			if n, want := h.countType(t, "agent.custom_tool_use"), calls-tc.answered; n != want {
 				t.Errorf("agent.custom_tool_use events = %d, want %d: the empty call goes to the client", n, want)
 			}
 			if got := h.answers(t); len(got) != tc.answered {
 				t.Errorf("answers = %+v, want %d", got, tc.answered)
 			}
 		})
+	}
+}
+
+// A cut call to a name the model was not offered is answered as any call to
+// it is: making it again, shorter, would meet the same unknown name.
+func TestACutCallToAnUnofferedNameIsAnsweredUnknown(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: "toolu_x", Name: "edit", Input: json.RawMessage(`{"path":"a`)}},
+		done("max_tokens", 8192),
+	}}, nil)
+	h.wake(t, "edit it")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 1 || !got[0].isErr || !strings.Contains(got[0].text, `unknown tool "edit"`) {
+		t.Errorf("answers = %+v, want the unknown-tool answer", got)
 	}
 }
 
@@ -1653,7 +1676,10 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 			textChunk(2, "after the cut"),
 		}, end...)
 	}
+	complete := provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+		ID: "toolu_a", Name: "lookup", Input: json.RawMessage(`{"query":"batch 8"}`)}}
 	for name, tc := range map[string]struct {
+		lead   []provider.Chunk // complete chunks ahead of the bad block
 		input  json.RawMessage
 		tail   []provider.Chunk
 		err    error
@@ -1661,38 +1687,52 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 		output int64 // the output tokens the token metric records
 	}{
 		"under a tool_use stop": {
-			cut, []provider.Chunk{done("tool_use", 40)}, nil,
+			nil, cut, []provider.Chunk{done("tool_use", 40)}, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason tool_use, 40 output tokens)`,
+			40,
+		},
+		// The turn fails whole: the complete call ahead of the bad one is
+		// committed and dispatched no more than the bad one is.
+		"a complete call before it": {
+			[]provider.Chunk{complete}, cut, []provider.Chunk{done("tool_use", 40)}, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason tool_use, 40 output tokens)`,
 			40,
 		},
 		"with more after it": {
-			cut, after(done("max_tokens", 8192)), nil,
-			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			nil, cut, after(done("max_tokens", 8192)), nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
 			8192,
 		},
 		"before another call": {
-			json.RawMessage("\n"), []provider.Chunk{
+			nil, json.RawMessage("\n"), []provider.Chunk{
 				{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
 					ID: "toolu_b", Name: "lookup", Input: json.RawMessage(`{"query":"batch 8"}`)}},
 				done("max_tokens", 8192),
 			}, nil,
-			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens)`,
+			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
 			8192,
 		},
 		"no done chunk": {
-			cut, nil, nil,
+			nil, cut, nil, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
 			0,
 		},
 		// The stream's own failure is part of how it ended, so it is named
 		// beside the bad block rather than hidden behind it.
 		"stream failed after it": {
-			cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
+			nil, cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
 			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
 			0,
 		},
+		// Only an object can be a cut one, so a cut string or array fails
+		// at once, whatever ends the stream.
+		"not an object": {
+			nil, json.RawMessage(`["a",`), []provider.Chunk{done("max_tokens", 8192)}, nil,
+			`tool "lookup": input must be a JSON object: unexpected EOF`,
+			0,
+		},
 		"malformed, not cut": {
-			json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
+			nil, json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
 			`tool "lookup": input must be a JSON object: json: cannot unmarshal string into Go value of type map[string]interface {}`,
 			0,
 		},
@@ -1700,8 +1740,8 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			collect := collectBrainMetrics(t)
 			h := newHarness(t, [][]provider.Chunk{
-				append([]provider.Chunk{{Kind: provider.KindToolUse,
-					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}}, tc.tail...),
+				append(append(append([]provider.Chunk(nil), tc.lead...), provider.Chunk{Kind: provider.KindToolUse,
+					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}), tc.tail...),
 			}, []error{tc.err})
 			h.customTool(t, "lookup")
 			h.wake(t, "use the tool")

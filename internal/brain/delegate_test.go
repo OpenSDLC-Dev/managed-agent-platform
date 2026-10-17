@@ -455,6 +455,68 @@ func TestAllSettlementTurnChainsTheCallersNextTurn(t *testing.T) {
 	}
 }
 
+// A cut call to the other half's tool is answered as any call to it is, not
+// as a cut: making it again would only meet the role gate, and it was never
+// work this thread could do, so a report beside it goes through.
+func TestACutCallToTheOtherHalfIsAnsweredWrongRole(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "submit_result", `{"result":"done"}`),
+		toolCall("t2", "create_agent", `{"agent_name":"researcher","message":"dig`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "do the work")
+	h.runOnce(t)
+
+	got := h.answers(t)
+	if len(got) != 2 {
+		t.Fatalf("answers = %v, want both calls answered", got)
+	}
+	if got[0].isErr || got[0].text != "Result reported." {
+		t.Errorf("answer 0 = %+v, want the report to succeed", got[0])
+	}
+	if !got[1].isErr || !strings.Contains(got[1].text, "belongs to your coordinator") {
+		t.Errorf("answer 1 = %+v, want the role gate's answer", got[1])
+	}
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle — it reported", s)
+	}
+}
+
+// A run of turns made of nothing but cut calls is a chain nobody feeds, so the
+// shared cap stops it, and both notices it leaves — the child's own
+// session.error and the coordinator's — name what the run was made of.
+func TestARunOfCutCallsIsStoppedByTheChainCap(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{
+		toolCall("t1", "send_to_parent", `{"message":"still wor`),
+		done("max_tokens", 8192),
+	}}, nil)
+	child := h.childTurn(t, "work on it")
+	h.setChainCount(t, child, 24) // this turn is the 25th — maxSettlementChain
+	h.runOnce(t)
+
+	if s := h.threadStatus(t, child); s != "idle" {
+		t.Errorf("child = %q, want idle once its chain is cut", s)
+	}
+	evs, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errs, notices int
+	for _, ev := range evs {
+		if !strings.Contains(string(ev.Body), "calls the output cap cut off") {
+			continue
+		}
+		if ev.Type == domain.EventSessionError {
+			errs++
+		} else {
+			notices++
+		}
+	}
+	if errs != 1 || notices != 1 {
+		t.Errorf("events naming cut calls: %d session.error, %d other, want one of each", errs, notices)
+	}
+}
+
 // The dream coordinator's failure in #951: a reply spawning children whose
 // last create_agent the output cap cut off. The complete call spawns its
 // child, the cut one is answered with how the stream ended rather than run

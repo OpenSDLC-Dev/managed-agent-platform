@@ -329,7 +329,7 @@ func (s *stream) complete() {
 	s.completed = true
 	s.flushTools()
 	stop := s.stopReason
-	if s.sawTools && stop != "max_tokens" {
+	if s.sawTools && !provider.CutOff(stop) {
 		stop = "tool_use"
 	} else if stop == "" {
 		stop = "end_turn"

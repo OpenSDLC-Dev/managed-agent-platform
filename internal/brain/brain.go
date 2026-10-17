@@ -794,7 +794,9 @@ func turnEvents(turn *turnResult, class map[string]toolClass) (batch []events.Ne
 		// for a tool whose arguments are all optional, and the settlement
 		// answers it with how the stream ended so the model makes it again,
 		// shorter (#951). The reference sends it to the tool with {} instead
-		// (docs/DIVERGENCES.md, turn classification).
+		// (docs/DIVERGENCES.md, turn classification). A cut MCP call keeps
+		// the prefixed name the model called, as an unoffered name does:
+		// replay rebuilds an agent.tool_use from its name as it stands.
 		cut := offered && turn.cut && i == len(turn.toolUses)-1
 		if !offered || cut {
 			// A name the model was not offered: not a declared custom tool (a

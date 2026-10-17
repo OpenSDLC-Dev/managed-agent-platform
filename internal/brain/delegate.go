@@ -145,10 +145,12 @@ type delegate struct {
 	// (decision 6): reporting and working at once would end the turn with work
 	// outstanding.
 	settlementOnly bool
-	// cut is set when the turn holds a call the output cap cut off (#951).
-	// The settlement answers it, but its work was never done, so a
-	// submit_result sharing the turn is an is_error as it is beside a call
-	// that runs.
+	// cut is set when the turn holds a call the output cap cut off to a tool
+	// this thread can run (#951). The settlement answers it, but the work the
+	// model asked of it was never done, so a submit_result sharing the turn
+	// is an is_error as it is beside a call that runs. A name the thread was
+	// not offered, or the other half's, was never work it could do, which is
+	// why a report beside one still goes through (#567).
 	cut bool
 	// waited caches the first wait_for_agents' verdict: the calls run in model
 	// order, so the first wait sees the spawns this turn already made, and a
@@ -188,7 +190,14 @@ type waitVerdict struct {
 // events and then its answer, so the batch reads as the turn happened.
 func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) error {
 	for _, call := range calls {
-		if call.unoffered || call.cut != "" {
+		var text string
+		switch {
+		case call.unoffered:
+			text = unknownToolAnswer(call.name)
+		case call.cut != "" && d.wrongRole(call.name) == "":
+			text = cutCallAnswer(call.cut)
+		}
+		if text != "" {
 			// Not one of the six: the model called a name nothing offered it
 			// at all (#567). wrongRole and the switch below both assume a
 			// genuine delegation call, so this is answered here instead of
@@ -196,11 +205,9 @@ func (d *delegate) run(ctx context.Context, tx pgx.Tx, calls []delegatedCall) er
 			// single-agent session would attempt to spawn a roster member
 			// that does not exist rather than being told the name is unknown.
 			// A call the output cap cut off is answered here too, never run,
-			// whichever tool it named (#951; turnEvents says why).
-			text := unknownToolAnswer(call.name)
-			if !call.unoffered {
-				text = cutCallAnswer(call.cut)
-			}
+			// whichever tool it named (#951; turnEvents says why) — unless it
+			// is the other half's, which wrongRole below answers as it would
+			// any call to it.
 			ev, err := delegationAnswer(call.eventID, text, true)
 			if err != nil {
 				return err
@@ -779,9 +786,11 @@ func (b *Brain) commitDelegatedTurn(ctx context.Context, sid domain.ID, item *qu
 		// session-wide count is scoped to delegation specifically.
 		genuine := false
 		for _, dc := range delegated {
-			if dc.cut != "" {
+			switch {
+			case dc.unoffered || d.wrongRole(dc.name) != "":
+			case dc.cut != "":
 				d.cut = true
-			} else if !dc.unoffered && d.wrongRole(dc.name) == "" {
+			default:
 				genuine = true
 			}
 		}
