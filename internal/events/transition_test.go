@@ -3,6 +3,7 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -44,6 +45,9 @@ func transition(t *testing.T, pool *pgxpool.Pool, log *events.Log, sid domain.ID
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// The append puts a session.usage before a session idle (usage_test.go);
+	// these tests read the fold's own events, so it is left out here.
+	appended = slices.DeleteFunc(appended, func(ev domain.Event) bool { return ev.Type == domain.EventSessionUsage })
 	return appended, moved
 }
 

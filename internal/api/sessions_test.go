@@ -398,11 +398,11 @@ func TestSessionCreateWithAgentString(t *testing.T) {
 	}
 
 	usage, _ := res["usage"].(map[string]any)
-	wantFields(t, usage, "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation")
+	wantFields(t, usage, "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation", "active_seconds")
 	cc, _ := usage["cache_creation"].(map[string]any)
 	wantFields(t, cc, "ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens")
-	if usage["input_tokens"] != float64(0) {
-		t.Errorf("usage.input_tokens = %v, want 0", usage["input_tokens"])
+	if usage["input_tokens"] != float64(0) || usage["active_seconds"] != float64(0) {
+		t.Errorf("usage.input_tokens/active_seconds = %v/%v, want 0/0", usage["input_tokens"], usage["active_seconds"])
 	}
 	stats, _ := res["stats"].(map[string]any)
 	wantFields(t, stats, "active_seconds", "duration_seconds")
@@ -422,6 +422,35 @@ func TestSessionCreateWithAgentString(t *testing.T) {
 		if !strings.HasSuffix(ts, "Z") {
 			t.Errorf("%s = %q must be UTC (Z suffix), not a local offset", k, ts)
 		}
+	}
+}
+
+// usage.active_seconds is the session's stored running time (plan 68),
+// rendered to the millisecond as the reference renders it, on GET and in the
+// list; stats keeps its zeroed shape.
+func TestSessionUsageRendersActiveSeconds(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET active_seconds = 4.2504 WHERE id = $1`, id); err != nil {
+		t.Fatalf("set active_seconds: %v", err)
+	}
+	_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+	usage, _ := got["usage"].(map[string]any)
+	if usage["active_seconds"] != 4.25 {
+		t.Errorf("GET usage.active_seconds = %v, want 4.25", usage["active_seconds"])
+	}
+	if stats, _ := got["stats"].(map[string]any); stats["active_seconds"] != float64(0) {
+		t.Errorf("stats.active_seconds = %v, want the zeroed shape", stats["active_seconds"])
+	}
+	_, list := s.do(http.MethodGet, "/v1/sessions", nil)
+	entries := listData(t, list)
+	if len(entries) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(entries))
+	}
+	if usage, _ := entries[0]["usage"].(map[string]any); usage["active_seconds"] != 4.25 {
+		t.Errorf("listed usage.active_seconds = %v, want 4.25", usage["active_seconds"])
 	}
 }
 

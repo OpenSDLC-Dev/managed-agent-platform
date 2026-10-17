@@ -301,7 +301,7 @@ func TestAReIdleIsListedBesideTheAnswerAheadOfPendingInput(t *testing.T) {
 				sendEvents(t, s, sid, posted...)
 
 				want := []string{"agent.tool_use", "agent.tool_use", "agent.tool_use", "user.tool_confirmation",
-					"agent.tool_result", "session.thread_status_idle", "session.status_idle", tc.want}
+					"agent.tool_result", "session.thread_status_idle", "session.usage", "session.status_idle", tc.want}
 				if got := s.eventTypes(sid); !sameStrings(got, want) {
 					t.Fatalf("event log = %v, want %v", got, want)
 				}
@@ -337,7 +337,7 @@ func TestAResumeTakesItsPlaceAmongTheInterruptsInReceiptOrder(t *testing.T) {
 			"session.thread_status_idle", "session.thread_status_running", "agent.tool_result",
 			"agent.thread_message_received"}},
 		{"interrupt first", false, []string{"agent.tool_use", "user.interrupt", "session.thread_status_idle",
-			"session.status_idle", "user.tool_confirmation", "session.status_running",
+			"session.usage", "session.status_idle", "user.tool_confirmation", "session.status_running",
 			"session.thread_status_running", "agent.tool_result", "agent.thread_message_received"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -400,7 +400,7 @@ func TestAnswersStraddlingAnInterruptMoveTheirThreadOnce(t *testing.T) {
 		confirm(ids[1], "deny", nil))
 
 	want := []string{"agent.tool_use", "agent.tool_use", "user.tool_confirmation", "user.interrupt",
-		"session.thread_status_idle", "session.status_idle", "user.tool_confirmation",
+		"session.thread_status_idle", "session.usage", "session.status_idle", "user.tool_confirmation",
 		"session.status_running", "session.thread_status_running", "agent.tool_result", "agent.tool_result",
 		"agent.thread_message_received"}
 	if got := wholeLogTypes(t, s, sid); !sameStrings(got, want) {
@@ -431,7 +431,7 @@ func TestAnAnswerThatLeavesAGateOpenWritesNoRunningPair(t *testing.T) {
 		want   []string
 	}{
 		{"deny the first", 0, "deny", []string{"agent.tool_use", "agent.tool_use", "user.tool_confirmation",
-			"agent.tool_result", "session.thread_status_idle", "session.status_idle"}},
+			"agent.tool_result", "session.thread_status_idle", "session.usage", "session.status_idle"}},
 		{"allow the second", 1, "allow", []string{"agent.tool_use", "agent.tool_use", "user.tool_confirmation"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

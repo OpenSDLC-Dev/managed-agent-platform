@@ -197,8 +197,8 @@ func TestAppendTransitionWritesAWakeBeforeItsInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sameTypes(idled, domain.EventAgentMessage, domain.EventSessionThreadStatusIdle, domain.EventSessionStatusIdle) {
-		t.Errorf("idle appended %v, want the reply and then the idle pair", types(idled))
+	if !sameTypes(idled, domain.EventAgentMessage, domain.EventSessionThreadStatusIdle, domain.EventSessionUsage, domain.EventSessionStatusIdle) {
+		t.Errorf("idle appended %v, want the reply and then the idle pair, the session's usage before its idle", types(idled))
 	}
 }
 

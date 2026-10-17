@@ -311,8 +311,9 @@ func TestAnUnflaggedThreadThatTheRowShowsMovedRendersItsStats(t *testing.T) {
 // On a single-agent session every session.status_* comes paired, in the same
 // batch, with the primary thread's session.thread_status_* naming the thread
 // and the agent — right after it when running, right before it otherwise, the
-// order the reference records for the primary (#674) — and no thread status
-// event stands outside a pair; the thread row's status follows the session's.
+// order the reference records for the primary (#674), with the session's
+// usage between the two idles (plan 68) — and no thread status event stands
+// outside a pair; the thread row's status follows the session's.
 func TestStatusEventsComeInPrimaryThreadPairs(t *testing.T) {
 	s := newTestServer(t)
 	sid := eventsFixture(t, s)
@@ -342,6 +343,12 @@ func TestStatusEventsComeInPrimaryThreadPairs(t *testing.T) {
 		j, other, where := i-1, i+1, "preceded"
 		if typ == "session.status_running" {
 			j, other, where = i+1, i-1, "followed"
+		}
+		if typ == "session.status_idle" {
+			if j < 0 || evs[j]["type"] != "session.usage" {
+				t.Fatalf("session.status_idle at %d does not follow a session.usage", i)
+			}
+			j--
 		}
 		if j < 0 || j >= len(evs) {
 			t.Fatalf("%s at an end of the log, not %s by its thread event", typ, where)
@@ -394,8 +401,8 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 		t.Fatalf("thread events: %d %v", status, thr)
 	}
 	sd, td := listData(t, sess), listData(t, thr)
-	if len(sd) != len(td) || len(sd) != 6 {
-		t.Fatalf("session view %d events, thread view %d, want 6 each", len(sd), len(td))
+	if len(sd) != len(td) || len(sd) != 7 {
+		t.Fatalf("session view %d events, thread view %d, want 7 each", len(sd), len(td))
 	}
 	for i := range sd {
 		if sd[i]["id"] != td[i]["id"] {
@@ -404,8 +411,8 @@ func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {
 	}
 	// Paging with the seq cursor, ascending only.
 	_, p1 := s.do(http.MethodGet, tpath+"/events?limit=4", nil)
-	if _, p2 := s.do(http.MethodGet, tpath+"/events?limit=4&page="+wantCursor(t, p1), nil); len(listData(t, p2)) != 2 {
-		t.Errorf("second page = %v, want the last 2", p2)
+	if _, p2 := s.do(http.MethodGet, tpath+"/events?limit=4&page="+wantCursor(t, p1), nil); len(listData(t, p2)) != 3 {
+		t.Errorf("second page = %v, want the last 3", p2)
 	}
 	for _, qs := range []string{"?order=desc", "?types[]=user.message", "?created_at[gt]=2020-01-01T00:00:00Z"} {
 		status, body := s.do(http.MethodGet, tpath+"/events"+qs, nil)

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -241,6 +242,20 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		agentName = new(string)
 	}
 
+	// A session.usage before each session idle, and the session's running
+	// time from its status events (plan 68, usage.go) — both under the lock,
+	// so the stamps they take and read are this append's.
+	evs = withUsageSnapshots(evs)
+	var (
+		clock     *sessionClock
+		snapUsage domain.Usage
+	)
+	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return sessionStatusTypes[ev.Type] }) {
+		if clock, snapUsage, err = readSessionClock(ctx, tx, sessionID, opts.AddUsage); err != nil {
+			return nil, err
+		}
+	}
+
 	// The session's last row, read under the lock: the batch continues its
 	// seq and is stamped past its created_at (the INSERT below).
 	var (
@@ -338,6 +353,16 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			}
 			lastStamp = *ev.ProcessedAt
 		}
+		// At its settled stamp: a usage reports the running time through it,
+		// and a status event moves that time.
+		if clock != nil && ev.ProcessedAt != nil {
+			if ev.Type == domain.EventSessionUsage {
+				if payload, err = usageSnapshot(snapUsage, clock.through(*ev.ProcessedAt)); err != nil {
+					return nil, err
+				}
+			}
+			clock.step(ev.Type, *ev.ProcessedAt)
+		}
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -375,6 +400,10 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		}
 	}
 	if err := insertThinking(ctx, tx, sessionID, opts.Thinking); err != nil {
+		return nil, err
+	}
+	// Before Then, whose nested append reads the running time this one moved.
+	if err := writeSessionClock(ctx, tx, sessionID, clock); err != nil {
 		return nil, err
 	}
 
