@@ -519,8 +519,24 @@ func TestDeploymentScheduleRejections(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("get a stored two-day schedule: status %d (%v)", status, res)
 	}
-	if up, _ := res["schedule"].(map[string]any)["upcoming_runs_at"].([]any); len(up) != 5 {
-		t.Errorf("a stored two-day schedule's upcoming_runs_at = %v, want 5", res["schedule"])
+	sched, _ := res["schedule"].(map[string]any)
+	up, _ := sched["upcoming_runs_at"].([]any)
+	if sched["expression"] != "0 0 13 * 5" || len(up) != 5 {
+		t.Fatalf("a stored two-day schedule renders as %v, want its expression and 5 runs", sched)
+	}
+	// Every run is a 13th or a Friday, and five runs always hold a Friday
+	// that is not the 13th, which intersection or a 13th-only reading would
+	// never list.
+	var plainFriday bool
+	for _, r := range up {
+		at := stamp(t, r)
+		if at.Day() != 13 && at.Weekday() != time.Friday {
+			t.Errorf("upcoming run %v is neither a 13th nor a Friday", at)
+		}
+		plainFriday = plainFriday || (at.Weekday() == time.Friday && at.Day() != 13)
+	}
+	if !plainFriday {
+		t.Errorf("upcoming runs %v hold no Friday that is not the 13th: not the union", up)
 	}
 }
 
