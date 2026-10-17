@@ -47,13 +47,16 @@ func (h *harness) repoSkillsRecord(t *testing.T) (recorded map[string][]skills.R
 // description are listed with an empty description, while a lowercase
 // skill.md, a SKILL.md two levels down and a hidden directory are not found.
 // Of the two links, a linked skill directory is followed and a SKILL.md that
-// is itself a link, which a read refuses, is not listed.
+// is itself a link, which a read refuses, is not listed. A skill is announced
+// under its frontmatter's name where it gives one, as recording #26 saw
+// dir-name announced as other-name, and in its directory's order.
 func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{
 		"README.md":                          "fixture\n",
 		".claude/skills/alpha/SKILL.md":      "---\nname: alpha\ndescription: Alpha marker.\n---\nbody\n",
 		".claude/skills/broken/SKILL.md":     "# no frontmatter\n",
 		".claude/skills/nodesc/SKILL.md":     "---\nname: nodesc\n---\n",
+		".claude/skills/dir-name/SKILL.md":   "---\nname: other-name\ndescription: Name mismatch.\n---\n",
 		".claude/skills/lower/skill.md":      "---\ndescription: lowercase\n---\n",
 		".claude/skills/deep/inner/SKILL.md": "---\ndescription: two levels\n---\n",
 		".claude/skills/.hidden/SKILL.md":    "---\ndescription: hidden\n---\n",
@@ -77,8 +80,9 @@ func TestRepoSkillsScannedBeforeTheFirstTurn(t *testing.T) {
 	want := map[string][]skills.RepoSkill{"sesrsc_skills": {
 		{Name: "alpha", Description: "Alpha marker.", Location: root + "alpha/SKILL.md"},
 		{Name: "broken", Description: "", Location: root + "broken/SKILL.md"},
+		{Name: "other-name", Description: "Name mismatch.", Location: root + "dir-name/SKILL.md"},
 		{Name: "nodesc", Description: "", Location: root + "nodesc/SKILL.md"},
-		{Name: "viadir", Description: "Alpha marker.", Location: root + "viadir/SKILL.md"},
+		{Name: "alpha", Description: "Alpha marker.", Location: root + "viadir/SKILL.md"},
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("repo_skills = %+v\nwant %+v", got, want)

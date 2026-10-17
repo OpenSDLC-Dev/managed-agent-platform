@@ -42,9 +42,10 @@ func unscannedRepos(present []repoRef, recorded map[string][]skills.RepoSkill) [
 // scanRepoSkills lists the skills the given checkouts hold, each by the
 // resource's id: each directory under a checkout's .claude/skills whose
 // SKILL.md is a regular file, by that exact name and one level down, as the
-// reference finds them. A skill is named by its directory, and its
-// description is read leniently (skills.RepoDescription). Names come sorted,
-// and room is what the session's cap leaves (maxRepoSkills).
+// reference finds them. A skill is named by its frontmatter where that gives a
+// usable name (skills.RepoName), else by its directory, and its description is
+// read leniently (skills.RepoDescription). Skills come in their directories'
+// sorted order, and room is what the session's cap leaves (maxRepoSkills).
 //
 // Only a whole scan of a checkout is returned. One whose listing failed, or
 // whose run was cancelled under it, or a SKILL.md read that failed for a
@@ -136,10 +137,13 @@ func readSkills(ctx context.Context, sb sandbox.Sandbox, logger *slog.Logger, ro
 			break
 		}
 		progress()
-		description := ""
+		announced, description := name, ""
 		md, err := sb.ReadFile(ctx, loc)
 		switch {
 		case err == nil:
+			if n := skills.RepoName(md); n != "" {
+				announced = n
+			}
 			description = skills.RepoDescription(md)
 		case errors.Is(err, sandbox.ErrFileTooLarge), errors.Is(err, sandbox.ErrNotRegularFile),
 			errors.Is(err, sandbox.ErrIsDirectory), errors.Is(err, sandbox.ErrFileNotExist):
@@ -150,7 +154,7 @@ func readSkills(ctx context.Context, sb sandbox.Sandbox, logger *slog.Logger, ro
 				"location", loc, "err", err)
 			return nil, false
 		}
-		list = append(list, skills.RepoSkill{Name: name, Description: description, Location: loc})
+		list = append(list, skills.RepoSkill{Name: announced, Description: description, Location: loc})
 	}
 	return list, true
 }

@@ -128,11 +128,12 @@ func (h *harness) resultIsError(t *testing.T, use domain.ID) bool {
 // thread is told of a skill once: a later read below the same directories,
 // in the same run or a later one, records only what is new to it, a skill
 // another tool made in the run among it, and another thread is told on its
-// own.
+// own. A nested skill is named by its frontmatter where that gives a name, as
+// a root one is.
 func TestNestedSkillsFoundByARead(t *testing.T) {
 	fx := newGitFixture(t, map[string]string{
 		".claude/skills/alpha/SKILL.md":                  "---\ndescription: Root marker.\n---\n",
-		"packages/.claude/skills/mid/SKILL.md":           "---\ndescription: Mid marker.\n---\n",
+		"packages/.claude/skills/mid/SKILL.md":           "---\nname: middle\ndescription: Mid marker.\n---\n",
 		"packages/x/.claude/skills/inner/SKILL.md":       "---\ndescription: Inner marker.\n---\n",
 		"packages/x/.claude/skills/inner-lower/skill.md": "---\ndescription: lowercase\n---\n",
 		"packages/x/probe.txt":                           "probe\n",
@@ -143,7 +144,7 @@ func TestNestedSkillsFoundByARead(t *testing.T) {
 	h, _ := dockerRepoHarness(t)
 	h.seedRepoResource(t, "sesrsc_skills", fx.url(), repoMount, "ghp_fixture", nil)
 	inner := skills.RepoSkill{Name: "inner", Description: "Inner marker.", Location: repoMount + "/packages/x/.claude/skills/inner/SKILL.md"}
-	mid := skills.RepoSkill{Name: "mid", Description: "Mid marker.", Location: repoMount + "/packages/.claude/skills/mid/SKILL.md"}
+	mid := skills.RepoSkill{Name: "middle", Description: "Mid marker.", Location: repoMount + "/packages/.claude/skills/mid/SKILL.md"}
 	fresh := skills.RepoSkill{Name: "fresh", Description: "Fresh marker.", Location: repoMount + "/packages/x/.claude/skills/fresh/SKILL.md"}
 	why := skills.RepoSkill{Name: "why", Description: "Why marker.", Location: repoMount + "/packages/y/.claude/skills/why/SKILL.md"}
 

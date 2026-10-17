@@ -115,10 +115,12 @@ type fileResourceJSON struct {
 // (checked against anthropic-sdk-go v1.70.1 — betasessionresource.go
 // BetaManagedAgentsGitHubRepositoryResource): {id, created_at, mount_path,
 // type, updated_at, url, checkout} — every field api:"required" except checkout
-// (api:"nullable"). The authorization_token is write-only on the wire and
-// deliberately absent from this type: what lands in the verbatim-echoed
-// sessions.resources jsonb is token-free by construction (plan 25 decision 2);
-// the secret seals into session_resource_credentials.
+// (api:"nullable"), which is left out when none was given, as the reference
+// renders it (2026-10-15 repo-followups setup[3]); a session stored before
+// keeps the null it was stored with. The authorization_token is write-only on
+// the wire and deliberately absent from this type: what lands in the
+// verbatim-echoed sessions.resources jsonb is token-free by construction (plan
+// 25 decision 2); the secret seals into session_resource_credentials.
 type repoResourceJSON struct {
 	ID        string        `json:"id"`
 	CreatedAt time.Time     `json:"created_at"`
@@ -126,7 +128,7 @@ type repoResourceJSON struct {
 	Type      string        `json:"type"`
 	UpdatedAt time.Time     `json:"updated_at"`
 	URL       string        `json:"url"`
-	Checkout  *checkoutJSON `json:"checkout"` // nullable: renders null when omitted (as-given, plan 25 decision 3)
+	Checkout  *checkoutJSON `json:"checkout,omitempty"` // as given, and no key when omitted or null
 }
 
 // checkoutJSON is the branch|commit checkout union (the SDK registers exactly
@@ -402,9 +404,12 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 		}
 		return resourceInput{}, errInvalid("file_id must be a valid file id")
 	}
-	given, _, _, err := stringField(obj, "mount_path")
+	given, set, null, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
+	}
+	if set && !null && given == "" {
+		return resourceInput{}, errEmptyMountPath()
 	}
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// The spelling is stored and echoed there (#849), and resolution
@@ -412,7 +417,7 @@ func parseFileResource(obj map[string]json.RawMessage, f resourceFlavor) (resour
 		// /mnt/session/uploads/x. A repository's spelling is held the same way.
 		return resourceInput{}, errInvalid("mount_path must be at most %d bytes as sent", maxMountPathBytes)
 	}
-	mountPath := defaultMountRoot + fileID // omitted, or null or ""
+	mountPath := defaultMountRoot + fileID // omitted or null
 	if given != "" {
 		if mountPath, err = resolveMountPath(given, fileID); err != nil {
 			return resourceInput{}, err
@@ -554,9 +559,16 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 	if err != nil {
 		return resourceInput{}, err
 	}
-	given, _, _, err := stringField(obj, "mount_path")
+	given, set, null, err := stringField(obj, "mount_path")
 	if err != nil {
 		return resourceInput{}, err
+	}
+	if set && !null && given == "" {
+		if f == resourceForSession {
+			// 2026-10-15 repo-followups setup[9].
+			return resourceInput{}, errInvalid("resources.%d.github_repository.mount_path: must be at least 1 character", i)
+		}
+		return resourceInput{}, errEmptyMountPath()
 	}
 	if f == resourceForDeployment && len(given) > maxMountPathBytes {
 		// Stored and echoed there (#849); parseFileResource says why.
@@ -570,6 +582,20 @@ func parseRepoResource(obj map[string]json.RawMessage, f resourceFlavor, i int) 
 		kind: resourceKindRepo, mountPath: mountPath, givenMountPath: given,
 		url: rawURL, token: token, checkout: checkout,
 	}, nil
+}
+
+// errEmptyMountPath refuses a mount_path sent as the empty string. The spec
+// bounds a resource's mount_path to at least 1 character on every route that
+// takes one (checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsGitHubRepositoryResourceParams.properties.mount_path,
+// checked against anthropic-sdk-go v1.70.1 — spec
+// components.schemas.BetaManagedAgentsFileResourceParams.properties.mount_path):
+// session create and deployment create and update take both, and a session's
+// resource add takes the file one. Only session create's refusal of a
+// repository's was recorded, and parseRepoResource words that one as the
+// reference does; every other route and arm takes this sentence of ours.
+func errEmptyMountPath() error {
+	return errInvalid("mount_path must be at least 1 character")
 }
 
 // parseGitHubRepoURL enforces the exact canonical repository URL
@@ -631,8 +657,9 @@ func validRepoURLSegment(s string) bool {
 // {type:"commit", sha} (the SDK registers exactly these two, checked against
 // anthropic-sdk-go v1.70.1 — betasession.go
 // BetaManagedAgentsGitHubRepositoryResourceParamsCheckoutUnion). Omitted or
-// null means the repository's default branch, resolved at clone time — stored
-// and rendered as null (as-given, INFERRED, plan 25 decision 3).
+// null means the repository's default branch, resolved at clone time, and is
+// stored and rendered as no key, as the reference renders an omitted one
+// (2026-10-15 repo-followups setup[3]; a null one is unrecorded).
 func parseCheckout(obj map[string]json.RawMessage) (*checkoutJSON, error) {
 	raw, ok := obj["checkout"]
 	if !ok || isNull(raw) {
@@ -692,11 +719,12 @@ func isFullCommitSHA(s string) bool {
 }
 
 // resolveRepoMountPath maps a github_repository mount_path to the container
-// path the repository is cloned into, "" (omitted, null or empty) taking the
-// default /workspace/<repoName>. Every path is rooted under /workspace, as
-// the docs put it ("the directory under /workspace to clone the repository
-// into") and the reference was recorded doing (#922, plan 64 lists each
-// probe). The path is cleaned first, so its ".." resolves before rooting:
+// path the repository is cloned into, "" (omitted or null; the parser refuses
+// an empty one) taking the default /workspace/<repoName>. Every path is rooted
+// under /workspace, as the docs put it ("the directory under /workspace to
+// clone the repository into") and the reference was recorded doing (#922,
+// plan 64 lists each probe). The path is cleaned first, so its ".." resolves
+// before rooting:
 //
 //   - /workspace, or a path below it, keeps its place, matched as a
 //     directory: /workspaceX/repo is rooted like any other path.
@@ -708,7 +736,7 @@ func isFullCommitSHA(s string) bool {
 //     /workspace/etc.
 //
 // A path that lands on /workspace itself — "/", "/workspace", "." — takes the
-// default, as "/" and "/workspace" did there. A cleaned relative path still
+// default, as each did there (`.` on 2026-10-15). A cleaned relative path still
 // led by ".." climbs out, and is refused, in the reference's words on session
 // create (2026-10-13 setup[14], `../x`) and in ours elsewhere (#540). The rule
 // fits every recorded input; what it does with any other is ours.

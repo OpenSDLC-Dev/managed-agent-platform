@@ -25,6 +25,11 @@ const (
 		`{"id":"sesrsc_c","type":"github_repository",` +
 		`"url":"https://github.com/example-org/pin","mount_path":"/workspace/pin",` +
 		`"checkout":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"},` +
+		`"created_at":"2026-08-07T00:00:00Z","updated_at":"2026-08-07T00:00:00Z"},` +
+		// No checkout key, as a session created since the omitted one renders
+		// none; lib's null is the shape stored before.
+		`{"id":"sesrsc_d","type":"github_repository",` +
+		`"url":"https://github.com/example-org/tool","mount_path":"/workspace/tool",` +
 		`"created_at":"2026-08-07T00:00:00Z","updated_at":"2026-08-07T00:00:00Z"}]`
 
 	repoResolvedAgent = `{"type":"agent","id":"agent_fixture","version":1,"name":"fixture",` +
@@ -63,6 +68,7 @@ func TestReposBlockInjected(t *testing.T) {
 	for _, want := range []string{
 		"/workspace/widget (https://github.com/example-org/widget, branch release)",
 		"/workspace/lib (https://github.com/example-org/lib, default branch)",
+		"/workspace/tool (https://github.com/example-org/tool, default branch)",
 		"/workspace/pin (https://github.com/example-org/pin, commit 0123456789abcdef0123456789abcdef01234567)",
 	} {
 		if !strings.Contains(sys, want) {
@@ -104,7 +110,7 @@ func TestReposBlockSkippedOnSelfHosted(t *testing.T) {
 func TestReposBlockMarksAFailedClone(t *testing.T) {
 	h := newHarnessEnv(t, "cloud", [][]provider.Chunk{{textChunk(0, "ok"), done("end_turn", 1)}}, nil)
 	// The event the executor writes when a clone fails, for the first of the
-	// three repositories seeded below.
+	// repositories seeded below.
 	seedCloneError(t, h, "sesrsc_a", "auth")
 
 	sys := seedRepos(t, h)
