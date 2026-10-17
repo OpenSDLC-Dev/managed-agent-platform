@@ -6,21 +6,21 @@
 `deploy-alert.yml`, `staging-parked.yml` and `evals-alert.yml` each define a
 three-attempt `retry` and wrap their READ calls in it — every one in
 `deploy-alert.yml` and `evals-alert.yml`, and all but `staging-parked.yml`'s
-issue lookup, which sits in an earlier step that defines no `retry` at all. Every value `retry` prints lands in a command substitution,
-either directly or by way of `open_issue_with`, which forwards it to one. The
-obvious
+issue lookup, which sits in an earlier step that defines no `retry` at all.
+Every value `retry` prints lands in a command substitution, either directly or
+by way of `open_issue_with`, which forwards it to one. The obvious
 spelling of the helper — `until "$@"` — runs each attempt with stdout already
 connected to that capture, so an attempt that emits bytes before failing leaves
 them in it and the caller parses them joined to the next attempt's. That is #507,
 filed against `deploy-alert.yml` after review caught the same line in
 `staging-parked.yml`.
 
-The two were deliberately NOT extracted into a shared script — unlike
+The copies were deliberately NOT extracted into a shared script — unlike
 `parked.sh`, where the two callers disagreeing about one cluster would make one of
-them a liar, two notifiers retrying a different number of times harms nothing.
-That argument holds only while both are correct, and this file is what holds it:
-it scans `.github/workflows/` for `retry` definitions and runs each through the
-same table, so a third copy is covered the day it appears and no copy can regress
+them a liar, notifiers retrying a different number of times harms nothing.
+That argument holds only while every copy is correct, and this file is what holds
+it: it scans `.github/workflows/` for `retry` definitions and runs each through the
+same table, so a new copy is covered the day it appears and no copy can regress
 alone — and a definition it recognises but cannot parse is refused by name rather
 than passed over, which is the part that keeps "covered" honest.
 
@@ -341,16 +341,16 @@ def main():
     for path in sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml")):
         helpers += definitions(path)
 
-    # Two copies is the state this file was written for. Fewer means one was
-    # deleted, or the two were consolidated into a script after all, and this
-    # floor is what says so out loud. It is not the discovery check — that is
+    # One copy per notifier, three of them. Fewer means one was deleted, or
+    # copies were consolidated into a script after all, and this floor is what
+    # says so out loud. It is not the discovery check — that is
     # the refusal in definitions(), which catches the spellings the parser does
     # not handle. Neither is a proof: no regex recognises every way of writing a
     # shell function, so the floor and the refusal are two backstops, not one
     # guarantee.
-    if len(helpers) < 2:
+    if len(helpers) < 3:
         print(
-            f"expected at least 2 `retry` helpers under {WORKFLOWS}, found"
+            f"expected at least 3 `retry` helpers under {WORKFLOWS}, found"
             f" {len(helpers)}: {[n for n, _ in helpers]}",
             file=sys.stderr,
         )
