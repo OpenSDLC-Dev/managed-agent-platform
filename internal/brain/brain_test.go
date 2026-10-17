@@ -1495,8 +1495,9 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 // A tool call the output cap cut off is answered, not run: {} would be a
 // broader call for a tool whose arguments are all optional, and a tool's own
 // required-argument error would not tell the model what happened. The cap cuts
-// a response's last block, so a cut call is the last call, under a stop reason
-// that says the turn was cut off, with an input that is unfinished or empty. It
+// what is still open when it is reached, so a cut call is the last call, with
+// nothing generated after it, under a stop reason that says the turn was cut
+// off, and with an input that is unfinished or empty. It
 // commits as agent.tool_use with {} as its input, stamped deny, and the
 // settlement answers it in the same commit with how the stream ended
 // (docs/DIVERGENCES.md, turn classification; #951). A complete call ahead of it
@@ -1546,6 +1547,10 @@ func TestCutToolCallIsAnsweredNotRun(t *testing.T) {
 		},
 		"a NUL-only delta after the cut": {
 			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), textChunk(1, "\x00\x00"), done("max_tokens", 8192)}, 0,
+			"(stop_reason max_tokens, 8192 output tokens)",
+		},
+		"an empty signature after the cut": {
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), signatureChunk(1, ""), done("max_tokens", 8192)}, 0,
 			"(stop_reason max_tokens, 8192 output tokens)",
 		},
 		"an empty thinking delta after the cut": {
@@ -1776,14 +1781,14 @@ func TestAnUnfinishedInputTheCapDidNotCutFailsTheTurn(t *testing.T) {
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
 			8192,
 		},
-		// Only an object can be a cut one; the stream is still read to its
-		// end for how it ended and what it spent.
 		// A thinking block that sends no text is a block all the same.
 		"a signature-only block after it": {
 			nil, cut, []provider.Chunk{signatureChunk(1, "sig"), done("max_tokens", 8192)}, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens; the response went on past it)`,
 			8192,
 		},
+		// Only an object can be a cut one; the stream is still read to its
+		// end for how it ended and what it spent.
 		"not an object": {
 			nil, json.RawMessage(`["a",`), []provider.Chunk{done("max_tokens", 8192)}, nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,

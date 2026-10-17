@@ -352,10 +352,9 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 
 // generated reports whether a chunk carries something the model generated
 // after the tool call whose block is lastTool (#951). An empty or NUL-only text
-// or thinking delta does not, which the stream's own paths skip too, nor does
-// the signature that seals a thinking block begun before that call. A
-// signature on a later block is that block, on a model that sends no thinking
-// text.
+// or thinking delta carries nothing, and neither does an empty signature or
+// one that seals a thinking block begun before that call. A signature on a
+// later block is that block, on a model that sends no thinking text.
 func generated(c provider.Chunk, lastTool int64) bool {
 	switch c.Kind {
 	case provider.KindDone:
@@ -363,7 +362,7 @@ func generated(c provider.Chunk, lastTool int64) bool {
 	case provider.KindTextDelta, provider.KindThinkingDelta:
 		return toolset.SanitizeText(c.Text) != ""
 	case provider.KindThinkingSignature:
-		return c.Index > lastTool
+		return c.Signature != "" && c.Index > lastTool
 	}
 	return true
 }
