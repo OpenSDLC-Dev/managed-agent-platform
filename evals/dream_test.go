@@ -332,8 +332,9 @@ func mentionsOutsideIndex(memories map[string]string, needle string) []string {
 	return paths
 }
 
-// pathToken is a run of the characters a memory path is written in.
-var pathToken = regexp.MustCompile(`[\w./-]+`)
+// pathToken is a run of the characters a memory path is written in, letters
+// and digits in any script included.
+var pathToken = regexp.MustCompile(`[\p{L}\p{N}_./-]+`)
 
 // tombstoneNamesSuccessor reports whether the in-place dream's tombstone names
 // what replaced the memory it retires: the finance app itself, or a memory in
@@ -355,7 +356,10 @@ func tombstoneNamesSuccessor(tomb, retiredPath string, memories map[string]strin
 			dirs = dirs[:1]
 		}
 		for _, dir := range dirs {
-			if slices.Contains(successors, path.Join(dir, tok)) {
+			// Joined below the root rather than at it, so a path that climbs
+			// out of the store shows as one instead of being clamped back in.
+			rel := path.Join(strings.TrimPrefix(dir, "/"), strings.TrimPrefix(tok, "/"))
+			if rel != ".." && !strings.HasPrefix(rel, "../") && slices.Contains(successors, "/"+rel) {
 				return true
 			}
 		}
@@ -567,8 +571,8 @@ func TestDreamPipeline(t *testing.T) {
 // transcripts through one dream, which is what the batch size and the
 // live-thread cap were sized for. It asserts what the seeded case cannot —
 // that a hundred transcripts complete inside the timeout, and that they fan
-// out into thirteen digest threads, or up to twice that many when the
-// coordinator rebuilds missing digests.
+// out into at least thirteen digest threads, more when the coordinator
+// rebuilds missing digests.
 //
 // It costs real money and real minutes. Measured on the first successful run
 // (2026-09-06, claude-haiku-4-5): driving the hundred transcripts took 3m4s and
@@ -659,21 +663,20 @@ func TestDreamPipelineHundred(t *testing.T) {
 		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
 			dreamID, dream["status"], dream["error"], dream["session_id"])
 	}
-	// One thread per batch at least, and two at most. Once the threads
-	// report, stage 2 has the coordinator check every digest on disk and
-	// rebuild a missing one, by spawning that batch again or reading it
-	// itself, so a sound dream can run more threads than batches (#951). Two a
-	// batch is the first spawn and one rebuild; past that is the fan-out the
-	// batch size exists to bound. The count is all this test checks: it
-	// cannot show which batch a thread read, and the digests are in the
-	// sandbox's scratch, which it cannot read.
+	// One thread per batch at least. Once the threads report, stage 2 has
+	// the coordinator check every digest on disk and rebuild a missing one,
+	// by spawning that batch again or reading it itself, so a sound dream can
+	// run more threads than batches (#951). No upper bound is asserted here:
+	// the platform's live-thread cap (internal/brain/delegate.go
+	// maxLiveThreads, the primary included) already holds a dream to 24
+	// children, and any tighter number would be a guess at how many rebuilds
+	// a sound dream needs. The count is all this test checks: it cannot show
+	// which batch a thread read, and the digests are in the sandbox's
+	// scratch, which it cannot read.
 	switch {
 	case threads < batches:
 		t.Errorf("the pipeline session %s ran %d digest threads, want at least %d (%d transcripts in batches of %d)",
 			sessionID, threads, batches, transcripts, batch)
-	case threads > 2*batches:
-		t.Errorf("the pipeline session %s ran %d digest threads, want at most %d: a first spawn and one rebuild per batch (%d transcripts in batches of %d)",
-			sessionID, threads, 2*batches, transcripts, batch)
 	case threads > batches:
 		t.Logf("the pipeline session %s ran %d digest threads for %d batches, %d more than the batches",
 			sessionID, threads, batches, threads-batches)

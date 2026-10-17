@@ -13,6 +13,7 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 		"/facts/expenses.md":       "# Expenses\n\nExpenses are filed in the internal finance app at finance.internal.\n",
 		"/facts/expense-filing.md": "# Expense filing\n\nFiled at finance.internal since 2026-09-01.\n",
 		"/facts/Expenses-2026.md":  "# Expenses\n\nFiled at finance.internal.\n",
+		"/facts/dépenses.md":       "# Dépenses\n\nDéclarées sur finance.internal.\n",
 	}
 	for _, tc := range []struct {
 		name, tomb string
@@ -27,7 +28,9 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 		// A relative link reads from the retired memory's own directory.
 		{"names it beside the retired memory", "Superseded by expenses.md.", true},
 		{"links to it", "Superseded by [expenses](./expenses.md).", true},
+		{"links to it from the parent directory", "Superseded by [expenses](../facts/expenses.md).", true},
 		{"names a path with capitals", "Superseded by facts/Expenses-2026.md.", true},
+		{"names a path outside ASCII", "Superseded by `facts/dépenses.md`.", true},
 		{"names the place itself", "Shut down on 2026-09-01; expenses go through the finance app now.", true},
 		{"names nothing", "Retired: the vendor portal was shut down on 2026-09-01.", false},
 		// A memory that is not the successor: it says nothing of the new place.
@@ -41,6 +44,9 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 		{"names it under another directory", "Superseded by other/facts/expenses.md.", false},
 		{"names it in another case", "Superseded by facts/EXPENSES.md.", false},
 		{"names a root path that is not there", "Superseded by /expenses.md.", false},
+		{"names it under a non-ASCII directory", "Superseded by 旧/facts/expenses.md.", false},
+		// From /facts, two levels up is outside the store, where no memory is.
+		{"climbs out of the store", "Superseded by ../../facts/expenses.md.", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tombstoneNamesSuccessor(tc.tomb, retired, store); got != tc.want {

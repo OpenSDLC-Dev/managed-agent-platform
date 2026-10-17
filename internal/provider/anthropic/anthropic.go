@@ -9,6 +9,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -436,8 +437,11 @@ func (s *stream) Next() bool {
 	// success: callers must never mistake it for a turn that merely
 	// produced no done chunk.
 	if err == nil {
-		err = fmt.Errorf("model stream ended before message_stop (%s)", s.stopNote())
+		err = errors.New("model stream ended before message_stop")
 	}
+	// Either way the stream ended early, and what message_delta had said by
+	// then tells a turn the output cap cut off from a dropped stream (#951).
+	err = fmt.Errorf("%w (%s)", err, s.stopNote())
 	// Last, so an endpoint that went silent is named as one: what the aborted
 	// read reports is a bare cancellation either way.
 	s.err = s.guard.Cause(err)

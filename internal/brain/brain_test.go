@@ -1487,8 +1487,8 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
-// A tool input that ends before its JSON object does may be one the output cap
-// cut off, so its turn fails only once the stream has ended, saying how it
+// A tool input that stops before its JSON object is complete may be one the
+// output cap cut off, so its turn fails only once the stream has ended, saying how it
 // ended: the stop reason and the output count arrive after the tool block
 // (#951). Nothing the stream carries after the block is kept or broadcast, and
 // what the call spent is recorded as for any turn. Any other bad input is the
@@ -1511,6 +1511,12 @@ func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
 		"cut at the cap": {
 			cut, after(done("max_tokens", 8192)), nil,
 			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
+			8192,
+		},
+		// Cut after nothing but whitespace, before the object began.
+		"cut before the object": {
+			json.RawMessage("\n"), after(done("max_tokens", 8192)), nil,
+			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens)`,
 			8192,
 		},
 		"no done chunk": {

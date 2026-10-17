@@ -890,23 +890,31 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 	}
 	for name, tc := range map[string]struct {
 		tail []string
-		want string
+		want []string
 	}{
 		"with message_delta": {
 			[]string{
 				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
 				`{"type":"message_stop"}`,
 			},
-			"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)",
+			[]string{"message_stop with tool_use block 0 still open (stop_reason max_tokens, 8192 output tokens)"},
 		},
 		"without message_delta": {
 			[]string{`{"type":"message_stop"}`},
-			"message_stop with tool_use block 0 still open (no stop reason)",
+			[]string{"message_stop with tool_use block 0 still open (no stop reason)"},
 		},
-		// A stream that drops before message_stop says how far it got too.
+		// A stream that drops before message_stop says how far it got too,
+		// whether it ends cleanly or on an error.
 		"without message_stop": {
 			[]string{`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`},
-			"model stream ended before message_stop (stop_reason max_tokens, 8192 output tokens)",
+			[]string{"model stream ended before message_stop (stop_reason max_tokens, 8192 output tokens)"},
+		},
+		"error after message_delta": {
+			[]string{
+				`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":8192}}`,
+				`{"type":"error","error":{"type":"api_error","message":"connection reset upstream"}}`,
+			},
+			[]string{"connection reset upstream", " (stop_reason max_tokens, 8192 output tokens)"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -922,8 +930,14 @@ func TestGenerateOpenToolBlockNamesHowTheStreamEnded(t *testing.T) {
 					t.Error("a stream with an open tool block produced a done chunk")
 				}
 			}
-			if err := stream.Err(); err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("stream error = %v, want it to contain %q", err, tc.want)
+			err = stream.Err()
+			if err == nil {
+				t.Fatal("the stream ended without an error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("stream error = %v, want it to contain %q", err, want)
+				}
 			}
 		})
 	}

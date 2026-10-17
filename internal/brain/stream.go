@@ -157,13 +157,14 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
-	// badInput is a tool input that ends before its JSON object does, the one
-	// shape a cut leaves. The turn fails on it, but only once the stream has
-	// ended: the stop reason and the output count arrive after the tool block,
-	// and they are what tells a call the output cap cut off from one the model
-	// closed early (#951). Reading on is bounded as every turn's reading is,
-	// by the route's stall guard, and nothing else the stream carries after
-	// the block is kept.
+	// badInput is a tool input that stops before its JSON object is complete,
+	// or before it began: the one shape a cut leaves (io.ErrUnexpectedEOF, or
+	// io.EOF for whitespace alone). The turn fails on it, but only once the
+	// stream has ended: the stop reason and the output count arrive after the
+	// tool block, and they are what tells a call the output cap cut off from
+	// one the model closed early (#951). Reading on is bounded as every turn's
+	// reading is, by the route's stall guard, and nothing else the stream
+	// carries after the block is kept.
 	var badInput error
 	for stream.Next() {
 		c := stream.Chunk()
@@ -266,7 +267,7 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			input, err := normalizeToolInput(tu.Input)
 			if err != nil {
 				err = fmt.Errorf("tool %q: %w", tu.Name, err)
-				if !errors.Is(err, io.ErrUnexpectedEOF) {
+				if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 					return nil, err
 				}
 				badInput = err
