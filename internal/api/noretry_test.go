@@ -92,6 +92,12 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 				"token_endpoint": "https://httpbin.org/status/400", "token_endpoint_auth": map[string]any{"type": "none"}}}}, mgmt, 400, false},
 		// 2026-09-02 free_batch1 idx 14 `mem.list.prefix/x` (#549).
 		{"an unslashed path_prefix", http.MethodGet, "/v1/memory_stores/" + store + "/memories?path_prefix=/x", nil, mgmt, 400, false},
+		// 2026-09-02 batch2 idx 426 `deployment.create.dom+dow-cron`, its body but for the ids (#543).
+		{"a schedule restricting both day fields", http.MethodPost, "/v1/deployments", map[string]any{
+			"name": "rec78 domdow", "agent": agentID, "environment_id": envID,
+			"initial_events": []any{map[string]any{"type": "user.message",
+				"content": []any{map[string]any{"type": "text", "text": "Reply with the single word pong."}}}},
+			"schedule": map[string]any{"type": "cron", "expression": "0 0 1 * 1", "timezone": "UTC"}}, mgmt, 400, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := s.doRaw(tc.method, tc.path, tc.body, tc.headers)
