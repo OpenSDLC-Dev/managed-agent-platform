@@ -245,39 +245,70 @@ func legacyStatus(t *testing.T, pool *pgxpool.Pool, sid domain.ID, typ domain.Ev
 	}
 }
 
-// A status event the clock's columns never saw is reconciled at the next
-// status event AppendInTx writes, from the log's last one: a close counts at
-// its own stamp, so an idle after it does not count the gap, and an open
-// opens at its own. An unseen close and reopen restarts the clock at the
-// reopen, which loses the time before that close and no more.
-func TestUsageClockReconcilesWithTheLog(t *testing.T) {
+// A close TransitionThread emits while the stored status was not running is
+// restated (NewEvent.Restated): here the interrupt's re-idle after a binary
+// from before migration 0055 ended the turn, leaving an interval open on the
+// row. It drops that interval rather than closing it across the gap, and its
+// snapshot reports the closed sum. The idle that ends a running turn is not
+// restated and closes its interval.
+func TestUsageRestatedCloseDropsAStaleInterval(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
-	sid := newSession(t, pool)
+	sid := newThreadedSession(t, pool)
+	ctx := context.Background()
 	s := time.Second
-
-	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(0))}, events.AppendOptions{})
-	legacyStatus(t, pool, sid, domain.EventSessionStatusIdle, at(3*s))
-	got := mustAppend(t, log, sid, []events.NewEvent{idleAt(at(100 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 3 {
-		t.Errorf("re-idle after an unseen close: active_seconds = %v, want 3, not the 100 s to the re-idle", v)
+	endTurn := &domain.StopReason{Type: domain.StopEndTurn}
+	move := func(tr events.ThreadTransition, stamp *time.Time) float64 {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		batch, moved, err := events.TransitionThread(ctx, tx, sid, tr)
+		if err != nil {
+			t.Fatalf("TransitionThread(%+v): %v", tr, err)
+		}
+		for i := range batch {
+			batch[i].ProcessedAt = stamp
+		}
+		got, err := log.AppendInTx(ctx, tx, sid, batch, events.AppendOptions{SetStatus: moved})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range got {
+			if ev.Type == domain.EventSessionUsage {
+				return activeSeconds(t, ev)
+			}
+		}
+		return -1
 	}
 
-	legacyStatus(t, pool, sid, domain.EventSessionStatusRunning, at(200*s))
-	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(204 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 7 {
-		t.Errorf("idle after an unseen open: active_seconds = %v, want 7 (3 + 4)", v)
+	move(events.ThreadTransition{Status: domain.SessionRunning}, at(0))
+	if v := move(events.ThreadTransition{Status: domain.SessionIdle, Stop: endTurn}, at(2*s)); v != 2 {
+		t.Errorf("the idle ending a running turn: active_seconds = %v, want 2", v)
 	}
 
-	mustAppend(t, log, sid, []events.NewEvent{status(domain.EventSessionStatusRunning, at(300*s))}, events.AppendOptions{})
-	legacyStatus(t, pool, sid, domain.EventSessionStatusIdle, at(301*s))
-	legacyStatus(t, pool, sid, domain.EventSessionStatusRunning, at(310*s))
-	got = mustAppend(t, log, sid, []events.NewEvent{idleAt(at(315 * s))}, events.AppendOptions{})
-	if v := activeSeconds(t, got[0]); v != 12 {
-		t.Errorf("idle after an unseen close and reopen: active_seconds = %v, want 12 (7 + 5)", v)
+	move(events.ThreadTransition{Status: domain.SessionRunning}, at(10*s))
+	// A binary from before migration 0055 ends the turn: the log and the
+	// status columns move, the clock's columns do not.
+	legacyStatus(t, pool, sid, domain.EventSessionStatusIdle, at(13*s))
+	for _, q := range []string{
+		`UPDATE sessions SET status = 'idle' WHERE id = $1`,
+		`UPDATE session_threads SET status = 'idle' WHERE session_id = $1`,
+	} {
+		if _, err := pool.Exec(ctx, q, sid.String()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if active, since := storedActive(t, pool, sid); active != 12 || since != nil {
-		t.Errorf("stored = %v since %v, want 12 and nothing open", active, since)
+	if v := move(events.ThreadTransition{Status: domain.SessionIdle, Stop: endTurn, Reemit: true}, at(100*s)); v != 2 {
+		t.Errorf("the re-idle after an unseen close: active_seconds = %v, want 2, not the 90 s to the re-idle", v)
+	}
+	if active, since := storedActive(t, pool, sid); active != 2 || since != nil {
+		t.Errorf("stored = %v since %v, want 2 and nothing open", active, since)
 	}
 }
 

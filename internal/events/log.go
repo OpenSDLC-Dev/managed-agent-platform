@@ -104,6 +104,13 @@ type NewEvent struct {
 	// surface filters (ListQuery.Scope).
 	ThreadID    domain.ID
 	CrossPosted bool
+	// Restated marks a session-level close (idle, rescheduled, terminated)
+	// emitted while the session's stored status was not running: a re-idle,
+	// or a move between two statuses neither of which runs. It closes no
+	// running interval, and drops one still open (plan 68, usage.go step).
+	// TransitionThread sets it, as does any emitter that builds such an
+	// event itself.
+	Restated bool
 }
 
 // Log is the append-only event store over the shared pool.
@@ -258,11 +265,6 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		snapUsage domain.Usage
 	)
 	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return sessionStatusTypes[ev.Type] }) {
-		last, err := lastSessionStatus(ctx, tx, sessionID)
-		if err != nil {
-			return nil, err
-		}
-		stored.reconcile(last)
 		clock = &stored
 	}
 	if slices.ContainsFunc(evs, func(ev NewEvent) bool { return ev.Type == domain.EventSessionUsage }) {
@@ -372,11 +374,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 		// and a status event moves that time.
 		if clock != nil && ev.ProcessedAt != nil {
 			if ev.Type == domain.EventSessionUsage {
-				if payload, err = usageSnapshot(snapUsage, ActiveSecondsAt(clock.active, clock.since, *ev.ProcessedAt)); err != nil {
+				active := ActiveSecondsAt(clock.active, clock.since, *ev.ProcessedAt)
+				if ev.Restated {
+					active = clock.active // its idle drops the open interval
+				}
+				if payload, err = usageSnapshot(snapUsage, active); err != nil {
 					return nil, err
 				}
 			}
-			clock.step(ev.Type, *ev.ProcessedAt)
+			clock.step(ev.Type, *ev.ProcessedAt, ev.Restated)
 		}
 		if i > 0 {
 			sb.WriteString(", ")

@@ -385,6 +385,43 @@ func TestStatusEventsComeInPrimaryThreadPairs(t *testing.T) {
 	}
 }
 
+// A child's archive that changes an idle session's stop reason re-idles it
+// payload-only, and that idle is restated (plan 68): an interval left open on
+// the row — by a close a binary from before migration 0055 wrote — is
+// dropped, not closed across the hour since.
+func TestAChildArchiveReIdleDropsAStaleInterval(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	child := insertChild(t, s, sid, "idle")
+	ctx := context.Background()
+	for _, q := range []struct{ sql, id string }{
+		{`UPDATE session_threads SET stop_reason = '{"type":"retries_exhausted"}' WHERE id = $1`, child},
+		{`UPDATE sessions SET active_seconds = 1.5, running_since = now() - interval '1 hour' WHERE id = $1`, sid},
+	} {
+		if _, err := s.pool.Exec(ctx, q.sql, q.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+child+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, res)
+	}
+	types := s.eventTypes(sid)
+	if n := len(types); n < 2 || types[n-2] != "session.usage" || types[n-1] != "session.status_idle" {
+		t.Fatalf("session view after the archive = %v, want it to end in the re-idle", types)
+	}
+	var (
+		active float64
+		open   bool
+	)
+	if err := s.pool.QueryRow(ctx, `SELECT active_seconds, running_since IS NOT NULL FROM sessions WHERE id = $1`, sid).
+		Scan(&active, &open); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1.5 || open {
+		t.Errorf("stored = %v with an interval open %v, want 1.5 and nothing open", active, open)
+	}
+}
+
 // The primary thread's events are the session's: the same rows, the same
 // ids, on the list and on the stream; the thread list carries no filters.
 func TestPrimaryThreadEventsAreTheSessionView(t *testing.T) {

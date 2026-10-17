@@ -9,10 +9,11 @@
 --
 -- The backfill replays the same rule over every session's stored status
 -- events, so a session's history keeps its time and a session running now
--- keeps its open interval. A status event this scan does not see — one a
--- binary from before this migration writes, or one committed while the scan
--- runs — is reconciled by the session's next status event AppendInTx writes,
--- which reads the log's last status event first (internal/events/usage.go).
+-- keeps its open interval. A close this scan does not see — one a binary
+-- from before this migration writes, or one committed while the scan runs —
+-- leaves an interval open on the row. The session's next running restarts
+-- it, and its next re-idle drops it (internal/events/usage.go step), so the
+-- idle after that close is not counted; the turn it ended is lost.
 --
 -- The scan of events runs first, into a scratch table dropped at the end,
 -- before this migration locks sessions: reading events blocks no append. An

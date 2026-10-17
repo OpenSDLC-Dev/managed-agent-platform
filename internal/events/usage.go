@@ -3,7 +3,6 @@ package events
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -32,9 +31,10 @@ var sessionStatusTypes = map[domain.EventType]bool{
 // withUsageSnapshots returns evs with a session.usage placed immediately
 // before every session.status_idle, or evs itself when it has none. The
 // usage takes the idle's stamp when the caller set one; otherwise the append
-// stamps the two in order, the usage first. Its body is written by the
-// append, which knows the stamps only once the batch's order has settled
-// them.
+// stamps the two in order, the usage first. It takes the idle's Restated
+// too: the snapshot of a restated idle reports the closed sum alone, the
+// value that idle leaves stored. Its body is written by the append, which
+// knows the stamps only once the batch's order has settled them.
 func withUsageSnapshots(evs []NewEvent) []NewEvent {
 	n := 0
 	for _, ev := range evs {
@@ -48,7 +48,7 @@ func withUsageSnapshots(evs []NewEvent) []NewEvent {
 	out := make([]NewEvent, 0, len(evs)+n)
 	for _, ev := range evs {
 		if ev.Type == domain.EventSessionStatusIdle {
-			out = append(out, NewEvent{Type: domain.EventSessionUsage, ProcessedAt: ev.ProcessedAt})
+			out = append(out, NewEvent{Type: domain.EventSessionUsage, ProcessedAt: ev.ProcessedAt, Restated: ev.Restated})
 		}
 		out = append(out, ev)
 	}
@@ -80,77 +80,24 @@ type sessionClock struct {
 // reads negative — two hosts' clocks — adds nothing.
 //
 // No batch AppendInTx writes runs a running session again without closing
-// first: the reclaim's forced pair closes with its rescheduled. A running
-// that finds an interval open restarts it, the rule reconcile and migration
-// 0055 apply too.
-func (c *sessionClock) step(typ domain.EventType, at time.Time) {
+// first, and none closes one that was not running except as a restated
+// close (NewEvent.Restated). So an interval open at either was left by a
+// close the columns never saw — one a binary from before migration 0055
+// wrote, or one committed during its scan. A running restarts it, and a
+// restated close drops it, so neither counts the gap after that close.
+func (c *sessionClock) step(typ domain.EventType, at time.Time, restated bool) {
 	switch typ {
 	case domain.EventSessionStatusRunning:
 		c.since = &at
 		c.changed = true
 	case domain.EventSessionStatusIdle, domain.EventSessionStatusRescheduled, domain.EventSessionStatusTerminated:
 		if c.since != nil {
-			c.active = ActiveSecondsAt(c.active, c.since, at)
+			if !restated {
+				c.active = ActiveSecondsAt(c.active, c.since, at)
+			}
 			c.since = nil
 			c.changed = true
 		}
-	}
-}
-
-// statusMark is a session-level status event the log holds: its type and
-// stamp.
-type statusMark struct {
-	typ domain.EventType
-	at  time.Time
-}
-
-// lastSessionStatus is the last session-level status event the session's log
-// holds, nil when it holds none. Read before the batch's insert, it is the
-// status the session had when the batch began.
-func lastSessionStatus(ctx context.Context, tx pgx.Tx, sessionID domain.ID) (*statusMark, error) {
-	types := make([]string, 0, len(sessionStatusTypes))
-	for t := range sessionStatusTypes {
-		types = append(types, string(t))
-	}
-	var (
-		typ string
-		at  time.Time
-	)
-	err := tx.QueryRow(ctx,
-		`SELECT type, processed_at FROM events
-		  WHERE session_id = $1 AND type = ANY($2) AND processed_at IS NOT NULL
-		  ORDER BY seq DESC LIMIT 1`,
-		sessionID.String(), types).Scan(&typ, &at)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &statusMark{typ: domain.EventType(typ), at: at}, nil
-}
-
-// reconcile brings the clock to the log's last session-level status event,
-// before the batch steps it. The two agree on every log AppendInTx alone
-// wrote. They disagree after a status event the columns never saw: one a
-// binary from before migration 0055 wrote, or one committed while the
-// migration's scan ran. A close is then counted at its own stamp, and an open
-// is opened at its own, so an idle that follows does not count the gap, and
-// the interval the event moved is not lost. What stays uncounted is an
-// interval opened and closed between two status events AppendInTx wrote.
-func (c *sessionClock) reconcile(last *statusMark) {
-	switch {
-	case last == nil:
-		if c.since != nil {
-			c.since = nil
-			c.changed = true
-		}
-	case last.typ == domain.EventSessionStatusRunning:
-		if c.since == nil || !c.since.Equal(last.at) {
-			c.step(last.typ, last.at)
-		}
-	default:
-		c.step(last.typ, last.at)
 	}
 }
 

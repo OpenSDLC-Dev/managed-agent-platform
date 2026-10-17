@@ -442,7 +442,8 @@ func terminateThread(ctx context.Context, tx pgx.Tx, log *events.Log, row thread
 				payload["stop_reason"] = after
 			}
 			raw := mustJSON(payload)
-			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: raw})
+			// The session was idle and stays so: a restated close.
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Payload: raw, Restated: true})
 		}
 	}
 	if err := tx.QueryRow(ctx,

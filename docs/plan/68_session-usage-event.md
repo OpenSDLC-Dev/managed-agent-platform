@@ -74,15 +74,15 @@ The recordings in `managed-agents-wire-recordings` add the shape and the order
    - an interval that reads negative, across two hosts' clocks, adds zero.
 
    No batch `AppendInTx` writes runs a running session again without a close
-   first. A running that finds an interval open restarts it.
-
-   Before a batch's status events step the clock, it is reconciled with the
-   log's last session-level status event. A status event the columns never
-   saw — one a binary from before migration 0055 wrote, or one committed
-   during the migration's scan — then counts at its own stamp: an idle after
-   an unseen close does not count the gap, and an unseen open is not lost.
-   The cost is one indexed read of the log per batch that carries a status
-   event.
+   first, and none closes a session that was not running except as a
+   restated close: a re-idle, which `TransitionThread` and the child archive
+   mark `NewEvent.Restated`. So an interval open at either was left by a close
+   the columns never saw — one a binary from before migration 0055 wrote, or
+   one committed during the migration's scan. A running restarts it and a
+   restated close drops it, so neither counts the idle after that close. The
+   turn the unseen close ended goes uncounted. Reading the log's history to
+   recover it was the alternative: a status-type filter no index covers, and
+   a read of every event since the last status event, under the lock.
 
    The session's status is the fold over its threads, running while any thread
    runs, so overlap counts once by construction. Rescheduling does not count:

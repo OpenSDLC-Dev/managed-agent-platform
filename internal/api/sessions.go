@@ -225,9 +225,9 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	// The running time counts the open interval up to this read, so a session
 	// that runs reports time as it spends it (plan 68 decision 6) — but only
 	// while the stored status says running: an interval whose close a binary
-	// from before migration 0055 wrote stays open on the row until the next
-	// status event reconciles it, and an idle session must not keep counting
-	// it. The read's time is the database's, the one clock every replica
+	// from before migration 0055 wrote stays open on the row until the
+	// session's next status event drops it, and an idle session must not keep
+	// counting it. The read's time is the database's, the one clock every replica
 	// reads; the stamp is the appender's, so the two differ by their hosts'
 	// skew. The create response, built before its row is read, counts no open
 	// interval.

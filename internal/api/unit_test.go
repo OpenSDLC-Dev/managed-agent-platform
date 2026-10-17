@@ -15,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -308,6 +310,37 @@ func TestRenderSessionActiveSecondsAddsTheOpenInterval(t *testing.T) {
 		}
 		if out.Usage.ActiveSeconds != c.want {
 			t.Errorf("%s: active_seconds = %v, want %v", c.name, out.Usage.ActiveSeconds, c.want)
+		}
+	}
+}
+
+// The idle keepLastSessionIdle keeps is restated only when every idle it
+// merges was: an interrupt whose first thread's end closed the running
+// interval must still close it with the idle it keeps (plan 68).
+func TestKeepLastSessionIdleRestatesOnlyWhenEveryIdleWas(t *testing.T) {
+	for _, c := range []struct {
+		restated []bool
+		want     bool
+	}{
+		{[]bool{false, true}, false},
+		{[]bool{true, false}, false},
+		{[]bool{true, true}, true},
+		{[]bool{false}, false},
+	} {
+		var batch []events.NewEvent
+		for _, r := range c.restated {
+			batch = append(batch, events.NewEvent{Type: domain.EventSessionStatusIdle, Restated: r},
+				events.NewEvent{Type: domain.EventSessionThreadStatusIdle})
+		}
+		got := keepLastSessionIdle(batch)
+		var idles []events.NewEvent
+		for _, ev := range got {
+			if ev.Type == domain.EventSessionStatusIdle {
+				idles = append(idles, ev)
+			}
+		}
+		if len(idles) != 1 || idles[0].Restated != c.want {
+			t.Errorf("restated %v: kept %+v, want one idle restated=%v", c.restated, idles, c.want)
 		}
 	}
 }
