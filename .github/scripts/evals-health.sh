@@ -39,8 +39,8 @@ case "$2" in '' | *[!0-9]*) usage ;; esac
 # The newest verdict is the one with the highest `run_number`, which is the
 # newest code, and within a run the highest `run_attempt`. Not the one that
 # finished last: a re-run of an older run tests that run's older commit, and
-# must not outvote a newer run. Not `created_at` either: an attempt's
-# `created_at` is when that attempt began.
+# must not outvote a newer run. Not `created_at` either: the runs endpoint gives
+# a run's own, and the attempts endpoint gives when each attempt began.
 #
 # Staleness is checked first. A verdict older than the limit means nothing has
 # run since it, and that is the newer news.

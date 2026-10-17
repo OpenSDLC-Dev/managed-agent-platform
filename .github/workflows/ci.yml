@@ -1395,16 +1395,21 @@ jobs:
             || { echo "expected exactly one EVALS_WORKFLOW in $A, got: $wf" >&2; exit 1; }
           [ -f ".github/workflows/$wf" ] \
             || { echo "$A reads the run history of workflows/$wf and no such workflow file exists" >&2; exit 1; }
+          # Both checks below are tripwires against a rename, a move or an
+          # inlined call, not a parse of the YAML: text inside a block scalar
+          # can still satisfy them.
+          #
           # The group of the workflow's top-level `concurrency:` block, not a
           # `group:` key anywhere else in the file.
           awk '/^concurrency:/ { c = 1; next }
                c && /^[^[:space:]#]/ { c = 0 }
-               c && /^[[:space:]]+group:[[:space:]]+evals[[:space:]]*$/ { found = 1 }
+               c && /^[[:space:]]+group:[[:space:]]+("evals"|evals)[[:space:]]*(#.*)?$/ { found = 1 }
                END { exit !found }' ".github/workflows/$wf" \
             || { echo "$wf no longer runs in the 'evals' concurrency group that $A's issue text names" >&2; exit 1; }
-          # The assignment that consumes the answer, so that a comment, a step
-          # name or an `echo` naming the script does not pass for the call.
-          grep -qE '^[[:space:]]*verdict="\$\(bash \.github/scripts/evals-health\.sh ' "$A" \
+          # The assignment that consumes the answer, so that a comment, an
+          # `echo` or a one-line step name naming the script does not pass for
+          # the call.
+          grep -qE '^[[:space:]]*verdict="\$\([[:space:]]*bash \.github/scripts/evals-health\.sh ' "$A" \
             || { echo "$A no longer assigns its verdict from .github/scripts/evals-health.sh, so make evals-alert-test tests nothing it runs" >&2; exit 1; }
           echo "ok: $A reads $wf, which runs in the 'evals' group, and decides with evals-health.sh"
       # The repository is public, so the operator's coordinates belong in Actions

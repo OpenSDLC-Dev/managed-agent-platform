@@ -192,13 +192,15 @@ jobs:
               # reported once, and a stall after a re-run or after a reported
               # failure is still news.
               export MARK="<!-- evals-alert stale since run:$RUN_ID attempt:$RUN_ATTEMPT -->"
+              # The newest RUN to reach a verdict, not the latest verdict in time:
+              # a re-run of an older run may have finished since.
               if [ "$RUN_ID" = "-" ]; then
-                newest="None of the newest 100 runs on \`main\` reached a verdict."
+                first="None of the newest 100 runs of the nightly eval suite on \`main\` reached a verdict."
               else
-                newest="The newest verdict is $RUN_URL (attempt $RUN_ATTEMPT), which ended **$RUN_CONCLUSION** at $FINISHED."
+                first="The newest run of the nightly eval suite on \`main\` to reach a verdict did so more than $STALE_HOURS hours ago: $RUN_URL (attempt $RUN_ATTEMPT) ended **$RUN_CONCLUSION** at $FINISHED."
               fi
               open_or_comment "$(printf '%s\n' \
-                "No run of the nightly eval suite has passed or failed on \`main\` in the last $STALE_HOURS hours. $newest" \
+                "$first" \
                 "" \
                 "A run that ends \`cancelled\` carries no verdict. That is how a pending run ends when a newer one replaces it, and how a run ends when it is cancelled by hand or when it hits its job timeout." \
                 "" \
