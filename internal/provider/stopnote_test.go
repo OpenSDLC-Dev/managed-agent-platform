@@ -7,8 +7,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
-// StopNote is what an incomplete tool call's error says about how its stream
-// ended; each of the three things it can know shows (#951).
+// StopNote is what an error that ends a stream early says about how far the
+// stream got; each of the three things it can know shows (#951).
 func TestStopNote(t *testing.T) {
 	for _, tc := range []struct {
 		reason string

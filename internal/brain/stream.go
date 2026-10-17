@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -157,23 +158,8 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 		return nil
 	}
 
-	// badInput is a tool input that stops before its JSON object is complete,
-	// or before it began: the one shape a cut leaves (io.ErrUnexpectedEOF, or
-	// io.EOF for whitespace alone). The turn fails on it, but only once the
-	// stream has ended: the stop reason and the output count arrive after the
-	// tool block, and they are what tells a call the output cap cut off from
-	// one the model closed early (#951). Reading on is bounded as every turn's
-	// reading is, by the route's stall guard, and nothing else the stream
-	// carries after the block is kept.
-	var badInput error
 	for stream.Next() {
 		c := stream.Chunk()
-		if badInput != nil {
-			if c.Kind == provider.KindDone {
-				turn.stopReason, turn.usage = c.StopReason, copyUsage(c.Usage)
-			}
-			continue
-		}
 		switch c.Kind {
 		case provider.KindThinkingDelta:
 			// Thinking is the first content a reasoning model streams, so it is
@@ -265,13 +251,18 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			tu := *c.ToolUse
 			tu.Name = toolset.SanitizeText(tu.Name)
 			input, err := normalizeToolInput(tu.Input)
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				// Cut off before its object closed, or before it began: the
+				// one shape the output cap leaves. The call goes out with no
+				// arguments, as the reference sends it, and the tool answers
+				// with its own error, which tells the model what went
+				// missing (#951; docs/DIVERGENCES.md, turn classification).
+				slog.WarnContext(ctx, "brain: a tool input was cut off; the call goes out with no arguments",
+					"session_id", sid.String(), "tool", tu.Name, "error", err)
+				input, err = json.RawMessage("{}"), nil
+			}
 			if err != nil {
-				err = fmt.Errorf("tool %q: %w", tu.Name, err)
-				if !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-					return nil, err
-				}
-				badInput = err
-				continue
+				return nil, fmt.Errorf("tool %q: %w", tu.Name, err)
 			}
 			tu.Input = input
 			turn.toolUses = append(turn.toolUses, tu)
@@ -286,15 +277,6 @@ func (b *Brain) streamTurn(ctx context.Context, sid, threadID domain.ID, p provi
 			turn.stopReason = c.StopReason
 			turn.usage = copyUsage(c.Usage)
 		}
-	}
-	if badInput != nil {
-		// The turn goes back with the error, because what the call spent is
-		// a fact of the call: runTurn records it for a failed turn too.
-		note := provider.StopNote(turn.stopReason, turn.usage)
-		if err := stream.Err(); err != nil {
-			return turn, fmt.Errorf("%w (%s; model stream: %w)", badInput, note, err)
-		}
-		return turn, fmt.Errorf("%w (%s)", badInput, note)
 	}
 	if err := stream.Err(); err != nil {
 		return nil, fmt.Errorf("model stream: %w", err)

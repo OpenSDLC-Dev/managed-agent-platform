@@ -992,12 +992,10 @@ func (b *Brain) commitTurn(ctx context.Context, sid domain.ID, item *queue.Item,
 	// tool turns: a tool_use stop with no blocks fails, and a refusal arrives
 	// here with its blocks dropped.
 	//
-	// A block truncated mid-input never reaches here — streamTurn rejects a
-	// tool input that is not a complete JSON object, and a proper prefix of an
-	// object never parses as one. A block cut before its first input delta is
-	// the exception: it arrives as {} and runs, which the tool answers with
-	// its own required-argument error, recoverable where a stranded call is
-	// not (docs/DIVERGENCES.md).
+	// A block cut mid-input, or before its first input delta, arrives here
+	// with {} as its input (streamTurn sees to it) and runs, as the reference
+	// runs it: the tool answers with its own required-argument error,
+	// recoverable where a stranded call is not (docs/DIVERGENCES.md; #951).
 	if len(turn.toolUses) > 0 {
 		if len(delegated) > 0 {
 			// A delegation call — or a name the model was not offered at all

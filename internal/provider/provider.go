@@ -156,14 +156,11 @@ type Chunk struct {
 	ThinkingAnyPrefix bool
 }
 
-// StopNote says how a stream ended, for the error about a stream that ended
-// early or a tool call that arrived incomplete. The output count tells a call
-// the output cap cut off from one the model malformed (#951), and so does the
-// stop reason where the adapter passes max_tokens through; provider/openai
-// reports tool_use for any turn that called a tool. A nil usage is an endpoint
-// that reported none. Without a stop reason the count is left out: the
-// message_delta that carries both never came, so any count is message_start's
-// opening snapshot.
+// StopNote says how far a stream got, for the error that ends it early: the
+// stop reason and the output count tell a stream the output cap ended from one
+// that failed on its own (#951). A nil usage is an endpoint that reported
+// none. Without a stop reason the count is left out: the message_delta that
+// carries both never came, so any count is message_start's opening snapshot.
 func StopNote(reason string, usage *domain.ModelUsage) string {
 	switch {
 	case reason == "":

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1458,11 +1459,13 @@ func TestEmptyLeadingBlockKeepsDeltaIndicesAligned(t *testing.T) {
 }
 
 func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
-	// A tool_use whose input is not a JSON object must never reach the log.
-	// Truncated JSON would abort every settlement (a silent reclaim loop);
+	// A tool_use whose input is not a JSON object must never reach the log:
 	// a valid non-object would replay into a request the model rejects,
-	// wedging the session forever on an append-only log.
-	for _, bad := range []string{`{`, `"oops"`, `[1,2]`, `42`} {
+	// wedging the session forever on an append-only log, and malformed JSON
+	// would abort every settlement (a silent reclaim loop). A cut input is
+	// the one exception, and it reaches the log as {} instead
+	// (TestCutToolInputRunsWithNoArguments).
+	for _, bad := range []string{`"oops"`, `[1,2]`, `42`, `{"a" 1}`} {
 		t.Run(bad, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{
 				provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
@@ -1488,108 +1491,56 @@ func TestMalformedToolInputFailsTurnVisibly(t *testing.T) {
 	}
 }
 
-// A tool input that stops before its JSON object is complete may be one the
-// output cap cut off, so its turn fails only once the stream has ended, saying how it
-// ended: the stop reason and the output count arrive after the tool block
-// (#951). Nothing the stream carries after the block is kept or broadcast, and
-// what the call spent is recorded as for any turn. Any other bad input is the
-// model's own, and fails its turn at once.
-func TestTruncatedToolInputNamesHowTheStreamEnded(t *testing.T) {
-	cut := json.RawMessage(`{"query":"batch 9`)
-	after := func(end ...provider.Chunk) []provider.Chunk {
-		return append([]provider.Chunk{
-			{Kind: provider.KindThinkingDelta, Index: 1, Text: "after the cut"},
-			textChunk(2, "after the cut"),
-		}, end...)
+// A tool input cut off before its JSON object is complete, or before it began,
+// runs with no arguments, as the reference runs it: the call goes out with {}
+// and the tool answers it with its own error (docs/DIVERGENCES.md, turn
+// classification; #951). A complete call ahead of the cut one keeps its input.
+func TestCutToolInputRunsWithNoArguments(t *testing.T) {
+	call := func(id, input string) provider.Chunk {
+		return provider.Chunk{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
+			ID: id, Name: "lookup", Input: json.RawMessage(input)}}
 	}
 	for name, tc := range map[string]struct {
-		lead   []provider.Chunk // complete chunks ahead of the bad block
-		input  json.RawMessage
-		tail   []provider.Chunk
-		err    error
-		want   string
-		output int64 // the output tokens the token metric records
+		chunks []provider.Chunk
+		want   []map[string]any // each intent's stored input, in order
 	}{
 		"cut at the cap": {
-			nil, cut, after(done("max_tokens", 8192)), nil,
-			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
-			8192,
+			[]provider.Chunk{call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)},
+			[]map[string]any{{}},
 		},
 		// Cut after nothing but whitespace, before the object began.
 		"cut before the object": {
-			nil, json.RawMessage("\n"), after(done("max_tokens", 8192)), nil,
-			`tool "lookup": input must be a JSON object: EOF (stop_reason max_tokens, 8192 output tokens)`,
-			8192,
+			[]provider.Chunk{call("toolu_x", "\n"), done("max_tokens", 8192)},
+			[]map[string]any{{}},
 		},
-		"no done chunk": {
-			nil, cut, nil, nil,
-			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason)`,
-			0,
-		},
-		// The stream's own failure is part of how it ended, so it is named
-		// beside the bad block rather than hidden behind it.
-		"stream failed after the cut": {
-			nil, cut, nil, fmt.Errorf("%w: no data for 10m0s", provider.ErrStalled),
-			`tool "lookup": input must be a JSON object: unexpected EOF (no stop reason; model stream: model endpoint stalled: no data for 10m0s)`,
-			0,
-		},
-		// The turn goes back with its error, holding the complete call ahead
-		// of the cut one; failing the turn must still dispatch neither.
 		"a complete call before the cut": {
-			[]provider.Chunk{{Kind: provider.KindToolUse, ToolUse: &provider.ToolUse{
-				ID: "toolu_a", Name: "lookup", Input: json.RawMessage(`{"query":"batch 8"}`)}}},
-			cut, after(done("max_tokens", 8192)), nil,
-			`tool "lookup": input must be a JSON object: unexpected EOF (stop_reason max_tokens, 8192 output tokens)`,
-			8192,
-		},
-		"malformed, not cut": {
-			nil, json.RawMessage(`"oops"`), after(done("tool_use", 12)), nil,
-			`tool "lookup": input must be a JSON object: json: cannot unmarshal string into Go value of type map[string]interface {}`,
-			0,
+			[]provider.Chunk{call("toolu_a", `{"query":"batch 8"}`), call("toolu_x", `{"query":"batch 9`), done("max_tokens", 8192)},
+			[]map[string]any{{"query": "batch 8"}, {}},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			collect := collectBrainMetrics(t)
-			h := newHarness(t, [][]provider.Chunk{
-				append(append(append([]provider.Chunk(nil), tc.lead...), provider.Chunk{Kind: provider.KindToolUse,
-					ToolUse: &provider.ToolUse{ID: "toolu_x", Name: "lookup", Input: tc.input}}), tc.tail...),
-			}, []error{tc.err})
+			h := newHarness(t, [][]provider.Chunk{tc.chunks}, nil)
+			h.customTool(t, "lookup")
 			h.wake(t, "use the tool")
-			frames := drainFrames(t, h)
+			h.runOnce(t)
 
-			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"session.error"}})
-			if len(evs) != 1 {
-				t.Fatalf("session.error events = %d, want 1", len(evs))
+			if n := h.countType(t, "session.error"); n != 0 {
+				t.Errorf("session.error events = %d, want 0: the cut call failed its turn", n)
 			}
-			var p struct {
-				Error struct {
-					Message string `json:"message"`
-				} `json:"error"`
+			evs, _ := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.custom_tool_use"}})
+			if len(evs) != len(tc.want) {
+				t.Fatalf("tool intents = %d, want %d", len(evs), len(tc.want))
 			}
-			if err := json.Unmarshal(evs[0].Body, &p); err != nil {
-				t.Fatal(err)
-			}
-			if p.Error.Message != tc.want {
-				t.Errorf("session.error message = %q, want %q", p.Error.Message, tc.want)
-			}
-			if n := h.countType(t, "agent.thinking"); n != 0 {
-				t.Errorf("agent.thinking events = %d, want 0: thinking after the bad block was kept", n)
-			}
-			for _, typ := range []string{"agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"} {
-				if n := h.countType(t, typ); n != 0 {
-					t.Errorf("%s events = %d, want 0: a call of the failed turn was dispatched", typ, n)
+			for i, ev := range evs {
+				var p struct {
+					Input map[string]any `json:"input"`
 				}
-			}
-			for _, f := range frames {
-				if raw, _ := json.Marshal(f); strings.Contains(string(raw), "after the cut") {
-					t.Errorf("frame %s: text after the bad block was broadcast", raw)
+				if err := json.Unmarshal(ev.Body, &p); err != nil {
+					t.Fatalf("intent %d: %v (%s)", i, err, ev.Body)
 				}
-			}
-			if got := tokenSums(t, collect())["output"]; got != tc.output {
-				t.Errorf("output tokens recorded = %d, want %d", got, tc.output)
-			}
-			if n := h.liveWork(t); n != 0 {
-				t.Errorf("%d work items still live (reclaim loop)", n)
+				if p.Input == nil || !reflect.DeepEqual(p.Input, tc.want[i]) {
+					t.Errorf("intent %d input = %v, want %v (payload %s)", i, p.Input, tc.want[i], ev.Body)
+				}
 			}
 		})
 	}
