@@ -1555,6 +1555,26 @@ through `internal/api/apitest_test.go`: the constant at `:22`, `newPoolWithKey` 
 above all `newTestServer` at `:60`, which **453** call sites use. *Counting rule:
 `grep -rc "newTestServer(t)" internal/api/*_test.go`, summed.*
 
+**The deployment surfaces carry the two names in this slice** (#615). The pair starts to matter
+in slice 6, where an operator maps an IdP group to a new workspace's id and restarts (§7.6).
+Without deployment support, that step would mean editing the chart or the compose file. So every
+surface that sets the role pair sets this pair beside it:
+
+- **compose** forwards `${IDENTITY_CLAIM_WORKSPACES:-}` and `${IDENTITY_WORKSPACE_MAP:-}` in
+  each service that forwards the role pair: `controlplane` and `modelgateway`. Both binaries
+  read `identity.FromEnv`, and under Helm they share one identity configuration. Compose keeps
+  that parity.
+- **Helm** gains `identity.claims.workspaces` and `identity.workspaceMap`, a map from claim value
+  to workspace id. `map.identityEnv` in `_helpers.tpl`, which both deployments include, renders
+  both. The map is encoded and refused the way `identity.roleMap` is: a non-string id, or a `,`
+  or `=` in a claim value or an id, fails the render. One value set without the other also fails
+  the render. A claim with no map resolves every human to no workspace, and a map with no claim
+  is never read.
+- **GCP staging** gets the pair as a commented-out placeholder beside the role pair in
+  `deploy/gcp/staging-values.yaml`. It stays commented out because staging runs one workspace:
+  a configured claim that resolves to no live workspace leaves every human with no authority
+  (§6.2).
+
 **Tests.** Per-lane scope derivation, five cases, through a test-only echo route — including
 that the environment key tracks its *environment's* row and not `environment_keys`' own
 columns. · The three header rejections, message-for-message, on every scope-bearing lane. ·
@@ -1575,7 +1595,9 @@ database leaves every row at `default` and inserts exactly one workspace. ·
 extended from 3 tables to all 14** — widening the table loop at `:641`, which is an edit to that
 test and the only one it takes: its assertion is unchanged, because it is the
 upgrade-compatibility pin and the pin that `org_id`/`project_id` stay constant. Enforcement is a
-separate suite beside it.
+separate suite beside it. · The `helm` job in `.github/workflows/ci.yml` gives the workspace pair
+the role map's render cases: the name-and-value check, the encoded `IDENTITY_WORKSPACE_MAP`
+value, each refused entry, and each half of the pair set alone.
 
 **Docs.** `changelog.d/` · STATE.md (plan enters `in-progress`) · plan frontmatter →
 `in-progress` · README.md's development/configuration notes and the `internal/identity` package
@@ -1583,7 +1605,8 @@ doc beside `config.go:26-29` for the two new `IDENTITY_*` names — **not**
 `docs/ARCHITECTURE.md:466`, which mentions only `IDENTITY_MODE` and enumerates neither existing
 name, so there is no list for them to join; if ARCHITECTURE is to carry them, `:465-470` — the
 bullet's opening and its sentence naming `IDENTITY_MODE` — is
-*extended*. · Registry: **rewrite** `:47` — this plan's own PR already recast that entry to
+*extended*. · `deploy/compose/.env.example`, the chart's README and its `values.yaml` comments
+document the pair beside the role pair. · Registry: **rewrite** `:47` — this plan's own PR already recast that entry to
 cover **both** halves (no response header; the request header accepted and ignored, with
 `server.go:699` cited and `Tracked: #56` naming this slice), so slice 1 rewrites it into the
 *delivered* behavior: both response headers emitted wherever a scope resolves, the request
