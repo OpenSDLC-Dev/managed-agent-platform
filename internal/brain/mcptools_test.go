@@ -360,7 +360,9 @@ func TestANoteQuotesABoundedName(t *testing.T) {
 // A tool name is one namespace. A custom tool the agent's author named
 // mcp__docs__search wins it — the author's own definition is not displaced by a
 // third party's listing — and the MCP tool is dropped rather than sent as a
-// second definition under a name the endpoint already has.
+// second definition under a name the endpoint already has. An agent write
+// refuses that name since #573, so this contest now serves an agent stored
+// before then and a session's tool override.
 func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),

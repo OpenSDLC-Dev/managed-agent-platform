@@ -190,6 +190,33 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 	}
 }
 
+// A custom tool cannot take a name in the frame an MCP tool is offered under,
+// refused in the reference's words: the create body is the recorded one
+// (managed-agents-wire-recordings 2026-09-03/batch2.json idx 57
+// agent.create.mcp-name-collision; #573). The update's "agent." prefix is the
+// one the reference's schema layer was recorded using on update (agentUpdatePath).
+func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
+	s := newTestServer(t)
+	impostor := customTool("mcp__deepwiki__ask_question")
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"mcp_servers": []any{map[string]any{"type": "url", "name": "deepwiki", "url": "https://mcp.deepwiki.com/mcp"}},
+		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "deepwiki"}, impostor},
+	}))
+	const want = `tools.1.custom.name: custom tool name "mcp__deepwiki__ask_question" uses reserved MCP tool prefix`
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	wantUpdateRejected(t, s, id, map[string]any{"tools": []any{customTool("mine"), impostor}}, "agent."+want)
+
+	// The reservation is the prefix, not a declared server's tools. Nothing
+	// else is reserved: none of these is a name the composition can produce.
+	wantAgentRejected(t, s, agentBody(map[string]any{"tools": []any{customTool("mcp__nowhere__x")}}),
+		`tools.0.custom.name: custom tool name "mcp__nowhere__x" uses reserved MCP tool prefix`)
+	for _, name := range []string{"mcp_search", "my__mcp__search", "MCP__docs__search"} {
+		createAgent(t, s, agentBody(map[string]any{"tools": []any{customTool(name)}}))
+	}
+}
+
 func TestAgentCreateMinimal(t *testing.T) {
 	s := newTestServer(t)
 	res := createAgent(t, s, map[string]any{"name": "helper", "model": "claude-opus-4-8"})
