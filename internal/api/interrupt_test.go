@@ -187,14 +187,18 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 		t.Errorf("synthesized user.custom_tool_result has a null processed_at")
 	}
 
-	// Both calls are answered, so the client's own late result is refused
-	// rather than double-answering the call on the append-only log.
+	// Both calls are answered, so the client's own late result is dropped
+	// rather than double-answering the call on the append-only log: the
+	// reference's no-op for a call that already has its result (#58).
 	status, _ := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": []any{
 		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "late"}}},
 	}})
-	if status != http.StatusBadRequest {
-		t.Errorf("late custom tool result: status %d, want 400", status)
+	if status != http.StatusOK {
+		t.Errorf("late custom tool result: status %d, want 200", status)
+	}
+	if n := countEventType(t, s, sessionID, "user.custom_tool_result"); n != 1 {
+		t.Errorf("user.custom_tool_result on the log = %d, want only the interrupt's", n)
 	}
 }
 

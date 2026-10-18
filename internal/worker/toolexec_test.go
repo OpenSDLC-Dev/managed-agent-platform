@@ -1561,10 +1561,10 @@ func TestACancelledCallDoesNotStopItsSiblings(t *testing.T) {
 
 // TestALateAnswerMakesThePostASkipNotAFault covers the window the watch cannot:
 // an answer landing after its last beat, while the result is already in flight.
-// The control plane refuses the second result (ValidateToolResults), and before
-// #441 that 400 aborted the whole pass — over a call that was done — leaving
-// every sibling behind it for a reclaim. The beat is left at its default here
-// so nothing but the post can catch it.
+// The control plane drops the second result and answers 200, as the reference
+// does (#58), so the pass carries on rather than faulting over a call that is
+// done and leaving every sibling behind it for a reclaim. The beat is left at
+// its default here so nothing but the post can catch it.
 func TestALateAnswerMakesThePostASkipNotAFault(t *testing.T) {
 	sb := &fakeSandbox{}
 	var h *harness
@@ -1588,7 +1588,7 @@ func TestALateAnswerMakesThePostASkipNotAFault(t *testing.T) {
 	answer = uses[0].ID
 
 	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
-		t.Fatalf("RunSessionTools: %v, want the refused duplicate to be a skip", err)
+		t.Fatalf("RunSessionTools: %v, want the late post to be a no-op", err)
 	}
 	select {
 	case err := <-injected:
@@ -1611,10 +1611,10 @@ func TestALateAnswerMakesThePostASkipNotAFault(t *testing.T) {
 	}
 }
 
-// TestAPostRefusedForAnotherReasonStillFaults: the skip above is bound to the
-// call actually being answered, never to the status alone. An ask-gated call
-// whose human has not confirmed is refused with the same 400, and waving that
-// through would lose the result of a tool that did run. The gate is stamped
+// TestAPostRefusedForAnotherReasonStillFaults: only a call the log has already
+// answered makes the post a no-op. An ask-gated call whose human has not
+// confirmed is refused with a 400, and waving that through would lose the
+// result of a tool that did run. The gate is stamped
 // after the scan and before the post — the same mid-flight injection the late
 // answer above uses — because a call already stamped ask is filtered out of the
 // runnable set and never runs at all.
@@ -1702,13 +1702,12 @@ func TestACallAnsweredWhileASiblingRanIsNeverStarted(t *testing.T) {
 	}
 }
 
-// TestAnArchivedSessionsRefusalIsNeverSkipped: the duplicate-result skip is a
-// 400 plus evidence, never a 400 alone. An archived session is refused with the
-// same status — and refused *before* any validation, so it can be refused while
-// the call is genuinely answered. Swallowing that would run a whole pass of
-// tools against a session nobody can write to, silently, which is worse than
-// the fault this change removes. TestArchivedSessionPostIsRefusedAndSurfaces
-// covers the plain case; this is the one where both conditions hold at once.
+// TestAnArchivedSessionsRefusalIsNeverSkipped: a late answer makes the post a
+// no-op (#58), but an archived session is refused *before* any result is read,
+// so it is refused while the call is genuinely answered. Swallowing that would
+// run a whole pass of tools against a session nobody can write to, silently.
+// TestArchivedSessionPostIsRefusedAndSurfaces covers the plain case; this is
+// the one where both conditions hold at once.
 func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
 	sb := &fakeSandbox{}
 	var h *harness
@@ -1720,7 +1719,8 @@ func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
 			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
 				fired.CompareAndSwap(false, true) {
 				// Both at once, before the post is forwarded: the call answered
-				// (so the log says skip) and the session archived (so it must not).
+				// (so the post alone would be a no-op) and the session archived
+				// (so it is refused).
 				if err := h.answerAsPlatformErr(r.Context(), answer); err != nil {
 					injected <- err
 					return
@@ -1760,53 +1760,41 @@ func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
 // than one page of events between the head and the answer, which is exactly the
 // shape a fixed look-back cannot see and the shape a thread-scoped interrupt
 // makes — it answers a whole thread's outstanding calls in one append, so the
-// answer to the call actually running sits behind every sibling's.
+// answer to a call sits behind every sibling's.
 //
-// The post's read is the one under test, so the walk must be uncapped there:
-// cap it, or stop the walk at one page, and this goes red while everything else
-// stays green.
+// The pre-run check's read is the one under test: stop the walk at one page,
+// and the buried call runs while everything else stays green.
 func TestTheAnsweredWalkPagesToReachTheAnswer(t *testing.T) {
-	sb := &fakeSandbox{}
-	var h *harness
-	var fired atomic.Bool
-	var answer domain.ID
-	injected := make(chan error, 1)
-	h = newHarnessWrapped(t, sb, func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events") &&
-				fired.CompareAndSwap(false, true) {
-				// The answer first, then enough above it to bury it several
-				// pages deep — the order a wide interrupt leaves behind.
-				if err := h.answerAsPlatformErr(r.Context(), answer); err != nil {
-					injected <- err
-					return
-				}
-				injected <- h.answeredHistoryErr(r.Context(), 2*answeredScanPageSize)
-			}
-			next.ServeHTTP(w, r)
-		})
-	})
-	uses := h.suspend(t, writeUse("first.txt", "one"), writeUse("second.txt", "two"))
-	answer = uses[0].ID
+	sb := &fakeSandbox{gatePath: "held.txt", entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	h := newHarness(t, sb)
+	uses := h.suspend(t, writeUse("held.txt", "one"), writeUse("later.txt", "two"))
 
-	if err := RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{}); err != nil {
-		t.Fatalf("RunSessionTools: %v, want the buried answer found and the duplicate skipped", err)
-	}
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSessionTools(context.Background(), h.client, h.prov, h.sid.String(), ToolExecConfig{})
+	}()
 	select {
-	case ierr := <-injected:
-		if ierr != nil {
-			t.Fatalf("bury the answer: %v", ierr)
-		}
-	default:
-		t.Fatal("the driver posted nothing; the fixture never got to inject")
+	case <-sb.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the held tool never started")
 	}
+	// The answer first, then enough above it to bury it several pages deep —
+	// the order a wide interrupt leaves behind.
+	h.answerAsPlatform(t, uses[1].ID)
+	if err := h.answeredHistoryErr(context.Background(), 2*answeredScanPageSize); err != nil {
+		t.Fatalf("bury the answer: %v", err)
+	}
+	close(sb.gate)
 
-	for _, got := range h.results(t) {
-		if got.ToolUseID == uses[0].ID.String() {
-			t.Fatalf("a second result was accepted for %q", uses[0].ID)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSessionTools: %v", err)
 		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the pass never finished")
 	}
-	if sb.files["/workspace/second.txt"] != "two" {
-		t.Errorf("the sibling did not run after the skip: %v", sb.files)
+	if _, ran := sb.files["/workspace/later.txt"]; ran {
+		t.Error("the buried answer was missed: the answered call ran")
 	}
 }

@@ -266,9 +266,9 @@ func TestParallelToolResultsResumeOnFullSet(t *testing.T) {
 }
 
 func TestInboundToolResultValidation(t *testing.T) {
-	// The log is append-only: a result with a wrong, unknown, or duplicate
-	// reference would poison every future replay, so it must be the
-	// client's 400 instead.
+	// The log is append-only: a result with a wrong or unknown reference, or
+	// two for one call in one request, would poison every future replay, so it
+	// must be the client's 400 instead.
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 
@@ -305,9 +305,10 @@ func TestInboundToolResultValidation(t *testing.T) {
 	if got := post(result(customID)); got != http.StatusOK {
 		t.Errorf("valid result: status %d, want 200", got)
 	}
-	// …and a second answer for the same call is rejected.
-	if got := post(result(customID)); got != http.StatusBadRequest {
-		t.Errorf("already answered: status %d, want 400", got)
+	// …and a second answer for the same call is the reference's no-op, which
+	// appends nothing (#58; TestARedeliveredToolResultIsANoOp).
+	if got := post(result(customID)); got != http.StatusOK {
+		t.Errorf("already answered: status %d, want 200", got)
 	}
 }
 

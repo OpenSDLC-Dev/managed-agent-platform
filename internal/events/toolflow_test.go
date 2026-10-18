@@ -451,7 +451,18 @@ func TestValidateToolResults(t *testing.T) {
 	// Validation is sequential and complete per event: for an error to surface
 	// at index n, events 0..n-1 must be entirely valid.
 	validate := func(sid domain.ID, evs ...events.NewEvent) error {
-		return events.ValidateToolResults(ctx, pool, sid, evs, nil)
+		_, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
+		return err
+	}
+	// drops is validate for a batch that must pass: the positions it reports
+	// are the results whose call is already answered (#58).
+	drops := func(t *testing.T, sid domain.ID, evs ...events.NewEvent) []int {
+		t.Helper()
+		got, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
+		if err != nil {
+			t.Fatalf("ValidateToolResults: %v", err)
+		}
+		return got
 	}
 
 	t.Run("unknown reference", func(t *testing.T) {
@@ -500,43 +511,50 @@ func TestValidateToolResults(t *testing.T) {
 		web := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"web_fetch"}`)
 		sandbox := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"bash"}`)
 		owned := func(name string) bool { return name == "web_fetch" }
+		validateWith := func(owned func(string) bool, ev events.NewEvent) ([]int, error) {
+			return events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{ev}, owned)
+		}
 
-		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, owned),
+		_, err := validateWith(owned, inResult(domain.EventUserToolResult, "tool_use_id", web.String()))
+		wantErrIs(t, err,
 			fmt.Sprintf(`events[0]: tool use %q (web_fetch) is platform-executed and cannot be answered by a client result`, web))
 		// The arm gates by name, not family: the sandbox call stays
 		// client-answerable — that is the BYOC pull protocol (#222).
-		if err := events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", sandbox.String())}, owned); err != nil {
+		if _, err := validateWith(owned, inResult(domain.EventUserToolResult, "tool_use_id", sandbox.String())); err != nil {
 			t.Errorf("sandbox call with predicate: %v", err)
 		}
 		// A nil predicate keeps the web call answerable: the events package
 		// has no tool knowledge of its own; the caller injects the split.
-		if err := events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, nil); err != nil {
+		if _, err := validateWith(nil, inResult(domain.EventUserToolResult, "tool_use_id", web.String())); err != nil {
 			t.Errorf("web call with nil predicate: %v", err)
 		}
 		// The wantUse gate: a custom tool deliberately named web_fetch is the
 		// client's to run, and its result rides the custom family untouched.
 		customWeb := appendEvent(t, log, sid, "", domain.EventAgentCustomToolUse, `{"name":"web_fetch"}`)
-		if err := events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", customWeb.String())}, owned); err != nil {
+		if _, err := validateWith(owned, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", customWeb.String())); err != nil {
 			t.Errorf("custom tool named web_fetch: %v", err)
 		}
 		// Ownership precedes the confirmation arm: an unconfirmed ask-gated
 		// web call reads platform-executed, not awaiting-confirmation.
 		askedWeb := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"web_fetch","evaluated_permission":"ask"}`)
-		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", askedWeb.String())}, owned),
+		_, err = validateWith(owned, inResult(domain.EventUserToolResult, "tool_use_id", askedWeb.String()))
+		wantErrIs(t, err,
 			fmt.Sprintf(`events[0]: tool use %q (web_fetch) is platform-executed and cannot be answered by a client result`, askedWeb))
-		// Once the platform's own answer lands, a retry is diagnosed as
-		// already answered — the answered arm runs first.
+		// Once the platform's own answer lands, a retry is dropped like any
+		// result for an answered call: the answered arm runs first, and a
+		// result nothing appends cannot be a second answer (#58).
 		answerWith(t, log, sid, domain.EventAgentToolResult, "tool_use_id", web)
-		wantErrIs(t, events.ValidateToolResults(ctx, pool, sid,
-			[]events.NewEvent{inResult(domain.EventUserToolResult, "tool_use_id", web.String())}, owned),
-			fmt.Sprintf(`events[0]: tool use %q already has a result`, web))
+		got, err := validateWith(owned, inResult(domain.EventUserToolResult, "tool_use_id", web.String()))
+		if err != nil || !slices.Equal(got, []int{0}) {
+			t.Errorf("retry after the platform's answer = %v, %v; want [0] dropped, no error", got, err)
+		}
 	})
 
+	// A result for a call that already has one is the reference's no-op: the
+	// recorded send answered 200 with nothing appended, for a repeat of the
+	// first answer and for a changed one alike (managed-agents-wire-recordings
+	// 2026-10-18-duplicate-tool-result, #58). So the validator reports its
+	// batch position for the caller to drop, whatever the earlier answer was.
 	t.Run("already answered", func(t *testing.T) {
 		for _, tc := range []struct {
 			result domain.EventType
@@ -551,8 +569,9 @@ func TestValidateToolResults(t *testing.T) {
 				sid := newSession(t, pool)
 				id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
 				answerWith(t, log, sid, tc.result, tc.key, id)
-				wantErrIs(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())),
-					fmt.Sprintf(`events[0]: tool use %q already has a result`, id))
+				if got := drops(t, sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); !slices.Equal(got, []int{0}) {
+					t.Errorf("dropped = %v, want [0]", got)
+				}
 			})
 		}
 
@@ -568,10 +587,11 @@ func TestValidateToolResults(t *testing.T) {
 				c := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
 				appendEvent(t, log, sid, "", domain.EventAgentToolResult,
 					fmt.Sprintf(`{"tool_use_id":%q,"custom_tool_use_id":%q}`, u, c))
-				wantErrHas(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", u.String())),
-					"already has a result")
-				if err := validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())); err != nil {
-					t.Errorf("a later COALESCE arm answered the custom tool use: %v", err)
+				if got := drops(t, sid, inResult(domain.EventUserToolResult, "tool_use_id", u.String())); !slices.Equal(got, []int{0}) {
+					t.Errorf("the first COALESCE arm did not answer the built-in: dropped = %v, want [0]", got)
+				}
+				if got := drops(t, sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())); got != nil {
+					t.Errorf("a later COALESCE arm answered the custom tool use: dropped = %v", got)
 				}
 			})
 
@@ -583,8 +603,9 @@ func TestValidateToolResults(t *testing.T) {
 				m := toolUse(t, log, sid, domain.EventAgentMCPToolUse, "")
 				appendEvent(t, log, sid, "", domain.EventAgentToolResult,
 					fmt.Sprintf(`{"custom_tool_use_id":%q,"mcp_tool_use_id":%q}`, c, m))
-				wantErrHas(t, validate(sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())),
-					"already has a result")
+				if got := drops(t, sid, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String())); !slices.Equal(got, []int{0}) {
+					t.Errorf("the second COALESCE arm did not answer the custom call: dropped = %v, want [0]", got)
+				}
 			})
 		})
 
@@ -593,20 +614,68 @@ func TestValidateToolResults(t *testing.T) {
 			sid := newSession(t, pool)
 			id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
 			answerWith(t, log, sid, domain.EventUserToolResult, "some_other_id", id)
-			if err := validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); err != nil {
-				t.Errorf("unread key counted as an answer: %v", err)
+			if got := drops(t, sid, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); got != nil {
+				t.Errorf("unread key counted as an answer: dropped = %v", got)
 			}
 		})
 
-		// Dropping r.session_id from the answered subquery turns this into
-		// "already has a result", and nothing else would notice.
+		// Dropping r.session_id from the answered subquery drops this result,
+		// and nothing else would notice.
 		t.Run("session scoped", func(t *testing.T) {
 			a, b := newSession(t, pool), newSession(t, pool)
 			id := toolUse(t, log, a, domain.EventAgentToolUse, "")
 			answerWith(t, log, b, domain.EventUserToolResult, "tool_use_id", id)
-			if err := validate(a, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); err != nil {
-				t.Errorf("a result in another session counted as the answer: %v", err)
+			if got := drops(t, a, inResult(domain.EventUserToolResult, "tool_use_id", id.String())); got != nil {
+				t.Errorf("a result in another session counted as the answer: dropped = %v", got)
 			}
+		})
+
+		// The checks ahead of the answered arm still refuse: a call of the
+		// other kind has no answer this result could repeat. The ask gate
+		// after it does not: an answered ask-gated call was settled by its
+		// human, and a result for it is a repeat, not a way past the gate.
+		t.Run("arm order", func(t *testing.T) {
+			sid := newSession(t, pool)
+			custom := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
+			answerWith(t, log, sid, domain.EventUserCustomToolRes, "custom_tool_use_id", custom)
+			wantErrIs(t, validate(sid, inResult(domain.EventUserToolResult, "tool_use_id", custom.String())),
+				fmt.Sprintf(`events[0]: tool_use_id %q references a agent.custom_tool_use event, not agent.tool_use`, custom))
+
+			denied := ask(t, log, sid)
+			appendEvent(t, log, sid, "", domain.EventUserToolConfirm,
+				fmt.Sprintf(`{"tool_use_id":%q,"result":"deny"}`, denied))
+			answerWith(t, log, sid, domain.EventAgentToolResult, "tool_use_id", denied)
+			if got := drops(t, sid, inResult(domain.EventUserToolResult, "tool_use_id", denied.String())); !slices.Equal(got, []int{0}) {
+				t.Errorf("result for a denied, answered call: dropped = %v, want [0]", got)
+			}
+		})
+
+		// Only the answered results drop, at their own batch positions; the
+		// rest of the batch is the caller's to process.
+		t.Run("beside fresh events", func(t *testing.T) {
+			sid := newSession(t, pool)
+			fresh := toolUse(t, log, sid, domain.EventAgentToolUse, "")
+			done := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
+			answerWith(t, log, sid, domain.EventUserCustomToolRes, "custom_tool_use_id", done)
+			got := drops(t, sid,
+				inResult(domain.EventUserToolResult, "tool_use_id", fresh.String()),
+				inRaw(domain.EventUserMessage, `{"content":[]}`),
+				inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", done.String()),
+			)
+			if !slices.Equal(got, []int{2}) {
+				t.Errorf("dropped = %v, want [2]", got)
+			}
+		})
+
+		// Two results for one answered call in one request are still the
+		// client's error: the in-request check runs before the log is read.
+		t.Run("twice in one request", func(t *testing.T) {
+			sid := newSession(t, pool)
+			id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
+			answerWith(t, log, sid, domain.EventUserToolResult, "tool_use_id", id)
+			ev := inResult(domain.EventUserToolResult, "tool_use_id", id.String())
+			wantErrIs(t, validate(sid, ev, ev),
+				fmt.Sprintf(`events[1]: duplicate result for tool_use_id %q in one request`, id))
 		})
 	})
 
@@ -751,12 +820,12 @@ func TestValidateToolResults(t *testing.T) {
 		sid := newSession(t, pool)
 		u := toolUse(t, log, sid, domain.EventAgentToolUse, "")
 		c := toolUse(t, log, sid, domain.EventAgentCustomToolUse, "")
-		if err := validate(sid,
+		if got := drops(t, sid,
 			inResult(domain.EventUserToolResult, "tool_use_id", u.String()),
 			inRaw(domain.EventUserMessage, `{"content":[]}`),
 			inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", c.String()),
-		); err != nil {
-			t.Errorf("valid batch rejected: %v", err)
+		); got != nil {
+			t.Errorf("valid batch dropped %v, want nothing", got)
 		}
 		if err := validate(sid); err != nil {
 			t.Errorf("empty batch rejected: %v", err)
@@ -1112,7 +1181,7 @@ func TestToolflowQueryErrorsAreWrapped(t *testing.T) {
 	} else {
 		wantErrHas(t, err, "unanswered tool_use check:")
 	}
-	err := events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{
+	_, err := events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{
 		inResult(domain.EventUserToolResult, "tool_use_id", id.String()),
 	}, nil)
 	wantErrHas(t, err, "validate tool result:")

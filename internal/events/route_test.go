@@ -57,7 +57,8 @@ func TestSendChecksTellRefusalsFromFaults(t *testing.T) {
 			return route(ctx, `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"`+noCall+`"}`)
 		}},
 		{"a tool result naming no call", func(ctx context.Context) error {
-			return events.ValidateToolResults(ctx, pool, sid, normalize(`{"type":"user.tool_result","tool_use_id":"`+noCall+`"}`), nil)
+			_, err := events.ValidateToolResults(ctx, pool, sid, normalize(`{"type":"user.tool_result","tool_use_id":"`+noCall+`"}`), nil)
+			return err
 		}},
 		{"a confirmation naming no call", func(ctx context.Context) error {
 			return events.ValidateToolConfirmations(ctx, pool, sid, normalize(`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"`+noCall+`"}`))

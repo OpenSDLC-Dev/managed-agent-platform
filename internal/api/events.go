@@ -31,7 +31,7 @@ import (
 // the six delegation tools the settlement answers in the commit that emits
 // them (plan 35 decision 6). The second half is defence in depth — a
 // delegation call is answered before any client can see it, so a forged
-// answer is already refused as a duplicate — and it is worth having anyway,
+// answer is already dropped as a repeat (#58) — and it is worth having anyway,
 // because the log is append-only and a forged child report is a report the
 // coordinator would act on. It must never cover the sandbox six: a
 // self_hosted worker answering those is the BYOC pull protocol.
@@ -138,13 +138,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, errInvalid("%s", err)
 	}
 	// A tool result must answer an outstanding tool call. The log is
-	// append-only: accepting a result with a wrong, unknown, or duplicate
-	// reference would poison every future replay with a request the model
-	// protocol rejects, permanently wedging the session — so bad references
-	// are the client's 400, not the session's funeral. platformExecuted marks
-	// the calls no client may answer, which closes the scan-to-commit
-	// double-answer window on self_hosted (#222).
-	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted); err != nil {
+	// append-only: accepting a result with a wrong or unknown reference would
+	// poison every future replay with a request the model protocol rejects,
+	// permanently wedging the session — so bad references are the client's
+	// 400, not the session's funeral. platformExecuted marks the calls no
+	// client may answer, which closes the scan-to-commit double-answer window
+	// on self_hosted (#222). A result for a call already answered is the
+	// reference's no-op instead (#58): answered holds where such results sit
+	// in the batch, and they are dropped below.
+	answered, err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted)
+	if err != nil {
 		return nil, sendCheckError(err)
 	}
 	// A confirmation must name a tool use still awaiting one; like a tool
@@ -170,6 +173,30 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
 	if err != nil {
 		return nil, sendCheckError(err)
+	}
+	// The results for calls already answered leave the batch here, after the
+	// checks above, which name an event by its place in the batch as sent, and
+	// before anything below reads the batch to decide what the send does. sent
+	// keeps each remaining event's place for the one check below that names
+	// one. A send left with nothing is the reference's 200 {"data":[]}, and
+	// the deferred rollback leaves the session as it was.
+	var sent []int
+	if len(answered) > 0 {
+		var kept, dropped []events.NewEvent
+		var keptScoped []bool
+		for i, ev := range newEvents {
+			if slices.Contains(answered, i) {
+				dropped = append(dropped, ev)
+				continue
+			}
+			kept, keptScoped, sent = append(kept, ev), append(keptScoped, scoped[i]), append(sent, i)
+		}
+		slog.InfoContext(ctx, "session events send: dropped results for calls already answered",
+			"request_id", requestIDFrom(ctx), "session_id", id, "tool_use_ids", events.ToolResultRefs(dropped))
+		if len(kept) == 0 {
+			return map[string]any{"data": []any{}}, nil
+		}
+		newEvents, scoped = kept, keptScoped
 	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
@@ -250,6 +277,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
 		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
+			var wa *events.WhileAwaitingError
+			if sent != nil && errors.As(err, &wa) {
+				wa.Index = sent[wa.Index]
+			}
 			return nil, errInvalid("%s", err)
 		}
 		primaryFlow = flow
