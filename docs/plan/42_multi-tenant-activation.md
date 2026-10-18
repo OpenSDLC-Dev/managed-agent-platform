@@ -1555,6 +1555,23 @@ through `internal/api/apitest_test.go`: the constant at `:22`, `newPoolWithKey` 
 above all `newTestServer` at `:60`, which **453** call sites use. *Counting rule:
 `grep -rc "newTestServer(t)" internal/api/*_test.go`, summed.*
 
+**The deployment surfaces carry the two names in this slice** (#615). Slice 6's operator step
+(§7.6) sets them, and without this slice's plumbing the only supported way to do so would be to
+edit the chart or the compose file. One name set without the other is a startup error, as an
+empty `IDENTITY_ROLE_MAP` is, and `internal/identity`'s tests cover each half set alone.
+
+- **compose** forwards both wherever it forwards the role pair, as Helm's shared
+  `map.identityEnv` does. `.env.example` documents them outside its block of seven SSO settings,
+  so the bundled one-workspace stack stays as it is.
+- **Helm** gains `identity.claims.workspaces` and `identity.workspaceMap`, a map from claim value
+  to workspace id. The chart renders and refuses them the way it does `identity.roleMap`, except
+  that the pair may be left out entirely: one without the other fails the render. The `helm` CI
+  job tests them beside the role map's cases.
+- **GCP staging** gets a commented-out placeholder beside the role pair, because staging runs one
+  workspace.
+
+The operator docs that describe the role pair describe this pair too.
+
 **Tests.** Per-lane scope derivation, five cases, through a test-only echo route — including
 that the environment key tracks its *environment's* row and not `environment_keys`' own
 columns. · The three header rejections, message-for-message, on every scope-bearing lane. ·
@@ -1634,6 +1651,7 @@ org/workspace/project as the reserved keys with single-tenant defaults, so "plat
 frozen at `default`, no reference counterpart at any level" belongs *there*, and slice 4's
 re-argument of the same parenthetical is the other half of one entry's rewrite — one divergence,
 one entry, which is the registry's own discipline.
+· The operator docs for the workspace pair, as "The deployment surfaces" above describes them.
 
 ### 7.2 Slice 2 — the guard, and the five stamping inserts it catches
 
