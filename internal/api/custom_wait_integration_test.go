@@ -126,6 +126,9 @@ func TestCustomWaitBatchAndConcurrentCompletion(t *testing.T) {
 			if code != http.StatusOK || s.liveWork(sid, queue.ModelTurn) != 1 {
 				t.Fatalf("duplicate reply = %d, or it changed scheduling", code)
 			}
+			if n := countEventType(t, s, sid, "user.custom_tool_result"); n != 2 {
+				t.Fatalf("results on the log = %d after a duplicate reply, want 2", n)
+			}
 		})
 	}
 }

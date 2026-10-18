@@ -727,8 +727,9 @@ func ValidateToolConfirmations(ctx context.Context, q Querier, sessionID domain.
 		// A gated call that already has a result was abandoned by a
 		// user.interrupt, which answers everything outstanding without asking
 		// anyone. Confirming it now would let a denial synthesize a second
-		// result for the same call onto the append-only log — the double-answer
-		// ValidateToolResults refuses from the other direction.
+		// result for the same call onto the append-only log — the double answer
+		// ValidateToolResults keeps off the log from the other direction, by
+		// reporting a result for an answered call for the caller to drop.
 		if answered {
 			return refuse("events[%d]: tool use %q was already answered and can no longer be confirmed", i, ref)
 		}

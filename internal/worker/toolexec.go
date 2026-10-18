@@ -313,7 +313,8 @@ func scanPageSize(coordinator bool) int64 {
 // every platform driver drains through); the types that answer and the one
 // that releases are the shared domain constants below, so a new one must be
 // added in all three. A drift here re-runs an answered tool every reclaim,
-// re-posting a result the control plane's ValidateToolResults rejects.
+// re-posting a result the control plane drops as a repeat (#58) — a re-run
+// that no error reports.
 //
 // Events are parsed from each event's raw wire JSON into a minimal local shape
 // rather than the SDK's typed event union: the union tracks the live API's tip
@@ -552,8 +553,9 @@ func dropAnsweredSince(ctx context.Context, client sdk.Client, sessionID, head s
 // A call answered between answeredWatch's last beat and this post needs no
 // handling here: the control plane drops a result for a call that already
 // has one and answers 200, as the reference does (#58), so the pass carries
-// on past a call that is done. Any refusal is therefore this post's own, and
-// faults the pass.
+// on past a call that is done. Any refusal faults the pass. A control plane
+// from before #58 refuses such a post 400, so against one the pass faults
+// and the reclaim finishes the calls that remain.
 func postToolResult(ctx context.Context, client sdk.Client, sessionID string, useID domain.ID, res toolset.Result) error {
 	ev := sdk.BetaManagedAgentsEventParamsOfUserToolResult(useID.String())
 	// The convenience constructor sets only tool_use_id; the wire requires the
@@ -590,8 +592,8 @@ const (
 	// answer for a third thing.
 	answeredBeat = 10 * time.Second
 	// answeredScanPageSize is the page one answered check asks for. The walk
-	// ends at the call it asks about rather than at a count, so the page size
-	// is only how many round trips reaching it costs.
+	// ends at the call it asks about, or at answeredCheckWindow, so the page
+	// size is only how many round trips reaching it costs.
 	answeredScanPageSize = 20
 	// answeredCheckWindow caps the two checks that are optimizations — the one
 	// before a call starts and the one on each beat. Both can only lose an

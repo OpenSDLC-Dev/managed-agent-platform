@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1766,6 +1767,10 @@ func TestAnArchivedSessionsRefusalIsNeverSkipped(t *testing.T) {
 // and the buried call runs while everything else stays green.
 func TestTheAnsweredWalkPagesToReachTheAnswer(t *testing.T) {
 	sb := &fakeSandbox{gatePath: "held.txt", entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	// Released on every exit, so a fixture failure below does not leave the
+	// pass blocked in the sandbox for the rest of the binary.
+	release := sync.OnceFunc(func() { close(sb.gate) })
+	defer release()
 	h := newHarness(t, sb)
 	uses := h.suspend(t, writeUse("held.txt", "one"), writeUse("later.txt", "two"))
 
@@ -1784,7 +1789,7 @@ func TestTheAnsweredWalkPagesToReachTheAnswer(t *testing.T) {
 	if err := h.answeredHistoryErr(context.Background(), 2*answeredScanPageSize); err != nil {
 		t.Fatalf("bury the answer: %v", err)
 	}
-	close(sb.gate)
+	release()
 
 	select {
 	case err := <-done:

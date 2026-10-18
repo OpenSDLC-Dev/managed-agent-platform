@@ -449,9 +449,14 @@ func TestValidateToolResults(t *testing.T) {
 	ctx := context.Background()
 
 	// Validation is sequential and complete per event: for an error to surface
-	// at index n, events 0..n-1 must be entirely valid.
+	// at index n, events 0..n-1 must be entirely valid. A batch validate
+	// passes drops nothing: the calls these subtests answer through it are
+	// open, so a drop would be a call misread as answered.
 	validate := func(sid domain.ID, evs ...events.NewEvent) error {
-		_, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
+		dropped, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
+		if err == nil && dropped != nil {
+			return fmt.Errorf("dropped %v as already answered", dropped)
+		}
 		return err
 	}
 	// drops is validate for a batch that must pass: the positions it reports
