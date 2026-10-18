@@ -411,6 +411,9 @@ func TestWhatADeploymentTestCannotReach(t *testing.T) {
 	both := onBoth(e, "minimax", f.URL, profile.Anthropic)
 	embed := e.deployment(both, "embedder", func(d *store.Deployment) { d.Kind = store.KindEmbedding })
 	chat := e.deployment(both, "MiniMax-M3")
+	patient := e.provider(f.URL, func(p *store.Provider) { p.StallTimeout = 10 * time.Minute })
+	e.credential(patient, "sk-patient-key1", 1)
+	long := e.deployment(patient, "up-model")
 	e.startProbing()
 
 	got, _ := e.test(embed.ID, "")
@@ -425,12 +428,32 @@ func TestWhatADeploymentTestCannotReach(t *testing.T) {
 		t.Errorf("ledger = %+v", rows)
 	}
 
-	start := time.Now()
-	got, _ = e.test(chat.ID, "")
-	if len(got) != 1 || got[0].OK || got[0].Status != nil || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
-		t.Errorf("after %s: %s", time.Since(start), encodeJSON(got))
+	for i, d := range []store.Deployment{chat, long} {
+		start := time.Now()
+		got, _ = e.test(d.ID, "")
+		if len(got) != 1 || got[0].OK || got[0].Status != nil || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
+			t.Errorf("%s, after %s: %s", d.UpstreamModel, time.Since(start), encodeJSON(got))
+		}
+		if rows := e.ledger(); len(rows) != i+1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
+			t.Errorf("%s: ledger = %+v", d.UpstreamModel, rows)
+		}
 	}
-	if rows := e.ledger(); len(rows) != 1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
+}
+
+// An embeddings answer cut off past the gateway's bound fails its test,
+// though the vendor answered 200, and is recorded as the failure it was.
+func TestACutOffVectorsAnswerFailsATest(t *testing.T) {
+	defer modelgateway.SetMaxVectorAnswer(64)()
+	e := newEnv(t)
+	f := newFake(t, vectors)
+	embed := e.deployment(onOpenAI(e, "openai-generic", f.URL), "embedder", func(d *store.Deployment) { d.Kind = store.KindEmbedding })
+	e.startProbing()
+
+	got, _ := e.test(embed.ID, "")
+	if len(got) != 1 || got[0].OK || got[0].Status == nil || *got[0].Status != 200 || got[0].Error == nil || got[0].Error.Type != "api_error" {
+		t.Errorf("results = %s", encodeJSON(got))
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Status != 200 || rows[0].ErrorType != "api_error" {
 		t.Errorf("ledger = %+v", rows)
 	}
 }

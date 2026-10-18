@@ -53,7 +53,7 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 The owner settled #953's four open questions on 2026-10-18, before any code. A test is written to the ledger, marked as a test. Neither route stores its result. Neither runs on create. The check needs the admin role, as the test does.
 
-**The list-models routes.** #953's keyless probe of 2026-10-17 left five rows unknown. A request with each live-tier key and with a made-up key settled them on 2026-10-18. The keyless probe was also run again, and it filled two gaps: MiniMax's international Anthropic host, and Moonshot's.
+**The list-models routes.** #953's keyless probe of 2026-10-17 left three rows unknown: DeepSeek's Anthropic endpoint, and both of Zhipu's protocols. On 2026-10-18 a request with each live-tier key and with a made-up key settled them on the hosts those keys reach, which are the CN ones. The keyless probe was also run again, and it filled two gaps: MiniMax's international Anthropic host, and Moonshot's.
 
 | Profile | Protocol | The tier's key | A made-up key | Recorded |
 | --- | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ The owner settled #953's four open questions on 2026-10-18, before any code. A t
 | `gitee` | OpenAI | 200, 208 models | 401 | lists |
 | `gemini` | Gemini | 200, 63 models | 400 `API key not valid` | lists |
 
-Two rows changed from #953's reading. Gitee lists its public catalogue to a request without a key, but it refuses a bad key, so a check with the provider's key does show that the key works. Zhipu's Anthropic host refuses a bad key with a 200 that holds no list, so a check reads the list, not the status. Without a key, the international hosts of MiniMax, Zhipu and Moonshot answer as the CN ones do. The GLM key lists models on Zhipu's Anthropic host, where every Messages call it makes answers 429, code 1309. A listing does not show that a model answers.
+Two rows changed from #953's reading. Gitee lists its public catalogue to a request without a key, but it refuses a bad key, so a check with the provider's key does show that the key works. Zhipu's Anthropic host refuses a bad key with a 200 that holds no list, so a check reads the list, not the status. Without a key, the international hosts of MiniMax, Zhipu and Moonshot answer as the CN ones do. For Zhipu that settles nothing, because Z.ai answers every path alike before it routes, and docs.z.ai shows no models route. No key has listed models on Z.ai. The profile records one value per protocol, so a check on Z.ai is tried on BigModel's evidence; where Z.ai serves no such route, the check reports a 404 as a missing route, not as a bad key. The GLM key lists models on Zhipu's Anthropic host, where every Messages call it makes answers 429, code 1309. A listing does not show that a model answers.
 
 **The smallest chat request.** On 2026-10-18 each chat model of the tier was asked for `max_tokens: 1`, with one user message, directly. Every one answered 200, on both endpoints where it has two. The answers stopped at `max_tokens` or `length`. DeepSeek, Kimi and GLM, which think by default, answered with one token of thinking. MiniMax-M3.1-Flash-Preview answered with `content: null`. Gitee's and Zhipu's embeddings of one short input, and Gitee's rerank of one document, answered 200 too.
 

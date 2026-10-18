@@ -172,8 +172,10 @@ var profiles = []Profile{
 		// A BigModel key lists models on both protocols (probed 2026-10-18).
 		// A bad key gets a 401 on the OpenAI host and, on the Anthropic one,
 		// a 200 whose body is {"code":401,...} and holds no list, which a
-		// check reads as the refusal it is. The Z.ai hosts answer a request
-		// without a key as BigModel's do.
+		// check reads as the refusal it is. No key has listed models on the
+		// Z.ai hosts, which answer every path alike without one, so the
+		// record is BigModel's; a Z.ai host without the route would answer
+		// a check 404, which reads as the route's absence.
 		ModelList: map[Protocol]bool{Anthropic: true, OpenAI: true}},
 	// Kimi documents a Bearer token as the one way to send a key: its Claude
 	// Code guide says to remove ANTHROPIC_API_KEY, which sends x-api-key. Its

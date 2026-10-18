@@ -10,11 +10,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
-// Prober makes the vendor calls of the check and test routes. Each goes
-// through the gateway's own request path (internal/modelgateway), its
-// profile's edits, conversion and headers included, which this package
-// cannot import: what a route reports is what an agent's call would meet.
-// Neither route stores what it learns; the answer is the record.
+// Prober makes the vendor calls of the check and test routes, from the
+// gateway's own request code (internal/modelgateway), which this package
+// cannot import. A check sends the headers and the key an attempt sends; a
+// test is an attempt, its profile's edits and conversion included, so what
+// it reports is what an agent's call would meet. Neither route stores what
+// it learns; the answer is the record.
 type Prober interface {
 	// CheckCredential lists the vendor's models with c's key, once on each
 	// protocol c may be used on, without a retry.
