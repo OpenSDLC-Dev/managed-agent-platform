@@ -2002,8 +2002,8 @@ Anthropic-protocol route.
 - The poll's work item named the Session and carried a base64url JSON `secret` with a `wtk_`
   `sessions_token`. The capture retains its type and length, but redacts the token bytes.
 - The worker downloaded two memories to `/mnt/memory/rec30-notes`. A live filesystem snapshot
-  captured the `.anthropic-memory-store` marker and both baseline files. The model then called
-  `read` and `write`; the worker posted both successful tool results.
+  captured the `.anthropic-memory-store` marker and both baseline files. The Session history
+  records model `read` and `write` calls; the worker posted both successful tool results.
 - At run end, the worker updated `/log/today.md` with the previous head's SHA-256 as its
   precondition. The update returned 200. The version list shows the new content and hash as a
   `modified` version created by `session_actor` for that Session.
