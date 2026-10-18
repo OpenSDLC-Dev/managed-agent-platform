@@ -108,6 +108,29 @@ func memoryWrite() Task {
 // is configuration rather than instruction: which agent to ask for what, and
 // when, is still the model's.
 //
+// The same prompt says that each agent holds one of the team's codes and that
+// the coordinator holds neither. That is configuration too: it says where the
+// facts live, as a real deployment's prompt would, and it names no tool.
+// Without it, MiniMax-M3 often read the request as one for credentials it
+// lacked. It answered that it had no access to the codes, or that neither agent
+// had a live thread, and spawned nothing. That failed both attempts on nightly
+// runs 56 and 89 (#951).
+//
+// The sentence was measured on 2026-10-18 against the nightly's endpoint, in 20
+// runs of each wording, interleaved. Without it, the first attempt failed in 7
+// runs, and the retry failed too in 3 of them. With it, no attempt failed. The
+// old wording's 10 failed attempts, retries included, were of two kinds:
+//
+//   - 5 spawned nothing, which is the miss the sentence is for;
+//   - 5 spawned both agents but answered with one or both codes missing or
+//     miscopied. In the one kept transcript of this kind, the herald ended
+//     three turns without reporting, and the platform told the coordinator so
+//     each time.
+//
+// Nothing shows that the sentence prevents the second kind, so its absence from
+// the new wording's 20 runs may be chance. As with repoAnswer's wording, this is
+// a measurement, not a law.
+//
 // The coordinator takes an empty toolset rather than the bare one, and that is
 // what keeps the trial honest: with bash and read it could open the archive file
 // itself and answer having delegated nothing. With its four delegation tools and
@@ -143,9 +166,9 @@ func coordinatorTeam() Task {
 		// Empty rather than nil — the bare toolset would let the coordinator do
 		// the work itself; see above.
 		Tools: []any{},
-		System: "You coordinate a team of two agents: archivist and herald. Neither of them can " +
-			"see this conversation, so tell each what you need from it, and give your answer only " +
-			"once both have reported back.",
+		System: "You coordinate a team of two agents: archivist and herald. Each of them holds one " +
+			"of your team's codes, and you hold neither. Neither of them can see this conversation, " +
+			"so tell each what you need from it, and give your answer only once both have reported back.",
 		Roster: []RosterMember{{
 			Name:    "archivist",
 			Toolset: true,
