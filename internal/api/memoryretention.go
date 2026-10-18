@@ -110,9 +110,12 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 // the insert, which every writer reaches only after the store lock (#552).
 // A dream's clone keeps now(), but it writes inside the transaction that
 // creates the store, so every later version of its memories is stamped after
-// it. The marker is stamped after every earlier version of its memory unless
-// the clock steps backwards between them (#411). The listable promise does not
-// depend on it either way. The reference's own wording, that versions "persist after
+// it. So a marker written since #552 is stamped after every earlier version of
+// its memory, unless the clock steps backwards between them (#411). A row
+// written before #552, or by an older binary during a rolling deploy, carries
+// its transaction's start, and a delete that waited on the lock can still
+// stamp its marker before a later-committed `modified`. The listable promise
+// does not depend on it either way. The reference's own wording, that versions "persist after
 // the memory is deleted", is about the delete not cascading rather than about
 // exemption from retention, and its retention rule names no exception. A
 // redacted version is no exception either, so the record of who erased what

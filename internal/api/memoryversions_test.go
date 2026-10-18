@@ -31,9 +31,9 @@ func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]
 
 // stampVersions is stampCreatedAt for one memory store's versions, with the
 // guarantee this listing needs on top: every row of the store must be named,
-// which is why the count is checked. One left out keeps its own stamp and lands
-// inside the stamped band, a second newest, silently moving every position the
-// caller then asserts on. Three are named by the id their own responses
+// which is why the count is checked. One left out keeps its own stamp, newer
+// than the whole stamped band, and lists first, silently moving every position
+// the caller then asserts on. Three are named by the id their own responses
 // returned and the fourth by exclusion, as the call site's query shows.
 //
 // The order of these rows is the wire contract the test below exists to pin, so
@@ -45,11 +45,12 @@ func listVersions(t *testing.T, s *tserver, storeID, query string) []map[string]
 //
 // What this does give up is worth naming: the listing's order no longer comes
 // from the platform's own stamps, so the test stops witnessing that successive
-// versions get increasing timestamps. Nothing asserts that here and no logic
-// enforces it — each is a clock_timestamp() reading, which the clock can step
-// back (#411) — while the contract the test does pin, that the handler returns
-// them newest first, is exercised exactly as before. Inverting the handler's
-// ORDER BY still fails this test.
+// versions get increasing timestamps. The writers stamp each version after the
+// store lock (#552), which orders them as far as the database clock keeps
+// time (#411); TestMemoryVersionIsStampedAfterTheLockWait pins which clock
+// stamps them. The contract this test pins, that the handler returns them
+// newest first, is exercised exactly as before. Inverting the handler's ORDER
+// BY still fails this test.
 func stampVersions(t *testing.T, s *tserver, storeID string, oldestFirst ...string) {
 	t.Helper()
 	var held int
@@ -66,9 +67,12 @@ func stampVersions(t *testing.T, s *tserver, storeID string, oldestFirst ...stri
 
 // A version is stamped when it is written, not when its transaction began
 // (#552): an update that waits on the store lock is stamped after the writer
-// it waited on commits. now(), frozen at the update's BEGIN, would stamp it
-// before.
+// it waited on commits. now(), frozen at the update's BEGIN, would stamp it at
+// least hold earlier. The assertion gives back half of hold, so a database
+// clock stepping backwards (#411 recorded 20ms) cannot fail it: the test tells
+// which clock stamped the row, not whether that clock is monotonic.
 func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
+	const hold = 200 * time.Millisecond
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "notes")
 	id := createMemory(t, s, store, "/a.md", "first")["id"].(string)
@@ -85,33 +89,10 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 		t.Fatalf("take the store lock: %v", err)
 	}
 
-	// roundTrip rather than do: a helper that can fail the test must run on
-	// the test's own goroutine.
-	done := make(chan error, 1)
-	go func() {
-		res, err := s.roundTrip(ctx, http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
-			map[string]any{"content": "second"}, map[string]string{"x-api-key": testKey})
-		if err == nil {
-			_ = res.Body.Close()
-			if res.StatusCode != http.StatusOK {
-				err = fmt.Errorf("status %d", res.StatusCode)
-			}
-		}
-		done <- err
-	}()
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		var waiting int
-		if err := s.pool.QueryRow(ctx,
-			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, pid).Scan(&waiting); err != nil {
-			t.Fatalf("look for the update waiting on the lock: %v", err)
-		}
-		if waiting > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the update never waited on the store lock")
-		}
-	}
+	done := s.sendAsync(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"content": "second"}, map[string]string{"x-api-key": testKey})
+	waitUntilBlockedOnALock(t, s.pool, pid, done)
+	time.Sleep(hold)
 	var released time.Time
 	if err := holder.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&released); err != nil {
 		t.Fatalf("read the clock: %v", err)
@@ -119,8 +100,8 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 	if err := holder.Commit(ctx); err != nil {
 		t.Fatalf("release the store lock: %v", err)
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("update the memory: %v", err)
+	if r := awaitReply(t, done); r.err != nil || r.code != http.StatusOK {
+		t.Fatalf("update the memory: %d %s (%v)", r.code, r.body, r.err)
 	}
 
 	var stamped time.Time
@@ -129,8 +110,8 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 		id).Scan(&stamped); err != nil {
 		t.Fatalf("read the update's version: %v", err)
 	}
-	if !stamped.After(released) {
-		t.Errorf("the update's version is stamped %s, not after the lock it waited on was released at %s",
+	if !stamped.After(released.Add(-hold / 2)) {
+		t.Errorf("the update's version is stamped %s, before the lock it waited on was released at %s",
 			stamped.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
 	}
 }
