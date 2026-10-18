@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +135,7 @@ func TestACheckFollowsTheProfile(t *testing.T) {
 		}
 	})
 	deepseek := onBoth(e, "deepseek", f.URL)
-	generic := e.provider(f.URL + "/generic")
+	generic := e.provider(f.URL+"/generic", func(p *store.Provider) { p.Headers = map[string]string{"anthropic-version": "2099-01-01"} })
 	gc := e.credential(generic, "sk-generic-key1", 1)
 	gemini := onGemini(e, f.URL)
 	e.startProbing()
@@ -164,7 +165,7 @@ func TestACheckFollowsTheProfile(t *testing.T) {
 		paths = append(paths, c.Path+"?"+c.Query)
 		switch c.Path {
 		case "/generic/v1/models":
-			if c.Key != "sk-generic-key1" || c.Header.Get("Authorization") != "" {
+			if c.Key != "sk-generic-key1" || c.Header.Get("Authorization") != "" || c.Header.Get("anthropic-version") != "2099-01-01" {
 				t.Errorf("generic headers = %v", c.Header)
 			}
 		case "/v1beta/models":
@@ -207,8 +208,14 @@ func TestACheckReportsTheVendorsAnswer(t *testing.T) {
 		{name: "untyped 402", status: 402, body: `{"error":{"message":"Insufficient Balance"}}`, typ: "billing_error", msg: "Insufficient Balance"},
 		{name: "untyped 403", status: 403, body: `{"message":"forbidden"}`, typ: "permission_error", msg: "forbidden"},
 		{name: "vendor type", status: 401, body: `{"type":"error","error":{"type":"authorized_error","message":"login fail"}}`, typ: "authorized_error", msg: "login fail"},
+		{name: "gemini key", status: 400, body: `{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"API_KEY_INVALID"}]}}`,
+			typ: "authentication_error", msg: "API key not valid"},
+		{name: "empty", status: 401, body: ``, typ: "authentication_error", msg: "answered 401 with an empty body"},
+		{name: "long type", status: 400, body: `{"error":{"type":"` + strings.Repeat("x", 2000) + `","message":"m"}}`, typ: strings.Repeat("x", 1024) + "…", msg: "m"},
+		{name: "key in type", status: 401, body: `{"error":{"type":"bad key sk-openai-generic-key1","message":"denied"}}`, typ: "bad key [redacted]", msg: "denied"},
 		{name: "rate limited", status: 429, body: `{"error":{"message":"slow down"}}`, typ: "rate_limit_error", msg: "slow down"},
 		{name: "no list", status: 200, body: `{"code":401,"msg":"令牌已过期或验证不正确","success":false}`, typ: "api_error", msg: `no model list: {"code":401,"msg":"令牌已过期或验证不正确","success":false}`},
+		{name: "no list, a key", status: 200, body: `{"code":401,"msg":"bad key sk-openai-generic-key1"}`, typ: "api_error", msg: "bad key [redacted]"},
 		{name: "null list", status: 200, body: `{"object":"list","data":null}`, typ: "api_error", msg: "no model list"},
 		{name: "html", status: 502, body: "<html><body>" + strings.Repeat("bad gateway ", 200) + "</body></html>", typ: "api_error", msg: "<html><body>bad gateway"},
 		{name: "redirect", status: 302, body: ``, typ: "api_error", msg: "redirect (302)"},
@@ -253,8 +260,20 @@ func TestACheckReportsTheVendorsAnswer(t *testing.T) {
 // caller would send. Each is written to the ledger as a test, under no key
 // and no alias.
 func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
+	defer modelgateway.SetProbeTimeouts(time.Minute, time.Second)()
 	e := newEnv(t)
+	var arrived sync.WaitGroup // the attempts are made at once: each waits for the other, past the test's bound
+	arrived.Add(2)
+	all := make(chan struct{})
+	go func() { arrived.Wait(); close(all) }()
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		arrived.Done()
+		select {
+		case <-all:
+		case <-r.Context().Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 		if c.Key == "sk-upstream-3" {
 			writeBody(w, 529, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
 			return
@@ -286,6 +305,7 @@ func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
 		t.Errorf("results = %s, want %s", encodeJSON(got), encodeJSON(want))
 	}
 	calls := f.recorded()
+	slices.SortFunc(calls, func(a, b fakeCall) int { return strings.Compare(a.Key, b.Key) })
 	if len(calls) != 2 || calls[0].Key != "sk-upstream-1" || calls[1].Key != "sk-upstream-3" {
 		t.Fatalf("calls = %+v", calls)
 	}
@@ -301,7 +321,10 @@ func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("ledger = %+v", rows)
 	}
-	slices.Reverse(rows) // newest first
+	slices.SortFunc(rows, func(a, b store.Usage) int { return strings.Compare(a.CredentialID, b.CredentialID) })
+	if c1.ID > c3.ID {
+		slices.Reverse(rows)
+	}
 	for i, row := range rows {
 		if row.RequestID != rid || row.APIKeyID != "admin" || row.Endpoint != "deployment_test" || row.Alias != "" ||
 			row.Model != "up-model" || row.DeploymentID != d.ID || row.Protocol != "anthropic" {
@@ -339,6 +362,71 @@ func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
 	f.answer = status(401, `{"message":"bad key"}`)
 	if got, _ := e.test(d.ID, ""); got[0].Error.Type != "authentication_error" || got[0].Error.Message != "bad key" {
 		t.Errorf("an untyped 401: %s", encodeJSON(got))
+	}
+	f.answer = status(403, ``)
+	if got, _ := e.test(d.ID, ""); got[0].Error.Type != "permission_error" || got[0].Error.Message != "the vendor answered 403 with an empty body" {
+		t.Errorf("an empty 403: %s", encodeJSON(got))
+	}
+}
+
+// A converted attempt's error keeps the vendor's own type and message in a
+// test's result, though a caller is given the type converted; whatever the
+// vendor says, its credential is removed.
+func TestADeploymentTestReportsTheVendorsOwnError(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, status(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded for sk-openai-generic-key1"}}`))
+	chat := e.deployment(onOpenAI(e, "openai-generic", f.URL), "up-model")
+	g := newFake(t, status(200, `{"candidates":[{"content":{"role":"model","parts":[{"text":"p"}]},"finishReason":"OTHER","finishMessage":"bad key AIza-gemini-key1"}]}`))
+	gem := e.deployment(onGemini(e, g.URL), "gemini-2.5-flash")
+	e.startProbing()
+
+	got, _ := e.test(chat.ID, "")
+	if len(got) != 1 || got[0].OK || *got[0].Status != 429 || got[0].Error.Type != "insufficient_quota" ||
+		got[0].Error.Message != "quota exceeded for [redacted]" {
+		t.Errorf("converted: %s", encodeJSON(got))
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Status != 429 || rows[0].ErrorType != "rate_limit_error" {
+		t.Errorf("ledger = %+v", rows)
+	}
+
+	got, _ = e.test(gem.ID, "")
+	if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "api_error" ||
+		!strings.Contains(got[0].Error.Message, "finished OTHER: bad key [redacted]") {
+		t.Errorf("gemini: %s", encodeJSON(got))
+	}
+}
+
+// A test is bounded as a whole: a vendor that sends a byte at a time, each
+// inside the stall timeout, is cut off at the test's bound.
+func TestADeploymentTestIsBoundedWhileTheVendorDribbles(t *testing.T) {
+	defer modelgateway.SetProbeTimeouts(time.Minute, 300*time.Millisecond)()
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
+		w.WriteHeader(200)
+		for end := time.Now().Add(5 * time.Second); time.Now().Before(end); {
+			if _, err := w.Write([]byte(" ")); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	})
+	p := e.provider(f.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	d := e.deployment(p, "up-model")
+	e.startProbing()
+
+	start := time.Now()
+	got, _ := e.test(d.ID, "")
+	if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
+		t.Errorf("after %s: %s", time.Since(start), encodeJSON(got))
+	}
+	if rows := e.ledger(); len(rows) != 1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
+		t.Errorf("ledger = %+v", rows)
 	}
 }
 
@@ -418,7 +506,7 @@ func TestWhatADeploymentTestCannotReach(t *testing.T) {
 
 	got, _ := e.test(embed.ID, "")
 	if len(got) != 1 || got[0].OK || got[0].Protocol != nil || got[0].Status != nil || got[0].LatencyMS != nil ||
-		got[0].Error.Type != "invalid_request_error" || !strings.Contains(got[0].Error.Message, "OpenAI request") {
+		got[0].Error.Type != "invalid_request_error" || !strings.Contains(got[0].Error.Message, "that OpenAI requests reach") {
 		t.Errorf("results = %s", encodeJSON(got))
 	}
 	if n := len(f.recorded()); n != 0 {

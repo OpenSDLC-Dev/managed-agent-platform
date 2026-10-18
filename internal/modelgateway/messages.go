@@ -495,6 +495,7 @@ type call struct {
 	resp   *convert.ResponseMeta // the Response a Responses request is answered with, nil for any other
 	start  time.Time             // when the request arrived
 	out    *outcome              // what the ledger is told of it
+	within time.Duration         // a deployment test's bound on its whole attempt (probes.go); zero on a caller's call, which a stall alone bounds (provider.StallGuard)
 }
 
 // fail answers the caller with f: an upstream's error body, which is in
@@ -544,7 +545,7 @@ type failure struct {
 	body   []byte      // an upstream's body, its credential removed
 	typ    string      // for a failure with no upstream body
 	err    error
-	detail []byte // a vendor's refusal of the credential, its credential removed, which a caller is not given (refusedCredential)
+	detail []byte // the vendor's own error, its credential removed, where a caller is given another: a refusal of the credential (refusedCredential), or a converted attempt's error answer; a deployment test reports it (probes.go)
 }
 
 // refusesThinking reports whether the failure is an upstream's 400 refusing
@@ -676,8 +677,13 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 // does not end an upstream answer it has started paying for, which is read to
 // its end.
 func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
-	c.out.at = &at
+	c.out.at, c.out.upstream = &at, 0
 	ctx := context.WithoutCancel(r.Context())
+	if c.within > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.within)
+		defer cancel()
+	}
 	key, err := h.open(ctx, at.Credential)
 	if err != nil {
 		slog.ErrorContext(ctx, "modelgateway: credential could not be opened", "credential", at.Credential.ID, "error", err)
@@ -754,7 +760,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		if conv {
 			h := resp.Header.Clone()
 			h.Set("Content-Type", "application/json")
-			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
+			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r)), detail: redactJSON(red, b)}, retryable(s, resp.Header)
 		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
@@ -857,13 +863,13 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		c.out.tokens = geminiUsageOf(member(b, "usageMetadata"))
 		if answer, err = convert.GeminiAnswer(b, c.alias, requestID(r), callerUsage(c.out.tokens), wrap.wrap); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
-				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false // a finishMessage is the vendor's text
 		}
 	case conv:
 		c.out.tokens = chatUsageOf(member(b, "usage"))
 		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap)); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
-				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}
 	case c.proto == profile.OpenAI:
 		var usage json.RawMessage

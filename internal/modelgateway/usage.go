@@ -74,15 +74,18 @@ const maxLedgerText = 256
 // Postgres text holds it: without the NUL a JSON string may carry, which
 // would fail the row, and cut to maxLedgerText bytes at a character's start.
 func ledgerText(s string) string {
-	s = strings.ReplaceAll(s, "\x00", "")
-	if len(s) <= maxLedgerText {
+	return cut(strings.ReplaceAll(s, "\x00", ""), maxLedgerText)
+}
+
+// cut is s cut to n bytes, at a character's start.
+func cut(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	i := maxLedgerText
-	for !utf8.RuneStart(s[i]) {
-		i--
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
-	return s[:i]
+	return s[:n]
 }
 
 // admit counts the request against its key's limits, when the key has any,

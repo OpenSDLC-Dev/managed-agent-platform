@@ -9,8 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
@@ -90,10 +90,10 @@ func (p prober) check(ctx context.Context, prov store.Provider, prof profile.Pro
 		res.Error = &admin.ProbeError{Type: "api_error", Message: red.Error(err).Error()}
 		return res
 	}
-	vendorHeaders(ctx, req.Header, prov, prof, up, key)
-	if up == profile.Anthropic {
+	if up == profile.Anthropic { // a provider's own, set next, wins, as on an attempt
 		req.Header.Set("anthropic-version", defaultAnthropicVersion)
 	}
+	vendorHeaders(ctx, req.Header, prov, prof, up, key)
 	start := time.Now()
 	resp, err := p.h.clientFor(prof).Do(req)
 	if err != nil {
@@ -116,7 +116,7 @@ func (p prober) check(ctx context.Context, prov store.Provider, prof profile.Pro
 		res.Error = &admin.ProbeError{Type: "not_found_error",
 			Message: "the endpoint answered 404 on its list-models route, which it may not serve: " + vendorMessage(red, b)}
 	case s >= 400:
-		res.Error = &admin.ProbeError{Type: vendorErrorType(b, s), Message: vendorMessage(red, b)}
+		res.Error = vendorError(redactJSON(red, b), s)
 	default:
 		ids, ok := modelIDs(up, b)
 		if !ok {
@@ -158,8 +158,9 @@ func modelIDs(up profile.Protocol, b []byte) ([]string, bool) {
 	return ids, true
 }
 
-// testTimeout bounds the silence of a test's attempt, which a whole answer
-// keeps until it is done: a provider's stall timeout, where it is shorter.
+// testTimeout bounds a test's attempt as a whole, which a caller's call is
+// not (provider.StallGuard): an answer of one token has no long generation
+// to wait out, so a vendor that sends it a byte at a time is cut off too.
 var testTimeout = 30 * time.Second
 
 // A test is written to the ledger under these: no API key made it, and the
@@ -170,10 +171,11 @@ const (
 )
 
 // testRequest is the minimal request a deployment of d's kind is tested
-// with, and the route it takes. A chat test asks for one token: every vendor
-// the live tier covers answers max_tokens 1 with a 200 — the models that
-// think by default with one token of thinking, MiniMax-M3.1-Flash-Preview
-// with content null — on both its endpoints (#953, probed 2026-10-18).
+// with, and the route it takes. A chat test asks for one token: every chat
+// model the live tier covers, which has no Gemini one, answers max_tokens 1
+// with a 200 — the models that think by default with one token of thinking,
+// MiniMax-M3.1-Flash-Preview with content null — on both its endpoints
+// (#953, probed 2026-10-18).
 func testRequest(d store.Deployment) (string, map[string]json.RawMessage) {
 	top := map[string]json.RawMessage{"model": encodeJSON(d.UpstreamModel)}
 	switch d.Kind {
@@ -189,11 +191,15 @@ func testRequest(d store.Deployment) (string, map[string]json.RawMessage) {
 	return "/v1/messages", top
 }
 
+// TestDeployment tests with every credential at once, so a test of many
+// takes the bound of one.
 func (p prober) TestDeployment(ctx context.Context, d store.Deployment, prov store.Provider, cs []store.Credential) []admin.DeploymentTest {
-	out := make([]admin.DeploymentTest, 0, len(cs))
-	for _, c := range cs {
-		out = append(out, p.test(ctx, d, prov, c))
+	out := make([]admin.DeploymentTest, len(cs))
+	var wg sync.WaitGroup
+	for i, c := range cs {
+		wg.Go(func() { out[i] = p.test(ctx, d, prov, c) })
 	}
+	wg.Wait()
 	return out
 }
 
@@ -206,17 +212,15 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	up := catalog.UpstreamProtocol(prov, c, in)
 	if up == "" {
 		res.Error = &admin.ProbeError{Type: "invalid_request_error", Message: fmt.Sprintf(
-			"credential %s is allowed on no protocol a %s request reaches provider %s on", c.ID, protocolNames[in], prov.ID)}
+			"credential %s is allowed on none of the protocols that %s requests reach provider %s on", c.ID, protocolNames[in], prov.ID)}
 		return res
 	}
 	res.Protocol = &up
 	at := catalog.Attempt{Deployment: d, Provider: prov, Credential: c, Endpoint: prov.Endpoints[up], Protocol: up}
-	if at.Provider.StallTimeout <= 0 || at.Provider.StallTimeout > testTimeout {
-		at.Provider.StallTimeout = testTimeout
-	}
+	bound := testTimeout
 	start := time.Now()
 	out := &outcome{}
-	cl := call{proto: in, top: top, alias: d.UpstreamModel, path: path, start: start, out: out}
+	cl := call{proto: in, top: top, alias: d.UpstreamModel, path: path, start: start, out: out, within: bound}
 	if in == profile.Anthropic {
 		cl.header = forwarded(http.Header{})
 	}
@@ -227,12 +231,16 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	}
 	f, _ := p.h.tracedAttempt(discard{http.Header{}}, r, cl, at, false)
 	latency := time.Since(start)
-	res.LatencyMS = since(start)
+	ms := latency.Milliseconds()
+	res.LatencyMS = &ms
 	if out.upstream != 0 {
 		res.Status = &out.upstream
 	}
 	status, errType := out.status, out.errType
 	switch {
+	case (f != nil || errType != "") && latency >= bound: // the bound cut the attempt off, whatever it then read as
+		status, errType = http.StatusGatewayTimeout, "timeout_error"
+		res.Error = &admin.ProbeError{Type: errType, Message: fmt.Sprintf("the vendor did not answer in full within the test's bound of %s", bound)}
 	case f != nil:
 		status, errType = f.status, f.errorType()
 		res.Error = testError(f, out.upstream)
@@ -257,33 +265,35 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 
 // testError is why a test's attempt failed, as the vendor said it where it
 // answered: a refusal of the credential, which a caller is given as the
-// gateway's 502, keeps the vendor's type and message here.
+// gateway's 502, and a converted attempt's error, which a caller is given
+// converted, keep the vendor's type and message here.
 func testError(f *failure, upstream int) *admin.ProbeError {
 	switch {
 	case f.detail != nil:
-		return &admin.ProbeError{Type: vendorErrorType(f.detail, upstream), Message: excerpt(errorMessageOr(f.detail))}
+		return vendorError(f.detail, upstream)
 	case f.body != nil:
-		return &admin.ProbeError{Type: f.errorType(), Message: excerpt(errorMessageOr(f.body))}
+		return vendorError(f.body, upstream)
 	}
 	return &admin.ProbeError{Type: f.typ, Message: f.err.Error()}
 }
 
-// refusalTypes names the account refusals by their status, for an answer
-// that names no type.
-var refusalTypes = map[int]string{
-	http.StatusUnauthorized:    "authentication_error",
-	http.StatusPaymentRequired: "billing_error",
-	http.StatusForbidden:       "permission_error",
-}
-
-// vendorErrorType is the error type a vendor's error body names, else the
-// one its status has (errorTypeOf), an account refusal's included.
-func vendorErrorType(b []byte, status int) string {
+// vendorError is a vendor's error body b, its credentials removed already,
+// answered with status: the type b names, else a refused Gemini key's
+// (geminiKeyRefused), else the one Anthropic gives status
+// (messagesErrorType); and its message (errorMessageOr), each cut short.
+func vendorError(b []byte, status int) *admin.ProbeError {
 	var typ string
-	if t, ok := refusalTypes[status]; ok && (json.Unmarshal(member(b, "error", "type"), &typ) != nil || typ == "") {
-		return t
+	if json.Unmarshal(member(b, "error", "type"), &typ) != nil || typ == "" {
+		typ = messagesErrorType("", status)
+		if geminiKeyRefused(b) {
+			typ = "authentication_error"
+		}
 	}
-	return errorTypeOf(b, status)
+	msg := errorMessageOr(b)
+	if strings.TrimSpace(msg) == "" {
+		msg = fmt.Sprintf("the vendor answered %d with an empty body", status)
+	}
+	return &admin.ProbeError{Type: excerpt(typ), Message: excerpt(msg)}
 }
 
 // vendorMessage is a vendor's error body as a check reports it: its message
@@ -305,16 +315,12 @@ func errorMessageOr(b []byte) string {
 // a whole HTML document.
 const maxMessage = 1 << 10
 
-// excerpt cuts s to maxMessage bytes, at a character's start.
+// excerpt cuts s to maxMessage bytes, at a character's start, marking the cut.
 func excerpt(s string) string {
-	if len(s) <= maxMessage {
-		return s
+	if c := cut(s, maxMessage); c != s {
+		return c + "…"
 	}
-	i := maxMessage
-	for i > 0 && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return s[:i] + "…"
+	return s
 }
 
 // transportError is a check's request that got no whole answer.

@@ -95,7 +95,7 @@ func TestLiveProbes(t *testing.T) {
 				if prof.ModelList[r.Protocol] && (r.OK || r.Status == nil || r.Error == nil) {
 					liveErrorf(t, "%s with a bad key: %s", r.Protocol, encodeJSON(r))
 				}
-				if r.Status != nil {
+				if r.Status != nil && r.Error != nil {
 					t.Logf("%s refuses a bad key: %d %s %s", r.Protocol, *r.Status, r.Error.Type, masked(r.Error.Message))
 				}
 			}
@@ -113,7 +113,9 @@ func TestLiveProbes(t *testing.T) {
 				c.d.Kind == store.KindChat && r.Usage.OutputTokens == 0 {
 				liveErrorf(t, "%s", masked(encodeJSON(r)))
 			}
-			t.Logf("%dms, usage %s", *r.LatencyMS, encodeJSON(r.Usage))
+			if r.LatencyMS != nil {
+				t.Logf("%dms, usage %s", *r.LatencyMS, encodeJSON(r.Usage))
+			}
 		})
 	}
 	n := 0

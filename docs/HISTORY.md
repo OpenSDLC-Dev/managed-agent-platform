@@ -73,6 +73,19 @@ Two rows changed from #953's reading. Gitee lists its public catalogue to a requ
 
 **The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu,gemini go test -run TestLiveProbes` passed all 23 subtests in 18 seconds. Each vendor's check listed models on each protocol its profile records a listing for, with the tier's chat models among them. On DeepSeek's and Moonshot's Anthropic endpoints it answered from the profile, with no status. Each listing refused the made-up key, and the check reported each refusal's status and message. MiniMax's and Zhipu's Anthropic hosts took `limit=1000`. Each of the 17 tests answered 200. Fourteen tested the eight chat models: on the Anthropic endpoint by passthrough wherever the tier's key serves one, and on the OpenAI endpoint through the conversion. Three tested the vectors deployments. Each chat test reported one to four output tokens, and the ledger held one test row for each test.
 
+**Review.** Codex (`gpt-6.1-sol`, `xhigh`) and `/code-review` (`claude-opus-5-5`, `xhigh`) reviewed the branch. The fixes:
+
+- A vendor's text reached a result unredacted in two places: a check's error type, and the `finishMessage` a failed Gemini conversion quotes. The second also reached a caller's 502, so the conversion's error is now redacted on every attempt.
+- A test of a converted attempt reported the error type the gateway converts to, not the vendor's own.
+- A vendor that sends one byte at a time kept a test open past its bound, because the stall timeout restarts on each byte. A test is now bounded as a whole, and its credentials are tested at once.
+
+Declined, with the evidence:
+
+- A 2xx that holds no message passes a test. Zhipu's Messages route refuses a made-up key with a 401 of type `1000`, under either auth header (probed 2026-10-18). So no vendor of the tier answers a bad key there with a 2xx.
+- One handler for the gateway and the prober. It needs a two-phase construction to break the cycle between the admin API and the gateway. The second handler costs a key cache that only probes fill, and a client pool idle between them.
+- Atomic probe timeouts. A probe reads them only inside an admin request that the test waits for in full.
+- One `request_id` for each ledger row. The ledger pages by its own id, and `request_id` is not unique. The shared id ties a test's rows to the admin request that made them.
+
 ---
 
 ## The `session.usage` event and `usage.active_seconds` (plan 68, #432) — archived 2026-10-17, delivered in one PR
