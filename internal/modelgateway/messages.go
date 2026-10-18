@@ -605,7 +605,9 @@ func retryable(status int, h http.Header) bool {
 // The refusal is named by its HTTP status, in a stream its error type, or
 // Gemini's reason where it refuses a key with a 400 (geminiKeyRefused).
 func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
-	detail = redactJSON(red, detail) // decoded first, where it is whole JSON, so a key a string escapes is matched too
+	if detail != nil {
+		detail = redactJSON(red, detail) // decoded first, where it is whole JSON, so a key a string escapes is matched too
+	}
 	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
 		"deployment", at.Deployment.ID, "refusal", refusal, "detail", string(detail))
 	return &failure{status: http.StatusBadGateway, typ: "api_error",
@@ -742,13 +744,13 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			err: fmt.Errorf("upstream answered a redirect (%d), which the gateway does not follow", s)}, true
 	case s == http.StatusUnauthorized, s == http.StatusPaymentRequired, s == http.StatusForbidden:
 		detail, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10+1))
-		f, retry := refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail[:min(len(detail), 4<<10)], red)
 		if err != nil || len(detail) > 4<<10 {
 			// Cut short, it may hold a key cut in half, or one a JSON string
-			// escapes and no decoding restores, which redaction cannot match.
-			f.detail = nil
+			// escapes and no decoding restores, which redaction cannot match:
+			// neither the log nor a test quotes it.
+			detail = nil
 		}
-		return f, retry
+		return refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail, red)
 	case s >= 400:
 		// Whether another attempt may cure it is the status's to say, whatever
 		// becomes of the body: a refusal whose body broke off is a refusal.

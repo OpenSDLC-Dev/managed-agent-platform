@@ -3,6 +3,7 @@ package modelgateway_test
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -348,7 +349,6 @@ func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
 // caller is given the gateway's 502: its status, its type, its message, its
 // key removed. The ledger keeps what a call would have recorded.
 func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
-	defer modelgateway.SetProbeTimeouts(time.Minute, 300*time.Millisecond)()
 	e := newEnv(t)
 	f := newFake(t, status(402, `{"error":{"message":"Insufficient Balance for sk-upstream-1","type":"unknown_error"}}`))
 	p := e.provider(f.URL)
@@ -387,6 +387,7 @@ func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
 
 	// A refusal whose body is still arriving at the bound is the refusal its
 	// status line already was, as a call meets it, not the bound's timeout.
+	defer modelgateway.SetProbeTimeouts(time.Minute, 300*time.Millisecond)()
 	f.answer = func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"error":{"message":"bad`))
@@ -408,9 +409,10 @@ func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
 // A whole refusal is logged decoded, so a key one of its strings escapes is
 // removed from the log too.
 func TestARefusalIsLoggedWithoutItsKey(t *testing.T) {
-	var log bytes.Buffer
-	defer slog.SetDefault(slog.Default())
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, nil)))
+	var buf bytes.Buffer
+	prev, w, flags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(w); log.SetFlags(flags) }) // SetDefault redirects the log package too
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
 	e := newEnv(t)
 	f := newFake(t, status(401, `{"error":{"message":"bad key sk-up\/stream-3"}}`))
 	p := e.provider(f.URL)
@@ -421,7 +423,9 @@ func TestARefusalIsLoggedWithoutItsKey(t *testing.T) {
 	if got, _ := e.test(d.ID, ""); got[0].Error.Message != "bad key [redacted]" {
 		t.Errorf("results = %s", encodeJSON(got))
 	}
-	if s := log.String(); !strings.Contains(s, "upstream refused a credential") || strings.Contains(s, "stream-3") {
+	f.answer = status(401, `{"error":{"message":"bad key sk-up\/stream-3 `+strings.Repeat("x", 5000)+`"}}`) // cut, so quoted nowhere
+	e.test(d.ID, "")
+	if s := buf.String(); strings.Count(s, "upstream refused a credential") != 2 || strings.Contains(s, "stream-3") {
 		t.Errorf("log = %s", s)
 	}
 }
