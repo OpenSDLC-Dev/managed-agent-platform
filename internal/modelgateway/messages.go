@@ -740,8 +740,14 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusBadGateway, typ: "api_error",
 			err: fmt.Errorf("upstream answered a redirect (%d), which the gateway does not follow", s)}, true
 	case s == http.StatusUnauthorized, s == http.StatusPaymentRequired, s == http.StatusForbidden:
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail, red)
+		detail, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10+1))
+		f, retry := refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail[:min(len(detail), 4<<10)], red)
+		if err != nil || len(detail) > 4<<10 {
+			// Cut short, it may hold a key cut in half, or one a JSON string
+			// escapes and no decoding restores, which redaction cannot match.
+			f.detail = nil
+		}
+		return f, retry
 	case s >= 400:
 		// Whether another attempt may cure it is the status's to say, whatever
 		// becomes of the body: a refusal whose body broke off is a refusal.

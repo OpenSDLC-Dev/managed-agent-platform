@@ -238,7 +238,9 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	}
 	status, errType := out.status, out.errType
 	switch {
-	case (f != nil || errType != "") && latency >= bound: // the bound cut the attempt off, whatever it then read as
+	// The bound cut the attempt off: its error says so, or, for an answer
+	// relayVectors cut off, which keeps no error, the time does.
+	case f != nil && errors.Is(f.err, context.DeadlineExceeded), f == nil && errType != "" && latency >= bound:
 		status, errType = http.StatusGatewayTimeout, "timeout_error"
 		res.Error = &admin.ProbeError{Type: errType, Message: fmt.Sprintf("the vendor did not answer in full within the test's bound of %s", bound)}
 	case f != nil:
@@ -274,7 +276,7 @@ func testError(f *failure, upstream int) *admin.ProbeError {
 	case f.body != nil:
 		return vendorError(f.body, upstream)
 	}
-	return &admin.ProbeError{Type: f.typ, Message: f.err.Error()}
+	return &admin.ProbeError{Type: f.typ, Message: excerpt(f.err.Error())}
 }
 
 // vendorError is a vendor's error body b, its credentials removed already,

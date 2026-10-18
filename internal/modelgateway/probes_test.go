@@ -367,6 +367,17 @@ func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
 	if got, _ := e.test(d.ID, ""); got[0].Error.Type != "permission_error" || got[0].Error.Message != "the vendor answered 403 with an empty body" {
 		t.Errorf("an empty 403: %s", encodeJSON(got))
 	}
+
+	// A refusal cut short at its bound is not quoted: its key may be cut in
+	// half, or escaped in a JSON string no longer whole enough to decode.
+	q := e.provider(f.URL)
+	e.credential(q, "sk-up/stream-2", 1)
+	long := e.deployment(q, "up-model")
+	f.answer = status(401, `{"error":{"message":"bad key sk-up\/stream-2 `+strings.Repeat("x", 5000)+`"}}`)
+	if got, _ := e.test(long.ID, ""); *got[0].Status != 401 || got[0].Error.Type != "api_error" ||
+		got[0].Error.Message != "upstream refused the gateway's credential (HTTP 401)" {
+		t.Errorf("a long 401: %s", encodeJSON(got))
+	}
 }
 
 // A converted attempt's error keeps the vendor's own type and message in a
@@ -376,7 +387,7 @@ func TestADeploymentTestReportsTheVendorsOwnError(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, status(429, `{"error":{"type":"insufficient_quota","message":"quota exceeded for sk-openai-generic-key1"}}`))
 	chat := e.deployment(onOpenAI(e, "openai-generic", f.URL), "up-model")
-	g := newFake(t, status(200, `{"candidates":[{"content":{"role":"model","parts":[{"text":"p"}]},"finishReason":"OTHER","finishMessage":"bad key AIza-gemini-key1"}]}`))
+	g := newFake(t, status(200, `{"candidates":[{"content":{"role":"model","parts":[{"text":"p"}]},"finishReason":"OTHER","finishMessage":"bad key AIza-gemini-key1 `+strings.Repeat("x", 2000)+`"}]}`))
 	gem := e.deployment(onGemini(e, g.URL), "gemini-2.5-flash")
 	e.startProbing()
 
@@ -391,7 +402,7 @@ func TestADeploymentTestReportsTheVendorsOwnError(t *testing.T) {
 
 	got, _ = e.test(gem.ID, "")
 	if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "api_error" ||
-		!strings.Contains(got[0].Error.Message, "finished OTHER: bad key [redacted]") {
+		!strings.Contains(got[0].Error.Message, "finished OTHER: bad key [redacted]") || len(got[0].Error.Message) > 1100 {
 		t.Errorf("gemini: %s", encodeJSON(got))
 	}
 }
