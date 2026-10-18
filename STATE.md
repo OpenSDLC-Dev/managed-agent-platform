@@ -4,15 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Six quick fixes from the 2026-10-17 issue triage**, plan-less, one PR each, in the
-order below. Issue triage found that none of them needs a plan. Two of them land only
-part of their issue, which stays open for the rest.
+**None.** The six quick fixes from the 2026-10-17 issue triage landed plan-less, one PR
+each: #589, #549, #543, #573, #552 and #634. #549 and #573 stay open for the rest of
+their scope. Each fix's record is its `changelog.d/` fragment.
 
 ## Tasks
 
-- [x] #589: refuse a past `mcp_oauth` `expires_at` on credential create (an update still accepts one).
-- [x] #549: refuse a memories-list `path_prefix` that does not end with `/` (order and `depth` stay open).
-- [x] #543: refuse a cron schedule that restricts both day-of-month and day-of-week.
-- [x] #573: reserve the `mcp__` prefix against custom tool names (the 64-byte cap stays open).
-- [x] #552: stamp `memory_versions.created_at` with `clock_timestamp()`.
-- [x] #634: two file-tool errors stop advising `bash`.
+None in flight.
