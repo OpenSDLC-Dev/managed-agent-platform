@@ -49,6 +49,50 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Model gateway credential check and deployment test (#953), run 2026-10-18 — ✅ passed
+
+The owner settled #953's four open questions on 2026-10-18, before any code. A test is written to the ledger, marked as a test. Neither route stores its result. Neither runs on create. The check needs the admin role, as the test does.
+
+**The list-models routes.** #953's keyless probe of 2026-10-17 left three rows unknown: DeepSeek's Anthropic endpoint, and both of Zhipu's protocols. On 2026-10-18 a request with each live-tier key and with a made-up key settled them on the hosts those keys reach, which are the CN ones. The keyless probe was also run again, and it filled two gaps: MiniMax's international Anthropic host, and Moonshot's.
+
+| Profile | Protocol | The tier's key | A made-up key | Recorded |
+| --- | --- | --- | --- | --- |
+| `deepseek` | Anthropic | 404 | 401 | no route |
+| `deepseek` | OpenAI | 200, 2 models | 401 | lists |
+| `minimax` | both, CN | 200, 9 models | 401 | lists |
+| `zhipu` | OpenAI, CN | 200, 11 models | 401 | lists |
+| `zhipu` | Anthropic, CN | 200, 11 models | 200, body `{"code":401,…}` | lists |
+| `moonshot` | OpenAI, CN | 200, 4 models | 401 | lists |
+| `moonshot` | Anthropic, CN | 404 `url.not_found` | 404 | no route |
+| `gitee` | OpenAI | 200, 208 models | 401 | lists |
+| `gemini` | Gemini | 200, 63 models | 400 `API key not valid` | lists |
+
+Two rows changed from #953's reading. Gitee lists its public catalogue to a request without a key, but it refuses a bad key, so a check with the provider's key does show that the key works. Zhipu's Anthropic host refuses a bad key with a 200 that holds no list, so a check reads the list, not the status. Without a key, the international hosts of MiniMax, Zhipu and Moonshot answer as the CN ones do. For Zhipu that settles nothing, because Z.ai answers every path alike before it routes, and docs.z.ai shows no models route. No key has listed models on Z.ai. The profile records one value per protocol, so a check on Z.ai is tried on BigModel's evidence; where Z.ai serves no such route, the check reports a 404 as a missing route, not as a bad key. The GLM key lists models on Zhipu's Anthropic host, where every Messages call it makes answers 429, code 1309. A listing does not show that a model answers.
+
+**The smallest chat request.** On 2026-10-18 each chat model of the tier was asked for `max_tokens: 1`, with one user message, directly. Every one answered 200, on both endpoints where it has two. The answers stopped at `max_tokens` or `length`. DeepSeek, Kimi and GLM, which think by default, answered with one token of thinking. MiniMax-M3.1-Flash-Preview answered with `content: null`. Gitee's and Zhipu's embeddings of one short input, and Gitee's rerank of one document, answered 200 too.
+
+**The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu,gemini go test -run TestLiveProbes` passed all 23 subtests in 18 seconds. Each vendor's check listed models on each protocol its profile records a listing for, with the tier's chat models among them. On DeepSeek's and Moonshot's Anthropic endpoints it answered from the profile, with no status. Each listing refused the made-up key, and the check reported each refusal's status and message. MiniMax's and Zhipu's Anthropic hosts took `limit=1000`. Each of the 17 tests answered 200. Fourteen tested the eight chat models: on the Anthropic endpoint by passthrough wherever the tier's key serves one, and on the OpenAI endpoint through the conversion. Three tested the vectors deployments. Each chat test reported one to four output tokens, and the ledger held one test row for each test. After all the review fixes below, the tier passed again, in 17 seconds.
+
+**Review.** Codex (`gpt-6.1-sol`, `xhigh`) reviewed the branch five times, and `/code-review` (`claude-opus-5-5`, `xhigh`) once. The fixes:
+
+- A vendor's text reached a result unredacted in two places: a check's error type, and the `finishMessage` a failed Gemini conversion quotes. The second also reached a caller's 502, so the conversion's error is now redacted on every attempt.
+- A test of a converted attempt reported the error type the gateway converts to, not the vendor's own.
+- A vendor that sends one byte at a time kept a test open past its bound, because the stall timeout restarts on each byte. A test is now bounded as a whole, and its credentials are tested at once.
+- A refusal cut at its 4 KiB bound was quoted in a test. A key a JSON string escapes is not matched once the cut leaves the JSON undecodable, so a cut refusal is no longer quoted.
+- A failure was named the test's timeout by the time it took. It is now named so by its cause, a deadline, and only once the bound has passed. So a whole answer near the bound does not read as one, nor does a client's own timeout that returns before the bound.
+- The verifier found a refusal's log line matching a key only as the raw body spells it, which predates this branch. A whole JSON refusal is now decoded before it is redacted, and a cut one is not logged.
+
+Declined, with the evidence:
+
+- A 2xx that holds no message passes a test. Zhipu's Messages route refuses a made-up key with a 401 of type `1000`, under either auth header (probed 2026-10-18). So no vendor of the tier answers a bad key there with a 2xx.
+- One handler for the gateway and the prober. It needs a two-phase construction to break the cycle between the admin API and the gateway. The second handler costs a key cache that only probes fill, and a client pool idle between them.
+- Atomic probe timeouts. A probe reads them only inside an admin request that the test waits for in full.
+- Reporting a timeout for a refusal whose body is still arriving at the bound, which a test now pins. Its status line is already a whole refusal, which is what a call meets: a 502 that tries the next credential.
+- Naming the bound by a cause set on its own deadline. net/http's HTTP/2 transport hands back `ctx.Err()` without the cause (`h2_bundle.go`, go1.26.8), and the gateway's own client sets no timeout for the time check to mistake for the bound.
+- One `request_id` for each ledger row. The ledger pages by its own id, and `request_id` is not unique. The shared id ties a test's rows to the admin request that made them.
+
+---
+
 ## The `session.usage` event and `usage.active_seconds` (plan 68, #432) — archived 2026-10-17, delivered in one PR
 
 #432 registered the reference's session-budget surface at anthropic-sdk-go v1.62.0. Checked on 2026-10-17, the surface was unchanged from v1.63.1 to v1.82.0, and the public docs now define it. The owner chose one slice that day: the `session.usage` event before every session idle, and `active_seconds`, with no price table. Budgets, `list_cost`, `server_tool_use` and `session.budget_reached` stay registered under #432, which stays open.

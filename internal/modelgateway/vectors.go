@@ -1,6 +1,7 @@
 package modelgateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -52,7 +53,7 @@ func relayVectors(w http.ResponseWriter, resp *http.Response, c call, guard *pro
 		slog.Warn("modelgateway: an upstream answer outran the gateway's bound, and was cut off", "bytes", maxVectorAnswer)
 	case !errors.Is(err, io.EOF):
 		c.out.errType = "api_error"
-		if errors.Is(guard.Cause(err), provider.ErrStalled) {
+		if errors.Is(guard.Cause(err), provider.ErrStalled) || errors.Is(err, context.DeadlineExceeded) { // a stall, or a deployment test's bound (call.within)
 			c.out.errType = "timeout_error"
 		}
 	}

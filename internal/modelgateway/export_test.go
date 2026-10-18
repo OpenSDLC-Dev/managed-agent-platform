@@ -90,6 +90,14 @@ func SetMaxVectorAnswer(n int) func() {
 	return func() { maxVectorAnswer = old }
 }
 
+// SetProbeTimeouts shortens a credential check's bound and a deployment
+// test's for one test, and returns their restore.
+func SetProbeTimeouts(check, test time.Duration) func() {
+	oldCheck, oldTest := checkTimeout, testTimeout
+	checkTimeout, testTimeout = check, test
+	return func() { checkTimeout, testTimeout = oldCheck, oldTest }
+}
+
 // VectorUsageOf is vectorUsageOf.
 func VectorUsageOf(raw []byte) *store.Tokens { return vectorUsageOf(raw) }
 

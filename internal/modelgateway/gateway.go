@@ -151,6 +151,14 @@ func (h *handler) open(ctx context.Context, c store.Credential) ([]byte, error) 
 
 // New returns the gateway's handler.
 func New(cfg Config) (http.Handler, error) {
+	h, err := newHandler(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
+}
+
+func newHandler(cfg Config) (*handler, error) {
 	switch {
 	case cfg.Catalog == nil:
 		return nil, errors.New("modelgateway: a catalog is required")

@@ -480,7 +480,7 @@ func streamFlag(top map[string]json.RawMessage) (bool, *apiError) {
 }
 
 // protocolNames names each protocol for a caller.
-var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI"}
+var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", profile.OpenAI: "OpenAI", profile.Gemini: "Gemini"}
 
 // call is what every attempt of one request sends.
 type call struct {
@@ -495,6 +495,7 @@ type call struct {
 	resp   *convert.ResponseMeta // the Response a Responses request is answered with, nil for any other
 	start  time.Time             // when the request arrived
 	out    *outcome              // what the ledger is told of it
+	within time.Duration         // a deployment test's bound on its whole attempt (probes.go); zero on a caller's call, which a stall alone bounds (provider.StallGuard)
 }
 
 // fail answers the caller with f: an upstream's error body, which is in
@@ -544,6 +545,7 @@ type failure struct {
 	body   []byte      // an upstream's body, its credential removed
 	typ    string      // for a failure with no upstream body
 	err    error
+	detail []byte // the vendor's own error, its credential removed, where a caller is given another: a refusal of the credential (refusedCredential), or a converted attempt's error answer; a deployment test reports it (probes.go)
 }
 
 // refusesThinking reports whether the failure is an upstream's 400 refusing
@@ -599,14 +601,17 @@ func retryable(status int, h http.Header) bool {
 // key, one without access to the model, or an empty balance (DeepSeek's 402).
 // It is not the caller's to read as its own authentication failing, and
 // another credential may serve, so it is a retryable 502 whose detail goes to
-// the log.
+// the log, and to a deployment test (probes.go).
 // The refusal is named by its HTTP status, in a stream its error type, or
 // Gemini's reason where it refuses a key with a 400 (geminiKeyRefused).
 func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
+	if detail != nil {
+		detail = redactJSON(red, detail) // decoded first, where it is whole JSON, so a key a string escapes is matched too
+	}
 	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
-		"deployment", at.Deployment.ID, "refusal", refusal, "detail", red.String(string(detail)))
+		"deployment", at.Deployment.ID, "refusal", refusal, "detail", string(detail))
 	return &failure{status: http.StatusBadGateway, typ: "api_error",
-		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal)}, true
+		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal), detail: detail}, true
 }
 
 // errorStatus is the HTTP status an Anthropic error type answers with
@@ -675,8 +680,13 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 // does not end an upstream answer it has started paying for, which is read to
 // its end.
 func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
-	c.out.at = &at
+	c.out.at, c.out.upstream = &at, 0
 	ctx := context.WithoutCancel(r.Context())
+	if c.within > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.within)
+		defer cancel()
+	}
 	key, err := h.open(ctx, at.Credential)
 	if err != nil {
 		slog.ErrorContext(ctx, "modelgateway: credential could not be opened", "credential", at.Credential.ID, "error", err)
@@ -717,29 +727,15 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			req.Header[k] = vs
 		}
 	}
-	for k, v := range at.Provider.Headers {
-		req.Header.Set(k, v)
-	}
-	propagate(ctx, at.Provider, req.Header)
+	vendorHeaders(ctx, req.Header, at.Provider, prof, up, key)
 	req.Header.Set("Content-Type", "application/json")
-	switch {
-	case up == profile.Gemini:
-		req.Header.Set("x-goog-api-key", string(key))
-	case prof.BearerAuth || up == profile.OpenAI: // every OpenAI-compatible API takes a Bearer token
-		req.Header.Set("Authorization", "Bearer "+string(key))
-	default:
-		req.Header.Set("x-api-key", string(key))
-	}
 
-	client := h.client
-	if prof.CloseConnections {
-		client = h.fresh
-	}
-	resp, err := client.Do(req)
+	resp, err := h.clientFor(prof).Do(req)
 	if err != nil {
 		return noAnswer(guard, red, err)
 	}
 	answered(ctx, resp.StatusCode)
+	c.out.upstream = resp.StatusCode
 	resp.Body = provider.ProgressBody(ctx, resp.Body)
 	defer resp.Body.Close()
 	switch s := resp.StatusCode; {
@@ -747,7 +743,13 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		return &failure{status: http.StatusBadGateway, typ: "api_error",
 			err: fmt.Errorf("upstream answered a redirect (%d), which the gateway does not follow", s)}, true
 	case s == http.StatusUnauthorized, s == http.StatusPaymentRequired, s == http.StatusForbidden:
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		detail, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10+1))
+		if err != nil || len(detail) > 4<<10 {
+			// Cut short, it may hold a key cut in half, or one a JSON string
+			// escapes and no decoding restores, which redaction cannot match:
+			// neither the log nor a test quotes it.
+			detail = nil
+		}
 		return refusedCredential(ctx, at, fmt.Sprintf("HTTP %d", s), detail, red)
 	case s >= 400:
 		// Whether another attempt may cure it is the status's to say, whatever
@@ -767,7 +769,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		if conv {
 			h := resp.Header.Clone()
 			h.Set("Content-Type", "application/json")
-			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r))}, retryable(s, resp.Header)
+			return &failure{status: s, header: h, body: c.upstreamError(ctx, red, b, s, requestID(r)), detail: redactJSON(red, b)}, retryable(s, resp.Header)
 		}
 		return &failure{status: s, header: resp.Header, body: errorJSON(ctx, red, b, requestID(r))}, retryable(s, resp.Header)
 	}
@@ -870,13 +872,13 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		c.out.tokens = geminiUsageOf(member(b, "usageMetadata"))
 		if answer, err = convert.GeminiAnswer(b, c.alias, requestID(r), callerUsage(c.out.tokens), wrap.wrap); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
-				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false // a finishMessage is the vendor's text
 		}
 	case conv:
 		c.out.tokens = chatUsageOf(member(b, "usage"))
 		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap)); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
-				err: fmt.Errorf("upstream answer could not be converted: %w", err)}, false
+				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}
 	case c.proto == profile.OpenAI:
 		var usage json.RawMessage
@@ -904,6 +906,35 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	_, _ = w.Write(answer)
 	c.out.status = resp.StatusCode
 	return nil, false
+}
+
+// vendorHeaders gives a request to a provider of prof on up the provider's
+// headers, its trace context where the provider opted in (propagate), and
+// key in the header its protocol takes: x-goog-api-key on Gemini's; a Bearer
+// on the OpenAI protocol, which every OpenAI-compatible API takes, and on an
+// Anthropic endpoint whose profile asks for one; x-api-key, Anthropic's own,
+// otherwise.
+func vendorHeaders(ctx context.Context, h http.Header, p store.Provider, prof profile.Profile, up profile.Protocol, key []byte) {
+	for k, v := range p.Headers {
+		h.Set(k, v)
+	}
+	propagate(ctx, p, h)
+	switch {
+	case up == profile.Gemini:
+		h.Set("x-goog-api-key", string(key))
+	case prof.BearerAuth || up == profile.OpenAI:
+		h.Set("Authorization", "Bearer "+string(key))
+	default:
+		h.Set("x-api-key", string(key))
+	}
+}
+
+// clientFor is the client a request to a provider of prof rides.
+func (h *handler) clientFor(prof profile.Profile) *http.Client {
+	if prof.CloseConnections {
+		return h.fresh
+	}
+	return h.client
 }
 
 // noAnswer is an attempt whose upstream gave no usable answer: a stall, or a

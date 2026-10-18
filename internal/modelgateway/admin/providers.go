@@ -22,6 +22,9 @@ func viewProfile(p profile.Profile) profileView {
 	if p.Hosts == nil {
 		p.Hosts = []profile.Host{}
 	}
+	if p.ModelList == nil {
+		p.ModelList = map[profile.Protocol]bool{}
+	}
 	return profileView{Type: "profile", Profile: p}
 }
 

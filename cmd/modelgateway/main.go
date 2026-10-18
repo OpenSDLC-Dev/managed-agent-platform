@@ -138,12 +138,17 @@ func run(ctx context.Context) error {
 		return err
 	}
 	st := mgstore.New(pool)
-	adminAPI, err := admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, BootstrapKey: bootKey})
+	cfg := modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
+		BrainKey: os.Getenv("BRAIN_API_KEY"), MaxAttempts: attempts}
+	prober, err := modelgateway.NewProber(cfg)
 	if err != nil {
 		return err
 	}
-	gateway, err := modelgateway.New(modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
-		BrainKey: os.Getenv("BRAIN_API_KEY"), Admin: adminAPI, MaxAttempts: attempts})
+	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, BootstrapKey: bootKey, Prober: prober})
+	if err != nil {
+		return err
+	}
+	gateway, err := modelgateway.New(cfg)
 	if err != nil {
 		return err
 	}
