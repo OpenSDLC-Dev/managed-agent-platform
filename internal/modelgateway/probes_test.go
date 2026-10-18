@@ -428,16 +428,19 @@ func TestADeploymentTestIsBoundedWhileTheVendorDribbles(t *testing.T) {
 	})
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
-	d := e.deployment(p, "up-model")
+	chat := e.deployment(p, "up-model")
+	embed := e.deployment(onOpenAI(e, "openai-generic", f.URL), "embedder", func(d *store.Deployment) { d.Kind = store.KindEmbedding })
 	e.startProbing()
 
-	start := time.Now()
-	got, _ := e.test(d.ID, "")
-	if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
-		t.Errorf("after %s: %s", time.Since(start), encodeJSON(got))
-	}
-	if rows := e.ledger(); len(rows) != 1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
-		t.Errorf("ledger = %+v", rows)
+	for i, d := range []store.Deployment{chat, embed} {
+		start := time.Now()
+		got, _ := e.test(d.ID, "")
+		if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
+			t.Errorf("%s, after %s: %s", d.UpstreamModel, time.Since(start), encodeJSON(got))
+		}
+		if rows := e.ledger(); len(rows) != i+1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
+			t.Errorf("%s: ledger = %+v", d.UpstreamModel, rows)
+		}
 	}
 }
 
