@@ -1,7 +1,9 @@
 package modelgateway_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -187,7 +189,6 @@ func TestACheckFollowsTheProfile(t *testing.T) {
 // vendor that cannot be reached, or does not answer in time, is reported as
 // such.
 func TestACheckReportsTheVendorsAnswer(t *testing.T) {
-	defer modelgateway.SetProbeTimeouts(200*time.Millisecond, time.Minute)()
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
@@ -224,6 +225,9 @@ func TestACheckReportsTheVendorsAnswer(t *testing.T) {
 		{name: "silent", url: slow.URL, typ: "timeout_error", msg: "the request failed", noStatus: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.url == slow.URL {
+				defer modelgateway.SetProbeTimeouts(200*time.Millisecond, time.Minute)()
+			}
 			e := newEnv(t)
 			f := newFake(t, func(w http.ResponseWriter, _ *http.Request, _ fakeCall) {
 				if c.status == 302 {
@@ -344,6 +348,7 @@ func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
 // caller is given the gateway's 502: its status, its type, its message, its
 // key removed. The ledger keeps what a call would have recorded.
 func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
+	defer modelgateway.SetProbeTimeouts(time.Minute, 300*time.Millisecond)()
 	e := newEnv(t)
 	f := newFake(t, status(402, `{"error":{"message":"Insufficient Balance for sk-upstream-1","type":"unknown_error"}}`))
 	p := e.provider(f.URL)
@@ -378,6 +383,46 @@ func TestADeploymentTestReportsARefusedCredential(t *testing.T) {
 	if got, _ := e.test(long.ID, ""); *got[0].Status != 401 || got[0].Error.Type != "api_error" ||
 		got[0].Error.Message != "upstream refused the gateway's credential (HTTP 401)" {
 		t.Errorf("a long 401: %s", encodeJSON(got))
+	}
+
+	// A refusal whose body is still arriving at the bound is the refusal its
+	// status line already was, as a call meets it, not the bound's timeout.
+	f.answer = func(w http.ResponseWriter, r *http.Request, _ fakeCall) {
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad`))
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if got, _ := e.test(long.ID, ""); *got[0].Status != 401 || got[0].Error.Type != "api_error" ||
+		got[0].Error.Message != "upstream refused the gateway's credential (HTTP 401)" {
+		t.Errorf("a 401 still arriving: %s", encodeJSON(got))
+	}
+	if rows := e.ledger(); rows[0].Status != 502 || rows[0].ErrorType != "api_error" {
+		t.Errorf("a 401 still arriving: ledger = %+v", rows[0])
+	}
+}
+
+// A whole refusal is logged decoded, so a key one of its strings escapes is
+// removed from the log too.
+func TestARefusalIsLoggedWithoutItsKey(t *testing.T) {
+	var log bytes.Buffer
+	defer slog.SetDefault(slog.Default())
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&log, nil)))
+	e := newEnv(t)
+	f := newFake(t, status(401, `{"error":{"message":"bad key sk-up\/stream-3"}}`))
+	p := e.provider(f.URL)
+	e.credential(p, "sk-up/stream-3", 1)
+	d := e.deployment(p, "up-model")
+	e.startProbing()
+
+	if got, _ := e.test(d.ID, ""); got[0].Error.Message != "bad key [redacted]" {
+		t.Errorf("results = %s", encodeJSON(got))
+	}
+	if s := log.String(); !strings.Contains(s, "upstream refused a credential") || strings.Contains(s, "stream-3") {
+		t.Errorf("log = %s", s)
 	}
 }
 

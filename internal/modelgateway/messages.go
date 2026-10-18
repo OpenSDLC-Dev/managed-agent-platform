@@ -605,10 +605,11 @@ func retryable(status int, h http.Header) bool {
 // The refusal is named by its HTTP status, in a stream its error type, or
 // Gemini's reason where it refuses a key with a 400 (geminiKeyRefused).
 func refusedCredential(ctx context.Context, at catalog.Attempt, refusal string, detail []byte, red provider.Redactor) (*failure, bool) {
+	detail = redactJSON(red, detail) // decoded first, where it is whole JSON, so a key a string escapes is matched too
 	slog.WarnContext(ctx, "modelgateway: upstream refused a credential", "credential", at.Credential.ID,
-		"deployment", at.Deployment.ID, "refusal", refusal, "detail", red.String(string(detail)))
+		"deployment", at.Deployment.ID, "refusal", refusal, "detail", string(detail))
 	return &failure{status: http.StatusBadGateway, typ: "api_error",
-		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal), detail: redactJSON(red, detail)}, true
+		err: fmt.Errorf("upstream refused the gateway's credential (%s)", refusal), detail: detail}, true
 }
 
 // errorStatus is the HTTP status an Anthropic error type answers with
