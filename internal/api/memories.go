@@ -275,8 +275,9 @@ func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (i
 // created_at is clock_timestamp(), the time of this insert, never the column
 // default now(), which Postgres freezes at BEGIN (#552). Every caller begins
 // before it takes the store lock, so now() would stamp a write that waited on
-// the lock earlier than rows committed while it waited; internal/events/log.go
-// stamps an event the same way for the same reason.
+// the lock earlier than rows committed while it waited. internal/events/log.go
+// stamps an event after its lock for the same reason. A dream's clone is the
+// one writer left on now() (cloneDreamStore).
 func insertMemoryVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, operation, path string,
 	content *string, actor map[string]string) (string, error) {
 	id := domain.NewID(domain.PrefixMemoryVersion).String()
