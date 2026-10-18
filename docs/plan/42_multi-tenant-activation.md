@@ -1555,33 +1555,22 @@ through `internal/api/apitest_test.go`: the constant at `:22`, `newPoolWithKey` 
 above all `newTestServer` at `:60`, which **453** call sites use. *Counting rule:
 `grep -rc "newTestServer(t)" internal/api/*_test.go`, summed.*
 
-**The deployment surfaces carry the two names in this slice** (#615). The pair starts to matter
-in slice 6, where an operator maps an IdP group to a new workspace's id and restarts (§7.6).
-Without deployment support, that step would mean editing the chart or the compose file.
+**The deployment surfaces carry the two names in this slice** (#615). Slice 6's operator step
+(§7.6) sets them, and without this slice's plumbing the only way to do so would be to edit the
+chart or the compose file. One name set without the other is a startup error, as an empty
+`IDENTITY_ROLE_MAP` is.
 
-`ConfigFromEnv` refuses either name set without the other, as it refuses an empty
-`IDENTITY_ROLE_MAP`. A claim with no map would resolve every human to no workspace, and a map
-with no claim would never be read. Like the other identity variables, both are read only while
-`IDENTITY_MODE` is set, and an empty value counts as unset. So setting neither keeps today's
-behavior on every surface.
-
-- **compose** forwards `${IDENTITY_CLAIM_WORKSPACES:-}` and `${IDENTITY_WORKSPACE_MAP:-}` to
-  `controlplane`. It does not forward them to `modelgateway`: this plan scopes nothing in the
-  gateway, and a half pair then stops the control plane alone. `.env.example` documents the pair
-  in its own commented block after the seven SSO lines, so "uncomment all seven" still gives the
-  one-workspace bundled stack. The block says that the two move together, and that one alone
-  stops the control plane at boot.
+- **compose** forwards both wherever it forwards the role pair, as Helm's shared
+  `map.identityEnv` does. `.env.example` documents them outside the block that "uncomment all
+  seven" enables, so the bundled one-workspace stack stays as it is.
 - **Helm** gains `identity.claims.workspaces` and `identity.workspaceMap`, a map from claim value
-  to workspace id, encoded like `identity.roleMap` and rendered by `map.identityEnv`. While
-  `identity.mode` is set, the render fails on a non-string id, on a `,` or `=` in a claim value
-  or an id, and on one value set without the other, where an empty map counts as unset. The
-  first two are encoding faults only the chart can see. The third is a boot error that the chart
-  refuses early, as it refuses an empty role map.
-- **GCP staging** gets the pair as a commented-out placeholder beside the role pair in
-  `deploy/gcp/staging-values.yaml`. It stays commented out because staging runs one workspace:
-  a configured claim that resolves to no live workspace leaves every human with no authority
-  (§6.2). The placeholder's comment notes that a single-valued claim, such as the email that
-  staging maps roles from, gives each person one workspace.
+  to workspace id. The chart renders and refuses them the way it does `identity.roleMap`, except
+  that the pair may be left out entirely: one without the other fails the render. The `helm` CI
+  job tests them beside the role map's cases.
+- **GCP staging** gets a commented-out placeholder beside the role pair, because staging runs one
+  workspace.
+
+The operator docs that describe the role pair describe this pair too.
 
 **Tests.** Per-lane scope derivation, five cases, through a test-only echo route — including
 that the environment key tracks its *environment's* row and not `environment_keys`' own
@@ -1604,11 +1593,6 @@ extended from 3 tables to all 14** — widening the table loop at `:641`, which 
 test and the only one it takes: its assertion is unchanged, because it is the
 upgrade-compatibility pin and the pin that `org_id`/`project_id` stay constant. Enforcement is a
 separate suite beside it.
-· `ConfigFromEnv` refuses either workspace name set alone. · The
-`helm` job in `.github/workflows/ci.yml`, rendering with `identity.mode` set, checks that both
-names reach the control plane with their values and that `IDENTITY_WORKSPACE_MAP` renders as
-the encoding the binary parses. Each refusal fails the render: a `,` or `=` on either side of an
-entry, a non-string id, and each half of the pair set alone.
 
 **Docs.** `changelog.d/` · STATE.md (plan enters `in-progress`) · plan frontmatter →
 `in-progress` · README.md's development/configuration notes and the `internal/identity` package
@@ -1667,11 +1651,6 @@ org/workspace/project as the reserved keys with single-tenant defaults, so "plat
 frozen at `default`, no reference counterpart at any level" belongs *there*, and slice 4's
 re-argument of the same parenthetical is the other half of one entry's rewrite — one divergence,
 one entry, which is the registry's own discipline.
-**Deployment docs** document the workspace pair beside the role pair: `deploy/compose/.env.example`
-and `deploy/compose/README.md`, the chart's README and `values.yaml`, the `iap_members`
-description in `deploy/gcp/environment/variables.tf`, and the role-mapping entry in
-`docs/self-hosted-security.md`. Where `values.yaml` and the chart README say what the chart
-refuses, they name every refusal it makes after this slice.
 
 ### 7.2 Slice 2 — the guard, and the five stamping inserts it catches
 
