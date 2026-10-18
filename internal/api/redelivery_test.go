@@ -171,8 +171,9 @@ func TestARedeliveredToolResultIsANoOp(t *testing.T) {
 
 // TestARedeliveredResultBesideOtherEvents: the recording sent each result
 // alone, so a batch that carries one beside other events is this platform's
-// reading of it (docs/DIVERGENCES.md, INFERRED): the repeat is dropped and the
-// rest of the send is processed as if it had come alone.
+// reading of it (docs/DIVERGENCES.md, INFERRED): the repeat is dropped, with a
+// system.message that trails it, and the rest of the send is processed, a
+// refusal still naming its event by the index the client sent.
 func TestARedeliveredResultBesideOtherEvents(t *testing.T) {
 	t.Run("the rest of the send is processed", func(t *testing.T) {
 		s := newTestServer(t)
