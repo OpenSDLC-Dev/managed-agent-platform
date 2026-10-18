@@ -514,8 +514,10 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 // handed on for storage unchanged, so what an update merges against is what the
 // client sent; the response is rendered from them rather than being them, since
 // renderAgent resolves the toolset configuration first (toolset.Materialize).
-func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
-	return parseToolsWith(raw, false, "")
+// prefix opens the path a reserved custom tool name is refused under, as the
+// session route names it.
+func parseTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
+	return parseToolsWith(raw, false, prefix)
 }
 
 // parseAgentTools is parseTools on agent create and update, which answer a
@@ -523,9 +525,8 @@ func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
 // refusing (toolset.ConfigError) in its words, the path opened by prefix — as
 // agentUpdatePath does on update — and the entry's tools[] index (2026-09-02
 // batch2 `agent.create.config-unknown-key`, `.config-type-only`,
-// `.config-name-type-mismatch`, #540), and which reserve the mcp__ prefix
-// against a custom tool's name (#573). A session override's tools keep
-// parseTools' sentences and rules, the reference's being unrecorded there.
+// `.config-name-type-mismatch`, #540). A session override's tools keep
+// parseTools' sentences, the reference's being unrecorded there.
 func parseAgentTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 	return parseToolsWith(raw, true, prefix)
 }
@@ -565,12 +566,14 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 			// The frame an MCP tool's model-facing name is composed in is
 			// reserved, in the reference's words (2026-09-03 batch2
 			// `agent.create.mcp-name-collision`; #573), so no custom tool can
-			// take an MCP tool's name. Only the agent routes: neither session
-			// route (a create's tool override, a mid-session agent.tools
-			// update) was probed, and for them, as for an agent stored before
-			// this check, the brain still settles a contested name by
-			// declaration order.
-			if agentRoute && strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
+			// take an MCP tool's name. Recorded on agent create, it binds every
+			// route that takes tools[] from a request, the path opened as that
+			// route opens it: a session's override or mid-session update would
+			// otherwise hand a custom tool the name, and the brain gives a
+			// custom tool the name over any MCP tool (resolveTools). A stored
+			// tools[] is never parsed again, so an agent stored before this
+			// check still resolves.
+			if strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
 				return nil, errInvalid("%stools.%d.custom.name: custom tool name %q uses reserved MCP tool prefix",
 					prefix, i, probe.Name)
 			}

@@ -395,10 +395,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				// Nothing here needs noteLabel: this branch is past
 				// mcpNameFits, so the composed name is at most
 				// maxModelToolName and both halves of it are shorter still. A
-				// contest is not only with the agent's own tools — two servers
-				// can compose to one string (a server named a__b with tool c,
-				// and a server named a with tool b__c), as can two names that
-				// sanitize to one — and declaration order settles all of them.
+				// contest is not only with the agent's own tools, which are
+				// laid down first and so always win — two servers can compose
+				// to one string (a server named a__b with tool c, and a server
+				// named a with tool b__c), as can two names that sanitize to
+				// one — and between MCP tools declaration order settles it.
 				notes.add("MCP tool %q on server %q was not offered: another tool is already named %q",
 					r.Name, probe.Server, name)
 				continue

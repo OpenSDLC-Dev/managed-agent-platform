@@ -417,7 +417,9 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		}
 	}
 	if raw, ok := overrides["tools"]; ok {
-		items, err := parseTools(raw)
+		// The path is opened as the override's recorded system refusal
+		// opens it, above.
+		items, err := parseTools(raw, "agent.agent_with_overrides.config.")
 		if err != nil {
 			return snap, err
 		}
@@ -1223,7 +1225,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		for key, val := range patch {
 			switch key {
 			case "tools":
-				items, err := parseTools(val)
+				items, err := parseTools(val, "agent.") // the field's path in this body
 				if err != nil {
 					return nil, err
 				}
