@@ -1990,6 +1990,30 @@ ready for. What substantiates the `self_hosted` path, all merged:
 Together these cover the acceptance's substance; the `ant beta:worker poll` transcript is the one
 artifact the deferred live run would add, tracked as #495 with the harness ready for it.
 
+### Follow-up acceptance — 2026-10-18 (#495) — passed
+
+The deferred live run is in [managed-agents-wire-recordings, `2026-10-18-platform-495`](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/tree/main/2026-10-18-platform-495)
+(recordings [PR #31](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/pull/31)).
+The capture harness ran this platform at `f3d54b0` in an isolated Compose stack with fresh
+Postgres, MinIO and OpenBao volumes. A real `ant beta:worker poll` v1.26.1 (SDK v1.66.0)
+served a `self_hosted` session. The brain was configured for the live MiniMax-M3
+Anthropic-protocol route.
+
+- The poll's work item named the Session and carried a base64url JSON `secret` with a `wtk_`
+  `sessions_token`. The capture retains its type and length, but redacts the token bytes.
+- The worker downloaded two memories to `/mnt/memory/rec30-notes`. A live filesystem snapshot
+  captured the `.anthropic-memory-store` marker and both baseline files. The model then called
+  `read` and `write`; the worker posted both successful tool results.
+- At run end, the worker updated `/log/today.md` with the previous head's SHA-256 as its
+  precondition. The update returned 200. The version list shows the new content and hash as a
+  `modified` version created by `session_actor` for that Session.
+
+The offline verifier cross-checks the poll, mount, tool results, hashes, version and cleanup.
+The temporary environment key was revoked, the created resources were archived, and the
+isolated Compose containers and volumes were removed. The pre-existing shared stack remained
+running. The events SSE body and upstream model HTTP traffic were not captured; the recorded
+Session event list supplies the completed tool and model-request history.
+
 ## BYOC memory (plan 36 slice 6, #494) — review-hardening record
 
 Two rounds past the verifier's first PASS, both judged against the reference worker
