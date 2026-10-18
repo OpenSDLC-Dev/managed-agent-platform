@@ -163,11 +163,6 @@ func modelIDs(up profile.Protocol, b []byte) ([]string, bool) {
 // to wait out, so a vendor that sends it a byte at a time is cut off too.
 var testTimeout = 30 * time.Second
 
-// errBound is the cause the bound cuts a test's attempt off with
-// (call.within), which net/http hands back as the request's error: it names
-// the bound apart from any other deadline, a client's own among them.
-var errBound = errors.New("the deployment test's bound passed")
-
 // A test is written to the ledger under these: no API key made it, and the
 // route is the test's, so Usage can tell it from an agent's call.
 const (
@@ -243,7 +238,11 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	}
 	status, errType := out.status, out.errType
 	switch {
-	case f != nil && errors.Is(f.err, errBound):
+	// The bound cut the attempt off: its error says a deadline did, and the
+	// time says it was the bound's, not a client's (Config.Client). A cause
+	// set on the bound would not name it: net/http's HTTP/2 transport hands
+	// back ctx.Err() without it (h2_bundle.go, go1.26.8).
+	case f != nil && errors.Is(f.err, context.DeadlineExceeded) && latency >= bound:
 		status, errType = http.StatusGatewayTimeout, "timeout_error"
 		res.Error = &admin.ProbeError{Type: errType, Message: fmt.Sprintf("the vendor did not answer in full within the test's bound of %s", bound)}
 	case f != nil:

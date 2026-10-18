@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -446,6 +447,33 @@ func TestADeploymentTestIsBoundedWhileTheVendorDribbles(t *testing.T) {
 		if rows := e.ledger(); len(rows) != i+1 || rows[0].Status != c.ledger || rows[0].ErrorType != "timeout_error" {
 			t.Errorf("%s: ledger = %+v", c.d.UpstreamModel, rows)
 		}
+	}
+}
+
+// Over HTTP/2, whose transport hands back a deadline without any cause set on
+// it, the bound is named all the same.
+func TestADeploymentTestIsBoundedOverHTTP2(t *testing.T) {
+	defer modelgateway.SetProbeTimeouts(time.Minute, 300*time.Millisecond)()
+	e := newEnv(t)
+	var proto atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		proto.Store(int32(r.ProtoMajor))
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	p := e.provider(srv.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	d := e.deployment(p, "up-model")
+	e.startProbing(func(c *modelgateway.Config) { c.Client = srv.Client() })
+
+	got, _ := e.test(d.ID, "")
+	if len(got) != 1 || got[0].OK || got[0].Error.Type != "timeout_error" || proto.Load() != 2 {
+		t.Errorf("over HTTP/%d: %s", proto.Load(), encodeJSON(got))
 	}
 }
 

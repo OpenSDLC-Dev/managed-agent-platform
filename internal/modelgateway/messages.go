@@ -681,7 +681,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	ctx := context.WithoutCancel(r.Context())
 	if c.within > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeoutCause(ctx, c.within, errBound)
+		ctx, cancel = context.WithTimeout(ctx, c.within)
 		defer cancel()
 	}
 	key, err := h.open(ctx, at.Credential)

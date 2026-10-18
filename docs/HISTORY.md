@@ -73,13 +73,13 @@ Two rows changed from #953's reading. Gitee lists its public catalogue to a requ
 
 **The run.** `RUN_LIVE_MODELGATEWAY=deepseek,minimax,moonshot,gitee,zhipu,gemini go test -run TestLiveProbes` passed all 23 subtests in 18 seconds. Each vendor's check listed models on each protocol its profile records a listing for, with the tier's chat models among them. On DeepSeek's and Moonshot's Anthropic endpoints it answered from the profile, with no status. Each listing refused the made-up key, and the check reported each refusal's status and message. MiniMax's and Zhipu's Anthropic hosts took `limit=1000`. Each of the 17 tests answered 200. Fourteen tested the eight chat models: on the Anthropic endpoint by passthrough wherever the tier's key serves one, and on the OpenAI endpoint through the conversion. Three tested the vectors deployments. Each chat test reported one to four output tokens, and the ledger held one test row for each test.
 
-**Review.** Codex (`gpt-6.1-sol`, `xhigh`) reviewed the branch four times, and `/code-review` (`claude-opus-5-5`, `xhigh`) once. The fixes:
+**Review.** Codex (`gpt-6.1-sol`, `xhigh`) reviewed the branch five times, and `/code-review` (`claude-opus-5-5`, `xhigh`) once. The fixes:
 
 - A vendor's text reached a result unredacted in two places: a check's error type, and the `finishMessage` a failed Gemini conversion quotes. The second also reached a caller's 502, so the conversion's error is now redacted on every attempt.
 - A test of a converted attempt reported the error type the gateway converts to, not the vendor's own.
 - A vendor that sends one byte at a time kept a test open past its bound, because the stall timeout restarts on each byte. A test is now bounded as a whole, and its credentials are tested at once.
 - A refusal cut at its 4 KiB bound was quoted in a test. A key a JSON string escapes is not matched once the cut leaves the JSON undecodable, so a cut refusal is no longer quoted.
-- A failure was named the test's timeout by the time it took. It is now named so only by the cause the bound's deadline carries, which net/http hands back as the error, so neither a whole answer near the bound nor a client's own timeout reads as one.
+- A failure was named the test's timeout by the time it took. It is now named so by its cause, a deadline, and only once the bound has passed. So a whole answer near the bound does not read as one, nor does a client's own timeout that returns before the bound.
 
 Declined, with the evidence:
 
@@ -87,6 +87,7 @@ Declined, with the evidence:
 - One handler for the gateway and the prober. It needs a two-phase construction to break the cycle between the admin API and the gateway. The second handler costs a key cache that only probes fill, and a client pool idle between them.
 - Atomic probe timeouts. A probe reads them only inside an admin request that the test waits for in full.
 - Reporting a timeout for a refusal whose body is still arriving at the bound. Its status line is already a whole refusal, which is what a call meets: a 502 that tries the next credential.
+- Naming the bound by a cause set on its own deadline. net/http's HTTP/2 transport hands back `ctx.Err()` without the cause (`h2_bundle.go`, go1.26.8), and the gateway's own client sets no timeout for the time check to mistake for the bound.
 - One `request_id` for each ledger row. The ledger pages by its own id, and `request_id` is not unique. The shared id ties a test's rows to the admin request that made them.
 
 ---
