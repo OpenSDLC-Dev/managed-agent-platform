@@ -121,9 +121,13 @@ func TestCustomWaitBatchAndConcurrentCompletion(t *testing.T) {
 			if processed != 2 {
 				t.Fatalf("processed=%d", processed)
 			}
+			// A repeat is the reference's no-op (#58): accepted, never scheduled.
 			code, _ := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{customReply(ids[1])}})
-			if code != http.StatusBadRequest || s.liveWork(sid, queue.ModelTurn) != 1 {
-				t.Fatal("duplicate reply changed scheduling")
+			if code != http.StatusOK || s.liveWork(sid, queue.ModelTurn) != 1 {
+				t.Fatalf("duplicate reply = %d, or it changed scheduling", code)
+			}
+			if n := countEventType(t, s, sid, "user.custom_tool_result"); n != 2 {
+				t.Fatalf("results on the log = %d after a duplicate reply, want 2", n)
 			}
 		})
 	}
@@ -193,13 +197,18 @@ func TestCustomWaitMessagesAndCancellation(t *testing.T) {
 			if s.liveWork(sid, queue.ModelTurn) != 0 {
 				t.Fatal("cancellation resumed model")
 			}
+			// The interrupt answered the call, so a late reply is the
+			// reference's no-op (#58); an archived session refuses it first.
 			code, _ := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": []any{customReply(ids[0])}})
-			wantStatus := "idle"
+			wantCode, wantStatus := http.StatusOK, "idle"
 			if archive {
-				wantStatus = "terminated"
+				wantCode, wantStatus = http.StatusBadRequest, "terminated"
 			}
-			if code != http.StatusBadRequest || s.sessionStatus(sid) != wantStatus {
-				t.Fatal("late reply revived stopped session")
+			if code != wantCode {
+				t.Errorf("late reply = %d, want %d", code, wantCode)
+			}
+			if got := s.sessionStatus(sid); got != wantStatus {
+				t.Fatalf("late reply revived stopped session: status %q, want %q", got, wantStatus)
 			}
 		})
 	}

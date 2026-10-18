@@ -31,7 +31,7 @@ import (
 // the six delegation tools the settlement answers in the commit that emits
 // them (plan 35 decision 6). The second half is defence in depth — a
 // delegation call is answered before any client can see it, so a forged
-// answer is already refused as a duplicate — and it is worth having anyway,
+// answer is already dropped as a repeat (#58) — and it is worth having anyway,
 // because the log is append-only and a forged child report is a report the
 // coordinator would act on. It must never cover the sandbox six: a
 // self_hosted worker answering those is the BYOC pull protocol.
@@ -138,13 +138,16 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, errInvalid("%s", err)
 	}
 	// A tool result must answer an outstanding tool call. The log is
-	// append-only: accepting a result with a wrong, unknown, or duplicate
-	// reference would poison every future replay with a request the model
-	// protocol rejects, permanently wedging the session — so bad references
-	// are the client's 400, not the session's funeral. platformExecuted marks
-	// the calls no client may answer, which closes the scan-to-commit
-	// double-answer window on self_hosted (#222).
-	if err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted); err != nil {
+	// append-only: accepting a result with a wrong or unknown reference would
+	// poison every future replay with a request the model protocol rejects,
+	// permanently wedging the session — so bad references are the client's
+	// 400, not the session's funeral. platformExecuted marks the calls no
+	// client may answer, which closes the scan-to-commit double-answer window
+	// on self_hosted (#222). A result for a call already answered is the
+	// reference's no-op instead (#58): repeats holds where such results sit
+	// in the batch, and they are dropped below.
+	repeats, err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted)
+	if err != nil {
 		return nil, sendCheckError(err)
 	}
 	// A confirmation must name a tool use still awaiting one; like a tool
@@ -170,6 +173,37 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	scoped, err := events.RouteInbound(ctx, tx, domain.ID(id), newEvents)
 	if err != nil {
 		return nil, sendCheckError(err)
+	}
+	// The results for calls already answered leave the batch here, after the
+	// checks above, which name an event by its place in the batch as sent, and
+	// before anything below reads the batch to decide what the send does. A
+	// system.message rides on the event it follows (NormalizeInbound), so one
+	// trailing a dropped result goes with it: a retried batch stays a no-op,
+	// and what is left could have been sent alone. sent keeps each remaining
+	// event's place for the one check below that names one. A send left with
+	// nothing is the reference's 200 {"data":[]}, and the deferred rollback
+	// leaves the session as it was.
+	var sent []int
+	var dropped []events.NewEvent
+	if len(repeats) > 0 {
+		drop := make([]bool, len(newEvents))
+		for _, i := range repeats {
+			drop[i] = true
+		}
+		var kept []events.NewEvent
+		var keptScoped []bool
+		for i, ev := range newEvents {
+			if drop[i] || (ev.Type == domain.EventSystemMessage && i > 0 && drop[i-1]) {
+				dropped = append(dropped, ev)
+				continue
+			}
+			kept, keptScoped, sent = append(kept, ev), append(keptScoped, scoped[i]), append(sent, i)
+		}
+		if len(kept) == 0 {
+			logDropped(ctx, id, dropped)
+			return map[string]any{"data": []any{}}, nil
+		}
+		newEvents, scoped = kept, keptScoped
 	}
 
 	// Route input per thread, then settle its ordered tool flow under the same
@@ -250,6 +284,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		}
 		reachesPrimary := func(i int) bool { return !scoped[i] || newEvents[i].ThreadID == "" }
 		if err := events.CheckWhileAwaiting(awaited, newEvents, reachesPrimary); err != nil {
+			var wa *events.WhileAwaitingError
+			if sent != nil && errors.As(err, &wa) {
+				wa.Index = sent[wa.Index]
+			}
 			return nil, errInvalid("%s", err)
 		}
 		primaryFlow = flow
@@ -767,6 +805,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	logDropped(ctx, id, dropped)
 	// After the commit: a status change that rolled back did not happen. These are
 	// the production transitions — idle→running (a user.message waking a session,
 	// a confirmation clearing the last gate) and running→idle (an interrupt
@@ -790,6 +829,17 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		data = append(data, wire)
 	}
 	return map[string]any{"data": data}, nil
+}
+
+// logDropped tells the operator which results a send that succeeded dropped
+// as repeats (#58): its 200 says nothing of them.
+func logDropped(ctx context.Context, sessionID string, dropped []events.NewEvent) {
+	if len(dropped) == 0 {
+		return
+	}
+	slog.InfoContext(ctx, "session events send: dropped results for calls already answered",
+		"request_id", requestIDFrom(ctx), "session_id", sessionID,
+		"tool_use_ids", events.ToolResultRefs(dropped), "dropped_events", len(dropped))
 }
 
 // sendCheckError answers the refusals of the checks a send runs against the
