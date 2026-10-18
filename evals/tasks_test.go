@@ -122,9 +122,10 @@ func memoryWrite() Task {
 // old wording's 10 failed attempts, retries included, were of two kinds:
 //
 //   - 5 spawned nothing, which is the miss the sentence is for;
-//   - 5 spawned both agents but answered with a code missing or miscopied. In
-//     the one kept transcript of this kind, the herald ended three turns
-//     without reporting, and the platform told the coordinator so each time.
+//   - 5 spawned both agents but answered with one or both codes missing or
+//     miscopied. In the one kept transcript of this kind, the herald ended
+//     three turns without reporting, and the platform told the coordinator so
+//     each time.
 //
 // Nothing shows that the sentence prevents the second kind, so its absence from
 // the new wording's 20 runs may be chance. As with repoAnswer's wording, this is
