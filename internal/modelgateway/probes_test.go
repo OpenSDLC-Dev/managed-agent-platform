@@ -432,15 +432,41 @@ func TestADeploymentTestIsBoundedWhileTheVendorDribbles(t *testing.T) {
 	embed := e.deployment(onOpenAI(e, "openai-generic", f.URL), "embedder", func(d *store.Deployment) { d.Kind = store.KindEmbedding })
 	e.startProbing()
 
-	for i, d := range []store.Deployment{chat, embed} {
+	// The ledger keeps what a call records: a 504, and for a vectors answer,
+	// relayed as it came, the 200 it began with.
+	for i, c := range []struct {
+		d      store.Deployment
+		ledger int
+	}{{chat, 504}, {embed, 200}} {
 		start := time.Now()
-		got, _ := e.test(d.ID, "")
+		got, _ := e.test(c.d.ID, "")
 		if len(got) != 1 || got[0].OK || *got[0].Status != 200 || got[0].Error.Type != "timeout_error" || time.Since(start) > 3*time.Second {
-			t.Errorf("%s, after %s: %s", d.UpstreamModel, time.Since(start), encodeJSON(got))
+			t.Errorf("%s, after %s: %s", c.d.UpstreamModel, time.Since(start), encodeJSON(got))
 		}
-		if rows := e.ledger(); len(rows) != i+1 || rows[0].Status != 504 || rows[0].ErrorType != "timeout_error" {
-			t.Errorf("%s: ledger = %+v", d.UpstreamModel, rows)
+		if rows := e.ledger(); len(rows) != i+1 || rows[0].Status != c.ledger || rows[0].ErrorType != "timeout_error" {
+			t.Errorf("%s: ledger = %+v", c.d.UpstreamModel, rows)
 		}
+	}
+}
+
+// A deadline that is not the test's own, a client's timeout here, is not
+// reported as the test's bound.
+func TestADeploymentTestNamesOnlyItsOwnBound(t *testing.T) {
+	e := newEnv(t)
+	f := newFake(t, func(_ http.ResponseWriter, r *http.Request, _ fakeCall) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+	p := e.provider(f.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	d := e.deployment(p, "up-model")
+	e.startProbing(func(c *modelgateway.Config) { c.Client = &http.Client{Timeout: 200 * time.Millisecond} })
+
+	got, _ := e.test(d.ID, "")
+	if len(got) != 1 || got[0].OK || got[0].Error.Type != "api_error" || !strings.Contains(got[0].Error.Message, "Client.Timeout") {
+		t.Errorf("results = %s", encodeJSON(got))
 	}
 }
 

@@ -238,9 +238,9 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	}
 	status, errType := out.status, out.errType
 	switch {
-	// The bound cut the attempt off: its error says so, or, for an answer
-	// relayVectors cut off, which keeps no error, the time does.
-	case f != nil && errors.Is(f.err, context.DeadlineExceeded), f == nil && errType != "" && latency >= bound:
+	// The bound cut the attempt off: its error says a deadline did, and the
+	// time says it was the bound's, not a client's (Config.Client).
+	case f != nil && errors.Is(f.err, context.DeadlineExceeded) && latency >= bound:
 		status, errType = http.StatusGatewayTimeout, "timeout_error"
 		res.Error = &admin.ProbeError{Type: errType, Message: fmt.Sprintf("the vendor did not answer in full within the test's bound of %s", bound)}
 	case f != nil:
