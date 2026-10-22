@@ -263,7 +263,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"directory", sandbox.ErrIsDirectory, "not a regular file"},
 		{"non-regular", sandbox.ErrNotRegularFile, "not a regular file"},
 		{"not a directory", sandbox.ErrNotDirectory, "not a directory"},
-		{"not replaceable", sandbox.ErrNotReplaceable, "cannot be replaced"},
+		{"not replaceable", sandbox.ErrNotReplaceable, "only replace a file whole"},
 		{"too large", sandbox.ErrFileTooLarge, "limit"},
 		// The unwritable-target refusal carries the sandbox's own strerror
 		// text, normalized the way the reference's fsErrorMessage table is:
@@ -292,11 +292,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 				if !res.IsError || !strings.Contains(res.Content, tc.want) {
 					t.Fatalf("%s: result = %+v, want an error result mentioning %q", tool.name, res, tc.want)
 				}
-				// A session may have bash disabled, and these results reach
-				// it all the same (#634).
-				if strings.Contains(res.Content, "bash") {
-					t.Errorf("%s: result %q advises bash", tool.name, res.Content)
-				}
+				wantNoBash(t, tool.name, res)
 			}
 
 			// The write side answers the same way. Two of these sentinels reach the
@@ -310,6 +306,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 			if !res.IsError || !strings.Contains(res.Content, tc.want) {
 				t.Fatalf("write: result = %+v, want an error result mentioning %q", res, tc.want)
 			}
+			wantNoBash(t, "write", res)
 
 			// And through `edit`, whose write follows a read that worked: the file it
 			// found is not the file it can replace.
@@ -321,7 +318,17 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 			if !res.IsError || !strings.Contains(res.Content, tc.want) {
 				t.Fatalf("edit: result = %+v, want an error result mentioning %q", res, tc.want)
 			}
+			wantNoBash(t, "edit", res)
 		})
+	}
+}
+
+// wantNoBash fails a file-tool result that advises bash: a session may have
+// bash disabled, and these results reach it all the same (#634).
+func wantNoBash(t *testing.T, tool string, res toolset.Result) {
+	t.Helper()
+	if strings.Contains(strings.ToLower(res.Content), "bash") {
+		t.Errorf("%s: result %q advises bash", tool, res.Content)
 	}
 }
 
