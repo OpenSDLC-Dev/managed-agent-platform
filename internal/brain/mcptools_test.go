@@ -388,9 +388,9 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 
 // Flattening two names into one string is not injective: a server named a__b
 // offering c and a server named a offering b__c compose to mcp__a__b__c. The
-// contest is settled the same way as one with a custom tool — declaration
-// order, with the loser noted — rather than by escaping a separator the
-// reference never publishes.
+// contest is settled by declaration order, with the loser noted, rather than
+// by escaping a separator the reference never publishes. A contest with a
+// custom tool is not: the agent's own tools are laid down first.
 func TestTwoServersCanContestOneComposedName(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"a__b"}`),
