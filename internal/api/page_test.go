@@ -62,10 +62,9 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 	// depth; at depth=1 it pages by path (TestMemoryListPrefixAndDepth). The
 	// nested ones carry a real parent because most of those handlers resolve
 	// it before they reach the cursor, so a made-up id would answer 404 and
-	// prove nothing about the guard. The
-	// threads list is the exception, checking the cursor first; it takes a real
-	// session anyway rather than making the table depend on which order a
-	// handler happens to use.
+	// prove nothing about the guard. The threads list is the exception,
+	// checking the cursor first; it takes a real session anyway rather than
+	// making the table depend on which order a handler happens to use.
 	for _, path := range []string{
 		"/v1/agents",
 		"/v1/environments",

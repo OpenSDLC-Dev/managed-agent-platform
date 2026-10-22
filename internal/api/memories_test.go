@@ -719,7 +719,8 @@ func TestMemoryList(t *testing.T) {
 		t.Errorf("paged walk = %v, want %v", seen, newestFirst)
 	}
 	// A memory written mid-walk is newer than every cursor, so the walk's
-	// remaining pages neither repeat a memory nor take the new one.
+	// remaining pages neither repeat a memory nor take the new one. That holds
+	// when no create waits on the store lock (#975).
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2", nil)
 	if status != http.StatusOK {
 		t.Fatalf("first page: status %d (%v)", status, body)
@@ -812,7 +813,7 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	store := createMemoryStore(t, s, "tree")
 	for _, path := range []string{
 		"/100%/x", "/1000/x", "/a_b/x", "/acb/x",
-		"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md", "/notes-archive/old.md",
+		"/notes/deep/b.md", "/notes/a.md", "/notes/deep/c.md", "/notes-archive/old.md",
 		"/z.md",
 	} {
 		createMemory(t, s, store, path, "x")
@@ -827,10 +828,11 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 
 	// Segment alignment: /notes/ must not reach /notes-archive/. Without a
-	// depth the list stays newest first under a prefix too (2026-09-02
-	// free_batch1 idx 15 `mem.list.prefix/x/`).
+	// depth the list stays newest first under a prefix too. The three were
+	// written out of path order, so neither path order nor its reverse gives
+	// this answer.
 	if got := list(t, "path_prefix=%2Fnotes%2F"); !slices.Equal(got,
-		[]string{"/notes/deep/c.md", "/notes/deep/b.md", "/notes/a.md"}) {
+		[]string{"/notes/deep/c.md", "/notes/a.md", "/notes/deep/b.md"}) {
 		t.Errorf("path_prefix=/notes/ = %v", got)
 	}
 	// Literal metacharacters: neither `_` nor `%` is a wildcard. As patterns,
@@ -854,6 +856,11 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx", nil)
 	wantInvalidRequest(t, "a missing store", status, body, unslashed)
+	// The depth=0 refusal also comes before the store is looked up, another
+	// order docs/DIVERGENCES.md registers as inferred.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx%2F&depth=0", nil)
+	wantInvalidRequest(t, "depth=0 beside a prefix on a missing store", status, body,
+		"depth: must be greater than or equal to 1")
 	// An omitted prefix means "/", which is every path, and so does one
 	// supplied empty, which the console sends for a cleared box. The
 	// unrecorded "segment-aligned" neighbours still match literally. depth=0
@@ -1105,12 +1112,12 @@ func TestMemoryMethodNotAllowed(t *testing.T) {
 // platform runs against, and no test here can prove that: the suite's
 // postgres:16-alpine is musl, which sorts en_US.utf8 as bytes anyway, so a
 // page reordered on Cloud SQL's glibc would still come back correct here.
-// Two things ARE checkable, and
-// together they are why listMemories can rely on a bare `ORDER BY key`. The
-// column's own collation is "C" — the migration says so, and this asks the
-// database rather than the file. And an explicitly collated expression keeps
-// that collation out through a subquery, which is the derivation rule the list
-// query leans on when it collates the rolled key once, inside.
+// Two things ARE checkable, and together they are why listMemories can rely
+// on a bare `ORDER BY key`. The column's own collation is "C" — the migration
+// says so, and this asks the database rather than the file. And an explicitly
+// collated expression keeps that collation out through a subquery, which is
+// the derivation rule the list query leans on when it collates the rolled key
+// once, inside.
 func TestMemoryPathsSortUnderTheCCollation(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "collation")

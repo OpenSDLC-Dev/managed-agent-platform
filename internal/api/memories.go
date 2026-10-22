@@ -751,7 +751,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	//
 	// Without a depth the list is newest first, as the reference was recorded
 	// answering (2026-09-02 free_batch1 `mem.list.noprefix`; #549), with id as
-	// the tiebreak the memory-versions list documents for itself.
+	// the tiebreak the memory-versions list documents for itself. created_at is
+	// still the creating transaction's now(), so a create that waited on the
+	// store lock can list behind a row that committed before it (#975).
 	//
 	// At depth=1 the remainder after the prefix decides each row: no "/" in it
 	// and the row is a memory at this level; a "/" and the row rolls up to the
@@ -841,9 +843,11 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodePathCursor(lastKey)
+		var c string
 		if depth == 0 {
 			c = encodeTimeCursor(dirNext, last.createdAt, last.id)
+		} else {
+			c = encodePathCursor(lastKey)
 		}
 		out.NextPage = &c
 	}
