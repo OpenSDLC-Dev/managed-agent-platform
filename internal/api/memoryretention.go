@@ -114,10 +114,11 @@ func StartMemoryRetention(ctx context.Context, pool *pgxpool.Pool) {
 // its memory, unless the clock steps backwards between them (#411). A row
 // written before #552, or by an older binary during a rolling deploy, carries
 // its transaction's start, and a delete that waited on the lock can still
-// stamp its marker before a later-committed `modified`. The listable promise
-// does not depend on it either way. The reference's own wording, that versions "persist after
-// the memory is deleted", is about the delete not cascading rather than about
-// exemption from retention, and its retention rule names no exception. A
+// stamp its marker before a `modified` that began later but committed first.
+// The listable promise does not depend on it either way. The reference's own
+// wording, that versions "persist after the memory is deleted", is about the
+// delete not cascading rather than about exemption from retention, and its
+// retention rule names no exception. A
 // redacted version is no exception either, so the record of who erased what
 // ages out with the row it annotates.
 //
