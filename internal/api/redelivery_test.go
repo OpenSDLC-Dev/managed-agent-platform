@@ -171,15 +171,23 @@ func TestARedeliveredToolResultIsANoOp(t *testing.T) {
 
 // The interrupt's answer is the call's first, so the result a self_hosted
 // worker posts once the interrupt has stopped its call is the same no-op. The
-// reference was recorded answering exactly this send
-// (managed-agents-wire-recordings 2026-10-18-selfhost-worker-reconnect,
-// worker-wire/0009.json; the interrupt's agent.tool_result stayed the call's
-// only result, setup.json idx 11).
+// reference was recorded answering this send (managed-agents-wire-recordings
+// 2026-10-18-selfhost-worker-reconnect, worker-wire/0009.json; the
+// interrupt's agent.tool_result stayed the call's only result, setup.json
+// idx 11). The worker's hold on the work is not modelled: the reference kept
+// its item active through the interrupt, and here the interrupt stops it (the
+// work items entry in docs/DIVERGENCES.md); the post does not depend on it.
 func TestAWorkersResultAfterAnInterruptIsANoOp(t *testing.T) {
 	s := newTestServer(t)
 	sid := selfHostedSession(t, s)
-	callID := suspendedOnTool(t, s, sid, domain.EventAgentToolUse)
+	// The recorded call: an always_ask bash call the client allowed, for the
+	// worker to run.
+	callID := appendToolUseWithPerm(t, s, sid, "bash", "ask")
+	sendEvents(t, s, sid, map[string]any{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": callID})
 	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	if n := countEventType(t, s, sid, "agent.tool_result"); n != 1 {
+		t.Fatalf("agent.tool_result on the log = %d, want the interrupt's alone", n)
+	}
 	if got := lastEventOfType(t, s, sid, "agent.tool_result")["tool_use_id"]; got != callID {
 		t.Fatalf("the interrupt's agent.tool_result answers %v, want %v", got, callID)
 	}
