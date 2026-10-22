@@ -732,18 +732,33 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 			// `mem.list.depth2`; #540), shared by the other refused values.
 			return nil, errInvalid("depth must be 0 or 1 when provided")
 		}
+		// The reference's words for depth=0 beside a path_prefix (2026-09-02
+		// free_batch1 `mem.list.prefix/x/.depth0` and `mem.list.prefix/.depth0`;
+		// #549). Without one it was never recorded, and the documented "`0`
+		// (or omitted)" stands; one sent empty reads as omitted, as above.
+		if n == 0 && q.Get("path_prefix") != "" {
+			return nil, errInvalid("depth: must be greater than or equal to 1")
+		}
 		depth = n
 	}
 	if err := s.checkMemoryStore(ctx, storeID); err != nil {
 		return nil, err
 	}
 
-	// One query for both depths (decision 5). The remainder after the prefix
-	// decides each row: no "/" in it and the row is a memory at this level;
-	// a "/" and — under depth=1 — the row rolls up to the first segment below
-	// the prefix, which DISTINCT ON collapses to one memory_prefix item. The
-	// prefix match is a literal left(), never LIKE, for occupiedBy's reason.
+	// The two depths order differently, so each pages with its own cursor
+	// kind and refuses the other's. The prefix match is a literal left(),
+	// never LIKE, for occupiedBy's reason.
 	//
+	// Without a depth the list is newest first, as the reference was recorded
+	// answering (2026-09-02 free_batch1 `mem.list.noprefix`; #549), with id as
+	// the tiebreak the memory-versions list documents for itself.
+	//
+	// At depth=1 the remainder after the prefix decides each row: no "/" in it
+	// and the row is a memory at this level; a "/" and the row rolls up to the
+	// first segment below the prefix, which DISTINCT ON collapses to one
+	// memory_prefix item. Those interleave "in path order", as the reference
+	// documents (plan 36 decision 5); the order it was recorded giving at
+	// depth=1 follows no rule docs/DIVERGENCES.md could find.
 	// COLLATE "C" is spelled once, on the key the subquery builds, and the
 	// outer ORDER BY and cursor comparison inherit it. The column carries the
 	// same collation, so the clause restates a derivation Postgres makes on
@@ -751,28 +766,44 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	// expression built over it, not this string. Without the collation a
 	// deployment whose default is not byte order would serve the page in a
 	// different order than it pages by.
-	args := []any{storeID, prefix, depth == 1}
-	query := `SELECT DISTINCT ON (key) key, is_prefix, ` + memoryColumns + `
-	  FROM (
-	    SELECT (CASE WHEN $3::boolean AND position('/' in substr(path, length($2::text) + 1)) > 0
-	                 THEN $2::text || substr(path, length($2::text) + 1,
-	                                         position('/' in substr(path, length($2::text) + 1)))
-	                 ELSE path END) COLLATE "C" AS key,
-	           $3::boolean AND position('/' in substr(path, length($2::text) + 1)) > 0 AS is_prefix,
-	           ` + memoryColumns + `
-	      FROM memories
-	     WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text
-	  ) matched
-	 WHERE true`
-	if page.cur != nil {
-		if !page.cur.pathKeyed || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+	args := []any{storeID, prefix}
+	var query string
+	if depth == 0 {
+		query = `SELECT path, false, ` + memoryColumns + `
+		  FROM memories
+		 WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text`
+		if page.cur != nil {
+			if page.cur.foreignToTime() || page.cur.dir != dirNext {
+				return nil, errInvalid("invalid page cursor")
+			}
+			args = append(args, page.cur.t, page.cur.id)
+			query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
 		}
-		args = append(args, page.cur.path)
-		query += fmt.Sprintf(` AND key > $%d`, len(args))
+		args = append(args, page.limit+1)
+		query += fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d`, len(args))
+	} else {
+		query = `SELECT DISTINCT ON (key) key, is_prefix, ` + memoryColumns + `
+		  FROM (
+		    SELECT (CASE WHEN position('/' in substr(path, length($2::text) + 1)) > 0
+		                 THEN $2::text || substr(path, length($2::text) + 1,
+		                                         position('/' in substr(path, length($2::text) + 1)))
+		                 ELSE path END) COLLATE "C" AS key,
+		           position('/' in substr(path, length($2::text) + 1)) > 0 AS is_prefix,
+		           ` + memoryColumns + `
+		      FROM memories
+		     WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text
+		  ) matched
+		 WHERE true`
+		if page.cur != nil {
+			if !page.cur.pathKeyed || page.cur.dir != dirNext {
+				return nil, errInvalid("invalid page cursor")
+			}
+			args = append(args, page.cur.path)
+			query += fmt.Sprintf(` AND key > $%d`, len(args))
+		}
+		args = append(args, page.limit+1)
+		query += fmt.Sprintf(` ORDER BY key LIMIT $%d`, len(args))
 	}
-	args = append(args, page.limit+1)
-	query += fmt.Sprintf(` ORDER BY key LIMIT $%d`, len(args))
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -782,6 +813,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 
 	var data []any
 	var lastKey string
+	var last memoryRow
 	fetched := 0
 	for rows.Next() {
 		fetched++
@@ -799,7 +831,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		} else {
 			data = append(data, renderMemory(storeID, row, view == viewFull))
 		}
-		lastKey = key
+		lastKey, last = key, row
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -810,6 +842,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	}
 	if fetched > page.limit {
 		c := encodePathCursor(lastKey)
+		if depth == 0 {
+			c = encodeTimeCursor(dirNext, last.createdAt, last.id)
+		}
 		out.NextPage = &c
 	}
 	return out, nil

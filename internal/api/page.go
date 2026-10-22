@@ -60,10 +60,10 @@ type cursor struct {
 	seqKeyed bool
 	seqDesc  bool
 	seq      int64
-	// path-keyed position (memories); used when pathKeyed is true. The
-	// memories list is the one list ordered by something other than time or a
-	// counter, and its key is not always a memory path: with depth=1 the last
-	// item on a page can be a rolled-up prefix.
+	// path-keyed position (memories at depth=1); used when pathKeyed is true.
+	// The memories list at depth=1 is the one list ordered by something other
+	// than time or a counter, and its key is not always a memory path: the
+	// last item on a page can be a rolled-up prefix.
 	pathKeyed bool
 	path      string
 }
@@ -146,8 +146,8 @@ func encodeVersionCursor(version int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-// encodePathCursor positions the memories list at a path (or, under depth=1, a
-// rolled-up prefix). The key is base64url'd INSIDE the token because a path may
+// encodePathCursor positions the memories list at depth=1 at a path or a
+// rolled-up prefix. The key is base64url'd INSIDE the token because a path may
 // hold any byte but NUL — "|" among them — and the grammar splits on "|".
 func encodePathCursor(path string) string {
 	raw := fmt.Sprintf("k1|%s|m|%s", dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))

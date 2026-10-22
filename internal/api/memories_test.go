@@ -664,17 +664,21 @@ func TestMemoryDeletePrecondition(t *testing.T) {
 func TestMemoryList(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "listing")
-	// Written out of order so the list's own ordering is what sorts them.
+	// Written out of path order, so neither path order nor its reverse is the
+	// newest-first order the list must give.
 	for _, path := range []string{"/b.md", "/a/deep.md", "/c.md", "/a/also.md"} {
 		createMemory(t, s, store, path, path)
 	}
+	// Newest first, as the reference was recorded answering a list with no
+	// depth (2026-09-02 free_batch1 `mem.list.noprefix`; #549).
+	newestFirst := []string{"/a/also.md", "/c.md", "/a/deep.md", "/b.md"}
 
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list: status %d (%v)", status, body)
 	}
-	if got := memoryPaths(t, body); !slices.Equal(got, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
-		t.Errorf("list order = %v, want byte-wise path order", got)
+	if got := memoryPaths(t, body); !slices.Equal(got, newestFirst) {
+		t.Errorf("list order = %v, want newest first %v", got, newestFirst)
 	}
 	wantExactKeys(t, body, "data", "prefixes")
 	// The list defaults to basic.
@@ -711,8 +715,20 @@ func TestMemoryList(t *testing.T) {
 		}
 		query = "/v1/memory_stores/" + store + "/memories?limit=1&page=" + cursor
 	}
-	if !slices.Equal(seen, []string{"/a/also.md", "/a/deep.md", "/b.md", "/c.md"}) {
-		t.Errorf("paged walk = %v", seen)
+	if !slices.Equal(seen, newestFirst) {
+		t.Errorf("paged walk = %v, want %v", seen, newestFirst)
+	}
+	// A memory written mid-walk is newer than every cursor, so the walk's
+	// remaining pages neither repeat a memory nor take the new one.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("first page: status %d (%v)", status, body)
+	}
+	cursor := wantCursor(t, body)
+	createMemory(t, s, store, "/late.md", "/late.md")
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2&page="+cursor, nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, newestFirst[2:]) {
+		t.Errorf("the page after a mid-walk write: status %d, %v, want %v", status, got, newestFirst[2:])
 	}
 
 	// view=full caps the limit at 20 silently; view=basic does not.
@@ -744,23 +760,30 @@ func TestMemoryList(t *testing.T) {
 	// (2026-09-05 batch4 idx 8 `rec85.memories.list.limit-101`, which also
 	// recorded 200 and 1000, and idx 11 `rec85.memories.list.limit-1001`), and
 	// for a depth other than 0 or 1 (2026-09-02 free_batch1 idx 13
-	// `mem.list.depth2`), which the other refused depths share; #540.
+	// `mem.list.depth2`), which the other refused depths share; #540. And for
+	// depth=0 beside a path_prefix (idx 16 `mem.list.prefix/x/.depth0`, idx 19
+	// `mem.list.prefix/.depth0`; #549), a refusal the bounds check comes before.
 	const inner = "limit: value must be greater than or equal to 1 and less than or equal to 100"
+	const depthZero = "depth: must be greater than or equal to 1"
 	for q, msg := range map[string]string{
 		"limit=101": inner, "limit=1000": inner,
 		"limit=1001": "limit: must be greater than or equal to 1 and less than or equal to 1000",
 		"depth=2":    "depth must be 0 or 1 when provided", "depth=-1": "depth must be 0 or 1 when provided",
-		"depth=all": "depth must be 0 or 1 when provided",
+		"depth=all":               "depth must be 0 or 1 when provided",
+		"path_prefix=%2F&depth=0": depthZero, "path_prefix=%2Fx%2F&depth=0": depthZero,
+		"path_prefix=%2Fx%2F&depth=-1": "depth must be 0 or 1 when provided",
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantInvalidRequest(t, q, status, body, msg)
 	}
-	// A cursor from another list's grammar is not a memory cursor.
+	// A cursor from another list's grammar is not a depth=1 memory cursor.
+	// Without a depth the list is time-keyed like the store list, so there the
+	// grammar cannot tell the two lists' cursors apart.
 	status, body = s.do(http.MethodGet, "/v1/memory_stores?limit=1", nil)
 	if status != http.StatusOK {
 		t.Fatalf("store list: status %d (%v)", status, body)
 	}
-	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?page="+wantCursor(t, body), nil)
+	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&page="+wantCursor(t, body), nil)
 	wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
 }
 
@@ -786,9 +809,11 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		return memoryPaths(t, body)
 	}
 
-	// Segment alignment: /notes/ must not reach /notes-archive/.
+	// Segment alignment: /notes/ must not reach /notes-archive/. Without a
+	// depth the list stays newest first under a prefix too (2026-09-02
+	// free_batch1 idx 15 `mem.list.prefix/x/`).
 	if got := list(t, "path_prefix=%2Fnotes%2F"); !slices.Equal(got,
-		[]string{"/notes/a.md", "/notes/deep/b.md", "/notes/deep/c.md"}) {
+		[]string{"/notes/deep/c.md", "/notes/deep/b.md", "/notes/a.md"}) {
 		t.Errorf("path_prefix=/notes/ = %v", got)
 	}
 	// Literal metacharacters: neither `_` nor `%` is a wildcard. As patterns,
@@ -814,8 +839,10 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	wantInvalidRequest(t, "a missing store", status, body, unslashed)
 	// An omitted prefix means "/", which is every path, and so does one
 	// supplied empty, which the console sends for a cleared box. The
-	// unrecorded "segment-aligned" neighbours still match literally.
-	for _, q := range []string{"depth=0", "path_prefix="} {
+	// unrecorded "segment-aligned" neighbours still match literally. depth=0
+	// is refused only beside a prefix, the one place it was recorded refused,
+	// so an empty one keeps the documented recursive list.
+	for _, q := range []string{"depth=0", "path_prefix=", "path_prefix=&depth=0"} {
 		if got := list(t, q); len(got) != 9 {
 			t.Errorf("%s returned %d rows, want all 9: %v", q, len(got), got)
 		}
@@ -865,6 +892,67 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		"prefix:/notes-archive/", "prefix:/notes/", "/z.md",
 	}) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
+	}
+
+	// A cursor belongs to the depth that issued it. depth=1 pages by path and
+	// the list without a depth pages by time, so each refuses the other's.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("depth=1 first page: status %d (%v)", status, body)
+	}
+	pathCursor := wantCursor(t, body)
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2", nil)
+	if status != http.StatusOK {
+		t.Fatalf("first page: status %d (%v)", status, body)
+	}
+	timeCursor := wantCursor(t, body)
+	for _, q := range []string{"page=" + pathCursor, "depth=0&page=" + pathCursor, "depth=1&page=" + timeCursor} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
+		wantInvalidRequest(t, q, status, body, "invalid page cursor")
+	}
+}
+
+// Rows that share a created_at are ordered by id, newest first, as the
+// memory-versions list documents for itself; the memories list documents no
+// tiebreak, so docs/DIVERGENCES.md registers this one as inferred. Planted in
+// one statement, the three rows share its now(), and their ids run against
+// their paths so neither path order nor its reverse passes.
+func TestMemoryListBreaksATieOnID(t *testing.T) {
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "tied")
+	if _, err := s.pool.Exec(t.Context(),
+		`INSERT INTO memories (id, memory_store_id, path, content, content_sha256,
+		                       content_size_bytes, memory_version_id)
+		 SELECT 'mem_' || lpad(i::text, 24, '0'), $1, p, '', $2, 0,
+		        'memver_' || lpad(i::text, 24, '0')
+		   FROM unnest(ARRAY['/c.md', '/a.md', '/b.md']) WITH ORDINALITY AS t(p, i)`,
+		store, digest("")); err != nil {
+		t.Fatalf("plant three memories: %v", err)
+	}
+	want := []string{"/b.md", "/a.md", "/c.md"}
+
+	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, want) {
+		t.Errorf("list: status %d, %v, want %v", status, got, want)
+	}
+	// The cursor carries the id, so a walk through the tie, one row a page,
+	// takes each row once.
+	var seen []string
+	query := "/v1/memory_stores/" + store + "/memories?limit=1"
+	for page := 0; page < 4; page++ {
+		status, body := s.do(http.MethodGet, query, nil)
+		if status != http.StatusOK {
+			t.Fatalf("page %d: status %d (%v)", page, status, body)
+		}
+		seen = append(seen, memoryPaths(t, body)...)
+		cursor := nextPage(t, body)
+		if cursor == "" {
+			break
+		}
+		query = "/v1/memory_stores/" + store + "/memories?limit=1&page=" + cursor
+	}
+	if !slices.Equal(seen, want) {
+		t.Errorf("the paged walk through a tie = %v, want %v", seen, want)
 	}
 }
 
@@ -996,10 +1084,11 @@ func TestMemoryMethodNotAllowed(t *testing.T) {
 	}
 }
 
-// The memories list must order by bytes on every database this platform runs
-// against, and no test here can prove that: the suite's postgres:16-alpine is
-// musl, which sorts en_US.utf8 as bytes anyway, so a page reordered on Cloud
-// SQL's glibc would still come back correct here. Two things ARE checkable, and
+// The memories list at depth=1 must order by bytes on every database this
+// platform runs against, and no test here can prove that: the suite's
+// postgres:16-alpine is musl, which sorts en_US.utf8 as bytes anyway, so a
+// page reordered on Cloud SQL's glibc would still come back correct here.
+// Two things ARE checkable, and
 // together they are why listMemories can rely on a bare `ORDER BY key`. The
 // column's own collation is "C" — the migration says so, and this asks the
 // database rather than the file. And an explicitly collated expression keeps
@@ -1027,9 +1116,10 @@ func TestMemoryPathsSortUnderTheCCollation(t *testing.T) {
 		t.Errorf(`collations: path %s, the rolled key %s — want "C" for both`, column, key)
 	}
 
-	// And on this database that is the order the endpoint serves: uppercase
-	// before lowercase, which is byte order and not en_US's.
-	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil)
+	// And on this database that is the order the endpoint serves at depth=1:
+	// uppercase before lowercase, which is byte order and not en_US's. /a.md
+	// is the newer, so the list without a depth gives the opposite order.
+	status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list: status %d (%v)", status, body)
 	}
