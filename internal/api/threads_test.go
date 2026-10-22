@@ -789,6 +789,9 @@ func TestAChildArchiveAnswersItsCustomCallOnTheSessionView(t *testing.T) {
 	if len(answers) != 1 || answers[0]["type"] != "user.custom_tool_result" || answers[0]["is_error"] != true {
 		t.Fatalf("session view's answers to the child's custom call = %v, want one errored user.custom_tool_result", answers)
 	}
+	if answers[0]["session_thread_id"] != idle {
+		t.Errorf("answer's session_thread_id = %v, want the child %s", answers[0]["session_thread_id"], idle)
+	}
 	abandonedText(t, answers[0])
 }
 
