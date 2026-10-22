@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -454,20 +455,24 @@ func TestValidateToolResults(t *testing.T) {
 	// open, so a drop would be a call misread as answered.
 	validate := func(sid domain.ID, evs ...events.NewEvent) error {
 		dropped, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
-		if err == nil && dropped != nil {
-			return fmt.Errorf("dropped %v as already answered", dropped)
+		if err == nil && (dropped.Answered != nil || dropped.Doubled != nil) {
+			return fmt.Errorf("dropped %+v", dropped)
 		}
 		return err
 	}
-	// drops is validate for a batch that must pass: the positions it reports
-	// are the results whose call is already answered (#58).
+	// drops is validate for a batch that must pass and double nothing: the
+	// positions it reports are the results whose call is already answered
+	// (#58).
 	drops := func(t *testing.T, sid domain.ID, evs ...events.NewEvent) []int {
 		t.Helper()
 		got, err := events.ValidateToolResults(ctx, pool, sid, evs, nil)
 		if err != nil {
 			t.Fatalf("ValidateToolResults: %v", err)
 		}
-		return got
+		if got.Doubled != nil {
+			t.Fatalf("doubled %v, want none", got.Doubled)
+		}
+		return got.Answered
 	}
 
 	t.Run("unknown reference", func(t *testing.T) {
@@ -517,7 +522,8 @@ func TestValidateToolResults(t *testing.T) {
 		sandbox := appendEvent(t, log, sid, "", domain.EventAgentToolUse, `{"name":"bash"}`)
 		owned := func(name string) bool { return name == "web_fetch" }
 		validateWith := func(owned func(string) bool, ev events.NewEvent) ([]int, error) {
-			return events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{ev}, owned)
+			got, err := events.ValidateToolResults(ctx, pool, sid, []events.NewEvent{ev}, owned)
+			return got.Answered, err
 		}
 
 		_, err := validateWith(owned, inResult(domain.EventUserToolResult, "tool_use_id", web.String()))
@@ -672,15 +678,18 @@ func TestValidateToolResults(t *testing.T) {
 			}
 		})
 
-		// Two results for one answered call in one request are still the
-		// client's error: the in-request check runs before the log is read.
+		// Two results for one answered call in one request are both repeats:
+		// the reference answered that send 200 {"data":[]}
+		// (managed-agents-wire-recordings 2026-10-22-duplicate-result-edges,
+		// setup.json idx 14).
 		t.Run("twice in one request", func(t *testing.T) {
 			sid := newSession(t, pool)
 			id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
 			answerWith(t, log, sid, domain.EventUserToolResult, "tool_use_id", id)
 			ev := inResult(domain.EventUserToolResult, "tool_use_id", id.String())
-			wantErrIs(t, validate(sid, ev, ev),
-				fmt.Sprintf(`events[1]: duplicate result for tool_use_id %q in one request`, id))
+			if got := drops(t, sid, ev, ev); !slices.Equal(got, []int{0, 1}) {
+				t.Errorf("dropped = %v, want [0 1]", got)
+			}
 		})
 	})
 
@@ -794,17 +803,27 @@ func TestValidateToolResults(t *testing.T) {
 		}
 	})
 
+	// A later result for a call an earlier result of the same send answers is
+	// doubled, mapped to that first result's position: the reference stored the
+	// first and echoed both (managed-agents-wire-recordings
+	// 2026-10-22-duplicate-result-edges, setup.json idx 12–13).
 	t.Run("intra-batch duplicate", func(t *testing.T) {
 		sid := newSession(t, pool)
 		id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
 		ev := inResult(domain.EventUserToolResult, "tool_use_id", id.String())
-		wantErrIs(t, validate(sid, ev, ev),
-			fmt.Sprintf(`events[1]: duplicate result for tool_use_id %q in one request`, id))
+		got, err := events.ValidateToolResults(ctx, pool, sid,
+			[]events.NewEvent{ev, inRaw(domain.EventUserMessage, `{"content":[]}`), ev, ev}, nil)
+		if err != nil {
+			t.Fatalf("ValidateToolResults: %v", err)
+		}
+		if got.Answered != nil || !maps.Equal(got.Doubled, map[int]int{2: 0, 3: 0}) {
+			t.Errorf("drops = %+v, want Doubled {2:0 3:0} and nothing answered", got)
+		}
 
-		// seen is keyed by the referenced id alone, not by id+kind, and the
-		// message reports the second event's own key.
+		// A doubled result is still checked against its call: one of the other
+		// kind is the kind mismatch it would be alone.
 		wantErrIs(t, validate(sid, ev, inResult(domain.EventUserCustomToolRes, "custom_tool_use_id", id.String())),
-			fmt.Sprintf(`events[1]: duplicate result for custom_tool_use_id %q in one request`, id))
+			fmt.Sprintf(`events[1]: custom_tool_use_id %q references a agent.tool_use event, not agent.custom_tool_use`, id))
 	})
 
 	// The index is the client's own batch position, counting the events this

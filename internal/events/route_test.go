@@ -9,6 +9,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5"
 )
 
 // The checks a send runs against the log tell the client's mistakes from
@@ -110,5 +111,70 @@ func TestDefineOutcomesRefusesAPayloadThatDoesNotParse(t *testing.T) {
 	var refusal *events.Refusal
 	if !errors.As(err, &refusal) || err.Error() != parseErr.Error() {
 		t.Errorf("DefineOutcomes => %v (%T), want a *Refusal reading %q", err, err, parseErr)
+	}
+}
+
+// countingQuerier counts the reads a check makes of the log.
+type countingQuerier struct {
+	events.Querier
+	reads int
+}
+
+func (q *countingQuerier) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	q.reads++
+	return q.Querier.QueryRow(ctx, sql, args...)
+}
+
+func (q *countingQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	q.reads++
+	return q.Querier.Query(ctx, sql, args...)
+}
+
+// A send may carry many copies of one result, which the reference stores once
+// (managed-agents-wire-recordings 2026-10-22-duplicate-result-edges), so the
+// checks a send runs before the copies leave it read each call once: a body of
+// copies must not hold the session lock across a read per copy. Every copy is
+// still routed to its call's thread: the call here is a child's, cross-posted,
+// so a copy routed from an empty cache entry would land on the primary.
+func TestASendReadsEachCallOnce(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewPool(t)
+	log := events.NewLog(pool)
+	for _, answered := range []bool{false, true} {
+		sid, _ := pgtest.NewSession(t, pool, "cloud")
+		child := pgtest.NewChildThread(t, pool, sid)
+		uses, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{}`),
+			ThreadID: child, CrossPosted: true}})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		id := uses[0].ID
+		if answered {
+			appendEvent(t, log, sid, "", domain.EventUserToolResult, `{"tool_use_id":"`+id.String()+`"}`)
+		}
+		batch := make([]events.NewEvent, 4)
+		for i := range batch {
+			batch[i] = inResult(domain.EventUserToolResult, "tool_use_id", id.String())
+		}
+
+		q := &countingQuerier{Querier: pool}
+		if _, err := events.ValidateToolResults(ctx, q, sid, batch, nil); err != nil {
+			t.Fatalf("answered=%v: ValidateToolResults: %v", answered, err)
+		}
+		if q.reads != 1 {
+			t.Errorf("answered=%v: ValidateToolResults read the log %d times for one call, want 1", answered, q.reads)
+		}
+		q.reads = 0
+		if _, err := events.RouteInbound(ctx, q, sid, batch); err != nil {
+			t.Fatalf("answered=%v: RouteInbound: %v", answered, err)
+		}
+		if q.reads != 1 {
+			t.Errorf("answered=%v: RouteInbound read the log %d times for one call, want 1", answered, q.reads)
+		}
+		for i, ev := range batch {
+			if ev.ThreadID != child || !ev.CrossPosted {
+				t.Errorf("answered=%v: events[%d] routed to %q, cross-posted %v; want %q, true", answered, i, ev.ThreadID, ev.CrossPosted, child)
+			}
+		}
 	}
 }

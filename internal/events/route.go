@@ -52,10 +52,16 @@ func refuse(format string, args ...any) error {
 // CrossPosted are what the append stores; the returned slice marks the
 // interrupts that named a thread — what tells a thread-scoped interrupt (the
 // primary's own id included) from a session-wide one once both carry an empty
-// ThreadID.
+// ThreadID. A call that several events of the send name is read once: a send
+// may carry many copies of one result (ValidateToolResults).
 func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent) ([]bool, error) {
 	primary := domain.PrimaryThreadID(sessionID)
 	scoped := make([]bool, len(evs))
+	type route struct {
+		thread      domain.ID
+		crossPosted bool
+	}
+	routes := map[string]route{}
 	for i := range evs {
 		ev := &evs[i]
 		switch ev.Type {
@@ -68,18 +74,22 @@ func RouteInbound(ctx context.Context, q Querier, sessionID domain.ID, evs []New
 			if err != nil {
 				return nil, refuse("events[%d]: %v", i, err)
 			}
-			var thread string
-			var crossPosted bool
-			err = q.QueryRow(ctx,
-				`SELECT COALESCE(thread_id, ''), cross_posted FROM events WHERE session_id = $1 AND id = $2`,
-				sessionID.String(), ref).Scan(&thread, &crossPosted)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+			r, ok := routes[ref]
+			if !ok {
+				var thread string
+				err = q.QueryRow(ctx,
+					`SELECT COALESCE(thread_id, ''), cross_posted FROM events WHERE session_id = $1 AND id = $2`,
+					sessionID.String(), ref).Scan(&thread, &r.crossPosted)
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("route inbound event: %w", err)
+				}
+				r.thread = domain.ID(thread)
+				routes[ref] = r
 			}
-			if err != nil {
-				return nil, fmt.Errorf("route inbound event: %w", err)
-			}
-			ev.ThreadID, ev.CrossPosted = domain.ID(thread), crossPosted
+			ev.ThreadID, ev.CrossPosted = r.thread, r.crossPosted
 		case domain.EventUserInterrupt:
 			claim := ev.ThreadID
 			if claim == "" {

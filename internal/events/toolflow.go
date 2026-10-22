@@ -552,19 +552,31 @@ func ToolResultRefs(evs []NewEvent) []string {
 	return refs
 }
 
+// ResultDrops holds, by batch position, the inbound results a send carries
+// that must not reach the log.
+type ResultDrops struct {
+	// Answered results name a call the log already answers.
+	Answered []int
+	// Doubled maps each later result for a call to the position of the first
+	// result of the same send for that call.
+	Doubled map[int]int
+}
+
 // ValidateToolResults rejects an inbound tool result that does not reference
 // an outstanding tool call: the id must name an existing tool-use event of
-// the matching kind, and no earlier event in the same batch may answer it.
-// The log is append-only — one accepted bad reference would poison every
-// future replay with a request the model protocol rejects, wedging the
-// session permanently.
+// the matching kind. The log is append-only — one accepted bad reference
+// would poison every future replay with a request the model protocol
+// rejects, wedging the session permanently.
 //
-// A result for a call the log already answers is not refused but returned,
-// by batch position, for the caller to drop: the reference answers that send
-// 200 and appends nothing, whether the result repeats the first answer or
-// not (managed-agents-wire-recordings 2026-10-18-duplicate-tool-result, #58).
-// Dropped, it cannot become a second answer, so the checks after the
-// answered arm do not apply to it.
+// Two kinds of result are not refused but returned for the caller to drop,
+// as the reference answers both sends 200 and stores no second answer. A
+// result for a call the log already answers is Answered, whether it repeats
+// the first answer or not (managed-agents-wire-recordings
+// 2026-10-18-duplicate-tool-result, #58). A later result for a call an
+// earlier result of the same send answers is Doubled: the reference stored
+// the first and echoed every one (2026-10-22-duplicate-result-edges,
+// setup.json idx 12–13). Neither can become a second answer, so the checks
+// after those arms do not apply to them.
 //
 // platformOwned, when non-nil, names the built-in tools only the platform may
 // answer — the API injects the web tools and the six delegation tools, whose
@@ -574,9 +586,17 @@ func ToolResultRefs(evs []NewEvent) []string {
 // docs/plan/16_one-answer-per-tool-call.md). It must never cover the sandbox
 // six — a self_hosted worker answering those via user.tool_result is the
 // BYOC pull protocol.
-func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent, platformOwned func(name string) bool) ([]int, error) {
-	var answered []int
-	seen := map[string]bool{}
+func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent, platformOwned func(name string) bool) (ResultDrops, error) {
+	var drops ResultDrops
+	// seen keeps what the log said of each call a result of this send names,
+	// so a later result for the same call costs no query: use is the call's
+	// type, and at the position of the send's first result for it, or -1 when
+	// the log already answers it.
+	type call struct {
+		use domain.EventType
+		at  int
+	}
+	seen := map[string]call{}
 	for i, ev := range evs {
 		refKey := resultRefKey(ev.Type)
 		if refKey == "" {
@@ -588,39 +608,52 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		}
 		ref, err := payloadString(ev.Payload, refKey)
 		if err != nil {
-			return nil, refuse("events[%d]: %v", i, err)
+			return ResultDrops{}, refuse("events[%d]: %v", i, err)
 		}
-		if seen[ref] {
-			return nil, refuse("events[%d]: duplicate result for %s %q in one request", i, refKey, ref)
-		}
-		seen[ref] = true
 
-		var useType, name, perm string
-		var done, confirmed bool
-		err = q.QueryRow(ctx,
-			`SELECT tu.type,
-			        COALESCE(tu.payload->>'name', ''),
-			        COALESCE(tu.payload->>'evaluated_permission', ''),
-			        `+answeredBy(3)+`,
-			        EXISTS (
-			          SELECT 1 FROM events c
-			          WHERE c.session_id = $1 AND c.type = $4
-			            AND c.payload->>'tool_use_id' = tu.id
-			            AND c.payload->>'result' = 'allow'
-			        )
-			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
-			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &done, &confirmed)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+		c, again := seen[ref]
+		var name, perm string
+		var confirmed bool
+		if !again {
+			var useType string
+			var done bool
+			err = q.QueryRow(ctx,
+				`SELECT tu.type,
+				        COALESCE(tu.payload->>'name', ''),
+				        COALESCE(tu.payload->>'evaluated_permission', ''),
+				        `+answeredBy(3)+`,
+				        EXISTS (
+				          SELECT 1 FROM events c
+				          WHERE c.session_id = $1 AND c.type = $4
+				            AND c.payload->>'tool_use_id' = tu.id
+				            AND c.payload->>'result' = 'allow'
+				        )
+				 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
+				sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &done, &confirmed)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ResultDrops{}, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+			}
+			if err != nil {
+				return ResultDrops{}, fmt.Errorf("validate tool result: %w", err)
+			}
+			c = call{use: domain.EventType(useType), at: i}
+			if done {
+				c.at = -1
+			}
+			seen[ref] = c
 		}
-		if err != nil {
-			return nil, fmt.Errorf("validate tool result: %w", err)
+		if c.use != wantUse {
+			return ResultDrops{}, refuse("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, c.use, wantUse)
 		}
-		if domain.EventType(useType) != wantUse {
-			return nil, refuse("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, useType, wantUse)
+		if c.at < 0 {
+			drops.Answered = append(drops.Answered, i)
+			continue
 		}
-		if done {
-			answered = append(answered, i)
+		if again {
+			if drops.Doubled == nil {
+				drops.Doubled = map[int]int{}
+			}
+			drops.Doubled[i] = c.at
 			continue
 		}
 		// A platform-owned call is never the client's to answer, answered or
@@ -629,7 +662,7 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		// wave the client's result through — the second answer then commits
 		// with the executor's settlement (#222).
 		if platformOwned != nil && wantUse == domain.EventAgentToolUse && platformOwned(name) {
-			return nil, refuse("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
+			return ResultDrops{}, refuse("events[%d]: tool use %q (%s) is platform-executed and cannot be answered by a client result", i, ref, name)
 		}
 		// An ask-gated tool must be allowed before any result answers it: a
 		// premature result would bypass the human approval and, on a later
@@ -637,10 +670,10 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 		// A queued denial is already authoritative even while an earlier call
 		// prevents its result from being synthesized.
 		if perm == string(domain.EvalPermAsk) && !confirmed {
-			return nil, refuse("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
+			return ResultDrops{}, refuse("events[%d]: tool use %q is awaiting confirmation and cannot be answered yet", i, ref)
 		}
 	}
-	return answered, nil
+	return drops, nil
 }
 
 // ToolConfirmationRefs collects the tool-use ids a batch's
@@ -848,9 +881,10 @@ var toolUseAnswer = map[domain.EventType]struct {
 // an empty text block: a Messages endpoint rejects one, and that request is what
 // every later replay of this session sends.
 //
-// The recording covers the agent.tool_use family only. The custom-tool and MCP
-// families reuse this string because one constant is what keeps the three arms
-// from drifting; that reuse is ours, not observed.
+// A later recording heard it for an interrupted custom call too
+// (2026-10-22-duplicate-result-edges, setup.json idx 25). The MCP family reuses
+// it because one constant is what keeps the three arms from drifting; that
+// reuse is ours, not observed.
 //
 // Note what the second sentence does that the wording it replaced did not: it
 // tells the model to retry the very call the user just abandoned, and being on
@@ -884,8 +918,11 @@ const InterruptResultText = "Tool execution was interrupted before completion. P
 // reference answers an abandoned call with an agent.tool_result carrying
 // is_error true, exactly one text block, a tool_use_id naming the tool-use
 // *event* id, and a populated processed_at — all four of which this already
-// wrote. What stays inferred is the custom-tool and MCP arms, which no recording
-// covers (docs/DIVERGENCES.md).
+// wrote. The custom-tool arm is recorded too, and not matched yet: the
+// reference answered an interrupted custom call with an agent.tool_result keyed
+// by tool_use_id (2026-10-22-duplicate-result-edges, setup.json idx 25), where
+// this writes a user.custom_tool_result. The MCP arm stays inferred
+// (docs/DIVERGENCES.md).
 func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	now := time.Now().UTC()
 	out := make([]NewEvent, 0, len(uses))
