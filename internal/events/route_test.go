@@ -133,14 +133,22 @@ func (q *countingQuerier) Query(ctx context.Context, sql string, args ...any) (p
 // A send may carry many copies of one result, which the reference stores once
 // (managed-agents-wire-recordings 2026-10-22-duplicate-result-edges), so the
 // checks a send runs before the copies leave it read each call once: a body of
-// copies must not hold the session lock across a read per copy.
+// copies must not hold the session lock across a read per copy. Every copy is
+// still routed to its call's thread: the call here is a child's, cross-posted,
+// so a copy routed from an empty cache entry would land on the primary.
 func TestASendReadsEachCallOnce(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)
 	for _, answered := range []bool{false, true} {
-		sid := newSession(t, pool)
-		id := toolUse(t, log, sid, domain.EventAgentToolUse, "")
+		sid, _ := pgtest.NewSession(t, pool, "cloud")
+		child := pgtest.NewChildThread(t, pool, sid)
+		uses, err := log.Append(ctx, sid, []events.NewEvent{{Type: domain.EventAgentToolUse, Payload: json.RawMessage(`{}`),
+			ThreadID: child, CrossPosted: true}})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		id := uses[0].ID
 		if answered {
 			appendEvent(t, log, sid, "", domain.EventUserToolResult, `{"tool_use_id":"`+id.String()+`"}`)
 		}
@@ -162,6 +170,11 @@ func TestASendReadsEachCallOnce(t *testing.T) {
 		}
 		if q.reads != 1 {
 			t.Errorf("answered=%v: RouteInbound read the log %d times for one call, want 1", answered, q.reads)
+		}
+		for i, ev := range batch {
+			if ev.ThreadID != child || !ev.CrossPosted {
+				t.Errorf("answered=%v: events[%d] routed to %q, cross-posted %v; want %q, true", answered, i, ev.ThreadID, ev.CrossPosted, child)
+			}
 		}
 	}
 }
