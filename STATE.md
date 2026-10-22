@@ -5,8 +5,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 **None.** The six quick fixes from the 2026-10-17 issue triage landed plan-less, one PR
-each: #589, #549, #543, #573, #552 and #634. #549 and #573 stay open for the rest of
-their scope. Each fix's record is its `changelog.d/` fragment.
+each: #589, #549, #543, #573, #552 and #634. #549 stays open for the rest of its
+scope. Each fix's record is its `changelog.d/` fragment.
 
 ## Tasks
 
