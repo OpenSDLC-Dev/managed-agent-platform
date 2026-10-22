@@ -660,7 +660,8 @@ func TestThreadArchive(t *testing.T) {
 		t.Fatalf("child's own view = %v, want both calls answered before the terminated event", ownTypes)
 	}
 	if own[2]["tool_use_id"] != parked[0].ID.String() || own[2]["is_error"] != true ||
-		own[3]["custom_tool_use_id"] != parked[1].ID.String() || own[3]["processed_at"] == nil {
+		own[3]["custom_tool_use_id"] != parked[1].ID.String() || own[3]["is_error"] != true ||
+		own[3]["processed_at"] == nil {
 		t.Errorf("closing results = %v / %v, want error results answering the parked calls, stamped processed", own[2], own[3])
 	}
 	if own[4]["session_thread_id"] != idle || own[4]["agent_name"] != "worker" {
@@ -755,6 +756,43 @@ func TestThreadArchive(t *testing.T) {
 	if n := threadRows(t, s, sid); n != 0 {
 		t.Errorf("thread rows after delete = %d, want 0", n)
 	}
+}
+
+// A child's custom call is cross-posted, because the session view is where the
+// client or the SDK's SessionToolRunner that answers it reads. When the child's
+// archive closes the call, the answer must be on that view too, and be a
+// user.custom_tool_result: the runner reads no agent.* result as an answer, so
+// it would run the abandoned tool again on its next attach (docs/DIVERGENCES.md,
+// "user.interrupt — an abandoned custom call is answered with a
+// `user.custom_tool_result`").
+func TestAChildArchiveAnswersItsCustomCallOnTheSessionView(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	idle := insertChild(t, s, sid, "idle")
+	parked, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
+		{Type: domain.EventAgentCustomToolUse, ThreadID: domain.ID(idle), CrossPosted: true,
+			Payload: []byte(`{"name":"lookup","input":{},"session_thread_id":null}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+idle+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive child: %d %v", status, res)
+	}
+	callID := parked[0].ID.String()
+	var answers []map[string]any
+	for _, ev := range eventList(t, s, sid) {
+		if ev["custom_tool_use_id"] == callID || ev["tool_use_id"] == callID {
+			answers = append(answers, ev)
+		}
+	}
+	if len(answers) != 1 || answers[0]["type"] != "user.custom_tool_result" || answers[0]["is_error"] != true {
+		t.Fatalf("session view's answers to the child's custom call = %v, want one errored user.custom_tool_result", answers)
+	}
+	if answers[0]["session_thread_id"] != idle {
+		t.Errorf("answer's session_thread_id = %v, want the child %s", answers[0]["session_thread_id"], idle)
+	}
+	abandonedText(t, answers[0])
 }
 
 // A rescheduling child is refused its own archive, which is idle only, yet

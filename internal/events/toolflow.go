@@ -862,6 +862,17 @@ func payloadString(payload json.RawMessage, key string) (string, error) {
 // answered-ness queries COALESCE the three reference keys, so a wrong-family
 // answer unblocks the gate and replays cleanly.
 //
+// The custom row is not the reference's, on purpose. Interrupting a custom
+// call session-wide, the reference was recorded answering it with an
+// agent.tool_result keyed by tool_use_id. The SDK's SessionToolRunner reads
+// only user.tool_result and user.custom_tool_result as answers. At the version
+// this module pins, a recording saw each fresh runner process run that
+// interrupted tool again. The runner of the SDK's next major skips a call a
+// session-wide interrupt covers, but not one a thread-scoped interrupt or an
+// archive closes. A user.custom_tool_result is an answer to both runners in
+// every case. docs/DIVERGENCES.md holds the decision; read it before changing
+// this row.
+//
 // thread marks the one shape whose wire object carries a session_thread_id; the
 // two agent.* results have no such field (verified against the SDK's event
 // types).
@@ -918,11 +929,11 @@ const InterruptResultText = "Tool execution was interrupted before completion. P
 // reference answers an abandoned call with an agent.tool_result carrying
 // is_error true, exactly one text block, a tool_use_id naming the tool-use
 // *event* id, and a populated processed_at — all four of which this already
-// wrote. The custom-tool arm is recorded too, and not matched yet: the
+// wrote. The custom-tool arm is recorded too, and differs on purpose: the
 // reference answered an interrupted custom call with an agent.tool_result keyed
 // by tool_use_id (2026-10-22-duplicate-result-edges, setup.json idx 25), where
-// this writes a user.custom_tool_result. The MCP arm stays inferred
-// (docs/DIVERGENCES.md).
+// this writes a user.custom_tool_result, for the reason toolUseAnswer gives.
+// The MCP arm stays inferred (docs/DIVERGENCES.md).
 func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	now := time.Now().UTC()
 	out := make([]NewEvent, 0, len(uses))
