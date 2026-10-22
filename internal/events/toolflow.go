@@ -588,7 +588,15 @@ type ResultDrops struct {
 // BYOC pull protocol.
 func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, evs []NewEvent, platformOwned func(name string) bool) (ResultDrops, error) {
 	var drops ResultDrops
-	first := map[string]int{}
+	// seen keeps what the log said of each call a result of this send names,
+	// so a later result for the same call costs no query: use is the call's
+	// type, and at the position of the send's first result for it, or -1 when
+	// the log already answers it.
+	type call struct {
+		use domain.EventType
+		at  int
+	}
+	seen := map[string]call{}
 	for i, ev := range evs {
 		refKey := resultRefKey(ev.Type)
 		if refKey == "" {
@@ -603,42 +611,51 @@ func ValidateToolResults(ctx context.Context, q Querier, sessionID domain.ID, ev
 			return ResultDrops{}, refuse("events[%d]: %v", i, err)
 		}
 
-		var useType, name, perm string
-		var done, confirmed bool
-		err = q.QueryRow(ctx,
-			`SELECT tu.type,
-			        COALESCE(tu.payload->>'name', ''),
-			        COALESCE(tu.payload->>'evaluated_permission', ''),
-			        `+answeredBy(3)+`,
-			        EXISTS (
-			          SELECT 1 FROM events c
-			          WHERE c.session_id = $1 AND c.type = $4
-			            AND c.payload->>'tool_use_id' = tu.id
-			            AND c.payload->>'result' = 'allow'
-			        )
-			 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
-			sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &done, &confirmed)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ResultDrops{}, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+		c, again := seen[ref]
+		var name, perm string
+		var confirmed bool
+		if !again {
+			var useType string
+			var done bool
+			err = q.QueryRow(ctx,
+				`SELECT tu.type,
+				        COALESCE(tu.payload->>'name', ''),
+				        COALESCE(tu.payload->>'evaluated_permission', ''),
+				        `+answeredBy(3)+`,
+				        EXISTS (
+				          SELECT 1 FROM events c
+				          WHERE c.session_id = $1 AND c.type = $4
+				            AND c.payload->>'tool_use_id' = tu.id
+				            AND c.payload->>'result' = 'allow'
+				        )
+				 FROM events tu WHERE tu.session_id = $1 AND tu.id = $2`,
+				sessionID.String(), ref, toolResultTypes, string(domain.EventUserToolConfirm)).Scan(&useType, &name, &perm, &done, &confirmed)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ResultDrops{}, refuse("events[%d]: %s %q does not name a tool use in this session", i, refKey, ref)
+			}
+			if err != nil {
+				return ResultDrops{}, fmt.Errorf("validate tool result: %w", err)
+			}
+			c = call{use: domain.EventType(useType), at: i}
+			if done {
+				c.at = -1
+			}
+			seen[ref] = c
 		}
-		if err != nil {
-			return ResultDrops{}, fmt.Errorf("validate tool result: %w", err)
+		if c.use != wantUse {
+			return ResultDrops{}, refuse("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, c.use, wantUse)
 		}
-		if domain.EventType(useType) != wantUse {
-			return ResultDrops{}, refuse("events[%d]: %s %q references a %s event, not %s", i, refKey, ref, useType, wantUse)
-		}
-		if done {
+		if c.at < 0 {
 			drops.Answered = append(drops.Answered, i)
 			continue
 		}
-		if at, ok := first[ref]; ok {
+		if again {
 			if drops.Doubled == nil {
 				drops.Doubled = map[int]int{}
 			}
-			drops.Doubled[i] = at
+			drops.Doubled[i] = c.at
 			continue
 		}
-		first[ref] = i
 		// A platform-owned call is never the client's to answer, answered or
 		// not: while the executor's web pass runs between its scan and its
 		// commit, the call is still unanswered and every other arm here would
@@ -864,9 +881,10 @@ var toolUseAnswer = map[domain.EventType]struct {
 // an empty text block: a Messages endpoint rejects one, and that request is what
 // every later replay of this session sends.
 //
-// The recording covers the agent.tool_use family only. The custom-tool and MCP
-// families reuse this string because one constant is what keeps the three arms
-// from drifting; that reuse is ours, not observed.
+// A later recording heard it for an interrupted custom call too
+// (2026-10-22-duplicate-result-edges, setup.json idx 25). The MCP family reuses
+// it because one constant is what keeps the three arms from drifting; that
+// reuse is ours, not observed.
 //
 // Note what the second sentence does that the wording it replaced did not: it
 // tells the model to retry the very call the user just abandoned, and being on
@@ -900,8 +918,11 @@ const InterruptResultText = "Tool execution was interrupted before completion. P
 // reference answers an abandoned call with an agent.tool_result carrying
 // is_error true, exactly one text block, a tool_use_id naming the tool-use
 // *event* id, and a populated processed_at — all four of which this already
-// wrote. What stays inferred is the custom-tool and MCP arms, which no recording
-// covers (docs/DIVERGENCES.md).
+// wrote. The custom-tool arm is recorded too, and not matched yet: the
+// reference answered an interrupted custom call with an agent.tool_result keyed
+// by tool_use_id (2026-10-22-duplicate-result-edges, setup.json idx 25), where
+// this writes a user.custom_tool_result. The MCP arm stays inferred
+// (docs/DIVERGENCES.md).
 func InterruptResults(uses []ToolUseRef) ([]NewEvent, error) {
 	now := time.Now().UTC()
 	out := make([]NewEvent, 0, len(uses))

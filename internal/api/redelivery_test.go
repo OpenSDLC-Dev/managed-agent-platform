@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"reflect"
 	"slices"
@@ -272,17 +273,74 @@ func TestARedeliveredResultBesideOtherEvents(t *testing.T) {
 		sendEvents(t, s, sid, customResult(callID), note)
 		endTurn(t, s, sid)
 
-		before := eventList(t, s, sid)
-		code, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events",
-			map[string]any{"events": []any{customResult(callID), note}})
-		want := "events[1]: the preceding tool result was already resolved, so this `system.message` was not applied; " +
-			"if this batch is a retry of one that succeeded, no action is needed — otherwise re-send the bare tool result " +
-			"(its 200 no-op re-wakes the agent), then send the instruction in a `user.message`"
-		if code != http.StatusBadRequest || errMessage(body) != want {
-			t.Fatalf("send = %d %q, want 400 %q", code, errMessage(body), want)
+		refused := func(index int, batch ...any) {
+			t.Helper()
+			before := eventList(t, s, sid)
+			code, body := s.do(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{"events": batch})
+			want := fmt.Sprintf("events[%d]: the preceding tool result was already resolved, so this `system.message` was not applied; "+
+				"if this batch is a retry of one that succeeded, no action is needed — otherwise re-send the bare tool result "+
+				"(its 200 no-op re-wakes the agent), then send the instruction in a `user.message`", index)
+			if code != http.StatusBadRequest || errMessage(body) != want {
+				t.Fatalf("send = %d %q, want 400 %q", code, errMessage(body), want)
+			}
+			if got := eventList(t, s, sid); !reflect.DeepEqual(got, before) {
+				t.Errorf("a refused send changed the log:\n%v\nwas\n%v", got, before)
+			}
 		}
-		if got := eventList(t, s, sid); !reflect.DeepEqual(got, before) {
-			t.Errorf("a refused send changed the log:\n%v\nwas\n%v", got, before)
+		refused(1, customResult(callID), note)
+		// The refusal reads only the result the system.message follows, so a
+		// fresh result ahead of the repeat does not save the send; that batch
+		// is unrecorded (docs/DIVERGENCES.md, INFERRED).
+		fresh := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse,
+			`{"name":"record_marker","input":{},"session_thread_id":null}`)
+		refused(2, customResult(fresh), customResult(callID), note)
+	})
+
+	// A system.message after a second result for one call is stored with the
+	// rest of the send, whatever the drop leaves it after: the call it follows
+	// is answered by the send's first result. Unrecorded (docs/DIVERGENCES.md,
+	// INFERRED).
+	t.Run("a system.message after a second result for one call is stored", func(t *testing.T) {
+		note := map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}}
+		for _, between := range [][]map[string]any{nil, {userMessage("next")}} {
+			s := newTestServer(t)
+			sid := eventsFixture(t, s)
+			callID := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse,
+				`{"name":"record_marker","input":{},"session_thread_id":null}`)
+			batch := append(append([]map[string]any{customResult(callID)}, between...), customResult(callID), note)
+
+			echo := sendEvents(t, s, sid, batch...)
+			if len(echo) != len(batch) || echo[len(echo)-1]["type"] != "system.message" {
+				t.Fatalf("echo = %v, want all %d events", echo, len(batch))
+			}
+			if n := countEventType(t, s, sid, "user.custom_tool_result"); n != 1 {
+				t.Errorf("%d events between: results on the log = %d, want 1", len(between), n)
+			}
+			if n := countEventType(t, s, sid, "system.message"); n != 1 {
+				t.Errorf("%d events between: system.message on the log = %d, want 1", len(between), n)
+			}
+		}
+	})
+
+	// A repeat ahead of two results for one open call: the echo still finds
+	// each kept event by its place in the batch as sent, so the second result
+	// is echoed as a twin of the stored first, not of the dropped repeat.
+	t.Run("a repeat ahead of two results for one call", func(t *testing.T) {
+		s := newTestServer(t)
+		sid := eventsFixture(t, s)
+		answered := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse,
+			`{"name":"record_marker","input":{},"session_thread_id":null}`)
+		sendEvents(t, s, sid, customResult(answered))
+		endTurn(t, s, sid)
+		open := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse,
+			`{"name":"record_marker","input":{},"session_thread_id":null}`)
+
+		echo := sendEvents(t, s, sid, customResult(answered), customResult(open), customResult(open))
+		if len(echo) != 2 || echo[0]["custom_tool_use_id"] != open || echo[1]["custom_tool_use_id"] != open || echo[0]["id"] == echo[1]["id"] {
+			t.Fatalf("echo = %v, want the open call's two results under two ids", echo)
+		}
+		if n := countEventType(t, s, sid, "user.custom_tool_result"); n != 2 {
+			t.Errorf("results on the log = %d, want one per call", n)
 		}
 	})
 
@@ -320,40 +378,63 @@ func TestARedeliveredResultBesideOtherEvents(t *testing.T) {
 // were identical, so each echo carrying its own content is this platform's
 // reading (docs/DIVERGENCES.md, INFERRED).
 func TestTwoResultsForOneCallInOneSend(t *testing.T) {
-	s := newTestServer(t)
-	sid := eventsFixture(t, s)
-	callID := appendGatedToolUse(t, s, sid, domain.EventAgentCustomToolUse,
-		`{"name":"record_marker","input":{},"session_thread_id":null}`)
+	for _, lane := range []struct {
+		name    string
+		session func(t *testing.T, s *tserver) (string, map[string]string)
+		use     domain.EventType
+		call    string
+		typ     string
+		key     string
+	}{
+		{"custom", func(t *testing.T, s *tserver) (string, map[string]string) {
+			return eventsFixture(t, s), map[string]string{"x-api-key": testKey}
+		}, domain.EventAgentCustomToolUse, `{"name":"record_marker","input":{},"session_thread_id":null}`,
+			"user.custom_tool_result", "custom_tool_use_id"},
+		// Unrecorded: a worker's two results for its call.
+		{"builtin", func(t *testing.T, s *tserver) (string, map[string]string) {
+			sid := selfHostedSession(t, s)
+			return sid, workerAuth(t, s, sid)
+		}, domain.EventAgentToolUse, `{"name":"bash","input":{},"evaluated_permission":"allow","session_thread_id":null}`,
+			"user.tool_result", "tool_use_id"},
+	} {
+		t.Run(lane.name, func(t *testing.T) {
+			s := newTestServer(t)
+			sid, auth := lane.session(t, s)
+			callID := appendGatedToolUse(t, s, sid, lane.use, lane.call)
+			result := func(text string) map[string]any {
+				return map[string]any{"type": lane.typ, lane.key: callID, "is_error": false,
+					"content": []any{map[string]any{"type": "text", "text": text}}}
+			}
 
-	again := customResult(callID)
-	again["content"] = []any{map[string]any{"type": "text", "text": "again"}}
-	echo := sendEvents(t, s, sid, customResult(callID), again)
-	if len(echo) != 2 || echo[0]["type"] != "user.custom_tool_result" || echo[1]["type"] != "user.custom_tool_result" ||
-		echo[0]["custom_tool_use_id"] != callID || echo[1]["custom_tool_use_id"] != callID {
-		t.Fatalf("echo = %v, want both results", echo)
-	}
-	first, second := echo[0]["id"], echo[1]["id"]
-	if first == second {
-		t.Fatalf("both echoed results carry id %v, want two", first)
-	}
-	if !reflect.DeepEqual(echo[0]["content"], customResult(callID)["content"]) || !reflect.DeepEqual(echo[1]["content"], again["content"]) {
-		t.Errorf("echoed content = %v, %v; want each result's own", echo[0]["content"], echo[1]["content"])
-	}
-	var stored []map[string]any
-	for _, ev := range eventList(t, s, sid) {
-		if ev["type"] == "user.custom_tool_result" {
-			stored = append(stored, ev)
-		}
-	}
-	if len(stored) != 1 || stored[0]["id"] != first || !reflect.DeepEqual(stored[0]["content"], echo[0]["content"]) {
-		t.Errorf("results on the log = %v, want only the first echoed, %v", stored, first)
-	}
-	if n := s.liveWork(sid, queue.ModelTurn); n != 1 {
-		t.Errorf("live model_turn items = %d, want the one resume", n)
-	}
+			echo := sendEventsAs(t, s, auth, sid, result("first"), result("again"))
+			if len(echo) != 2 || echo[0]["type"] != lane.typ || echo[1]["type"] != lane.typ ||
+				echo[0][lane.key] != callID || echo[1][lane.key] != callID {
+				t.Fatalf("echo = %v, want both results", echo)
+			}
+			first, second := echo[0]["id"], echo[1]["id"]
+			if first == second {
+				t.Fatalf("both echoed results carry id %v, want two", first)
+			}
+			if !reflect.DeepEqual(echo[0]["content"], result("first")["content"]) || !reflect.DeepEqual(echo[1]["content"], result("again")["content"]) {
+				t.Errorf("echoed content = %v, %v; want each result's own", echo[0]["content"], echo[1]["content"])
+			}
+			var stored []map[string]any
+			for _, ev := range eventList(t, s, sid) {
+				if ev["type"] == lane.typ {
+					stored = append(stored, ev)
+				}
+			}
+			if len(stored) != 1 || stored[0]["id"] != first || !reflect.DeepEqual(stored[0]["content"], echo[0]["content"]) {
+				t.Errorf("results on the log = %v, want only the first echoed, %v", stored, first)
+			}
+			if n := s.liveWork(sid, queue.ModelTurn); n != 1 {
+				t.Errorf("live model_turn items = %d, want the one resume", n)
+			}
 
-	endTurn(t, s, sid)
-	sendIsANoOp(t, s, map[string]string{"x-api-key": testKey}, sid, customResult(callID), customResult(callID))
+			endTurn(t, s, sid)
+			sendIsANoOp(t, s, auth, sid, result("first"), result("first"))
+		})
+	}
 }
 
 // A repeat to a child's call is dropped like any other: the child it would

@@ -832,9 +832,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// The response echoes the posted events only, in the order posted, not the
 	// platform's state-machine reaction (which clients observe on the
 	// stream/log, in processing order). A result dropped as a repeat is not
-	// echoed. A doubled one is, as its call's stored result under an id of its
-	// own that no event on the log carries, as the reference echoed it
-	// (2026-10-22-duplicate-result-edges, setup.json idx 12–13).
+	// echoed. A doubled one is, as the reference echoed it
+	// (2026-10-22-duplicate-result-edges, setup.json idx 12–13): its own
+	// content, in the envelope of its call's stored result, under an id that
+	// no event on the log carries.
 	stored := make(map[int]domain.ID, len(newEvents))
 	for k, ev := range newEvents {
 		if sent != nil {
@@ -875,9 +876,10 @@ func logDropped(ctx context.Context, sessionID string, dropped, doubled []events
 	if len(dropped) == 0 && len(doubled) == 0 {
 		return
 	}
-	slog.InfoContext(ctx, "session events send: dropped results for calls already answered",
+	slog.InfoContext(ctx, "session events send: dropped repeated tool results",
 		"request_id", requestIDFrom(ctx), "session_id", sessionID,
-		"tool_use_ids", events.ToolResultRefs(dropped), "doubled_tool_use_ids", events.ToolResultRefs(doubled))
+		"tool_use_ids", events.ToolResultRefs(dropped), "doubled_tool_use_ids", events.ToolResultRefs(doubled),
+		"dropped_events", len(dropped)+len(doubled))
 }
 
 // sendCheckError answers the refusals of the checks a send runs against the
