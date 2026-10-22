@@ -169,6 +169,26 @@ func TestARedeliveredToolResultIsANoOp(t *testing.T) {
 	}
 }
 
+// The interrupt's answer is the call's first, so the result a self_hosted
+// worker posts once the interrupt has stopped its call is the same no-op. The
+// reference was recorded answering exactly this send
+// (managed-agents-wire-recordings 2026-10-18-selfhost-worker-reconnect,
+// worker-wire/0009.json; the interrupt's agent.tool_result stayed the call's
+// only result, setup.json idx 11).
+func TestAWorkersResultAfterAnInterruptIsANoOp(t *testing.T) {
+	s := newTestServer(t)
+	sid := selfHostedSession(t, s)
+	callID := suspendedOnTool(t, s, sid, domain.EventAgentToolUse)
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	if got := lastEventOfType(t, s, sid, "agent.tool_result")["tool_use_id"]; got != callID {
+		t.Fatalf("the interrupt's agent.tool_result answers %v, want %v", got, callID)
+	}
+
+	sendIsANoOp(t, s, workerAuth(t, s, sid), sid, map[string]any{"type": "user.tool_result",
+		"tool_use_id": callID, "is_error": true,
+		"content": []any{map[string]any{"type": "text", "text": "bash: context canceled"}}})
+}
+
 // TestARedeliveredResultBesideOtherEvents: the recording sent each result
 // alone, so a batch that carries one beside other events is this platform's
 // reading of it (docs/DIVERGENCES.md, INFERRED): the repeat is dropped, with a
