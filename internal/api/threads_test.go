@@ -660,7 +660,8 @@ func TestThreadArchive(t *testing.T) {
 		t.Fatalf("child's own view = %v, want both calls answered before the terminated event", ownTypes)
 	}
 	if own[2]["tool_use_id"] != parked[0].ID.String() || own[2]["is_error"] != true ||
-		own[3]["custom_tool_use_id"] != parked[1].ID.String() || own[3]["processed_at"] == nil {
+		own[3]["custom_tool_use_id"] != parked[1].ID.String() || own[3]["is_error"] != true ||
+		own[3]["processed_at"] == nil {
 		t.Errorf("closing results = %v / %v, want error results answering the parked calls, stamped processed", own[2], own[3])
 	}
 	if own[4]["session_thread_id"] != idle || own[4]["agent_name"] != "worker" {

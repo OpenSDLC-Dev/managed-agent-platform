@@ -146,7 +146,9 @@ func TestInterruptEndsATurnStuckOnAnUnansweredToolUse(t *testing.T) {
 func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 	// A result event's family must match its tool use's: a custom tool is
 	// answered by user.custom_tool_result keyed by custom_tool_use_id, a
-	// platform built-in by agent.tool_result keyed by tool_use_id.
+	// platform built-in by agent.tool_result keyed by tool_use_id. The custom
+	// answer is not the reference's, on purpose (docs/DIVERGENCES.md, "user.interrupt —
+	// an abandoned custom call is answered with a user.custom_tool_result").
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 	ctx := context.Background()
@@ -185,6 +187,21 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 	// looking like a client event still queued behind earlier ones.
 	if customResult["processed_at"] == nil {
 		t.Errorf("synthesized user.custom_tool_result has a null processed_at")
+	}
+	// Exactly one answer per call. The lookups above read the last event of
+	// each type, so they would pass with a call answered twice, or in both
+	// families at once.
+	answers := map[any]int{}
+	for _, ev := range eventList(t, s, sessionID) {
+		switch ev["type"] {
+		case "agent.tool_result":
+			answers[ev["tool_use_id"]]++
+		case "user.custom_tool_result":
+			answers[ev["custom_tool_use_id"]]++
+		}
+	}
+	if len(answers) != 2 || answers[toolID] != 1 || answers[customID] != 1 {
+		t.Errorf("answers per call = %v, want one each for %s and %s", answers, toolID, customID)
 	}
 
 	// Both calls are answered, so the client's own late result is dropped
