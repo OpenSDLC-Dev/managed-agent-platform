@@ -237,7 +237,7 @@ func fileFault(verb, display string, err error) (Result, error) {
 	case errors.Is(err, sandbox.ErrNotWritable):
 		return failf("%s %s: %s", verb, display, notWritableReason(err))
 	case errors.Is(err, sandbox.ErrFileTooLarge):
-		return failf("%s: %s is over the %d-byte limit on a file the read and edit tools open, whole or by view_range.",
+		return failf("%s: %s is over the %d-byte limit for files opened by read or edit; the read tool's view_range does not bypass it.",
 			verb, display, sandbox.MaxFileBytes)
 	default:
 		return Result{}, err

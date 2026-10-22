@@ -264,7 +264,7 @@ func TestFileSentinelsAreToolErrors(t *testing.T) {
 		{"non-regular", sandbox.ErrNotRegularFile, "not a regular file"},
 		{"not a directory", sandbox.ErrNotDirectory, "not a directory"},
 		{"not replaceable", sandbox.ErrNotReplaceable, "only replace a file whole"},
-		{"too large", sandbox.ErrFileTooLarge, "whole or by view_range"},
+		{"too large", sandbox.ErrFileTooLarge, "view_range does not bypass it"},
 		// The unwritable-target refusal carries the sandbox's own strerror
 		// text, normalized the way the reference's fsErrorMessage table is:
 		// its one mapped case takes the reference's wording, everything else
