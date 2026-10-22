@@ -514,8 +514,10 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 // handed on for storage unchanged, so what an update merges against is what the
 // client sent; the response is rendered from them rather than being them, since
 // renderAgent resolves the toolset configuration first (toolset.Materialize).
-func parseTools(raw json.RawMessage) ([]json.RawMessage, error) {
-	return parseToolsWith(raw, false, "")
+// prefix opens the path a reserved custom tool name is refused under, as the
+// session route names it.
+func parseTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
+	return parseToolsWith(raw, false, prefix)
 }
 
 // parseAgentTools is parseTools on agent create and update, which answer a
@@ -560,6 +562,20 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 		case "custom":
 			if probe.Name == "" || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
 				return nil, errInvalid("custom tools require name, description, and input_schema")
+			}
+			// The frame an MCP tool's model-facing name is composed in is
+			// reserved, in the reference's words (2026-09-03 batch2
+			// `agent.create.mcp-name-collision`; #573), so no custom tool can
+			// take an MCP tool's name. Recorded on agent create, it binds every
+			// route that takes tools[] from a request, the path opened as that
+			// route opens it: a session's override or mid-session update would
+			// otherwise hand a custom tool the name, and the brain gives a
+			// custom tool the name over any MCP tool (resolveTools). A stored
+			// tools[] is never parsed again, so an agent stored before this
+			// check still resolves.
+			if strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
+				return nil, errInvalid("%stools.%d.custom.name: custom tool name %q uses reserved MCP tool prefix",
+					prefix, i, probe.Name)
 			}
 		case "mcp_toolset":
 			if probe.MCPServerName == "" {

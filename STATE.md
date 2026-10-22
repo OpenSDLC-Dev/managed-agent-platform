@@ -13,6 +13,6 @@ part of their issue, which stays open for the rest.
 - [x] #589: refuse a past `mcp_oauth` `expires_at` on credential create (an update still accepts one).
 - [x] #549: refuse a memories-list `path_prefix` that does not end with `/` (order and `depth` stay open).
 - [x] #543: refuse a cron schedule that restricts both day-of-month and day-of-week.
-- [ ] #573: reserve the `mcp__` prefix against custom tool names (the 64-byte cap stays open).
+- [x] #573: reserve the `mcp__` prefix against custom tool names (the 64-byte cap stays open).
 - [ ] #552: stamp `memory_versions.created_at` with `clock_timestamp()`.
 - [ ] #634: two file-tool errors stop advising `bash`.

@@ -190,6 +190,73 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 	}
 }
 
+// A custom tool cannot take a name in the frame an MCP tool is offered under,
+// refused in the reference's words: the create body has the recorded one's
+// shape (managed-agents-wire-recordings 2026-09-03/batch2.json idx 57
+// agent.create.mcp-name-collision; #573), whose verbatim body
+// TestXShouldRetryFollowsTheRecordings sends. The update's "agent." prefix is
+// the one the reference's schema layer was recorded using on update
+// (agentUpdatePath).
+func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
+	s := newTestServer(t)
+	impostor := customTool("mcp__deepwiki__ask_question")
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"mcp_servers": []any{map[string]any{"type": "url", "name": "deepwiki", "url": "https://mcp.deepwiki.com/mcp"}},
+		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "deepwiki"}, impostor},
+	}))
+	const want = `tools.1.custom.name: custom tool name "mcp__deepwiki__ask_question" uses reserved MCP tool prefix`
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	wantUpdateRejected(t, s, id, map[string]any{"tools": []any{customTool("mine"), impostor}}, "agent."+want)
+
+	// The reservation is the prefix, not a declared server's tools. Nothing
+	// else is reserved: none of these is a name the composition can produce.
+	wantAgentRejected(t, s, agentBody(map[string]any{"tools": []any{customTool("mcp__nowhere__x")}}),
+		`tools.0.custom.name: custom tool name "mcp__nowhere__x" uses reserved MCP tool prefix`)
+	for _, name := range []string{"mcp_search", "my__mcp__search", "MCP__docs__search"} {
+		createAgent(t, s, agentBody(map[string]any{"tools": []any{customTool(name)}}))
+	}
+
+	// Both session routes take tools[] from the request too, so both refuse,
+	// each path opened as that route opens it (unrecorded; docs/
+	// DIVERGENCES.md): a create's tool override and a mid-session agent.tools
+	// update. The refused update leaves the session's agent as it was.
+	agentID, envID := fixture(t, s)
+	status, res = s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
+		"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool("mcp__docs__search")}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`agent.agent_with_overrides.config.tools.0.custom.name: custom tool name "mcp__docs__search" uses reserved MCP tool prefix`)
+	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
+	_, before := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": []any{customTool("mine"), customTool("mcp__docs__fetch")}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`agent.tools.1.custom.name: custom tool name "mcp__docs__fetch" uses reserved MCP tool prefix`)
+	if _, after := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); !reflect.DeepEqual(after["agent"], before["agent"]) {
+		t.Errorf("refused update changed the session's agent: %v, was %v", after["agent"], before["agent"])
+	}
+
+	// A stored tools[] is not parsed again: an agent stored with such a name
+	// before the check starts a session and takes an update that leaves its
+	// tools alone, and the brain gives the custom tool the name
+	// (internal/brain TestAnMCPToolLosesAContestedName).
+	legacy := createAgent(t, s, agentBody(nil))["id"].(string)
+	planted, err := json.Marshal([]any{customTool("mcp__docs__search")})
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE agents SET spec = jsonb_set(spec, '{tools}', $1::jsonb) WHERE id = $2`,
+		string(planted), legacy); err != nil {
+		t.Fatalf("plant a pre-#573 spec: %v", err)
+	}
+	createSession(t, s, map[string]any{"environment_id": envID, "agent": legacy})
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+legacy, map[string]any{"version": 1, "name": "renamed"}); status != http.StatusOK {
+		t.Errorf("rename of an agent stored with an mcp__ custom tool: status %d (%v), want 200", status, res)
+	}
+}
+
 func TestAgentCreateMinimal(t *testing.T) {
 	s := newTestServer(t)
 	res := createAgent(t, s, map[string]any{"name": "helper", "model": "claude-opus-4-8"})

@@ -360,7 +360,10 @@ func TestANoteQuotesABoundedName(t *testing.T) {
 // A tool name is one namespace. A custom tool the agent's author named
 // mcp__docs__search wins it — the author's own definition is not displaced by a
 // third party's listing — and the MCP tool is dropped rather than sent as a
-// second definition under a name the endpoint already has.
+// second definition under a name the endpoint already has. The toolset is
+// declared first, so the win is the order resolveTools lays groups down in,
+// not tools[]'s. Every write of tools[] refuses that name since #573, so this
+// contest now serves only an agent or a session stored before then.
 func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
@@ -385,9 +388,9 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 
 // Flattening two names into one string is not injective: a server named a__b
 // offering c and a server named a offering b__c compose to mcp__a__b__c. The
-// contest is settled the same way as one with a custom tool — declaration
-// order, with the loser noted — rather than by escaping a separator the
-// reference never publishes.
+// contest is settled by declaration order, with the loser noted, rather than
+// by escaping a separator the reference never publishes. A contest with a
+// custom tool is not: the agent's own tools are laid down first.
 func TestTwoServersCanContestOneComposedName(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"a__b"}`),
