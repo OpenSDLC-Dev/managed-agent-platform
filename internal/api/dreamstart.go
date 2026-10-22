@@ -505,12 +505,21 @@ func (s *server) cloneDreamStore(ctx context.Context, tx pgx.Tx, d dreamRow, in 
 			fmt.Fprintf(&mem, "($%d, $1, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
 			n = len(verArgs)
 			verArgs = append(verArgs, versionID, memoryID, m.path, m.content, m.sha, m.size)
-			fmt.Fprintf(&ver, "($%d, $1, $%d, 'created', $%d, $%d, $%d, $%d, $2)",
+			fmt.Fprintf(&ver, "($%d, $1, $%d, 'created', $%d, $%d, $%d, $%d, $2, now())",
 				n+1, n+2, n+3, n+4, n+5, n+6)
 		}
+		// created_at is now(), written out rather than left to the column's
+		// default, unlike the other writers of memory_versions
+		// (insertMemoryVersion, #552): the completion scan keeps these rows out
+		// only by reading versions stamped after the session row, which takes
+		// the same now() (dreamSecretInVersions). The store is created in this
+		// transaction, so no writer can be waiting on its lock, and its own
+		// order is sound. Across stores it is not: a start that waited on the
+		// input store's lock dates its copies before the input versions they
+		// copy were written.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO memory_versions (id, memory_store_id, memory_id, operation, path,
-				content, content_sha256, content_size_bytes, created_by) VALUES `+ver.String(), verArgs...); err != nil {
+				content, content_sha256, content_size_bytes, created_by, created_at) VALUES `+ver.String(), verArgs...); err != nil {
 			return "", err
 		}
 		if _, err := tx.Exec(ctx, `

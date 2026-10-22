@@ -985,11 +985,14 @@ func lastSessionError(ctx context.Context, db querier, sessionID string) (string
 // the cheap half of the secret defence (§3.3): the pipeline reads redacted
 // text, and this reads back what it wrote.
 //
-// The strict `created_at > after` bound cannot exclude a version the session
-// wrote: the only versions that can tie the session row's own created_at are
-// the clone's, which share the session's transaction and its now(); anything
-// the session writes lands in a transaction that begins after that one
-// committed, so its now() is strictly later.
+// The strict `created_at > after` bound excludes no version the session wrote
+// while the database clock runs forward: the only versions that can tie the
+// session row's own created_at are the clone's, which share the session's
+// transaction and its now(); anything the session writes is stamped with
+// clock_timestamp() at its insert (#552), in a transaction that begins after
+// that one committed, so it is strictly later. A clock that steps backwards
+// between the two (#411 recorded 20ms) can date a session's version at or
+// before the bound, and this half of the defence then misses it.
 func dreamSecretInVersions(ctx context.Context, db querier, storeID, sessionID string, after time.Time) (string, error) {
 	rows, err := db.Query(ctx, `
 		SELECT memory_id, content FROM memory_versions
