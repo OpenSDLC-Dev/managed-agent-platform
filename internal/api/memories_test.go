@@ -730,6 +730,23 @@ func TestMemoryList(t *testing.T) {
 	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, newestFirst[2:]) {
 		t.Errorf("the page after a mid-walk write: status %d, %v, want %v", status, got, newestFirst[2:])
 	}
+	// The order is by created_at, so rewriting the oldest memory leaves it
+	// last. An order by updated_at would move it to the front.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil)
+	rows := memoryRows(t, body)
+	if status != http.StatusOK || len(rows) != 5 {
+		t.Fatalf("list after the late write: status %d, %d rows (%v)", status, len(rows), body)
+	}
+	oldest := rows[4]
+	if status, resp := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+oldest["id"].(string),
+		map[string]any{"content": "rewritten"}); status != http.StatusOK {
+		t.Fatalf("rewrite %v: status %d (%v)", oldest["path"], status, resp)
+	}
+	afterRewrite := append([]string{"/late.md"}, newestFirst...)
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, afterRewrite) {
+		t.Errorf("list after rewriting %v: status %d, %v, want %v", oldest["path"], status, got, afterRewrite)
+	}
 
 	// view=full caps the limit at 20 silently; view=basic does not.
 	bulk := createMemoryStore(t, s, "bulk")
