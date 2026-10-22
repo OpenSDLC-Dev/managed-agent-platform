@@ -190,16 +190,9 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 	// Both calls are answered, so the client's own late result is dropped
 	// rather than double-answering the call on the append-only log: the
 	// reference's no-op for a call that already has its result (#58).
-	status, _ := s.do(http.MethodPost, "/v1/sessions/"+sessionID+"/events", map[string]any{"events": []any{
-		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
-			"content": []any{map[string]any{"type": "text", "text": "late"}}},
-	}})
-	if status != http.StatusOK {
-		t.Errorf("late custom tool result: status %d, want 200", status)
-	}
-	if n := countEventType(t, s, sessionID, "user.custom_tool_result"); n != 1 {
-		t.Errorf("user.custom_tool_result on the log = %d, want only the interrupt's", n)
-	}
+	sendIsANoOp(t, s, map[string]string{"x-api-key": testKey}, sessionID, map[string]any{
+		"type": "user.custom_tool_result", "custom_tool_use_id": customID,
+		"content": []any{map[string]any{"type": "text", "text": "late"}}})
 }
 
 func TestInterruptAndRedirectInOneBatch(t *testing.T) {
