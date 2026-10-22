@@ -266,9 +266,10 @@ func TestParallelToolResultsResumeOnFullSet(t *testing.T) {
 }
 
 func TestInboundToolResultValidation(t *testing.T) {
-	// The log is append-only: a result with a wrong or unknown reference, or
-	// two for one call in one request, would poison every future replay, so it
-	// must be the client's 400 instead.
+	// The log is append-only: a result with a wrong or unknown reference would
+	// poison every future replay, so it must be the client's 400 instead. Two
+	// for one call in one request are stored once
+	// (TestTwoResultsForOneCallInOneSend).
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 
@@ -296,10 +297,6 @@ func TestInboundToolResultValidation(t *testing.T) {
 		map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": customID}}},
 		workerAuth(t, s, sessionID)); got != http.StatusBadRequest {
 		t.Errorf("kind mismatch: status %d, want 400", got)
-	}
-	// Duplicate within one request.
-	if got := post(result(customID), result(customID)); got != http.StatusBadRequest {
-		t.Errorf("intra-batch duplicate: status %d, want 400", got)
 	}
 	// The valid result lands…
 	if got := post(result(customID)); got != http.StatusOK {

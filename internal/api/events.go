@@ -122,7 +122,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// Checked before any side effect (the rubric snapshot writes a blob), not
 	// only at append time: a rejected send must leave nothing behind.
 	if sessionArchivedAt != nil {
-		return nil, errInvalid("session %s is archived and read-only", id)
+		return nil, errArchivedSend(id)
 	}
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
@@ -144,9 +144,10 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// 400, not the session's funeral. platformExecuted marks the calls no
 	// client may answer, which closes the scan-to-commit double-answer window
 	// on self_hosted (#222). A result for a call already answered is the
-	// reference's no-op instead (#58): repeats holds where such results sit
-	// in the batch, and they are dropped below.
-	repeats, err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted)
+	// reference's no-op instead (#58), and a second result for a call the same
+	// send answers is stored once: drops holds where such results sit in the
+	// batch, and they leave it below.
+	drops, err := events.ValidateToolResults(ctx, tx, domain.ID(id), newEvents, platformExecuted)
 	if err != nil {
 		return nil, sendCheckError(err)
 	}
@@ -174,33 +175,44 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, sendCheckError(err)
 	}
-	// The results for calls already answered leave the batch here, after the
-	// checks above, which name an event by its place in the batch as sent, and
-	// before anything below reads the batch to decide what the send does. A
-	// system.message rides on the event it follows (NormalizeInbound), so one
-	// trailing a dropped result goes with it: a retried batch stays a no-op,
-	// and what is left could have been sent alone. sent keeps each remaining
-	// event's place for the one check below that names one. A send left with
-	// nothing is the reference's 200 {"data":[]}, and the deferred rollback
-	// leaves the session as it was.
+	// The results drops names leave the batch here, after the checks above,
+	// which name an event by its place in the batch as sent, and before
+	// anything below reads the batch to decide what the send does. A
+	// system.message rides on the result it follows (NormalizeInbound), and
+	// the reference refuses one whose result repeats an answered call
+	// (2026-10-22-duplicate-result-edges, setup.json idx 10). echoed keeps the
+	// batch as sent, which the response follows; sent keeps each remaining
+	// event's place in it, for the echo and for the one check below that
+	// names an event. A send left with nothing is the reference's 200
+	// {"data":[]}, and the deferred rollback leaves the session as it was.
+	echoed := newEvents
 	var sent []int
-	var dropped []events.NewEvent
-	if len(repeats) > 0 {
-		drop := make([]bool, len(newEvents))
-		for _, i := range repeats {
-			drop[i] = true
+	var dropped, doubled []events.NewEvent
+	if len(drops.Answered) > 0 || len(drops.Doubled) > 0 {
+		answered := make([]bool, len(newEvents))
+		for _, i := range drops.Answered {
+			answered[i] = true
 		}
 		var kept []events.NewEvent
 		var keptScoped []bool
 		for i, ev := range newEvents {
-			if drop[i] || (ev.Type == domain.EventSystemMessage && i > 0 && drop[i-1]) {
+			if ev.Type == domain.EventSystemMessage && i > 0 && answered[i-1] {
+				return nil, errInvalid("events[%d]: the preceding tool result was already resolved, so this `system.message` was not applied; "+
+					"if this batch is a retry of one that succeeded, no action is needed — otherwise re-send the bare tool result "+
+					"(its 200 no-op re-wakes the agent), then send the instruction in a `user.message`", i)
+			}
+			if answered[i] {
 				dropped = append(dropped, ev)
+				continue
+			}
+			if _, ok := drops.Doubled[i]; ok {
+				doubled = append(doubled, ev)
 				continue
 			}
 			kept, keptScoped, sent = append(kept, ev), append(keptScoped, scoped[i]), append(sent, i)
 		}
 		if len(kept) == 0 {
-			logDropped(ctx, id, dropped)
+			logDropped(ctx, id, dropped, nil)
 			return map[string]any{"data": []any{}}, nil
 		}
 		newEvents, scoped = kept, keptScoped
@@ -726,7 +738,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	case errors.Is(err, events.ErrSessionNotFound):
 		return nil, errNotFound("session %s not found", id)
 	case errors.Is(err, events.ErrSessionArchived):
-		return nil, errInvalid("session %s is archived and read-only", id)
+		return nil, errArchivedSend(id)
 	case err != nil:
 		return nil, err
 	}
@@ -805,7 +817,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	logDropped(ctx, id, dropped)
+	logDropped(ctx, id, dropped, doubled)
 	// After the commit: a status change that rolled back did not happen. These are
 	// the production transitions — idle→running (a user.message waking a session,
 	// a confirmation clearing the last gate) and running→idle (an interrupt
@@ -819,10 +831,29 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 
 	// The response echoes the posted events only, in the order posted, not the
 	// platform's state-machine reaction (which clients observe on the
-	// stream/log, in processing order).
-	data := make([]any, 0, len(newEvents))
-	for _, ev := range newEvents {
-		wire, err := eventWire(*posted[ev.ID], events.ScopeSession)
+	// stream/log, in processing order). A result dropped as a repeat is not
+	// echoed. A doubled one is, as its call's stored result under an id of its
+	// own that no event on the log carries, as the reference echoed it
+	// (2026-10-22-duplicate-result-edges, setup.json idx 12–13).
+	stored := make(map[int]domain.ID, len(newEvents))
+	for k, ev := range newEvents {
+		if sent != nil {
+			k = sent[k]
+		}
+		stored[k] = ev.ID
+	}
+	data := make([]any, 0, len(echoed))
+	for i, ev := range echoed {
+		var echo domain.Event
+		if eid, ok := stored[i]; ok {
+			echo = *posted[eid]
+		} else if at, ok := drops.Doubled[i]; ok {
+			echo = *posted[stored[at]]
+			echo.ID, echo.Body = domain.NewID(domain.PrefixEvent), ev.Payload
+		} else {
+			continue
+		}
+		wire, err := eventWire(echo, events.ScopeSession)
 		if err != nil {
 			return nil, err
 		}
@@ -831,15 +862,22 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	return map[string]any{"data": data}, nil
 }
 
-// logDropped tells the operator which results a send that succeeded dropped
-// as repeats (#58): its 200 says nothing of them.
-func logDropped(ctx context.Context, sessionID string, dropped []events.NewEvent) {
-	if len(dropped) == 0 {
+// errArchivedSend is the reference's refusal of a send to an archived
+// session (2026-10-22-duplicate-result-edges, setup.json idx 31).
+func errArchivedSend(sessionID string) error {
+	return errInvalid("Cannot send events to archived session: %s", sessionID)
+}
+
+// logDropped tells the operator which results a send that succeeded kept off
+// the log: repeats of an answered call (#58), and doubles of a result the
+// same send stored. Its 200 says nothing of either.
+func logDropped(ctx context.Context, sessionID string, dropped, doubled []events.NewEvent) {
+	if len(dropped) == 0 && len(doubled) == 0 {
 		return
 	}
 	slog.InfoContext(ctx, "session events send: dropped results for calls already answered",
 		"request_id", requestIDFrom(ctx), "session_id", sessionID,
-		"tool_use_ids", events.ToolResultRefs(dropped), "dropped_events", len(dropped))
+		"tool_use_ids", events.ToolResultRefs(dropped), "doubled_tool_use_ids", events.ToolResultRefs(doubled))
 }
 
 // sendCheckError answers the refusals of the checks a send runs against the
