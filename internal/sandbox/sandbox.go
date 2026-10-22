@@ -80,8 +80,9 @@ var (
 	// rename(2) refuses a mount point with EBUSY — or, worse, succeeds and
 	// *supplants* the node with a regular file instead of writing through it.
 	// Both backends refuse instead and say why. Like ErrIsDirectory it
-	// describes the target the caller asked for — the model can write through
-	// such a target with bash redirection — so a tool hands it over as a tool
+	// describes the target the caller asked for — the model can choose another
+	// target, and a session with bash can write through this one by
+	// redirection — so a tool hands it over as a tool
 	// result rather than letting it reach the executor as a sandbox fault and
 	// be retried until the lease runs out (#205).
 	ErrNotReplaceable = errors.New("sandbox: target cannot be replaced")
@@ -663,8 +664,8 @@ type Sandbox interface {
 	//     both are refused with ErrNotReplaceable before the move, identically on
 	//     both backends, by the shared __map_unreplaceable probe (#205). A write
 	//     to a bind-mounted file fails where the pre-#71 k8s backend used to
-	//     write through it; the model is told why, and bash redirection still
-	//     reaches it.
+	//     write through it; the model is told why, and in a session with bash,
+	//     redirection still reaches it.
 	WriteFile(ctx context.Context, path string, data []byte) error
 	// WriteFileStream writes exactly size bytes read from src to path, creating
 	// parent directories and overwriting any existing file, atomically and with

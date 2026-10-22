@@ -957,8 +957,9 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	// made there. Every sandbox this suite runs has such a file at /etc/hosts
 	// (the docker daemon and the kubelet both manage it), which makes it the one
 	// target both backends can be asked about identically. The answer must be
-	// ErrNotReplaceable, a tool result the model can act on with bash redirection
-	// — not an unclassified fault the executor retries until the lease runs out
+	// ErrNotReplaceable, a tool result the model can act on — another target,
+	// or bash redirection where the session has bash — not an unclassified
+	// fault the executor retries until the lease runs out
 	// (issue #205).
 	t.Run("WriteOntoBindMountedTarget", func(t *testing.T) {
 		sb, _, _ := provision(t, unrestricted)
