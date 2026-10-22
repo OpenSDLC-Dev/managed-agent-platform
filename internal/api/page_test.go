@@ -58,12 +58,13 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 
 	// Every unidirectional list whose keyset is (created_at, id), against all
 	// four arms — the three foreign kinds and a backwards time cursor, which
-	// these lists do not serve either. The nested ones carry a real parent
-	// because most of those handlers resolve it before they reach the cursor,
-	// so a made-up id would answer 404 and prove nothing about the guard. The
-	// threads list is the exception, checking the cursor first; it takes a real
-	// session anyway rather than making the table depend on which order a
-	// handler happens to use.
+	// these lists do not serve either. The memories list is one when it has no
+	// depth; at depth=1 it pages by path (TestMemoryListPrefixAndDepth). The
+	// nested ones carry a real parent because most of those handlers resolve
+	// it before they reach the cursor, so a made-up id would answer 404 and
+	// prove nothing about the guard. The threads list is the exception,
+	// checking the cursor first; it takes a real session anyway rather than
+	// making the table depend on which order a handler happens to use.
 	for _, path := range []string{
 		"/v1/agents",
 		"/v1/environments",
@@ -73,6 +74,7 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 		"/v1/deployment_runs",
 		"/v1/dreams",
 		"/v1/memory_stores",
+		"/v1/memory_stores/" + storeID + "/memories",
 		"/v1/memory_stores/" + storeID + "/memory_versions",
 		"/v1/skills",
 		"/v1/skills/" + skillID + "/versions",

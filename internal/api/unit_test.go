@@ -41,8 +41,9 @@ func TestCursorRoundTrip(t *testing.T) {
 	if err != nil || !c.versioned || c.version != 7 || c.dir != dirNext {
 		t.Errorf("version cursor round-trip: %+v, err %v", c, err)
 	}
-	// The path cursor keys the memories list. Its key rides base64url'd INSIDE
-	// the token, which is what lets a path carry the grammar's own separator.
+	// The path cursor keys the memories list at depth=1. Its key rides
+	// base64url'd INSIDE the token, which is what lets a path carry the
+	// grammar's own separator.
 	path := `/a|b/c\d é`
 	c, err = decodeCursor(encodePathCursor(path))
 	if err != nil || !c.pathKeyed || c.path != path || c.dir != dirNext {
