@@ -862,12 +862,16 @@ func payloadString(payload json.RawMessage, key string) (string, error) {
 // answered-ness queries COALESCE the three reference keys, so a wrong-family
 // answer unblocks the gate and replays cleanly.
 //
-// The custom row is not the reference's, on purpose. The reference answers an
-// abandoned custom call with an agent.tool_result keyed by tool_use_id, which
-// the SDK's SessionToolRunner of its first major does not read as an answer: a
-// recording saw each fresh runner process run the interrupted tool again. A
-// user.custom_tool_result is an answer to every runner. docs/DIVERGENCES.md
-// holds the decision; read it before changing this row.
+// The custom row is not the reference's, on purpose. Interrupting a custom
+// call session-wide, the reference was recorded answering it with an
+// agent.tool_result keyed by tool_use_id. The SDK's SessionToolRunner reads
+// only user.tool_result and user.custom_tool_result as answers. At the version
+// this module pins, a recording saw each fresh runner process run that
+// interrupted tool again. The runner of the SDK's next major skips a call a
+// session-wide interrupt covers, but not one a thread-scoped interrupt or an
+// archive closes. A user.custom_tool_result is an answer to both runners in
+// every case. docs/DIVERGENCES.md holds the decision; read it before changing
+// this row.
 //
 // thread marks the one shape whose wire object carries a session_thread_id; the
 // two agent.* results have no such field (verified against the SDK's event

@@ -194,6 +194,9 @@ func TestCustomWaitMessagesAndCancellation(t *testing.T) {
 			if count != 1 || processed != 1 {
 				t.Fatalf("received reply lost or unprocessed: %d/%d", count, processed)
 			}
+			// The interrupt and the session's archive close the open call
+			// alike, in its own family (docs/DIVERGENCES.md).
+			wantOneAnswer(t, s, sid, ids[0], "user.custom_tool_result")
 			if s.liveWork(sid, queue.ModelTurn) != 0 {
 				t.Fatal("cancellation resumed model")
 			}

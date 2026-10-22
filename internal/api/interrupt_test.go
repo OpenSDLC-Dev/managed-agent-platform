@@ -49,6 +49,36 @@ func abandonedText(t *testing.T, ev map[string]any) {
 	}
 }
 
+// wantOneAnswer asserts that exactly one stored result answers callID, and
+// that it is of type typ. It reads all four result families by their
+// reference keys, so a call answered twice, or in a second family, fails.
+func wantOneAnswer(t *testing.T, s *tserver, sid, callID, typ string) {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT type FROM events WHERE session_id = $1
+		   AND type IN ('agent.tool_result','user.tool_result','user.custom_tool_result','agent.mcp_tool_result')
+		   AND COALESCE(payload->>'tool_use_id', payload->>'custom_tool_use_id', payload->>'mcp_tool_use_id') = $2`,
+		sid, callID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, stored)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != typ {
+		t.Errorf("results answering %s = %v, want one %s", callID, got, typ)
+	}
+}
+
 // stopReasonType reads the stop_reason.type off a session.status_idle event.
 func stopReasonType(t *testing.T, ev map[string]any) string {
 	t.Helper()
@@ -148,7 +178,7 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 	// answered by user.custom_tool_result keyed by custom_tool_use_id, a
 	// platform built-in by agent.tool_result keyed by tool_use_id. The custom
 	// answer is not the reference's, on purpose (docs/DIVERGENCES.md, "user.interrupt —
-	// an abandoned custom call is answered with a user.custom_tool_result").
+	// an abandoned custom call is answered with a `user.custom_tool_result`").
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 	ctx := context.Background()
@@ -189,20 +219,10 @@ func TestInterruptAnswersEachToolFamilyInItsOwnShape(t *testing.T) {
 		t.Errorf("synthesized user.custom_tool_result has a null processed_at")
 	}
 	// Exactly one answer per call. The lookups above read the last event of
-	// each type, so they would pass with a call answered twice, or in both
-	// families at once.
-	answers := map[any]int{}
-	for _, ev := range eventList(t, s, sessionID) {
-		switch ev["type"] {
-		case "agent.tool_result":
-			answers[ev["tool_use_id"]]++
-		case "user.custom_tool_result":
-			answers[ev["custom_tool_use_id"]]++
-		}
-	}
-	if len(answers) != 2 || answers[toolID] != 1 || answers[customID] != 1 {
-		t.Errorf("answers per call = %v, want one each for %s and %s", answers, toolID, customID)
-	}
+	// each type, so they would pass with a call answered twice, or in a second
+	// family as well.
+	wantOneAnswer(t, s, sessionID, toolID, "agent.tool_result")
+	wantOneAnswer(t, s, sessionID, customID, "user.custom_tool_result")
 
 	// Both calls are answered, so the client's own late result is dropped
 	// rather than double-answering the call on the append-only log: the

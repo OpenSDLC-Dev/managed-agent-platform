@@ -758,6 +758,40 @@ func TestThreadArchive(t *testing.T) {
 	}
 }
 
+// A child's custom call is cross-posted, because the session view is where the
+// client or the SDK's SessionToolRunner that answers it reads. When the child's
+// archive closes the call, the answer must be on that view too, and be a
+// user.custom_tool_result: the runner reads no agent.* result as an answer, so
+// it would run the abandoned tool again on its next attach (docs/DIVERGENCES.md,
+// "user.interrupt — an abandoned custom call is answered with a
+// `user.custom_tool_result`").
+func TestAChildArchiveAnswersItsCustomCallOnTheSessionView(t *testing.T) {
+	s := newTestServer(t)
+	sid := eventsFixture(t, s)
+	idle := insertChild(t, s, sid, "idle")
+	parked, err := events.NewLog(s.pool).Append(context.Background(), domain.ID(sid), []events.NewEvent{
+		{Type: domain.EventAgentCustomToolUse, ThreadID: domain.ID(idle), CrossPosted: true,
+			Payload: []byte(`{"name":"lookup","input":{},"session_thread_id":null}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid+"/threads/"+idle+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive child: %d %v", status, res)
+	}
+	callID := parked[0].ID.String()
+	var answers []map[string]any
+	for _, ev := range eventList(t, s, sid) {
+		if ev["custom_tool_use_id"] == callID || ev["tool_use_id"] == callID {
+			answers = append(answers, ev)
+		}
+	}
+	if len(answers) != 1 || answers[0]["type"] != "user.custom_tool_result" || answers[0]["is_error"] != true {
+		t.Fatalf("session view's answers to the child's custom call = %v, want one errored user.custom_tool_result", answers)
+	}
+	abandonedText(t, answers[0])
+}
+
 // A rescheduling child is refused its own archive, which is idle only, yet
 // ended by its session's, which refuses only running (docs/DIVERGENCES.md,
 // session threads; #730).
