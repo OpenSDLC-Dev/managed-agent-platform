@@ -769,7 +769,7 @@ func TestMemoryList(t *testing.T) {
 	}
 
 	for _, q := range []string{
-		"limit=0", "limit=abc", "page=@@@", "view=deep", "path_prefix=%00",
+		"limit=0", "limit=abc", "view=deep", "path_prefix=%00",
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
@@ -792,7 +792,10 @@ func TestMemoryList(t *testing.T) {
 		"limit=101": inner, "limit=1000": inner,
 		"limit=1001": "limit: must be greater than or equal to 1 and less than or equal to 1000",
 		"depth=2":    "depth must be 0 or 1 when provided", "depth=all": "depth must be 0 or 1 when provided",
-		"depth=0": depthZero, "depth=-1": depthZero,
+		"depth=0": depthZero, "depth=-1": depthZero, "depth=-99999999999999999999": depthZero,
+		"depth=99999999999999999999": "depth must be 0 or 1 when provided",
+		// A token that does not decode keeps this platform's words (#983).
+		"page=@@@":                "invalid page cursor",
 		"path_prefix=%2F&depth=0": depthZero, "path_prefix=%2Fx%2F&depth=0": depthZero,
 		"path_prefix=%2F&depth=-1": depthZero, "path_prefix=%2Fx%2F&depth=-1": depthZero,
 		"path_prefix=": emptyPrefix, "path_prefix=&depth=0": emptyPrefix,
@@ -808,7 +811,8 @@ func TestMemoryList(t *testing.T) {
 		t.Fatalf("store list: status %d (%v)", status, body)
 	}
 	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&page="+wantCursor(t, body), nil)
-	wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+	wantInvalidRequest(t, "a store-list cursor at depth=1", status, resp,
+		"page token does not match this request's parameters or API version; restart pagination from the first page")
 }
 
 // path_prefix is a literal prefix match, and depth=1 rolls everything below the
@@ -862,13 +866,22 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx", nil)
 	wantInvalidRequest(t, "a missing store", status, body, unslashed)
-	// The depth=0 refusal also comes before the store is looked up, as the
+	// The depth=0 refusal also comes before the store id is judged, as the
 	// reference was recorded answering beside a root prefix (2026-10-22
-	// memory-list-order idx 40 `missing-store.valid-id.depth0`; #979).
-	for _, q := range []string{"path_prefix=%2Fx%2F&depth=0", "path_prefix=%2F&depth=0", "depth=0"} {
-		status, body = s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?"+q, nil)
-		wantInvalidRequest(t, q+" on a missing store", status, body, "depth: must be greater than or equal to 1")
+	// memory-list-order idx 37 `missing-store.depth0`, idx 40
+	// `missing-store.valid-id.depth0`; #979). The second id is the recorded
+	// one, of the reference's format, which this platform cannot parse; without
+	// the refusal it answers the recorded 404, in the recorded words (idx 39
+	// `missing-store.valid-id.control`).
+	const recordedID = "memstore_01KjguWkm5aE3snTZqYkkZKA"
+	for _, id := range []string{"memstore_0000000000000000000000gk", recordedID} {
+		for _, q := range []string{"path_prefix=%2Fx%2F&depth=0", "path_prefix=%2F&depth=0", "depth=0"} {
+			status, body = s.do(http.MethodGet, "/v1/memory_stores/"+id+"/memories?"+q, nil)
+			wantInvalidRequest(t, q+" on a missing store", status, body, "depth: must be greater than or equal to 1")
+		}
 	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+recordedID+"/memories", nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "memory store "+recordedID+" not found")
 	// An omitted prefix means "/", which is every path. The unrecorded
 	// "segment-aligned" neighbours still match literally.
 	for _, q := range []string{"", "path_prefix=%2F"} {

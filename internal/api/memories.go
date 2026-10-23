@@ -674,12 +674,16 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	return map[string]string{"id": memoryID, "type": "memory_deleted"}, nil
 }
 
+// memoryCursorMismatch is the reference's answer to a cursor from the
+// memories list's other depth (2026-10-22 memory-list-order
+// `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979). Here every token the
+// list decodes but cannot use takes it; one that does not decode keeps
+// parsePage's words, and the other lists keep theirs (#983).
+const memoryCursorMismatch = "page token does not match this request's parameters or API version; restart pagination from the first page"
+
 func (s *server) listMemories(r *http.Request) (any, error) {
 	ctx := r.Context()
 	storeID := r.PathValue("id")
-	if err := checkID(storeID, "memory store"); err != nil {
-		return nil, err
-	}
 	q, err := queryValues(r)
 	if err != nil {
 		return nil, err
@@ -730,11 +734,15 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		}
 		prefix = v
 	}
-	// A depth, when sent, is 1: the reference documents "`0` (or omitted)"
-	// but was recorded refusing 0 everywhere.
+	// A depth sent non-empty must be 1: the reference documents "`0` (or
+	// omitted)" but was recorded refusing 0 everywhere. Past int's range Atoi
+	// clamps n and keeps its sign, so a huge negative is still under 1.
 	depth := 0
 	if v := q.Get("depth"); v != "" {
 		n, err := strconv.Atoi(v)
+		if errors.Is(err, strconv.ErrRange) {
+			err = nil
+		}
 		switch {
 		case err == nil && n < 1:
 			// The reference's words for depth=0 with and without a prefix,
@@ -749,6 +757,13 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 			return nil, errInvalid("depth must be 0 or 1 when provided")
 		}
 		depth = n
+	}
+	// The store id is judged after the query, as the reference judged depth=0
+	// ahead of an id it refused as malformed and of a store that does not exist
+	// (2026-10-22 memory-list-order `missing-store.depth0`,
+	// `missing-store.valid-id.depth0`; #979).
+	if err := checkID(storeID, "memory store"); err != nil {
+		return nil, err
 	}
 	if err := s.checkMemoryStore(ctx, storeID); err != nil {
 		return nil, err
@@ -779,7 +794,6 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	// expression built over it, not this string. Without the collation a
 	// deployment whose default is not byte order would serve the page in a
 	// different order than it pages by.
-	const mismatched = "page token does not match this request's parameters or API version; restart pagination from the first page"
 	args := []any{storeID, prefix}
 	var query string
 	if depth == 0 {
@@ -788,7 +802,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		 WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text`
 		if page.cur != nil {
 			if page.cur.foreignToTime() || page.cur.dir != dirNext {
-				return nil, errInvalid(mismatched)
+				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.t, page.cur.id)
 			query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -810,7 +824,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		 WHERE true`
 		if page.cur != nil {
 			if !page.cur.pathKeyed || page.cur.dir != dirNext {
-				return nil, errInvalid(mismatched)
+				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.path)
 			query += fmt.Sprintf(` AND key > $%d`, len(args))

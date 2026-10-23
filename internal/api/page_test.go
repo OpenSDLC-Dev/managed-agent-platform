@@ -89,6 +89,16 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 		}
 	}
 
+	// The memories list words all four as the reference words a cursor from
+	// its other depth (#979); the others keep `invalid page cursor` (#983).
+	for name, cur := range foreignCursors {
+		t.Run("memories_words_"+name, func(t *testing.T) {
+			status, res := s.do(http.MethodGet, "/v1/memory_stores/"+storeID+"/memories?page="+url.QueryEscape(cur), nil)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+				"page token does not match this request's parameters or API version; restart pagination from the first page")
+		})
+	}
+
 	// The sessions list takes ?order= and paginates both ways, so it gets the
 	// three kinds on both arms and not the backwards cursor, which it serves.
 	// Its ascending arm is the one that answered with a full first page rather
