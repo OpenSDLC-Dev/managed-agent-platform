@@ -121,8 +121,9 @@ func hasRoster(raw json.RawMessage) bool {
 // was recorded offering and calling a composed MCP name of exactly 128
 // characters and skipping one of 129 (managed-agents-wire-recordings
 // 2026-10-22-mcp-name-ceiling; #980). An MCP server's own names are bounded
-// apart: 255 characters of server name (internal/api), 128 of tool name
-// (internal/mcp), so a composed name can run to 390.
+// apart: 255 characters of server name (internal/api), up to 1,020 bytes, and
+// 128 bytes of tool name (internal/mcp), so a composed name the API accepts
+// can run to 1,155 bytes, and one in a spec stored before #980 has no bound.
 const maxModelToolName = 128
 
 // The two tools[] entry types that expand to more than themselves.
@@ -153,8 +154,9 @@ func mcpNameFits(server, tool string) bool {
 // reference's documented 255 since #980, but only in a request, so an agent
 // spec stored before then can carry one bounded only by the 4 MiB body — while
 // a note is written per tool and per turn, so an uncapped one multiplies into
-// the log for as long as the session lives. A name past this is a name being
-// used as a payload.
+// the log for as long as the session lives. A server name the API accepts can
+// pass this when it is not ASCII, and a note cuts it; the report keeps it
+// whole (reportLabel).
 const maxNoteLabel = 256
 
 func noteLabel(s string) string {
@@ -244,8 +246,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 	class := map[string]toolClass{}
 	var notes toolNotes
 	var unsupported []mcpUnsupported
-	unsupportedAt := map[string]int{} // server -> its entry in unsupported
-	reported := map[[2]string]bool{}  // {server, tool} already in an entry
+	reportedServer := map[string]bool{}
 
 	// The name is read back out of the definition rather than listed beside it,
 	// so the set the model is offered and the set it may call back cannot drift
@@ -394,13 +395,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			notes.add("MCP server %q does not report a tool named %q, which its toolset configures",
 				noteLabel(probe.Server), noteLabel(name))
 		}
-		var skipped []string
 		for _, r := range resolved {
 			if !mcpNameFits(probe.Server, r.Name) {
 				notes.add("MCP tool %q on server %q was not offered: together they do not compose a "+
 					"name a model request can carry (at most %d bytes)",
 					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName)
-				skipped = append(skipped, r.Name)
 				continue
 			}
 			name := domain.MCPModelName(probe.Server, r.Name)
@@ -434,23 +433,20 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				server: probe.Server, tool: r.Name,
 			}
 		}
-		// Two toolsets may name one server, and the run reports a server once,
-		// so a second toolset's skips join the first's, each name once. A set,
-		// because tools[] holds up to 128 toolsets and a listing thousands of
-		// tools.
-		for _, name := range skipped {
-			key := [2]string{probe.Server, name}
-			if reported[key] {
-				continue
+		// The report counts what the server returned, as its words say, so it
+		// names a tool the toolset disables too, and two toolsets naming one
+		// server share it.
+		if !reportedServer[probe.Server] {
+			reportedServer[probe.Server] = true
+			u := mcpUnsupported{server: probe.Server}
+			for _, tool := range listing {
+				if !mcpNameFits(probe.Server, tool.Name) {
+					u.tools = append(u.tools, tool.Name)
+				}
 			}
-			reported[key] = true
-			at, ok := unsupportedAt[probe.Server]
-			if !ok {
-				at = len(unsupported)
-				unsupportedAt[probe.Server] = at
-				unsupported = append(unsupported, mcpUnsupported{server: probe.Server})
+			if len(u.tools) > 0 {
+				unsupported = append(unsupported, u)
 			}
-			unsupported[at].tools = append(unsupported[at].tools, name)
 		}
 	}
 	if overBudget > 0 {
@@ -599,8 +595,8 @@ func (b *Brain) suspendForDiscovery(ctx context.Context, sid domain.ID, item *qu
 	return nil
 }
 
-// mcpUnsupported is one server's tools that resolveTools skipped because their
-// composed name is longer than a request can carry, in listing order.
+// mcpUnsupported is the tools one server listed whose composed name is longer
+// than a request can carry, in listing order.
 type mcpUnsupported struct {
 	server string
 	tools  []string
@@ -675,16 +671,16 @@ func (b *Brain) reportUnsupportedNames(ctx context.Context, tx pgx.Tx, sid, thre
 	if len(unsupported) == 0 {
 		return nil
 	}
-	// OFFSET 1 skips the start this commit inserted. Both reads walk the
-	// (session_id, seq) index back from the log's end.
+	// OFFSET 1 skips the start this commit inserted. The previous start is read
+	// back from the log's end, and a demand is looked for only past it, so the
+	// read covers one request's share of the log however long the run.
 	var first bool
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE((SELECT seq FROM events
-		                   WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = ANY($3)
-		                   ORDER BY seq DESC LIMIT 1), 0)
-		       > COALESCE((SELECT seq FROM events
-		                   WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = $4
-		                   ORDER BY seq DESC OFFSET 1 LIMIT 1), 0)`,
+		`SELECT EXISTS (SELECT 1 FROM events
+		                 WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = ANY($3)
+		                   AND seq > COALESCE((SELECT seq FROM events
+		                                        WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = $4
+		                                        ORDER BY seq DESC OFFSET 1 LIMIT 1), 0))`,
 		sid.String(), events.NullableThread(threadID), domain.ConsumedInputs,
 		string(domain.EventSpanModelRequestStart)).Scan(&first); err != nil {
 		return err

@@ -120,7 +120,7 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefi
 		spec.Tools = items
 	}
 	if raw, ok := obj["mcp_servers"]; ok {
-		items, err := parseMCPServers(raw, prefix)
+		items, err := parseMCPServers(raw, prefix, capRunes)
 		if err != nil {
 			return err
 		}

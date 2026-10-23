@@ -219,7 +219,7 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
 		"type": "agent_with_overrides", "id": agentID, "mcp_servers": []any{long}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		"agent.agent_with_overrides.config.mcp_servers.0.name: maximum string length is 255")
+		"agent.agent_with_overrides.config.mcp_servers.0.name: must be at most 255 characters")
 	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"mcp_servers": []any{long}}})

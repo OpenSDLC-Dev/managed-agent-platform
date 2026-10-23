@@ -598,8 +598,8 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 
 // parseMCPServers validates mcp_servers[]: only {type:"url", name, url}, the
 // name at most maxMCPServerNameRunes. prefix opens the path the name's cap is
-// refused under, as parseTools' prefix does.
-func parseMCPServers(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
+// refused under, as parseTools' prefix does, and capName words the refusal.
+func parseMCPServers(raw json.RawMessage, prefix string, capName func(path, val string, limit int) error) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "mcp_servers")
 	if err != nil {
 		return nil, err
@@ -616,7 +616,7 @@ func parseMCPServers(raw json.RawMessage, prefix string) ([]json.RawMessage, err
 		if probe.Type != "url" || probe.Name == "" || probe.URL == "" {
 			return nil, errInvalid(`mcp_servers entries require type "url", name, and url`)
 		}
-		if err := capRunes(fmt.Sprintf("%smcp_servers.%d.name", prefix, i), probe.Name, maxMCPServerNameRunes); err != nil {
+		if err := capName(fmt.Sprintf("%smcp_servers.%d.name", prefix, i), probe.Name, maxMCPServerNameRunes); err != nil {
 			return nil, err
 		}
 	}
@@ -627,8 +627,11 @@ func parseMCPServers(raw json.RawMessage, prefix string) ([]json.RawMessage, err
 // (checked against anthropic-sdk-go v1.70.1 — betaagent.go
 // BetaManagedAgentsURLMCPServerParams.Name), refused past it on agent create
 // in capRunes' words (2026-10-22 mcp-name-ceiling `server256.agent.create`;
-// #980). The update and session routes are not recorded. Like the agent's
-// other string bounds it binds what a request supplies, never a stored spec.
+// #980). The other routes are not recorded: a session create's override takes
+// capOverrideRunes' words, the ones its validator was recorded answering a
+// length in, and the two update routes take the create words. Like the
+// agent's other string bounds it binds what a request supplies, never a
+// stored spec.
 const maxMCPServerNameRunes = 255
 
 // The reference's documented agent caps (the SDK's create/update params,
@@ -673,6 +676,16 @@ const (
 func capRunes(path, val string, limit int) error {
 	if utf8.RuneCountInString(val) > limit {
 		return errInvalid("%s: maximum string length is %d", path, limit)
+	}
+	return nil
+}
+
+// capOverrideRunes is capRunes in the words of the reference's session
+// override validator, which are not agent create's (2026-09-02 batch2
+// `session.create.overrides.system-100001-ascii`; #540).
+func capOverrideRunes(path, val string, limit int) error {
+	if utf8.RuneCountInString(val) > limit {
+		return errInvalid("%s: must be at most %d characters", path, limit)
 	}
 	return nil
 }

@@ -214,13 +214,16 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 // The API lets two toolsets name one server, each with its own configs[]. A
 // run still reports each server once, so the second toolset's skips join the
 // first's, each name once.
-func TestTwoToolsetsOnOneServerShareOneReport(t *testing.T) {
+// The report counts what the server returned, so it names a tool no toolset
+// enables, keeps the listing's order, and is one for a server two toolsets
+// name.
+func TestASkipReportNamesWhatTheServerListed(t *testing.T) {
 	a, b := strings.Repeat("a", 128), strings.Repeat("b", 128)
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool(a), mcpTool(b), mcpTool("search"))}
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs",
-			"default_config":{"enabled":false},"configs":[{"name":"` + a + `","enabled":true}]}`),
-		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+			"default_config":{"enabled":false},"configs":[{"name":"` + b + `","enabled":true}]}`),
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs","default_config":{"enabled":false}}`),
 	}}}
 
 	_, _, _, unsupported, err := resolveTools(agent, cat, delegationNone, time.Now())
@@ -228,7 +231,7 @@ func TestTwoToolsetsOnOneServerShareOneReport(t *testing.T) {
 		t.Fatalf("resolveTools: %v", err)
 	}
 	if len(unsupported) != 1 || unsupported[0].server != "docs" || !slicesEqual(unsupported[0].tools, []string{a, b}) {
-		t.Errorf("unsupported = %+v, want one entry for docs naming each skipped tool once", unsupported)
+		t.Errorf("unsupported = %+v, want one entry for docs naming each overlong tool once, in listing order", unsupported)
 	}
 }
 
