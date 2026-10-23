@@ -674,12 +674,16 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	return map[string]string{"id": memoryID, "type": "memory_deleted"}, nil
 }
 
+// memoryCursorMismatch is the reference's answer to a cursor from the
+// memories list's other depth (2026-10-22 memory-list-order
+// `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979). Here every token the
+// list decodes but cannot use takes it; one that does not decode keeps
+// parsePage's words, and the other lists keep theirs (#983).
+const memoryCursorMismatch = "page token does not match this request's parameters or API version; restart pagination from the first page"
+
 func (s *server) listMemories(r *http.Request) (any, error) {
 	ctx := r.Context()
 	storeID := r.PathValue("id")
-	if err := checkID(storeID, "memory store"); err != nil {
-		return nil, err
-	}
 	q, err := queryValues(r)
 	if err != nil {
 		return nil, err
@@ -711,43 +715,66 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		page.limit = memoryFullViewLimit
 	}
 	prefix := "/"
-	if v := q.Get("path_prefix"); v != "" {
+	if q.Has("path_prefix") {
+		v := q.Get("path_prefix")
+		// The reference's words for a prefix sent empty, which it gave ahead
+		// of the depth refusal (2026-10-22 memory-list-order
+		// `depth0.empty-prefix`; #979).
+		if v == "" {
+			return nil, errInvalid("invalid parameter 'path_prefix' in query: empty value is not allowed")
+		}
 		if !storableText(v) {
 			return nil, errInvalid("path_prefix must be valid text")
 		}
 		// The reference's words for a prefix that does not end with "/"
 		// (2026-09-02 free_batch1 `mem.list.prefix/x`; #549). Matched
-		// literally, /notes would reach /notes-archive/. One sent empty
-		// never gets here: it reads as omitted (docs/DIVERGENCES.md).
+		// literally, /notes would reach /notes-archive/.
 		if !strings.HasSuffix(v, "/") {
 			return nil, errInvalid("path_prefix must be segment-aligned and end with /")
 		}
 		prefix = v
 	}
+	// A depth sent non-empty must be 1: the reference documents "`0` (or
+	// omitted)" but was recorded refusing 0 everywhere. Past int's range Atoi
+	// clamps n and keeps its sign, so a huge negative is still under 1.
 	depth := 0
 	if v := q.Get("depth"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || (n != 0 && n != 1) {
+		if errors.Is(err, strconv.ErrRange) {
+			err = nil
+		}
+		switch {
+		case err == nil && n < 1:
+			// The reference's words for depth=0 with and without a prefix,
+			// and for -1 (2026-09-02 free_batch1 `mem.list.prefix/x/.depth0`;
+			// 2026-10-22 memory-list-order `depth0.no-prefix` and
+			// `depth.negative-root-prefix`; #979).
+			return nil, errInvalid("depth: must be greater than or equal to 1")
+		case err != nil || n > 1:
 			// The reference's words for depth=2 (2026-09-02 free_batch1
-			// `mem.list.depth2`; #540), shared by the other refused values.
+			// `mem.list.depth2`; #540), shared by a depth that is not an
+			// integer.
 			return nil, errInvalid("depth must be 0 or 1 when provided")
 		}
-		// The reference's words for depth=0 beside a path_prefix (2026-09-02
-		// free_batch1 `mem.list.prefix/x/.depth0` and `mem.list.prefix/.depth0`;
-		// #549). Without one it was never recorded, and the documented "`0`
-		// (or omitted)" stands; one sent empty reads as omitted, as above.
-		if n == 0 && q.Get("path_prefix") != "" {
-			return nil, errInvalid("depth: must be greater than or equal to 1")
-		}
 		depth = n
+	}
+	// The store id is judged after the query's own refusals, as the reference
+	// judged depth=0 ahead of an id it refused as malformed and of a store that
+	// does not exist (2026-10-22 memory-list-order `missing-store.depth0`,
+	// `missing-store.valid-id.depth0`; #979). Only the cursor-kind check below,
+	// which needs the depth, follows it.
+	if err := checkID(storeID, "memory store"); err != nil {
+		return nil, err
 	}
 	if err := s.checkMemoryStore(ctx, storeID); err != nil {
 		return nil, err
 	}
 
 	// The two depths order differently, so each pages with its own cursor
-	// kind and refuses the other's. The prefix match is a literal left(),
-	// never LIKE, for occupiedBy's reason.
+	// kind and refuses the other's, in the reference's words (2026-10-22
+	// memory-list-order `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979).
+	// The prefix match is a literal left(), never LIKE, for occupiedBy's
+	// reason.
 	//
 	// Without a depth the list is newest first, as the reference was recorded
 	// answering (2026-09-02 free_batch1 `mem.list.noprefix`; #549), with id as
@@ -776,7 +803,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		 WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text`
 		if page.cur != nil {
 			if page.cur.foreignToTime() || page.cur.dir != dirNext {
-				return nil, errInvalid("invalid page cursor")
+				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.t, page.cur.id)
 			query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -798,7 +825,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		 WHERE true`
 		if page.cur != nil {
 			if !page.cur.pathKeyed || page.cur.dir != dirNext {
-				return nil, errInvalid("invalid page cursor")
+				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.path)
 			query += fmt.Sprintf(` AND key > $%d`, len(args))
@@ -842,7 +869,11 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if out.Data == nil {
 		out.Data = []any{}
 	}
-	if fetched > page.limit {
+	// A full depth=1 page carries a cursor whether or not a row follows it, as
+	// the reference was recorded answering (2026-10-22 memory-list-order
+	// `pages.depth.3`; #979). Without a depth a full last page was not
+	// recorded, and carries none.
+	if fetched > page.limit || depth == 1 && fetched == page.limit {
 		var c string
 		if depth == 0 {
 			c = encodeTimeCursor(dirNext, last.createdAt, last.id)

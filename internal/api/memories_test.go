@@ -769,7 +769,7 @@ func TestMemoryList(t *testing.T) {
 	}
 
 	for _, q := range []string{
-		"limit=0", "limit=abc", "page=@@@", "view=deep", "path_prefix=%00",
+		"limit=0", "limit=abc", "view=deep", "path_prefix=%00",
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
@@ -777,19 +777,28 @@ func TestMemoryList(t *testing.T) {
 	// The reference's words for a limit past either of its two bounds
 	// (2026-09-05 batch4 idx 8 `rec85.memories.list.limit-101`, which also
 	// recorded 200 and 1000, and idx 11 `rec85.memories.list.limit-1001`), and
-	// for a depth other than 0 or 1 (2026-09-02 free_batch1 idx 13
-	// `mem.list.depth2`), which the other refused depths share; #540. And for
-	// depth=0 beside a path_prefix (idx 16 `mem.list.prefix/x/.depth0`, idx 19
-	// `mem.list.prefix/.depth0`; #549), a refusal the bounds check comes before.
+	// for depth=2 (2026-09-02 free_batch1 idx 13 `mem.list.depth2`; #540),
+	// which a depth that is not an integer shares. A depth under 1 is bounded
+	// in other words, recorded beside a path_prefix (idx 16
+	// `mem.list.prefix/x/.depth0`, idx 19 `mem.list.prefix/.depth0`; #549) and
+	// without one, and for -1 (2026-10-22 memory-list-order idx 34
+	// `depth0.no-prefix`, idx 36 `depth.negative-root-prefix`; #979). A
+	// path_prefix sent empty is refused ahead of the depth (idx 35
+	// `depth0.empty-prefix`); alone it was not recorded.
 	const inner = "limit: value must be greater than or equal to 1 and less than or equal to 100"
 	const depthZero = "depth: must be greater than or equal to 1"
+	const emptyPrefix = "invalid parameter 'path_prefix' in query: empty value is not allowed"
 	for q, msg := range map[string]string{
 		"limit=101": inner, "limit=1000": inner,
 		"limit=1001": "limit: must be greater than or equal to 1 and less than or equal to 1000",
-		"depth=2":    "depth must be 0 or 1 when provided", "depth=-1": "depth must be 0 or 1 when provided",
-		"depth=all":               "depth must be 0 or 1 when provided",
+		"depth=2":    "depth must be 0 or 1 when provided", "depth=all": "depth must be 0 or 1 when provided",
+		"depth=0": depthZero, "depth=-1": depthZero, "depth=-99999999999999999999": depthZero,
+		"depth=99999999999999999999": "depth must be 0 or 1 when provided",
+		// A token that does not decode keeps this platform's words (#983).
+		"page=@@@":                "invalid page cursor",
 		"path_prefix=%2F&depth=0": depthZero, "path_prefix=%2Fx%2F&depth=0": depthZero,
-		"path_prefix=%2Fx%2F&depth=-1": "depth must be 0 or 1 when provided",
+		"path_prefix=%2F&depth=-1": depthZero, "path_prefix=%2Fx%2F&depth=-1": depthZero,
+		"path_prefix=": emptyPrefix, "path_prefix=&depth=0": emptyPrefix,
 	} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantInvalidRequest(t, q, status, body, msg)
@@ -802,7 +811,8 @@ func TestMemoryList(t *testing.T) {
 		t.Fatalf("store list: status %d (%v)", status, body)
 	}
 	status, resp := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&page="+wantCursor(t, body), nil)
-	wantErr(t, status, resp, http.StatusBadRequest, "invalid_request_error")
+	wantInvalidRequest(t, "a store-list cursor at depth=1", status, resp,
+		"page token does not match this request's parameters or API version; restart pagination from the first page")
 }
 
 // path_prefix is a literal prefix match, and depth=1 rolls everything below the
@@ -856,19 +866,27 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	}
 	status, body := s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx", nil)
 	wantInvalidRequest(t, "a missing store", status, body, unslashed)
-	// The depth=0 refusal also comes before the store is looked up, another
-	// order docs/DIVERGENCES.md registers as inferred.
-	status, body = s.do(http.MethodGet, "/v1/memory_stores/memstore_0000000000000000000000gk/memories?path_prefix=%2Fx%2F&depth=0", nil)
-	wantInvalidRequest(t, "depth=0 beside a prefix on a missing store", status, body,
-		"depth: must be greater than or equal to 1")
-	// An omitted prefix means "/", which is every path, and so does one
-	// supplied empty, which the console sends for a cleared box. The
-	// unrecorded "segment-aligned" neighbours still match literally. depth=0
-	// is refused only beside a prefix, the one place it was recorded refused,
-	// so an empty one keeps the documented recursive list.
-	for _, q := range []string{"depth=0", "path_prefix=", "path_prefix=&depth=0"} {
+	// The depth=0 refusal also comes before the store id is judged, as the
+	// reference was recorded answering beside a root prefix (2026-10-22
+	// memory-list-order idx 37 `missing-store.depth0`, idx 40
+	// `missing-store.valid-id.depth0`; #979). The second id is the recorded
+	// one, of the reference's format, which this platform cannot parse; without
+	// the refusal it answers the recorded 404, in the recorded words (idx 39
+	// `missing-store.valid-id.control`).
+	const recordedID = "memstore_01KjguWkm5aE3snTZqYkkZKA"
+	for _, id := range []string{"memstore_0000000000000000000000gk", recordedID} {
+		for _, q := range []string{"path_prefix=%2Fx%2F&depth=0", "path_prefix=%2F&depth=0", "depth=0"} {
+			status, body = s.do(http.MethodGet, "/v1/memory_stores/"+id+"/memories?"+q, nil)
+			wantInvalidRequest(t, q+" on a missing store", status, body, "depth: must be greater than or equal to 1")
+		}
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+recordedID+"/memories", nil)
+	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "memory store "+recordedID+" not found")
+	// An omitted prefix means "/", which is every path. The unrecorded
+	// "segment-aligned" neighbours still match literally.
+	for _, q := range []string{"", "path_prefix=%2F"} {
 		if got := list(t, q); len(got) != 9 {
-			t.Errorf("%s returned %d rows, want all 9: %v", q, len(got), got)
+			t.Errorf("%q returned %d rows, want all 9: %v", q, len(got), got)
 		}
 	}
 	for _, q := range []string{"path_prefix=notes%2F", "path_prefix=%2Fnotes%2F%2F"} {
@@ -918,8 +936,30 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
 	}
 
+	// A full depth=1 page carries a cursor even when nothing follows it, and
+	// that cursor leads to an empty page without one, as the reference was
+	// recorded answering (2026-10-22 memory-list-order idx 25–28
+	// `pages.depth.1`–`pages.depth.4`; #979). Without a depth a full last page
+	// carries none, which was not recorded (docs/DIVERGENCES.md).
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 2 {
+		t.Fatalf("a full depth=1 page: status %d, %v", status, got)
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F&page="+wantCursor(t, body), nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 0 || nextPage(t, body) != "" {
+		t.Errorf("the page after a full last depth=1 page: status %d, %v, next_page %q, want none of either",
+			status, got, nextPage(t, body))
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=9", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 9 || nextPage(t, body) != "" {
+		t.Errorf("a full last page without a depth: status %d, %d rows, next_page %q, want 9 and none",
+			status, len(got), nextPage(t, body))
+	}
+
 	// A cursor belongs to the depth that issued it. depth=1 pages by path and
-	// the list without a depth pages by time, so each refuses the other's.
+	// the list without a depth pages by time, so each refuses the other's, in
+	// the reference's words (2026-10-22 memory-list-order idx 32
+	// `cursor.depth-to-flat`, idx 33 `cursor.flat-to-depth`; #979).
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2", nil)
 	if status != http.StatusOK {
 		t.Fatalf("depth=1 first page: status %d (%v)", status, body)
@@ -930,9 +970,10 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		t.Fatalf("first page: status %d (%v)", status, body)
 	}
 	timeCursor := wantCursor(t, body)
-	for _, q := range []string{"page=" + pathCursor, "depth=0&page=" + pathCursor, "depth=1&page=" + timeCursor} {
+	for _, q := range []string{"page=" + pathCursor, "depth=1&page=" + timeCursor} {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
-		wantInvalidRequest(t, q, status, body, "invalid page cursor")
+		wantInvalidRequest(t, q, status, body,
+			"page token does not match this request's parameters or API version; restart pagination from the first page")
 	}
 }
 
