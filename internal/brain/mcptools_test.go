@@ -277,6 +277,36 @@ func TestAnUnsupportedNamesReportIsTheRecordedOne(t *testing.T) {
 		}
 	}
 
+	// The server's name is bounded in the field and the message alike, without
+	// cutting any name the API accepts: 255 characters of four bytes each stay
+	// whole, while a longer one, which only a spec stored before #980 can
+	// carry, is cut and marked.
+	for _, tc := range []struct {
+		server string
+		whole  bool
+	}{{strings.Repeat("𝔡", 255), true}, {strings.Repeat("s", 100_000), false}} {
+		ev, err := unsupportedNamesEvent(mcpUnsupported{tc.server, []string{"search"}}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Error struct {
+				Server  string `json:"mcp_server_name"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(ev.Payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		if got := body.Error.Server == tc.server && strings.Contains(body.Error.Message, "'"+tc.server+"'"); got != tc.whole {
+			t.Errorf("a %d-byte server name kept whole = %v, want %v", len(tc.server), got, tc.whole)
+		}
+		if !tc.whole && (len(ev.Payload) > 4<<10 || !strings.HasSuffix(body.Error.Server, "[truncated]")) {
+			t.Errorf("a %d-byte server name gave a %d-byte report, field %q…, want it bounded and marked",
+				len(tc.server), len(ev.Payload), body.Error.Server[:16])
+		}
+	}
+
 	// Past a handful the count is the news: the names quoted are bounded, and
 	// the count is not.
 	var many []string

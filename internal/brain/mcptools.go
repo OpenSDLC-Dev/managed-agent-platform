@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -246,6 +245,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 	var notes toolNotes
 	var unsupported []mcpUnsupported
 	unsupportedAt := map[string]int{} // server -> its entry in unsupported
+	reported := map[[2]string]bool{}  // {server, tool} already in an entry
 
 	// The name is read back out of the definition rather than listed beside it,
 	// so the set the model is offered and the set it may call back cannot drift
@@ -435,16 +435,22 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			}
 		}
 		// Two toolsets may name one server, and the run reports a server once,
-		// so a second toolset's skips join the first's.
-		if at, ok := unsupportedAt[probe.Server]; ok {
-			for _, name := range skipped {
-				if !slices.Contains(unsupported[at].tools, name) {
-					unsupported[at].tools = append(unsupported[at].tools, name)
-				}
+		// so a second toolset's skips join the first's, each name once. A set,
+		// because tools[] holds up to 128 toolsets and a listing thousands of
+		// tools.
+		for _, name := range skipped {
+			key := [2]string{probe.Server, name}
+			if reported[key] {
+				continue
 			}
-		} else if len(skipped) > 0 {
-			unsupportedAt[probe.Server] = len(unsupported)
-			unsupported = append(unsupported, mcpUnsupported{server: probe.Server, tools: skipped})
+			reported[key] = true
+			at, ok := unsupportedAt[probe.Server]
+			if !ok {
+				at = len(unsupported)
+				unsupportedAt[probe.Server] = at
+				unsupported = append(unsupported, mcpUnsupported{server: probe.Server})
+			}
+			unsupported[at].tools = append(unsupported[at].tools, name)
 		}
 	}
 	if overBudget > 0 {
@@ -606,6 +612,20 @@ type mcpUnsupported struct {
 // exact.
 const maxUnsupportedNames = maxToolNotes
 
+// maxReportLabel bounds the server name a report carries, in its field and its
+// message alike. It cuts no name the API accepts since #980, 255 characters of
+// up to four bytes each. Only an agent spec stored before then can carry a
+// longer one, and the report is written once per run for as long as the
+// session lives.
+const maxReportLabel = 4 * 255
+
+func reportLabel(s string) string {
+	if len(s) <= maxReportLabel {
+		return s
+	}
+	return toolset.TruncateRunes(s, maxReportLabel) + "[truncated]"
+}
+
 // unsupportedNamesEvent is the session.error the reference reports a server's
 // skipped tools in, in its words (2026-10-22 mcp-name-ceiling; #980). Its "1-K
 // characters" is what the server's name leaves of the 128, so a long name
@@ -623,12 +643,13 @@ func unsupportedNamesEvent(u mcpUnsupported, threadID domain.ID) (events.NewEven
 		names += fmt.Sprintf(" and %d more", rest)
 	}
 	budget := maxModelToolName - len(domain.MCPModelNamePrefix) - len(domain.MCPModelNameSeparator) - len(u.server)
+	server := reportLabel(u.server)
 	payload, err := json.Marshal(map[string]any{"error": map[string]any{
 		"type":            "mcp_connection_failed_error",
-		"mcp_server_name": u.server,
+		"mcp_server_name": server,
 		"message": fmt.Sprintf("MCP server '%s' returned %d tool(s) with unsupported names: %s. "+
 			"Tool names must match [a-zA-Z0-9_-] and be 1-%d characters. These tools were skipped.",
-			noteLabel(u.server), len(u.tools), names, budget),
+			server, len(u.tools), names, budget),
 		"retry_status": map[string]any{"type": "retrying"},
 	}})
 	if err != nil {
