@@ -758,10 +758,11 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		}
 		depth = n
 	}
-	// The store id is judged after the query, as the reference judged depth=0
-	// ahead of an id it refused as malformed and of a store that does not exist
-	// (2026-10-22 memory-list-order `missing-store.depth0`,
-	// `missing-store.valid-id.depth0`; #979).
+	// The store id is judged after the query's own refusals, as the reference
+	// judged depth=0 ahead of an id it refused as malformed and of a store that
+	// does not exist (2026-10-22 memory-list-order `missing-store.depth0`,
+	// `missing-store.valid-id.depth0`; #979). Only the cursor-kind check below,
+	// which needs the depth, follows it.
 	if err := checkID(storeID, "memory store"); err != nil {
 		return nil, err
 	}
