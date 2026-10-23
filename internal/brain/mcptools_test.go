@@ -68,10 +68,11 @@ var modelToolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // class, costs the whole request and every tool in it, on every turn of a
 // session that replays.
 func TestAComposedMCPNameMatchesTheDocumentedRule(t *testing.T) {
-	// mcp__ and __ frame the pair, so the two names together may spend
-	// maxModelToolName less that frame.
+	// mcp__ and __ frame the pair, so the two names together may spend the
+	// documented 128 less that frame. The 128 is written out, not read from
+	// maxModelToolName, so a changed cap fails here.
 	frame := len(domain.MCPModelNamePrefix) + len(domain.MCPModelNameSeparator)
-	exact := strings.Repeat("t", maxModelToolName-frame-len("docs"))
+	exact := strings.Repeat("t", 128-frame-len("docs"))
 
 	cases := []struct {
 		server, tool string
@@ -211,9 +212,6 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 	}
 }
 
-// The API lets two toolsets name one server, each with its own configs[]. A
-// run still reports each server once, so the second toolset's skips join the
-// first's, each name once.
 // The report counts what the server returned, so it names a tool no toolset
 // enables, keeps the listing's order, and is one for a server two toolsets
 // name.

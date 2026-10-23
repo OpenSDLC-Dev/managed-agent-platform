@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -470,6 +471,67 @@ func TestASkippedMCPToolIsReportedOncePerRun(t *testing.T) {
 	h.runOnce(t)
 	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 3 {
 		t.Errorf("session.error count = %d after the request that consumed a mid-run message, want 3", n)
+	}
+}
+
+// The report commits with its request's start, so the start's lease covers it.
+// A claimant that loses the item mid-request leaves its report behind, and the
+// reclaimed turn does not repeat it: no demand is newer than the start the lost
+// claimant committed.
+func TestAReclaimedTurnDoesNotRepeatTheSkipReport(t *testing.T) {
+	long := strings.Repeat("n", 128)
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "lost"), done("end_turn", 1)},
+		{textChunk(0, "recovered"), done("end_turn", 1)},
+	}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "ready", `[{"name":"`+long+`","description":"Long.","input_schema":{"type":"object"}}]`)
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		if _, err := h.pool.Exec(context.Background(),
+			`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE session_id = $1`,
+			h.sessionID.String()); err != nil {
+			t.Errorf("expire lease: %v", err)
+		}
+	}
+	h.wake(t, "search the docs")
+	if found, err := h.brain.RunOnce(context.Background()); !found || err == nil {
+		t.Fatalf("RunOnce = (%v, %v), want found with a lease error", found, err)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 1 {
+		t.Fatalf("session.error count = %d after the lost claimant, want its committed report", n)
+	}
+	h.runOnce(t)
+	if n := len(h.eventsOfType(t, domain.EventSpanModelRequestStart)); n != 2 {
+		t.Fatalf("request starts = %d, want the reclaimed turn's too", n)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 1 {
+		t.Errorf("session.error count = %d after the reclaim, want 1", n)
+	}
+}
+
+// A claimant that has lost its item before the start writes neither the start
+// nor the report: the start's lease proof fails the commit they share.
+func TestALostLeaseWritesNoSkipReport(t *testing.T) {
+	long := strings.Repeat("n", 128)
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "never"), done("end_turn", 1)}}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "ready", `[{"name":"`+long+`","description":"Long.","input_schema":{"type":"object"}}]`)
+	h.wake(t, "search the docs")
+	h.tracedBrain(t, &onQuery{match: []string{"FROM work_items WHERE id = $1 AND state = 'active' AND lease_expires_at = $2 FOR UPDATE"},
+		hook: func(context.Context) context.Context {
+			if err := h.queue.CancelSession(context.Background(), h.pool, h.sessionID); err != nil {
+				t.Errorf("cancel: %v", err)
+			}
+			return nil
+		}})
+	if found, err := h.brain.RunOnce(context.Background()); !found || !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("RunOnce = (%v, %v), want a lost lease", found, err)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSpanModelRequestStart)) + len(h.eventsOfType(t, domain.EventSessionError)); n != 0 {
+		t.Errorf("start and report rows = %d from a claimant that lost its item, want none", n)
 	}
 }
 
