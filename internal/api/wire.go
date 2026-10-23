@@ -596,13 +596,15 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 	return items, nil
 }
 
-// parseMCPServers validates mcp_servers[]: only {type:"url", name, url}.
-func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
+// parseMCPServers validates mcp_servers[]: only {type:"url", name, url}, the
+// name at most maxMCPServerNameRunes. prefix opens the path the name's cap is
+// refused under, as parseTools' prefix does.
+func parseMCPServers(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "mcp_servers")
 	if err != nil {
 		return nil, err
 	}
-	for _, item := range items {
+	for i, item := range items {
 		var probe struct {
 			Type string `json:"type"`
 			Name string `json:"name"`
@@ -614,9 +616,20 @@ func parseMCPServers(raw json.RawMessage) ([]json.RawMessage, error) {
 		if probe.Type != "url" || probe.Name == "" || probe.URL == "" {
 			return nil, errInvalid(`mcp_servers entries require type "url", name, and url`)
 		}
+		if err := capRunes(fmt.Sprintf("%smcp_servers.%d.name", prefix, i), probe.Name, maxMCPServerNameRunes); err != nil {
+			return nil, err
+		}
 	}
 	return items, nil
 }
+
+// maxMCPServerNameRunes is the server name's documented "1-255 characters"
+// (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsURLMCPServerParams.Name), refused past it on agent create
+// in capRunes' words (2026-10-22 mcp-name-ceiling `server256.agent.create`;
+// #980). The update and session routes are not recorded. Like the agent's
+// other string bounds it binds what a request supplies, never a stored spec.
+const maxMCPServerNameRunes = 255
 
 // The reference's documented agent caps (the SDK's create/update params,
 // checked against anthropic-sdk-go v1.70.1 — betaagent.go

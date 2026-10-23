@@ -2,6 +2,8 @@ package brain
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -58,7 +60,7 @@ func hasNote(notes []string, substr string) bool {
 
 // modelToolName is the documented rule, written out so this test pins it
 // literally rather than re-deriving whatever the brain happens to compose.
-var modelToolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+var modelToolName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 // Both edges of that rule matter. A bound one short refuses names the endpoint
 // accepts and the loss is silent — a tool the agent declared simply never
@@ -142,7 +144,7 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -169,15 +171,15 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 	}
 }
 
-// The Messages API pins a tool's name to ^[a-zA-Z0-9_-]{1,64}$, and an MCP
+// The Messages API pins a tool's name to ^[a-zA-Z0-9_-]{1,128}$, and an MCP
 // server chooses its own names under no such rule — 255 characters of server
 // name and 128 of tool name both fit the MCP wire. A name the endpoint would
 // reject costs the whole request, every turn, on a log that keeps replaying it,
 // so the tool is dropped and the rest of the listing still reaches the model.
 func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
-	long := strings.Repeat("n", 64)
+	long := strings.Repeat("n", 128)
 	cat := mcpCatalog{"docs": listingOf(t,
-		mcpTool(long), // mcp__docs__ + 64 is past the ceiling
+		mcpTool(long), // mcp__docs__ + 128 is past the ceiling
 		mcpTool("search files"),
 		mcpTool("fetch"),
 	)}
@@ -185,9 +187,12 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, unsupported, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
+	}
+	if len(unsupported) != 1 || unsupported[0].server != "docs" || !slicesEqual(unsupported[0].tools, []string{long}) {
+		t.Errorf("unsupported = %+v, want only the overlong tool, under its server", unsupported)
 	}
 	// The space is outside the class but the name still fits, so that tool is
 	// mangled into the request rather than lost with the overlong one.
@@ -206,6 +211,96 @@ func TestAnOverlongMCPToolNameCostsOnlyItsOwnTool(t *testing.T) {
 	}
 }
 
+// The API lets two toolsets name one server, each with its own configs[]. A
+// run still reports each server once, so the second toolset's skips join the
+// first's, each name once.
+func TestTwoToolsetsOnOneServerShareOneReport(t *testing.T) {
+	a, b := strings.Repeat("a", 128), strings.Repeat("b", 128)
+	cat := mcpCatalog{"docs": listingOf(t, mcpTool(a), mcpTool(b), mcpTool("search"))}
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs",
+			"default_config":{"enabled":false},"configs":[{"name":"` + a + `","enabled":true}]}`),
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+	}}}
+
+	_, _, _, unsupported, err := resolveTools(agent, cat, delegationNone, time.Now())
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if len(unsupported) != 1 || unsupported[0].server != "docs" || !slicesEqual(unsupported[0].tools, []string{a, b}) {
+		t.Errorf("unsupported = %+v, want one entry for docs naming each skipped tool once", unsupported)
+	}
+}
+
+// A skip is reported in the reference's words, which it was recorded writing
+// for these servers and the public DeepWiki tools (managed-agents-wire-recordings
+// 2026-10-22-mcp-name-ceiling/setup.json idx 44 `server104.wait2.events`, idx 37
+// `server103.wait1.events`, idx 9 `server255.poll1.events`; #980). The K of
+// "1-K characters" is what the server's name leaves of 128, negative and all.
+func TestAnUnsupportedNamesReportIsTheRecordedOne(t *testing.T) {
+	const tail = ". These tools were skipped."
+	server := func(n int) string { return "deepwiki-" + strings.Repeat("x", n-len("deepwiki-")) }
+	maxServer := "deepwiki-max-" + strings.Repeat("x", 255-len("deepwiki-max-"))
+	cases := []struct {
+		u    mcpUnsupported
+		want string
+	}{{
+		mcpUnsupported{server(104), []string{"read_wiki_contents", "read_wiki_structure"}},
+		"MCP server '" + server(104) + "' returned 2 tool(s) with unsupported names: 'read_wiki_contents', " +
+			"'read_wiki_structure'. Tool names must match [a-zA-Z0-9_-] and be 1-17 characters" + tail,
+	}, {
+		mcpUnsupported{server(103), []string{"read_wiki_structure"}},
+		"MCP server '" + server(103) + "' returned 1 tool(s) with unsupported names: 'read_wiki_structure'. " +
+			"Tool names must match [a-zA-Z0-9_-] and be 1-18 characters" + tail,
+	}, {
+		mcpUnsupported{maxServer, []string{"ask_wiki_question", "read_wiki_contents", "read_wiki_structure"}},
+		"MCP server '" + maxServer + "' returned 3 tool(s) with unsupported names: 'ask_wiki_question', " +
+			"'read_wiki_contents', 'read_wiki_structure'. Tool names must match [a-zA-Z0-9_-] and be 1--134 characters" + tail,
+	}}
+	for _, tc := range cases {
+		ev, err := unsupportedNamesEvent(tc.u, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body struct {
+			Error map[string]any `json:"error"`
+		}
+		if err := json.Unmarshal(ev.Payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{
+			"type": "mcp_connection_failed_error", "mcp_server_name": tc.u.server, "message": tc.want,
+			"retry_status": map[string]any{"type": "retrying"},
+		}
+		if ev.Type != domain.EventSessionError || !reflect.DeepEqual(body.Error, want) {
+			t.Errorf("%d-character server: event = %s %s, want the recorded error %v", len(tc.u.server), ev.Type, ev.Payload, want)
+		}
+	}
+
+	// Past a handful the count is the news: the names quoted are bounded, and
+	// the count is not.
+	var many []string
+	for i := range maxUnsupportedNames + 4 {
+		many = append(many, fmt.Sprintf("tool%02d", i))
+	}
+	ev, err := unsupportedNamesEvent(mcpUnsupported{"docs", many}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(ev.Payload, &body); err != nil {
+		t.Fatal(err)
+	}
+	if msg := body.Error.Message; !strings.Contains(msg, fmt.Sprintf("returned %d tool(s)", len(many))) ||
+		!strings.Contains(msg, "'tool15' and 4 more. ") || strings.Contains(msg, "tool16") {
+		t.Errorf("message = %q, want %d names quoted and the rest counted", msg, maxUnsupportedNames)
+	}
+}
+
 // Two names that mangle alike contest the one they compose to, exactly as two
 // that composed to it directly would: the mangling is what the model sees, and
 // a request cannot carry two definitions under one name.
@@ -215,7 +310,7 @@ func TestTwoToolNamesThatSanitizeAlikeContestOneName(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -235,7 +330,7 @@ func TestTwoToolNamesThatSanitizeAlikeContestOneName(t *testing.T) {
 // cap, and a session replays the same listing on every turn. Past a handful the
 // count is the news and the names are not.
 func TestTheNotesOneTurnWritesAreBounded(t *testing.T) {
-	long := strings.Repeat("n", 64) // past the ceiling under any server name
+	long := strings.Repeat("n", maxModelToolName) // past the ceiling under any server name
 	var tools []toolset.MCPTool
 	for i := 0; i < maxToolNotes+4; i++ {
 		tools = append(tools, mcpTool(long+string(rune('a'+i))))
@@ -245,7 +340,7 @@ func TestTheNotesOneTurnWritesAreBounded(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, _, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, _, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -279,7 +374,7 @@ func TestOneRequestCarriesABoundedSetOfMCPDefinitions(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -338,7 +433,7 @@ func TestANoteQuotesABoundedName(t *testing.T) {
 			agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
 				Tools: []json.RawMessage{json.RawMessage(tc.tools)},
 			}}
-			defs, _, notes, err := resolveTools(agent, tc.cat, delegationNone, time.Now())
+			defs, _, notes, _, err := resolveTools(agent, tc.cat, delegationNone, time.Now())
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}
@@ -371,7 +466,7 @@ func TestAnMCPToolLosesAContestedName(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"), mcpTool("fetch"))}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -401,7 +496,7 @@ func TestTwoServersCanContestOneComposedName(t *testing.T) {
 		"a":    listingOf(t, mcpTool("b__c"), mcpTool("d")),
 	}
 
-	defs, class, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -425,7 +520,7 @@ func TestAServerWithNoListingOffersNothing(t *testing.T) {
 		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, mcpCatalog{}, delegationNone, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, mcpCatalog{}, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -455,7 +550,7 @@ func TestUnknownConfigNamesAreNotedNotFatal(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	defs, _, notes, err := resolveTools(agent, cat, delegationNone, time.Now())
+	defs, _, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -476,7 +571,7 @@ func TestAnUnevaluableMCPPolicyFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
 
-	if _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
+	if _, _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a policy it cannot evaluate")
 	}
 }
@@ -490,7 +585,7 @@ func TestACorruptListingFailsAssembly(t *testing.T) {
 	}}}
 	cat := mcpCatalog{"docs": json.RawMessage(`{"not":"a listing"}`)}
 
-	if _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
+	if _, _, _, _, err := resolveTools(agent, cat, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a listing it could not decode")
 	}
 }
@@ -528,7 +623,7 @@ func TestAMalformedToolEntryFailsAssembly(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`"not an object"`),
 	}}}
-	if _, _, _, err := resolveTools(agent, nil, delegationNone, time.Now()); err == nil {
+	if _, _, _, _, err := resolveTools(agent, nil, delegationNone, time.Now()); err == nil {
 		t.Fatal("resolveTools accepted a malformed tools[] entry")
 	}
 }
@@ -580,7 +675,7 @@ func TestALegacyNameCollisionKeepsTheLaterEntry(t *testing.T) {
 			for _, raw := range tc.tools {
 				agent.Tools = append(agent.Tools, json.RawMessage(raw))
 			}
-			defs, class, notes, err := resolveTools(agent, nil, delegationNone, time.Now())
+			defs, class, notes, _, err := resolveTools(agent, nil, delegationNone, time.Now())
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}

@@ -354,7 +354,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	case hasRoster(agent.Multiagent):
 		role = delegationCoordinator
 	}
-	toolDefs, class, notes, err := resolveTools(agent, cat, role, b.now())
+	toolDefs, class, notes, unsupported, err := resolveTools(agent, cat, role, b.now())
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
@@ -379,6 +379,9 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// so Describe cannot miss; an empty backend would only mean unlabelled
 	// metrics, never a failed turn.
 	desc, _ := b.registry.Describe(agent.Model.ID)
+	if err := b.reportUnsupportedNames(ctx, sid, item, unsupported); err != nil {
+		return fmt.Errorf("report unsupported mcp names: %w", err)
+	}
 	// The start's commit processes what this request consumes (#793), which a
 	// client sees: it stamps the thread's inputs below it, and on the primary
 	// it flips a pending outcome to running — every pending entry's

@@ -53,7 +53,7 @@ func TestBuildRequestReplaysTheLog(t *testing.T) {
 
 	// The custom tool, the eight expanded agent_toolset tools and the one tool
 	// the MCP server reported all reach the model, the agent's own first.
-	tools, _, _, err := resolveTools(agent, mcpCatalog{"srv": listingOf(t, mcpTool("search"))}, delegationNone, time.Now())
+	tools, _, _, _, err := resolveTools(agent, mcpCatalog{"srv": listingOf(t, mcpTool("search"))}, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}

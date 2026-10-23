@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -114,11 +116,15 @@ func hasRoster(raw json.RawMessage) bool {
 // an MCP tool is domain.MCPModelName's.
 //
 // maxModelToolName and the character class are the documented Messages
-// constraint — "Must match the regex ^[a-zA-Z0-9_-]{1,64}$" (the tool-use
-// guide's parameter table; the API reference and the SDK types state neither).
-// An MCP server is bound by nothing of the sort: 255 characters of server name
-// and 128 of tool name are both within what its own wire allows.
-const maxModelToolName = 64
+// constraint, ^[a-zA-Z0-9_-]{1,128}$ (the tool-use guide's "Define tools"
+// table, and the pattern on Tool.name, checked against anthropic-sdk-go
+// v1.70.1 — spec components.schemas.Tool.properties.name). The reference
+// was recorded offering and calling a composed MCP name of exactly 128
+// characters and skipping one of 129 (managed-agents-wire-recordings
+// 2026-10-22-mcp-name-ceiling; #980). An MCP server's own names are bounded
+// apart: 255 characters of server name (internal/api), 128 of tool name
+// (internal/mcp), so a composed name can run to 390.
+const maxModelToolName = 128
 
 // The two tools[] entry types that expand to more than themselves.
 const (
@@ -144,11 +150,12 @@ func mcpNameFits(server, tool string) bool {
 }
 
 // maxNoteLabel bounds a name a note quotes. Nothing caps either half of an MCP
-// tool's name where it is stored — a server name rides the agent spec, bounded
-// only by the API's 4 MiB body, and the reference's documented 1–255 is not
-// enforced (docs/DIVERGENCES.md #66) — while a note is written per tool and per
-// turn, so an uncapped one multiplies into the log for as long as the session
-// lives. A name past this is a name being used as a payload.
+// tool's name where it is stored — the API refuses a server name past the
+// reference's documented 255 since #980, but only in a request, so an agent
+// spec stored before then can carry one bounded only by the 4 MiB body — while
+// a note is written per tool and per turn, so an uncapped one multiplies into
+// the log for as long as the session lives. A name past this is a name being
+// used as a payload.
 const maxNoteLabel = 256
 
 func noteLabel(s string) string {
@@ -202,7 +209,9 @@ const maxMCPToolBytes = 256 << 10
 // MCP catalog into the two halves of a turn's tool surface: the definitions the
 // model is offered, and the class of each name it may call back. The third
 // return is the notes worth telling an operator — every tool an agent declared
-// and the model was not offered, and why.
+// and the model was not offered, and why. The fourth is the one kind of skip
+// the reference reports on the session too, each server's tools whose composed
+// name no request can carry (reportUnsupportedNames).
 //
 // The role's delegation tools are the platform's own and are laid down before
 // anything an agent declared: a coordinator's four on the primary thread of a
@@ -231,10 +240,12 @@ const maxMCPToolBytes = 256 << 10
 // over a third party's listing it does not control. The one hard error is a
 // permission policy this platform cannot evaluate, which is the #26 fail-open:
 // defaulting it would run an unconfirmed tool.
-func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRole, now time.Time) ([]json.RawMessage, map[string]toolClass, []string, error) {
+func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRole, now time.Time) ([]json.RawMessage, map[string]toolClass, []string, []mcpUnsupported, error) {
 	var defs []json.RawMessage
 	class := map[string]toolClass{}
 	var notes toolNotes
+	var unsupported []mcpUnsupported
+	unsupportedAt := map[string]int{} // server -> its entry in unsupported
 
 	// The name is read back out of the definition rather than listed beside it,
 	// so the set the model is offered and the set it may call back cannot drift
@@ -245,7 +256,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(def, &probe); err != nil {
-			return nil, nil, nil, fmt.Errorf("delegation tool: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("delegation tool: %w", err)
 		}
 		defs = append(defs, def)
 		class[probe.Name] = toolClass{kind: domain.EventAgentToolUse, settlement: true}
@@ -294,7 +305,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 	for i, raw := range agent.Tools {
 		e := &entries[i]
 		if err := json.Unmarshal(raw, &e.probe); err != nil {
-			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
 		switch e.probe.Type {
 		case "custom":
@@ -304,7 +315,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		case agentToolsetType:
 			bs, err := toolset.Resolve(raw, now)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+				return nil, nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 			}
 			e.builtins = bs
 			for _, b := range bs {
@@ -336,7 +347,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				"name": probe.Name, "description": probe.Description, "input_schema": probe.InputSchema,
 			})
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			defs = append(defs, def)
 			class[probe.Name] = toolClass{kind: domain.EventAgentCustomToolUse}
@@ -360,7 +371,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			Server string `json:"mcp_server_name"`
 		}
 		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
 		if probe.Type != mcpToolsetType {
 			continue
@@ -373,21 +384,23 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 		var listing []toolset.MCPTool
 		if err := json.Unmarshal(stored, &listing); err != nil {
-			return nil, nil, nil, fmt.Errorf("mcp catalog for %q: %w", probe.Server, err)
+			return nil, nil, nil, nil, fmt.Errorf("mcp catalog for %q: %w", probe.Server, err)
 		}
 		resolved, unknown, err := toolset.ResolveMCP(raw, listing)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("agent tool: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("agent tool: %w", err)
 		}
 		for _, name := range unknown {
 			notes.add("MCP server %q does not report a tool named %q, which its toolset configures",
 				noteLabel(probe.Server), noteLabel(name))
 		}
+		var skipped []string
 		for _, r := range resolved {
 			if !mcpNameFits(probe.Server, r.Name) {
 				notes.add("MCP tool %q on server %q was not offered: together they do not compose a "+
 					"name a model request can carry (at most %d bytes)",
 					noteLabel(r.Name), noteLabel(probe.Server), maxModelToolName)
+				skipped = append(skipped, r.Name)
 				continue
 			}
 			name := domain.MCPModelName(probe.Server, r.Name)
@@ -408,7 +421,7 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				"name": name, "description": r.Description, "input_schema": r.InputSchema,
 			})
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			if spent+len(def) > maxMCPToolBytes {
 				overBudget++
@@ -421,12 +434,24 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 				server: probe.Server, tool: r.Name,
 			}
 		}
+		// Two toolsets may name one server, and the run reports a server once,
+		// so a second toolset's skips join the first's.
+		if at, ok := unsupportedAt[probe.Server]; ok {
+			for _, name := range skipped {
+				if !slices.Contains(unsupported[at].tools, name) {
+					unsupported[at].tools = append(unsupported[at].tools, name)
+				}
+			}
+		} else if len(skipped) > 0 {
+			unsupportedAt[probe.Server] = len(unsupported)
+			unsupported = append(unsupported, mcpUnsupported{server: probe.Server, tools: skipped})
+		}
 	}
 	if overBudget > 0 {
 		notes.add("%d MCP tools were not offered: this session's listings hold more than the %d bytes "+
 			"of tool definitions one request carries", overBudget, maxMCPToolBytes)
 	}
-	return defs, class, notes.render(), nil
+	return defs, class, notes.render(), unsupported, nil
 }
 
 // loadMCPCatalog reads the session's catalog into the listings request assembly
@@ -568,12 +593,96 @@ func (b *Brain) suspendForDiscovery(ctx context.Context, sid domain.ID, item *qu
 	return nil
 }
 
+// mcpUnsupported is one server's tools that resolveTools skipped because their
+// composed name is longer than a request can carry, in listing order.
+type mcpUnsupported struct {
+	server string
+	tools  []string
+}
+
+// maxUnsupportedNames bounds how many names one report quotes, for maxToolNotes'
+// reason: a listing holds thousands of tools inside its own cap, and the report
+// is written once per run for as long as the session lives. The count stays
+// exact.
+const maxUnsupportedNames = maxToolNotes
+
+// unsupportedNamesEvent is the session.error the reference reports a server's
+// skipped tools in, in its words (2026-10-22 mcp-name-ceiling; #980). Its "1-K
+// characters" is what the server's name leaves of the 128, so a long name
+// prints a negative K, as recorded. Here K and the bound count bytes, which
+// the recorded ASCII names cannot tell from characters. The type and
+// retry_status are the recorded ones; retrying is also mcpFailureEvent's
+// reading of the union, since the turn carries on without the tools.
+func unsupportedNamesEvent(u mcpUnsupported, threadID domain.ID) (events.NewEvent, error) {
+	quoted := make([]string, 0, min(len(u.tools), maxUnsupportedNames))
+	for _, name := range u.tools[:cap(quoted)] {
+		quoted = append(quoted, "'"+noteLabel(name)+"'")
+	}
+	names := strings.Join(quoted, ", ")
+	if rest := len(u.tools) - len(quoted); rest > 0 {
+		names += fmt.Sprintf(" and %d more", rest)
+	}
+	budget := maxModelToolName - len(domain.MCPModelNamePrefix) - len(domain.MCPModelNameSeparator) - len(u.server)
+	payload, err := json.Marshal(map[string]any{"error": map[string]any{
+		"type":            "mcp_connection_failed_error",
+		"mcp_server_name": u.server,
+		"message": fmt.Sprintf("MCP server '%s' returned %d tool(s) with unsupported names: %s. "+
+			"Tool names must match [a-zA-Z0-9_-] and be 1-%d characters. These tools were skipped.",
+			noteLabel(u.server), len(u.tools), names, budget),
+		"retry_status": map[string]any{"type": "retrying"},
+	}})
+	if err != nil {
+		return events.NewEvent{}, err
+	}
+	return events.NewEvent{Type: domain.EventSessionError, Payload: payload, ThreadID: threadID}, nil
+}
+
+// reportUnsupportedNames writes one unsupportedNamesEvent per server, ahead of
+// the request's span.model_request_start, on the first request of a run only.
+// The reference was recorded reporting a skip once for each user message, and
+// not again on the request that follows a tool result. A run's first request
+// is the one that consumes a demand: a user.message, a user.define_outcome or a
+// delivered thread message, still unprocessed (domain.ConsumedInputs). The
+// lease is asserted with the append, so a claimant that has lost the item
+// writes nothing. A claimant that dies between this commit and the start's
+// leaves its inputs unconsumed, so the turn's next claimant reports again.
+func (b *Brain) reportUnsupportedNames(ctx context.Context, sid domain.ID, item *queue.Item, unsupported []mcpUnsupported) error {
+	if len(unsupported) == 0 {
+		return nil
+	}
+	var first bool
+	if err := b.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM events
+		  WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2
+		    AND type = ANY($3) AND processed_at IS NULL)`,
+		sid.String(), events.NullableThread(item.ThreadID), domain.ConsumedInputs).Scan(&first); err != nil {
+		return err
+	}
+	if !first {
+		return nil
+	}
+	evs := make([]events.NewEvent, 0, len(unsupported))
+	for _, u := range unsupported {
+		ev, err := unsupportedNamesEvent(u, item.ThreadID)
+		if err != nil {
+			return err
+		}
+		evs = append(evs, ev)
+	}
+	_, err := b.log.AppendWith(ctx, sid, evs, events.AppendOptions{
+		Then: func(ctx context.Context, tx pgx.Tx) error {
+			return b.queue.Assert(ctx, tx, item)
+		},
+	})
+	return err
+}
+
 // logToolNotes puts every tool an agent declared and the model was not offered
 // where an operator can find it. It is the skills- and files-injection
 // precedent: a reference this platform cannot resolve is a logged miss, not a
 // failed turn, and the log is where a miss goes because no wire event describes
-// one — session.error names connection and authentication failures, and this is
-// neither.
+// most of them. The one the reference does report, a tool whose composed name
+// is too long, is on the session too (reportUnsupportedNames).
 func logToolNotes(ctx context.Context, sid domain.ID, notes []string) {
 	for _, n := range notes {
 		slog.WarnContext(ctx, "brain: "+n, "session_id", sid.String())

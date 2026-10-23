@@ -190,6 +190,43 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 	}
 }
 
+// An MCP server's name is at most 255 characters, as the SDK documents ("1-255
+// characters") and the reference was recorded answering on agent create: 255
+// accepted, 256 refused in these words (managed-agents-wire-recordings
+// 2026-10-22-mcp-name-ceiling/setup.json idx 5 `server255.agent.create`, idx 58
+// `server256.agent.create`; #980). Every route that takes mcp_servers[] from a
+// request refuses it, each path opened as that route opens it (unrecorded;
+// docs/DIVERGENCES.md).
+func TestAgentMCPServerNameIsCapped(t *testing.T) {
+	s := newTestServer(t)
+	server := func(name string) map[string]any {
+		return map[string]any{"type": "url", "name": name, "url": "https://mcp.example.com/mcp"}
+	}
+	maxName := strings.Repeat("s", 255)
+	createAgent(t, s, agentBody(map[string]any{
+		"mcp_servers": []any{server(maxName)},
+		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": maxName}},
+	}))
+	long := server(strings.Repeat("s", 256))
+	wantAgentRejected(t, s, agentBody(map[string]any{"mcp_servers": []any{long}}),
+		"mcp_servers.0.name: maximum string length is 255")
+
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	wantUpdateRejected(t, s, id, map[string]any{"mcp_servers": []any{server("docs"), long}},
+		"agent.mcp_servers.1.name: maximum string length is 255")
+
+	agentID, envID := fixture(t, s)
+	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
+		"type": "agent_with_overrides", "id": agentID, "mcp_servers": []any{long}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"agent.agent_with_overrides.config.mcp_servers.0.name: maximum string length is 255")
+	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"mcp_servers": []any{long}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"agent.mcp_servers.0.name: maximum string length is 255")
+}
+
 // A custom tool cannot take a name in the frame an MCP tool is offered under,
 // refused in the reference's words: the create body has the recorded one's
 // shape (managed-agents-wire-recordings 2026-09-03/batch2.json idx 57
