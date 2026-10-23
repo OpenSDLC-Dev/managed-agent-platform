@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -400,6 +401,137 @@ func TestAToolTheModelWasNotOfferedIsAnsweredUnknown(t *testing.T) {
 	}
 	if n := h.liveOf(t, queue.ModelTurn); n != 1 {
 		t.Errorf("model_turn items = %d, want the settlement's own chained turn", n)
+	}
+}
+
+// A tool whose composed name no request can carry is skipped and reported as a
+// session.error once per run, as the reference was recorded doing: once for
+// each user message, and not again on the request that follows a tool result
+// (managed-agents-wire-recordings 2026-10-22-mcp-name-ceiling/setup.json idx 59
+// `server104.boundary-call.final.events`; #980). The report commits with the
+// run's first request start, right after it. A message that lands mid-run is
+// reported by the request that consumes it. The run carries on without the tool.
+func TestASkippedMCPToolIsReportedOncePerRun(t *testing.T) {
+	long := strings.Repeat("n", 128) // mcp__docs__ + 128 is past the ceiling
+	h := newHarness(t, [][]provider.Chunk{
+		{toolUseChunk("toolu_1", "nope"), done("tool_use", 3)},
+		{textChunk(0, "done"), done("end_turn", 3)},
+		{toolUseChunk("toolu_2", "nope"), done("tool_use", 3)},
+		{textChunk(0, "again"), done("end_turn", 3)},
+	}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "ready", `[{"name":"search","description":"Search.","input_schema":{"type":"object"}},
+		{"name":"`+long+`","description":"Long.","input_schema":{"type":"object"}}]`)
+
+	h.wake(t, "search the docs")
+	h.runOnce(t) // calls an unknown tool, answered inline, so the run continues
+	h.runOnce(t) // the run's second request
+	if n := len(h.provider.calls); n != 2 {
+		t.Fatalf("model requests = %d, want 2", n)
+	}
+	for i, req := range h.provider.calls {
+		if got := requestTools(t, req); !slices.Equal(got, []string{"mcp__docs__search"}) {
+			t.Errorf("request %d offered %v, want the tool whose name fits", i, got)
+		}
+	}
+	got := h.types(t)
+	if at := slices.Index(got, string(domain.EventSessionError)); at < 1 ||
+		slices.Index(got, string(domain.EventSpanModelRequestStart)) != at-1 {
+		t.Fatalf("log = %v, want one session.error right after the run's first request start", got)
+	}
+	errs := h.eventsOfType(t, domain.EventSessionError)
+	if len(errs) != 1 {
+		t.Fatalf("session.error count = %d after one run, want 1", len(errs))
+	}
+	var body struct {
+		Error struct {
+			Type, Message string
+			Server        string                `json:"mcp_server_name"`
+			Retry         struct{ Type string } `json:"retry_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(errs[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	want := "MCP server 'docs' returned 1 tool(s) with unsupported names: '" + long +
+		"'. Tool names must match [a-zA-Z0-9_-] and be 1-117 characters. These tools were skipped."
+	if e := body.Error; e.Type != "mcp_connection_failed_error" || e.Server != "docs" || e.Message != want || e.Retry.Type != "retrying" {
+		t.Errorf("session.error = %s, want the recorded shape naming docs and %s", errs[0].Body, long[:8])
+	}
+	if got := h.status(t); got != "idle" {
+		t.Errorf("status = %q, want idle (the run ended normally)", got)
+	}
+
+	h.wake(t, "and again")
+	h.runOnce(t) // a new run, which calls the unknown tool again
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 2 {
+		t.Errorf("session.error count = %d after a second run's first request, want 2", n)
+	}
+	h.wake(t, "one more thing") // lands mid-run, before the chained request
+	h.runOnce(t)
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 3 {
+		t.Errorf("session.error count = %d after the request that consumed a mid-run message, want 3", n)
+	}
+}
+
+// The report commits with its request's start, so the start's lease covers it.
+// A claimant that loses the item mid-request leaves its report behind, and the
+// reclaimed turn does not repeat it: no demand is newer than the start the lost
+// claimant committed.
+func TestAReclaimedTurnDoesNotRepeatTheSkipReport(t *testing.T) {
+	long := strings.Repeat("n", 128)
+	h := newHarness(t, [][]provider.Chunk{
+		{textChunk(0, "lost"), done("end_turn", 1)},
+		{textChunk(0, "recovered"), done("end_turn", 1)},
+	}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "ready", `[{"name":"`+long+`","description":"Long.","input_schema":{"type":"object"}}]`)
+	h.provider.onGenerate = func(call int) {
+		if call != 0 {
+			return
+		}
+		if _, err := h.pool.Exec(context.Background(),
+			`UPDATE work_items SET lease_expires_at = now() - interval '1 second' WHERE session_id = $1`,
+			h.sessionID.String()); err != nil {
+			t.Errorf("expire lease: %v", err)
+		}
+	}
+	h.wake(t, "search the docs")
+	if found, err := h.brain.RunOnce(context.Background()); !found || err == nil {
+		t.Fatalf("RunOnce = (%v, %v), want found with a lease error", found, err)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 1 {
+		t.Fatalf("session.error count = %d after the lost claimant, want its committed report", n)
+	}
+	h.runOnce(t)
+	if n := len(h.eventsOfType(t, domain.EventSpanModelRequestStart)); n != 2 {
+		t.Fatalf("request starts = %d, want the reclaimed turn's too", n)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 1 {
+		t.Errorf("session.error count = %d after the reclaim, want 1", n)
+	}
+}
+
+// A claimant that has lost its item before the start writes neither the start
+// nor the report: the start's lease proof fails the commit they share.
+func TestALostLeaseWritesNoSkipReport(t *testing.T) {
+	long := strings.Repeat("n", 128)
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "never"), done("end_turn", 1)}}, nil)
+	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
+	listing(t, h, "ready", `[{"name":"`+long+`","description":"Long.","input_schema":{"type":"object"}}]`)
+	h.wake(t, "search the docs")
+	h.tracedBrain(t, &onQuery{match: []string{"FROM work_items WHERE id = $1 AND state = 'active' AND lease_expires_at = $2 FOR UPDATE"},
+		hook: func(context.Context) context.Context {
+			if err := h.queue.CancelSession(context.Background(), h.pool, h.sessionID); err != nil {
+				t.Errorf("cancel: %v", err)
+			}
+			return nil
+		}})
+	if found, err := h.brain.RunOnce(context.Background()); !found || !errors.Is(err, queue.ErrLeaseLost) {
+		t.Fatalf("RunOnce = (%v, %v), want a lost lease", found, err)
+	}
+	if n := len(h.eventsOfType(t, domain.EventSpanModelRequestStart)) + len(h.eventsOfType(t, domain.EventSessionError)); n != 0 {
+		t.Errorf("start and report rows = %d from a claimant that lost its item, want none", n)
 	}
 }
 

@@ -426,7 +426,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		spec.Tools = items
 	}
 	if raw, ok := overrides["mcp_servers"]; ok {
-		items, err := parseMCPServers(raw)
+		items, err := parseMCPServers(raw, "agent.agent_with_overrides.config.", capOverrideRunes)
 		if err != nil {
 			return snap, err
 		}
@@ -1231,7 +1231,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 				}
 				agent.Tools = items
 			case "mcp_servers":
-				items, err := parseMCPServers(val)
+				items, err := parseMCPServers(val, "agent.", capRunes)
 				if err != nil {
 					return nil, err
 				}

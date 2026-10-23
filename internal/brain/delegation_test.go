@@ -38,7 +38,7 @@ func TestDelegationToolsAreInjectedByRole(t *testing.T) {
 		{"child", delegationChild, []string{"submit_result", "send_to_parent"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			defs, class, notes, err := resolveTools(agentWithACustomTool(), nil, tc.role, time.Now())
+			defs, class, notes, _, err := resolveTools(agentWithACustomTool(), nil, tc.role, time.Now())
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}
@@ -106,7 +106,7 @@ func TestACustomToolNamedLikeADelegationToolIsShadowed(t *testing.T) {
 		json.RawMessage(`{"type":"custom","name":"create_agent","description":"Not ours.","input_schema":{"type":"object"}}`),
 	}}}
 
-	defs, class, notes, err := resolveTools(agent, nil, delegationCoordinator, time.Now())
+	defs, class, notes, _, err := resolveTools(agent, nil, delegationCoordinator, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestACustomToolNamedLikeADelegationToolIsShadowed(t *testing.T) {
 		t.Errorf("notes = %v, want the shadowed tool named", notes)
 	}
 
-	defs, class, notes, err = resolveTools(agent, nil, delegationNone, time.Now())
+	defs, class, notes, _, err = resolveTools(agent, nil, delegationNone, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestACustomToolNamedLikeTheOtherHalfKeepsItsName(t *testing.T) {
 				json.RawMessage(`{"type":"custom","name":"` + tc.tool + `","description":"Ours.","input_schema":{"type":"object"}}`),
 			}}}
 
-			defs, class, notes, err := resolveTools(agent, nil, tc.role, time.Now())
+			defs, class, notes, _, err := resolveTools(agent, nil, tc.role, time.Now())
 			if err != nil {
 				t.Fatalf("resolveTools: %v", err)
 			}
@@ -213,7 +213,7 @@ func TestRosterDetection(t *testing.T) {
 // every platform call — but escalates no work item, because no driver can run
 // it. Its id is minted here so the answer this same commit appends can name it.
 func TestTurnEventsRendersADelegationCall(t *testing.T) {
-	_, class, _, err := resolveTools(agentWithACustomTool(), nil, delegationCoordinator, time.Now())
+	_, class, _, _, err := resolveTools(agentWithACustomTool(), nil, delegationCoordinator, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestTurnEventsMixesDelegationWithExecCalls(t *testing.T) {
 	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
 		json.RawMessage(`{"type":"agent_toolset_20260401","default_config":{"permission_policy":{"type":"always_ask"}}}`),
 	}}}
-	_, class, _, err := resolveTools(agent, nil, delegationCoordinator, time.Now())
+	_, class, _, _, err := resolveTools(agent, nil, delegationCoordinator, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestTurnEventsAnswersANameNotInClass(t *testing.T) {
 // would answer it "unknown tool" instead of routing it to wrongRole, which is
 // the message that actually tells the model what to reach for instead.
 func TestTurnEventsOtherHalfIsNotUnoffered(t *testing.T) {
-	_, class, _, err := resolveTools(agentWithACustomTool(), nil, delegationChild, time.Now())
+	_, class, _, _, err := resolveTools(agentWithACustomTool(), nil, delegationChild, time.Now())
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}

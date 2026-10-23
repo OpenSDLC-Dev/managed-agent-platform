@@ -354,7 +354,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	case hasRoster(agent.Multiagent):
 		role = delegationCoordinator
 	}
-	toolDefs, class, notes, err := resolveTools(agent, cat, role, b.now())
+	toolDefs, class, notes, unsupported, err := resolveTools(agent, cat, role, b.now())
 	if err != nil {
 		return b.failTurn(ctx, sid, item, nil, 0, fmt.Sprintf("resolve tools: %v", err), envKind)
 	}
@@ -386,12 +386,16 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// this request is the one that reads it (the SDK: "pending" before the
 	// agent begins work, "running" while producing or revising). Both carry
 	// the lease proof, so a claimant that already lost the item writes
-	// neither and stops here, before the model.
+	// neither and stops here, before the model. So does the run's report of
+	// the MCP tools it cannot offer.
 	sctx, span, err := b.log.StartModelRequestOn(ctx, sid, item.ThreadID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model},
 		func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Assert(ctx, tx, item); err != nil {
 				return err
+			}
+			if err := b.reportUnsupportedNames(ctx, tx, sid, item.ThreadID, unsupported); err != nil {
+				return fmt.Errorf("report unsupported mcp names: %w", err)
 			}
 			if item.ThreadID != "" {
 				return nil // a child's request reads no user.define_outcome
