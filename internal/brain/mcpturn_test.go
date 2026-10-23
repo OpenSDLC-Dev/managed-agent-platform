@@ -404,16 +404,18 @@ func TestAToolTheModelWasNotOfferedIsAnsweredUnknown(t *testing.T) {
 }
 
 // A tool whose composed name no request can carry is skipped and reported as a
-// session.error ahead of the run's first request, once per run, as the
-// reference was recorded doing: once for each user message, and not again on
-// the request that follows a tool result (managed-agents-wire-recordings
-// 2026-10-22-mcp-name-ceiling/setup.json idx 59 `server104.boundary-call.final.events`;
-// #980). The run carries on without the tool.
+// session.error once per run, as the reference was recorded doing: once for
+// each user message, and not again on the request that follows a tool result
+// (managed-agents-wire-recordings 2026-10-22-mcp-name-ceiling/setup.json idx 59
+// `server104.boundary-call.final.events`; #980). The report commits with the
+// run's first request start, right after it. A message that lands mid-run is
+// reported by the request that consumes it. The run carries on without the tool.
 func TestASkippedMCPToolIsReportedOncePerRun(t *testing.T) {
 	long := strings.Repeat("n", 128) // mcp__docs__ + 128 is past the ceiling
 	h := newHarness(t, [][]provider.Chunk{
 		{toolUseChunk("toolu_1", "nope"), done("tool_use", 3)},
 		{textChunk(0, "done"), done("end_turn", 3)},
+		{toolUseChunk("toolu_2", "nope"), done("tool_use", 3)},
 		{textChunk(0, "again"), done("end_turn", 3)},
 	}, nil)
 	mcpAgent(t, h, `{"type":"mcp_toolset","mcp_server_name":"docs"}`)
@@ -432,10 +434,9 @@ func TestASkippedMCPToolIsReportedOncePerRun(t *testing.T) {
 		}
 	}
 	got := h.types(t)
-	at := slices.Index(got, string(domain.EventSessionError))
-	if at < 0 || at+1 >= len(got) || got[at+1] != string(domain.EventSpanModelRequestStart) ||
-		slices.Index(got, string(domain.EventSpanModelRequestStart)) != at+1 {
-		t.Fatalf("log = %v, want one session.error right before the run's first request", got)
+	if at := slices.Index(got, string(domain.EventSessionError)); at < 1 ||
+		slices.Index(got, string(domain.EventSpanModelRequestStart)) != at-1 {
+		t.Fatalf("log = %v, want one session.error right after the run's first request start", got)
 	}
 	errs := h.eventsOfType(t, domain.EventSessionError)
 	if len(errs) != 1 {
@@ -461,9 +462,14 @@ func TestASkippedMCPToolIsReportedOncePerRun(t *testing.T) {
 	}
 
 	h.wake(t, "and again")
-	h.runOnce(t)
+	h.runOnce(t) // a new run, which calls the unknown tool again
 	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 2 {
-		t.Errorf("session.error count = %d after a second run, want 2", n)
+		t.Errorf("session.error count = %d after a second run's first request, want 2", n)
+	}
+	h.wake(t, "one more thing") // lands mid-run, before the chained request
+	h.runOnce(t)
+	if n := len(h.eventsOfType(t, domain.EventSessionError)); n != 3 {
+		t.Errorf("session.error count = %d after the request that consumed a mid-run message, want 3", n)
 	}
 }
 

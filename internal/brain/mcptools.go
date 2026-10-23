@@ -637,25 +637,35 @@ func unsupportedNamesEvent(u mcpUnsupported, threadID domain.ID) (events.NewEven
 	return events.NewEvent{Type: domain.EventSessionError, Payload: payload, ThreadID: threadID}, nil
 }
 
-// reportUnsupportedNames writes one unsupportedNamesEvent per server, ahead of
-// the request's span.model_request_start, on the first request of a run only.
-// The reference was recorded reporting a skip once for each user message, and
-// not again on the request that follows a tool result. A run's first request
-// is the one that consumes a demand: a user.message, a user.define_outcome or a
-// delivered thread message, still unprocessed (domain.ConsumedInputs). The
-// lease is asserted with the append, so a claimant that has lost the item
-// writes nothing. A claimant that dies between this commit and the start's
-// leaves its inputs unconsumed, so the turn's next claimant reports again.
-func (b *Brain) reportUnsupportedNames(ctx context.Context, sid domain.ID, item *queue.Item, unsupported []mcpUnsupported) error {
+// reportUnsupportedNames writes one unsupportedNamesEvent per server on the
+// first request of a run only. The reference was recorded reporting a skip
+// once for each user message, and not again on the request that follows a tool
+// result. A run's first request is the one that consumes a demand: a
+// user.message, a user.define_outcome or a delivered thread message
+// (domain.ConsumedInputs), newer than the thread's previous request start.
+//
+// It runs in the commit of the request's span.model_request_start, after the
+// start is inserted (StartModelRequestOn's then), so the report follows the
+// start. Under that commit's session lock no input can land between the check
+// and the request that consumes it, and the lease the start asserts covers the
+// report too: a claimant that has lost the item writes neither, and one that
+// dies after the commit leaves a report its reclaimed turn does not repeat.
+func (b *Brain) reportUnsupportedNames(ctx context.Context, tx pgx.Tx, sid, threadID domain.ID, unsupported []mcpUnsupported) error {
 	if len(unsupported) == 0 {
 		return nil
 	}
+	// OFFSET 1 skips the start this commit inserted. Both reads walk the
+	// (session_id, seq) index back from the log's end.
 	var first bool
-	if err := b.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM events
-		  WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2
-		    AND type = ANY($3) AND processed_at IS NULL)`,
-		sid.String(), events.NullableThread(item.ThreadID), domain.ConsumedInputs).Scan(&first); err != nil {
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE((SELECT seq FROM events
+		                   WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = ANY($3)
+		                   ORDER BY seq DESC LIMIT 1), 0)
+		       > COALESCE((SELECT seq FROM events
+		                   WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM $2 AND type = $4
+		                   ORDER BY seq DESC OFFSET 1 LIMIT 1), 0)`,
+		sid.String(), events.NullableThread(threadID), domain.ConsumedInputs,
+		string(domain.EventSpanModelRequestStart)).Scan(&first); err != nil {
 		return err
 	}
 	if !first {
@@ -663,17 +673,13 @@ func (b *Brain) reportUnsupportedNames(ctx context.Context, sid domain.ID, item 
 	}
 	evs := make([]events.NewEvent, 0, len(unsupported))
 	for _, u := range unsupported {
-		ev, err := unsupportedNamesEvent(u, item.ThreadID)
+		ev, err := unsupportedNamesEvent(u, threadID)
 		if err != nil {
 			return err
 		}
 		evs = append(evs, ev)
 	}
-	_, err := b.log.AppendWith(ctx, sid, evs, events.AppendOptions{
-		Then: func(ctx context.Context, tx pgx.Tx) error {
-			return b.queue.Assert(ctx, tx, item)
-		},
-	})
+	_, err := b.log.AppendInTx(ctx, tx, sid, evs, events.AppendOptions{ThreadID: threadID})
 	return err
 }
 

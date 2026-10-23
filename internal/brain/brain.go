@@ -379,9 +379,6 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// so Describe cannot miss; an empty backend would only mean unlabelled
 	// metrics, never a failed turn.
 	desc, _ := b.registry.Describe(agent.Model.ID)
-	if err := b.reportUnsupportedNames(ctx, sid, item, unsupported); err != nil {
-		return fmt.Errorf("report unsupported mcp names: %w", err)
-	}
 	// The start's commit processes what this request consumes (#793), which a
 	// client sees: it stamps the thread's inputs below it, and on the primary
 	// it flips a pending outcome to running — every pending entry's
@@ -389,12 +386,16 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	// this request is the one that reads it (the SDK: "pending" before the
 	// agent begins work, "running" while producing or revising). Both carry
 	// the lease proof, so a claimant that already lost the item writes
-	// neither and stops here, before the model.
+	// neither and stops here, before the model. So does the run's report of
+	// the MCP tools it cannot offer.
 	sctx, span, err := b.log.StartModelRequestOn(ctx, sid, item.ThreadID,
 		events.Backend{Provider: desc.Protocol, Model: desc.Model},
 		func(ctx context.Context, tx pgx.Tx) error {
 			if err := b.queue.Assert(ctx, tx, item); err != nil {
 				return err
+			}
+			if err := b.reportUnsupportedNames(ctx, tx, sid, item.ThreadID, unsupported); err != nil {
+				return fmt.Errorf("report unsupported mcp names: %w", err)
 			}
 			if item.ThreadID != "" {
 				return nil // a child's request reads no user.define_outcome
