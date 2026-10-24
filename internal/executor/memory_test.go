@@ -601,8 +601,9 @@ func TestMemorySyncReplacesADirectoryWithAFile(t *testing.T) {
 // earlier, and would tie the creates, leaving the list's id tiebreak, which is
 // random, to order them. The bound gives back half of hold, for the reason
 // internal/api's TestMemoryVersionIsStampedAfterTheLockWait argues. A create's
-// two stamps are one reading, so they are equal. The creates are distinct, not
-// ordered, for TestMemorySyncReplacesADirectoryWithAFile's reason.
+// two stamps are one reading, so they are equal, and each memory is stamped
+// no later than its head version. The creates are distinct, not ordered, for
+// TestMemorySyncReplacesADirectoryWithAFile's reason.
 func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
 	const hold = 200 * time.Millisecond
 	h, sb := materialized(t, "read_write")
@@ -664,8 +665,9 @@ func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
 	}
 
 	rows, err := h.pool.Query(context.Background(),
-		`SELECT path, created_at, updated_at FROM memories
-		  WHERE memory_store_id = $1 AND path = ANY($2)`,
+		`SELECT m.path, m.created_at, m.updated_at, v.created_at
+		   FROM memories m JOIN memory_versions v ON v.id = m.memory_version_id
+		  WHERE m.memory_store_id = $1 AND m.path = ANY($2)`,
 		memStoreID, []string{"/new.md", "/other.md", "/notes.md"})
 	if err != nil {
 		t.Fatal(err)
@@ -674,11 +676,16 @@ func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
 	created, updated := map[string]time.Time{}, map[string]time.Time{}
 	for rows.Next() {
 		var p string
-		var c, u time.Time
-		if err := rows.Scan(&p, &c, &u); err != nil {
+		var c, u, v time.Time
+		if err := rows.Scan(&p, &c, &u, &v); err != nil {
 			t.Fatal(err)
 		}
 		created[p], updated[p] = c, u
+		// The memory row goes in before its version, as the API writes them
+		// (TestMemoryVersionIsStampedAfterTheLockWait argues the margin).
+		if u.After(v) {
+			t.Errorf("%s: updated_at %v is after its version's created_at %v", p, u, v)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
