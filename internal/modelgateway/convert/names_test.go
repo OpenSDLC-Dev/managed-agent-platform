@@ -63,7 +63,8 @@ func TestFunctionNameCutsAtARune(t *testing.T) {
 }
 
 // A call the history made on a tool the request no longer offers reads back
-// whole too. Where a history name and a tool's meet, the tool wins.
+// whole too. Where two names go out alike the later wins: a tool over the
+// history, and a later call over an earlier one.
 func TestNamesOfReadsAHistoryCallBack(t *testing.T) {
 	long := strings.Repeat("x", 100)
 	fn := convert.FunctionName(long)
@@ -77,6 +78,10 @@ func TestNamesOfReadsAHistoryCallBack(t *testing.T) {
 	tools := []json.RawMessage{json.RawMessage(`{"name":"` + fn + `"}`)}
 	if got := convert.NamesOf(tools, history).Tool(fn); got != fn {
 		t.Errorf("Tool(%q) = %q, want the tool the request offers under that name", fn, got)
+	}
+	later := append(history, convert.Message{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"t2","name":"` + fn + `","input":{}}]`)})
+	if got := convert.NamesOf(nil, later).Tool(fn); got != fn {
+		t.Errorf("Tool(%q) = %q, want the later call's tool", fn, got)
 	}
 }
 

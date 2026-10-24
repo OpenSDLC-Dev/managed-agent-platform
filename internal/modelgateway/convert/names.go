@@ -54,13 +54,21 @@ func FunctionName(name string) string {
 type Names map[string]string
 
 // NamesOf is the Names of a request: the names its history's calls carried,
-// and its tools' names, each read by its exact key, as Messages and Tools
-// read them. A call on a tool the request no longer offers still reads back
-// whole. The tools win where the two meet: a name a tool goes out under reads
-// back as that tool. Tools has refused two tools that share a function name
-// before any answer is read.
+// in order, then its tools' names, each read by its exact key, as Messages
+// and Tools read them. A call on a tool the request no longer offers still
+// reads back whole. Where two names go out alike the later one wins, so the
+// request's tools win over its history, and a later call over an earlier
+// one. Tools has refused two tools that share a function name before any
+// answer is read.
 func NamesOf(tools []json.RawMessage, history []Message) Names {
 	n := Names{}
+	read := func(name string) {
+		if fn := FunctionName(name); fn != name {
+			n[fn] = name
+		} else {
+			delete(n, name)
+		}
+	}
 	for _, m := range history {
 		var blocks []map[string]json.RawMessage
 		if json.Unmarshal(m.Content, &blocks) != nil {
@@ -69,9 +77,7 @@ func NamesOf(tools []json.RawMessage, history []Message) Names {
 		for _, b := range blocks {
 			if typ, _ := text(b, "type"); typ == "tool_use" {
 				name, _ := text(b, "name")
-				if fn := FunctionName(name); fn != name {
-					n[fn] = name
-				}
+				read(name)
 			}
 		}
 	}
@@ -79,11 +85,7 @@ func NamesOf(tools []json.RawMessage, history []Message) Names {
 		var def map[string]json.RawMessage
 		_ = json.Unmarshal(t, &def)
 		name, _ := text(def, "name")
-		if fn := FunctionName(name); fn != name {
-			n[fn] = name
-		} else {
-			delete(n, name)
-		}
+		read(name)
 	}
 	return n
 }

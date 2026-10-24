@@ -923,9 +923,13 @@ func TestACallOnAToolOnlyTheHistoryNamesComesBackWhole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
+	var got []string
 	for _, c := range collect(t, stream) {
-		if c.Kind == provider.KindToolUse && c.ToolUse.Name != long {
-			t.Errorf("tool_use name = %q, want %q", c.ToolUse.Name, long)
+		if c.Kind == provider.KindToolUse {
+			got = append(got, c.ToolUse.Name)
 		}
+	}
+	if !reflect.DeepEqual(got, []string{long}) {
+		t.Errorf("tool_use names = %v, want one call on %q", got, long)
 	}
 }
