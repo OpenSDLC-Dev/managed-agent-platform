@@ -75,8 +75,9 @@ type geminiResult struct {
 // field it does not name is refused, as Request refuses one:
 //
 //   - mapped: system (systemInstruction, a part per text block), messages
-//     (contents), tools (functionDeclarations, input_schema unchanged as
-//     parametersJsonSchema), tool_choice (functionCallingConfig, sent only
+//     (contents), tools (functionDeclarations, each name as GeminiName makes
+//     it and input_schema unchanged as parametersJsonSchema), tool_choice
+//     (functionCallingConfig, sent only
 //     beside a declaration: auto AUTO, any ANY, tool ANY naming it, none
 //     NONE), and into generationConfig max_tokens, temperature, top_p, top_k
 //     and stop_sequences, and thinking and output_config.effort as
@@ -87,15 +88,17 @@ type geminiResult struct {
 //   - refused: output_config.format; tool_choice's disable_parallel_tool_use
 //     true, as Gemini has no switch to hold an answer to one call; a server
 //     tool, and a tool that is strict — Gemini bounds no call's input to its
-//     schema — or defer_loading, or not callable directly; and a final
+//     schema — or defer_loading, or not callable directly; two tools whose
+//     names GeminiName would send as one; and a final
 //     assistant turn, which Gemini would answer rather than continue.
 //
 // In the turns, a user turn is user and an assistant turn model; consecutive
 // turns of one role are one turn, as the Messages API reads them. Text is
 // text, an empty one sent as nothing; a base64 image is inlineData, and every
 // other source and block is refused — a document, a search_result outside a
-// tool_result, a server tool's. A tool_use is a functionCall under its id; a
-// tool_result a functionResponse naming the tool its tool_use called, its
+// tool_result, a server tool's. A tool_use is a functionCall under its id and
+// its GeminiName; a tool_result a functionResponse naming the tool its
+// tool_use called, its
 // text the response's output, or its error under is_error, its images the
 // response's parts, and a search_result in it the text
 // provider.SearchResultText renders. A thinking block carries back only the
@@ -334,7 +337,7 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, s
 				return nil, "", fmt.Errorf("content[%d].input: %w", j, err)
 			}
 			called[id] = name
-			parts = append(parts, geminiPart{FunctionCall: &geminiCall{ID: id, Name: name, Args: args}})
+			parts = append(parts, geminiPart{FunctionCall: &geminiCall{ID: id, Name: GeminiName(name), Args: args}})
 		case "tool_result":
 			id, _ := text(b, "tool_use_id")
 			name, ok := called[id]
@@ -349,7 +352,7 @@ func geminiParts(raw json.RawMessage, called map[string]string) ([]geminiPart, s
 			if bytes.Equal(bytes.TrimSpace(b["is_error"]), []byte("true")) {
 				key = "error"
 			}
-			parts = append(parts, geminiPart{FunctionResponse: &geminiResult{ID: id, Name: name,
+			parts = append(parts, geminiPart{FunctionResponse: &geminiResult{ID: id, Name: GeminiName(name),
 				Response: map[string]string{key: output}, Parts: images}})
 		case "thinking":
 			if sig, _ := text(b, "signature"); signature == "" && strings.HasPrefix(sig, GeminiSignaturePrefix) {
@@ -465,6 +468,7 @@ func geminiTools(raw json.RawMessage) ([]map[string]any, error) {
 		return nil, fmt.Errorf("tools: must be an array of objects")
 	}
 	decls := make([]map[string]any, 0, len(tools))
+	taken := map[string]string{} // function name -> the tool name sent under it
 	for i, def := range tools {
 		if typ, ok := text(def, "type"); ok && typ != "custom" {
 			return nil, fmt.Errorf("tools[%d]: a %q server tool has no Gemini counterpart", i, typ)
@@ -497,7 +501,12 @@ func geminiTools(raw json.RawMessage) ([]map[string]any, error) {
 		if !ok || name == "" {
 			return nil, fmt.Errorf("tools[%d].name: must be a non-empty string", i)
 		}
-		decl := map[string]any{"name": name}
+		fn := GeminiName(name)
+		if other, ok := taken[fn]; ok && other != name {
+			return nil, fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
+		}
+		taken[fn] = name
+		decl := map[string]any{"name": fn}
 		if d, _ := text(def, "description"); d != "" {
 			decl["description"] = d
 		}
@@ -539,7 +548,7 @@ func geminiToolChoice(raw json.RawMessage) (map[string]any, error) {
 		if !ok {
 			return nil, fmt.Errorf(".name: must be a string")
 		}
-		return map[string]any{"mode": "ANY", "allowedFunctionNames": []string{name}}, nil
+		return map[string]any{"mode": "ANY", "allowedFunctionNames": []string{GeminiName(name)}}, nil
 	}
 	return nil, fmt.Errorf(".type: %q has no Gemini counterpart", typ)
 }

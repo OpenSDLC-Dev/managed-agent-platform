@@ -177,3 +177,71 @@ func TestNamesOfReadsTheNameKeyAlone(t *testing.T) {
 		t.Errorf("Tool(%q) = %q, want the name the tool was sent under", fn, got)
 	}
 }
+
+// A Messages tool name may start with a digit or a dash, and a Gemini
+// function name must start with a letter or "_", so such a name goes out with
+// a "_" in front, within Gemini's 128, and an answer's name comes back as the
+// tool's own (#985).
+func TestGeminiNameStartsWithALetterOrUnderscore(t *testing.T) {
+	for name, want := range map[string]string{
+		"get_time": "get_time", "Get": "Get", "_private": "_private", "": "",
+		"1password": "_1password", "-dash": "_-dash", "9": "_9",
+	} {
+		if got := convert.GeminiName(name); got != want {
+			t.Errorf("GeminiName(%q) = %q, want %q", name, got, want)
+		}
+	}
+	long := "1" + strings.Repeat("x", 127) // 128, and 129 with its "_"
+	got := convert.GeminiName(long)
+	if len(got) != 128 || !strings.HasPrefix(got, "_1xxx") || !strings.HasSuffix(got, "xxx") {
+		t.Errorf("GeminiName(128 characters from a digit) = %q (%d), want 128 from a \"_\"", got, len(got))
+	}
+	if again := convert.GeminiName(long); again != got {
+		t.Errorf("GeminiName is not stable: %q then %q", got, again)
+	}
+	letter := "a" + strings.Repeat("x", 127)
+	if got := convert.GeminiName(letter); got != letter {
+		t.Errorf("GeminiName of 128 characters from a letter = %q, want it unchanged", got)
+	}
+	names := convert.GeminiNamesOf([]json.RawMessage{
+		json.RawMessage(`{"name":"1password"}`), json.RawMessage(`{"name":"` + long + `"}`),
+		json.RawMessage(`{"name":"get_time"}`),
+	}, nil)
+	for fn, want := range map[string]string{"_1password": "1password", got: long, "get_time": "get_time"} {
+		if back := names.Tool(fn); back != want {
+			t.Errorf("Tool(%q) = %q, want %q", fn, back, want)
+		}
+	}
+	// Chat Completions takes a name that starts with a digit, so NamesOf maps
+	// none of these.
+	if back := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"1password"}`)}, nil).Tool("_1password"); back != "_1password" {
+		t.Errorf("NamesOf read _1password as %q", back)
+	}
+}
+
+// A whole and a streamed Gemini answer name each call as the tool's own.
+func TestGeminiAnswerReadsMappedNamesBack(t *testing.T) {
+	names := convert.GeminiNamesOf([]json.RawMessage{json.RawMessage(`{"name":"1password"}`)}, nil)
+	call := `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"c1","name":"_1password","args":{}}}]},"finishReason":"STOP"}],"responseId":"r1"}`
+
+	b, err := convert.GeminiAnswer([]byte(call), "alias", "req_1", nil, wrapSig, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answer struct {
+		Content []struct{ Name string } `json:"content"`
+	}
+	if err := json.Unmarshal(b, &answer); err != nil || len(answer.Content) != 1 || answer.Content[0].Name != "1password" {
+		t.Errorf("GeminiAnswer = %s (%v), want one tool_use named 1password", b, err)
+	}
+
+	s := convert.NewGeminiStream("alias", "req_1", wrapSig, names)
+	out, err := s.Chunk([]byte(call))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := accumulated(t, append(out, s.End()...))
+	if len(m.Content) != 1 || m.Content[0].Name != "1password" {
+		t.Errorf("streamed content %+v, want one tool_use named 1password", m.Content)
+	}
+}

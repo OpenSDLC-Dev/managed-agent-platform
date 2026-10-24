@@ -36,7 +36,7 @@ func signatureOf(t *testing.T, b []byte) string {
 
 func geminiAnswer(t *testing.T, b []byte) string {
 	t.Helper()
-	out, err := convert.GeminiAnswer(b, "alias", "req_1", &convert.Usage{Input: 6, Output: 335, CacheRead: 2}, wrapSig)
+	out, err := convert.GeminiAnswer(b, "alias", "req_1", &convert.Usage{Input: 6, Output: 335, CacheRead: 2}, wrapSig, nil)
 	if err != nil {
 		t.Fatalf("GeminiAnswer(%s): %v", b, err)
 	}
@@ -74,7 +74,7 @@ func TestGeminiAnswerID(t *testing.T) {
 		`{"responseId":"r-1","candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}]}`: "r-1",
 		`{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}]}`:                    "req_1",
 	} {
-		out, err := convert.GeminiAnswer([]byte(body), "alias", "req_1", nil, wrapSig)
+		out, err := convert.GeminiAnswer([]byte(body), "alias", "req_1", nil, wrapSig, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,7 +128,7 @@ func TestGeminiAnswerFinishReasons(t *testing.T) {
 	}
 	for _, reason := range []string{"MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS", "MISSING_THOUGHT_SIGNATURE",
 		"MALFORMED_RESPONSE", "OTHER", "NO_IMAGE", "LANGUAGE", "IMAGE_OTHER", "FINISH_REASON_UNSPECIFIED", "SOMETHING_NEW"} {
-		_, err := convert.GeminiAnswer([]byte(answer(reason)), "alias", "req_1", nil, wrapSig)
+		_, err := convert.GeminiAnswer([]byte(answer(reason)), "alias", "req_1", nil, wrapSig, nil)
 		if err == nil || !strings.Contains(err.Error(), reason) || !strings.Contains(err.Error(), "call f was malformed") {
 			t.Errorf("%s: err = %v, want one naming it and its message", reason, err)
 		}
@@ -147,7 +147,7 @@ func TestGeminiAnswerRefusals(t *testing.T) {
 		`{"candidates":[{"content":{"parts":[{"text":7}]},"finishReason":"STOP"}]}`:                                            "text",
 		`{"candidates":[{"content":{"parts":{}},"finishReason":"STOP"}]}`:                                                      "parts",
 	} {
-		_, err := convert.GeminiAnswer([]byte(body), "alias", "req_1", nil, wrapSig)
+		_, err := convert.GeminiAnswer([]byte(body), "alias", "req_1", nil, wrapSig, nil)
 		if err == nil || !strings.Contains(err.Error(), contains) {
 			t.Errorf("%s: err = %v, want one naming %s", body, err, contains)
 		}

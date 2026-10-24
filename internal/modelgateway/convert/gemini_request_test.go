@@ -303,3 +303,44 @@ func TestGeminiRequestRefusals(t *testing.T) {
 		}
 	}
 }
+
+// Every place a request names a tool sends the name GeminiName makes: its
+// declarations, tool_choice, and the calls and results of its history. Two
+// tools that would go out under one name are refused, in either order; a
+// name listed twice is not (#985).
+func TestGeminiRequestMapsAToolNameGeminiWouldRefuse(t *testing.T) {
+	got := geminiRequest(t, `{"max_tokens":8,
+		"tools":[{"name":"1password","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"1password"},
+		"messages":[{"role":"user","content":"hi"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"1password","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}]}`)
+	want := decoded(t, `{
+		"tools":[{"functionDeclarations":[{"name":"_1password","parametersJsonSchema":{"type":"object"}}]}],
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["_1password"]}},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]},
+			{"role":"model","parts":[{"functionCall":{"id":"t1","name":"_1password","args":{}},"thoughtSignature":"skip_thought_signature_validator"}]},
+			{"role":"user","parts":[{"functionResponse":{"id":"t1","name":"_1password","response":{"output":"ok"}}}]}]}`).(map[string]any)
+	for _, k := range []string{"tools", "toolConfig", "contents"} {
+		if !reflect.DeepEqual(got[k], want[k]) {
+			t.Errorf("%s = %v\nwant %v", k, got[k], want[k])
+		}
+	}
+
+	tool := func(name string) string { return `{"name":"` + name + `","input_schema":{"type":"object"}}` }
+	for _, c := range []struct {
+		tools   string
+		refused bool
+	}{
+		{tool("1password") + "," + tool("_1password"), true},
+		{tool("_1password") + "," + tool("1password"), true},
+		{tool("1password") + "," + tool("1password"), false},
+	} {
+		var top map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"max_tokens":8,`+hi+`,"tools":[`+c.tools+`]}`), &top)
+		_, err := convert.GeminiRequest(top)
+		if refused := err != nil && strings.Contains(err.Error(), "tools[1]") && strings.Contains(err.Error(), "goes out as"); refused != c.refused {
+			t.Errorf("tools %s: err = %v, want refused %v", c.tools, err, c.refused)
+		}
+	}
+}

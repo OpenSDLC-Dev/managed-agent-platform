@@ -785,7 +785,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		var p streamProto
 		switch {
 		case up == profile.Gemini:
-			p = &convStream{c: c, s: convert.NewGeminiStream(c.alias, requestID(r), wrap.wrap), ctx: ctx, red: red, rid: requestID(r),
+			p = &convStream{c: c, s: convert.NewGeminiStream(c.alias, requestID(r), wrap.wrap, geminiToolNames(c.top)), ctx: ctx, red: red, rid: requestID(r),
 				usage: func(o map[string]json.RawMessage) *store.Tokens { return geminiUsageOf(o["usageMetadata"]) }, status: geminiStatus}
 		case conv:
 			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap), toolNames(c.top)), ctx: ctx, red: red, rid: requestID(r),
@@ -870,7 +870,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	switch {
 	case up == profile.Gemini:
 		c.out.tokens = geminiUsageOf(member(b, "usageMetadata"))
-		if answer, err = convert.GeminiAnswer(b, c.alias, requestID(r), callerUsage(c.out.tokens), wrap.wrap); err != nil {
+		if answer, err = convert.GeminiAnswer(b, c.alias, requestID(r), callerUsage(c.out.tokens), wrap.wrap, geminiToolNames(c.top)); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
 				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false // a finishMessage is the vendor's text
 		}

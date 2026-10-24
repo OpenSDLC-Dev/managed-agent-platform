@@ -29,8 +29,9 @@ import (
 // candidate, a finish reason geminiStop has none for, a part carrying
 // content Messages has no block for (inline data, a file, code or its
 // result), a functionCall with no name or with args that are no JSON object,
-// or a text that is not a string. Every field is read by its exact key.
-func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value string) string) ([]byte, error) {
+// or a text that is not a string. Every field is read by its exact key. Each
+// call's name is read back through names, as the tool's own (GeminiNamesOf).
+func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value string) string, names Names) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil || obj == nil {
 		return nil, fmt.Errorf("the answer is not a JSON object")
@@ -77,7 +78,7 @@ func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value stri
 			return nil, fmt.Errorf("the answer's part %d: %w", i, err)
 		}
 		if !null(p["functionCall"]) {
-			call, err := geminiCallOf(p["functionCall"], id, calls)
+			call, err := geminiCallOf(p["functionCall"], id, calls, names)
 			if err != nil {
 				return nil, fmt.Errorf("the answer's part %d: %w", i, err)
 			}
@@ -127,8 +128,8 @@ func GeminiAnswer(b []byte, alias, id string, usage *Usage, sign func(value stri
 }
 
 // geminiCallOf is a functionCall as a tool_use block, the n-th call of the
-// answer answerID names.
-func geminiCallOf(raw json.RawMessage, answerID string, n int) (map[string]any, error) {
+// answer answerID names, under the tool name names reads its name back as.
+func geminiCallOf(raw json.RawMessage, answerID string, n int, names Names) (map[string]any, error) {
 	var fc map[string]json.RawMessage
 	if json.Unmarshal(raw, &fc) != nil {
 		return nil, fmt.Errorf("functionCall is not an object")
@@ -153,7 +154,7 @@ func geminiCallOf(raw json.RawMessage, answerID string, n int) (map[string]any, 
 	if callID == "" {
 		callID = geminiCallID(answerID, n)
 	}
-	return map[string]any{"type": "tool_use", "id": callID, "name": name, "input": input}, nil
+	return map[string]any{"type": "tool_use", "id": callID, "name": names.Tool(name), "input": input}, nil
 }
 
 // geminiCallID is the id the n-th call of an answer gets where Gemini names
