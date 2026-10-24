@@ -121,3 +121,15 @@ func TestAnswerReadsShortenedNamesBack(t *testing.T) {
 		t.Errorf("streamed content %+v, want one tool_use named %q", m.Content, long)
 	}
 }
+
+// NamesOf reads a definition's name by its exact key, as Tools does, so a
+// definition that also carries "Name" cannot point a call on one tool at
+// another.
+func TestNamesOfReadsTheNameKeyAlone(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	fn := convert.FunctionName(long)
+	names := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"` + fn + `","Name":"` + long + `"}`)})
+	if got := names.Tool(fn); got != fn {
+		t.Errorf("Tool(%q) = %q, want the name the tool was sent under", fn, got)
+	}
+}

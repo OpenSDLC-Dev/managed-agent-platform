@@ -17,7 +17,8 @@ import (
 const maxFunctionName = 64
 
 // nameHash is how many hex digits of a name's SHA-256 its shortened form ends
-// in: 64 bits, so two long names a request carries do not shorten alike.
+// in: 64 bits, so two long names one request carries are vanishingly unlikely
+// to shorten alike, and Tools refuses a pair that does.
 const nameHash = 16
 
 // FunctionName is the function name a Chat Completions upstream is sent for a
@@ -43,22 +44,22 @@ func FunctionName(name string) string {
 // every name as itself.
 type Names map[string]string
 
-// NamesOf is the Names of a request's tool definitions. Tools has refused
-// tools that share a function name before any answer is read.
+// NamesOf is the Names of a request's tool definitions, each name read by its
+// exact key, as Tools reads it. Tools has refused tools that share a function
+// name before any answer is read.
 func NamesOf(tools []json.RawMessage) Names {
 	var n Names
 	for _, t := range tools {
-		var def struct {
-			Name string `json:"name"`
-		}
+		var def map[string]json.RawMessage
 		if json.Unmarshal(t, &def) != nil {
 			continue
 		}
-		if fn := FunctionName(def.Name); fn != def.Name {
+		name, _ := text(def, "name")
+		if fn := FunctionName(name); fn != name {
 			if n == nil {
 				n = Names{}
 			}
-			n[fn] = def.Name
+			n[fn] = name
 		}
 	}
 	return n
