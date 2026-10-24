@@ -732,10 +732,16 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 			return memoryPushOverCap, nil
 		}
 		memoryID := domain.NewID(domain.PrefixMemory).String()
+		// This insert and the update below stamp with statement_timestamp()
+		// for internal/api createMemory's reason (#975), and for one more: a
+		// settlement writes all its memories in one transaction, which now()
+		// would stamp identically.
 		tag, err := tx.Exec(ctx,
 			`INSERT INTO memories
-			   (id, memory_store_id, path, content, content_sha256, content_size_bytes, memory_version_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+			   (id, memory_store_id, path, content, content_sha256, content_size_bytes, memory_version_id,
+			    created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, statement_timestamp(), statement_timestamp())
+			 ON CONFLICT DO NOTHING`,
 			memoryID, storeID, act.Path, content, act.LocalSHA, len(content), versionID)
 		if err != nil {
 			return "", err
@@ -749,7 +755,7 @@ func (e *Executor) pushMemory(ctx context.Context, tx pgx.Tx, storeID string, ac
 	tag, err := tx.Exec(ctx,
 		`UPDATE memories
 		    SET content = $3, content_sha256 = $4, content_size_bytes = $5,
-		        memory_version_id = $6, updated_at = now()
+		        memory_version_id = $6, updated_at = statement_timestamp()
 		  WHERE id = $1 AND content_sha256 = $2`,
 		act.ID, act.BaselineSHA, content, act.LocalSHA, len(content), versionID)
 	if err != nil {

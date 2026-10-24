@@ -65,18 +65,14 @@ func stampVersions(t *testing.T, s *tserver, storeID string, oldestFirst ...stri
 	stampCreatedAt(t, s, "memory_versions", oldestFirst...)
 }
 
-// A version is stamped when it is written, not when its transaction began
-// (#552): an update that waits on the store lock is stamped after the writer
-// it waited on commits. now(), frozen at the update's BEGIN, would stamp it at
-// least hold earlier. The assertion gives back half of hold, so a database
-// clock stepping backwards (#411 recorded 20ms) cannot fail it: the test tells
-// which clock stamped the row, not whether that clock is monotonic.
-func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
-	const hold = 200 * time.Millisecond
-	s := newTestServer(t)
-	store := createMemoryStore(t, s, "notes")
-	id := createMemory(t, s, store, "/a.md", "first")["id"].(string)
-
+// sendPastTheStoreLock sends one memory write while another transaction holds
+// the store's lock, holds it for hold once the write waits on it, and returns
+// the database clock at the release. The holder rolls back on every path, so a
+// test that fails before the commit still returns its connection to the pool,
+// whose close would otherwise wait for it.
+func sendPastTheStoreLock(t *testing.T, s *tserver, store string, hold time.Duration,
+	path string, body map[string]any) time.Time {
+	t.Helper()
 	ctx := t.Context()
 	holder, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -89,8 +85,7 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 		t.Fatalf("take the store lock: %v", err)
 	}
 
-	done := s.sendAsync(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
-		map[string]any{"content": "second"}, map[string]string{"x-api-key": testKey})
+	done := s.sendAsync(http.MethodPost, path, body, map[string]string{"x-api-key": testKey})
 	waitUntilBlockedOnALock(t, s.pool, pid, done)
 	time.Sleep(hold)
 	var released time.Time
@@ -101,18 +96,51 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 		t.Fatalf("release the store lock: %v", err)
 	}
 	if r := awaitReply(t, done); r.err != nil || r.code != http.StatusOK {
-		t.Fatalf("update the memory: %d %s (%v)", r.code, r.body, r.err)
+		t.Fatalf("POST %s: %d %s (%v)", path, r.code, r.body, r.err)
 	}
+	return released
+}
 
-	var stamped time.Time
-	if err := s.pool.QueryRow(ctx,
-		`SELECT v.created_at FROM memories m JOIN memory_versions v ON v.id = m.memory_version_id WHERE m.id = $1`,
-		id).Scan(&stamped); err != nil {
-		t.Fatalf("read the update's version: %v", err)
+// stampsOf reads a memory's updated_at and its head version's created_at.
+func stampsOf(t *testing.T, s *tserver, memoryID string) (updated, version time.Time) {
+	t.Helper()
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT m.updated_at, v.created_at FROM memories m JOIN memory_versions v ON v.id = m.memory_version_id
+		  WHERE m.id = $1`, memoryID).Scan(&updated, &version); err != nil {
+		t.Fatalf("read the stamps of %s: %v", memoryID, err)
 	}
+	return updated, version
+}
+
+// A version is stamped when it is written, not when its transaction began
+// (#552): an update that waits on the store lock is stamped after the writer
+// it waited on commits. now(), frozen at the update's BEGIN, would stamp it at
+// least hold earlier. So is the memory's updated_at (#975), just before the
+// version, as the reference stamps the two. The assertion gives back half of
+// hold, so a database clock stepping backwards (#411 recorded 20ms) cannot
+// fail it: the test tells which clock stamped the row, not whether that clock
+// is monotonic. The memory and its version are two statements apart, and only
+// a clock step inside that gap could put the version first.
+func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "notes")
+	id := createMemory(t, s, store, "/a.md", "first")["id"].(string)
+
+	released := sendPastTheStoreLock(t, s, store, hold, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"content": "second"})
+	updated, stamped := stampsOf(t, s, id)
 	if !stamped.After(released.Add(-hold / 2)) {
 		t.Errorf("the update's version is stamped %s, before the lock it waited on was released at %s",
 			stamped.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
+	}
+	if !updated.After(released.Add(-hold / 2)) {
+		t.Errorf("the memory's updated_at is %s, before the lock it waited on was released at %s",
+			updated.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
+	}
+	if updated.After(stamped) {
+		t.Errorf("the memory's updated_at %s is after its version's created_at %s",
+			updated.Format(time.RFC3339Nano), stamped.Format(time.RFC3339Nano))
 	}
 }
 

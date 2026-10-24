@@ -593,6 +593,121 @@ func TestMemorySyncReplacesADirectoryWithAFile(t *testing.T) {
 	}
 }
 
+// TestMemorySyncStampsEachMemoryAsItWritesIt: one settlement stamps each
+// memory when it writes it, not when the settlement began (#975), as it
+// stamps their versions (#552). A settlement that waits on the store lock
+// stamps its creates and its update after the writer it waited on commits.
+// now(), frozen at the settlement's BEGIN, would stamp all three at least hold
+// earlier, and would tie the creates, leaving the list's id tiebreak, which is
+// random, to order them. The bound gives back half of hold, for the reason
+// internal/api's TestMemoryVersionIsStampedAfterTheLockWait argues. A create's
+// two stamps are one reading, so they are equal, and each memory is stamped
+// no later than its head version. The creates are distinct, not ordered, for
+// TestMemorySyncReplacesADirectoryWithAFile's reason.
+func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	h, sb := materialized(t, "read_write")
+	sb.files[memMount+"/new.md"] = "fresh"
+	sb.files[memMount+"/other.md"] = "also fresh"
+	sb.files[memMount+"/notes.md"] = "hello v2"
+	h.suspend(t, writeUse("out.txt", "x"))
+
+	ctx := context.Background()
+	holder, err := h.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lock holder: %v", err)
+	}
+	defer func() { _ = holder.Rollback(ctx) }()
+	var pid int
+	if err := holder.QueryRow(ctx,
+		`SELECT pg_backend_pid() FROM memory_stores WHERE id = $1 FOR UPDATE`, memStoreID).Scan(&pid); err != nil {
+		t.Fatalf("take the store lock: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.exec.step(ctx)
+		done <- err
+	}()
+	// The settlement is the run's one statement that waits on the store row,
+	// so a backend that pid blocks is it.
+	deadline := time.Now().Add(15 * time.Second)
+	for blocked := false; !blocked; {
+		if time.Now().After(deadline) {
+			t.Fatal("the settlement never waited on the store lock")
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the run ended before it waited on the store lock (err %v)", err)
+		default:
+		}
+		if err := h.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			   WHERE wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid)))`, pid).Scan(&blocked); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(hold)
+	var released time.Time
+	if err := holder.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&released); err != nil {
+		t.Fatalf("read the clock: %v", err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the store lock: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("step: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run did not end within 30s of the release")
+	}
+
+	rows, err := h.pool.Query(context.Background(),
+		`SELECT m.path, m.created_at, m.updated_at, v.created_at
+		   FROM memories m JOIN memory_versions v ON v.id = m.memory_version_id
+		  WHERE m.memory_store_id = $1 AND m.path = ANY($2)`,
+		memStoreID, []string{"/new.md", "/other.md", "/notes.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	created, updated := map[string]time.Time{}, map[string]time.Time{}
+	for rows.Next() {
+		var p string
+		var c, u, v time.Time
+		if err := rows.Scan(&p, &c, &u, &v); err != nil {
+			t.Fatal(err)
+		}
+		created[p], updated[p] = c, u
+		// The memory row goes in before its version, as the API writes them
+		// (TestMemoryVersionIsStampedAfterTheLockWait argues the margin).
+		if u.After(v) {
+			t.Errorf("%s: updated_at %v is after its version's created_at %v", p, u, v)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 3 {
+		t.Fatalf("the settlement left %d of its 3 memories: %v", len(created), created)
+	}
+	for p, u := range updated {
+		if !u.After(released.Add(-hold / 2)) {
+			t.Errorf("%s: updated_at %v is before the lock the settlement waited on was released at %v", p, u, released)
+		}
+	}
+	for _, p := range []string{"/new.md", "/other.md"} {
+		if !created[p].Equal(updated[p]) {
+			t.Errorf("%s: created_at %v and updated_at %v differ", p, created[p], updated[p])
+		}
+	}
+	if created["/new.md"].Equal(created["/other.md"]) {
+		t.Errorf("the settlement's two creates are both stamped %v", created["/new.md"])
+	}
+}
+
 // TestMemorySyncStoreWinsAPrefixConflict: a memory created in the store at
 // an ancestor or a descendant of a file the agent created cannot share the
 // filesystem with it, and left in place the file would block the memory's

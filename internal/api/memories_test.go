@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The memory wire surface (plan 36 slice 2, #52): shapes per the SDK's
@@ -719,8 +720,9 @@ func TestMemoryList(t *testing.T) {
 		t.Errorf("paged walk = %v, want %v", seen, newestFirst)
 	}
 	// A memory written mid-walk is newer than every cursor, so the walk's
-	// remaining pages neither repeat a memory nor take the new one. That holds
-	// when no create waits on the store lock (#975).
+	// remaining pages neither repeat a memory nor take the new one. Since #975
+	// that holds for a create that waited on the store lock too, because it is
+	// stamped after the lock, as far as the database clock keeps time (#411).
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2", nil)
 	if status != http.StatusOK {
 		t.Fatalf("first page: status %d (%v)", status, body)
@@ -1219,5 +1221,42 @@ func TestMemoryNullsTakeTheRecordedWords(t *testing.T) {
 	wantInvalidRequest(t, "a null precondition hash", status, body, "precondition.content_sha256: Value is not nullable")
 	if _, after := s.do(http.MethodGet, base+"/"+id, nil); !reflect.DeepEqual(after, before) {
 		t.Errorf("a refused update changed the memory: %v, was %v", after, before)
+	}
+}
+
+// A memory is stamped when it is written, not when its transaction began
+// (#975), as its versions are (#552). A create that waits on the store lock is
+// stamped after the writer it waited on commits, so the list, ordered on
+// created_at, follows the commits. now(), frozen at BEGIN, would stamp it at
+// least hold earlier. A create's two stamps are one reading, so they are
+// equal, as the reference shows them, and they come just before its version's.
+// TestMemoryVersionIsStampedAfterTheLockWait pins an update the same way, and
+// argues the margins.
+func TestMemoryIsStampedAfterTheLockWait(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "notes")
+
+	released := sendPastTheStoreLock(t, s, store, hold, "/v1/memory_stores/"+store+"/memories",
+		map[string]any{"path": "/a.md", "content": "a"})
+	var id string
+	var created time.Time
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT id, created_at FROM memories WHERE memory_store_id = $1 AND path = '/a.md'`, store).
+		Scan(&id, &created); err != nil {
+		t.Fatalf("read the memory: %v", err)
+	}
+	updated, version := stampsOf(t, s, id)
+	if !created.After(released.Add(-hold / 2)) {
+		t.Errorf("created_at is %s, before the lock it waited on was released at %s",
+			created.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
+	}
+	if !created.Equal(updated) {
+		t.Errorf("created_at %s and updated_at %s differ",
+			created.Format(time.RFC3339Nano), updated.Format(time.RFC3339Nano))
+	}
+	if created.After(version) {
+		t.Errorf("created_at %s is after its version's created_at %s",
+			created.Format(time.RFC3339Nano), version.Format(time.RFC3339Nano))
 	}
 }
