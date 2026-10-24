@@ -278,9 +278,13 @@ func occupiedBy(ctx context.Context, tx pgx.Tx, storeID, path, except string) (i
 // the lock earlier than rows committed while it waited. internal/events/log.go
 // stamps an event after its lock for the same reason. A dream's clone is the
 // one writer left on now() (cloneDreamStore).
-func insertMemoryVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, operation, path string,
-	content *string, actor map[string]string) (string, error) {
-	id := domain.NewID(domain.PrefixMemoryVersion).String()
+//
+// The id is the caller's, because a create or an update writes the memory row
+// first, already pointing at it (#975). So the memory is stamped just before
+// the version its write records, as the reference stamped them, 9 and 17 ms
+// apart (2026-09-12-console-141 ui-network.json).
+func insertMemoryVersion(ctx context.Context, tx pgx.Tx, id, storeID, memoryID, operation, path string,
+	content *string, actor map[string]string) error {
 	var body, sha, size, createdBy any
 	if content != nil {
 		body, sha, size = *content, contentDigest(*content), len(*content)
@@ -294,7 +298,7 @@ func insertMemoryVersion(ctx context.Context, tx pgx.Tx, storeID, memoryID, oper
 		    content_size_bytes, created_by, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())`,
 		id, storeID, memoryID, operation, path, body, sha, size, createdBy)
-	return id, err
+	return err
 }
 
 func (s *server) createMemory(r *http.Request) (any, error) {
@@ -365,17 +369,16 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 	row := memoryRow{
 		id: domain.NewID(domain.PrefixMemory).String(), path: path,
 		content: content, sha: contentDigest(content), size: int64(len(content)),
-	}
-	row.versionID, err = insertMemoryVersion(ctx, tx, storeID, row.id, "created", path, &content, memoryActor(ctx))
-	if err != nil {
-		return nil, err
+		versionID: domain.NewID(domain.PrefixMemoryVersion).String(),
 	}
 	// created_at and updated_at are statement_timestamp(), the start of this
 	// INSERT, which comes after the store lock. They are never the column
 	// default now(), which Postgres freezes at BEGIN (#975): now() would date a
 	// create that waited on the lock before rows committed while it waited, and
 	// the list, ordered on created_at, would show it out of commit order.
-	// internal/events/log.go stamps an event the same way. It is one reading,
+	// internal/events/log.go reads the same clock for an event, but floors it
+	// past the last one. Nothing floors a memory's, so a database clock that
+	// steps backwards (#411) can still reorder two creates. It is one reading,
 	// so the two columns are equal, as the reference returned them at create
 	// (2026-10-22 memory-list-order `order.create.m1`).
 	if err := tx.QueryRow(ctx,
@@ -386,6 +389,10 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 		 RETURNING created_at, updated_at`,
 		row.id, storeID, path, content, row.sha, row.size, row.versionID).
 		Scan(&row.createdAt, &row.updatedAt); err != nil {
+		return nil, err
+	}
+	if err := insertMemoryVersion(ctx, tx, row.versionID, storeID, row.id, "created", path, &content,
+		memoryActor(ctx)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -542,12 +549,9 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 				"delete it first to rename-and-replace")
 		}
 	}
-	next.versionID, err = insertMemoryVersion(ctx, tx, storeID, memoryID, "modified",
-		next.path, &next.content, memoryActor(ctx))
-	if err != nil {
-		return nil, err
-	}
-	// updated_at is statement_timestamp() for createMemory's reason (#975).
+	// updated_at is statement_timestamp(), and the row goes in before its
+	// version, for createMemory's reasons (#975).
+	next.versionID = domain.NewID(domain.PrefixMemoryVersion).String()
 	if err := tx.QueryRow(ctx,
 		`UPDATE memories
 		    SET path = $2, content = $3, content_sha256 = $4, content_size_bytes = $5,
@@ -555,6 +559,10 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 		  WHERE id = $1 RETURNING updated_at`,
 		memoryID, next.path, next.content, next.sha, next.size, next.versionID).
 		Scan(&next.updatedAt); err != nil {
+		return nil, err
+	}
+	if err := insertMemoryVersion(ctx, tx, next.versionID, storeID, memoryID, "modified",
+		next.path, &next.content, memoryActor(ctx)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -672,8 +680,8 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 	// The tombstone's own promise — "The memory's version history persists and
 	// remains listable … until the store itself is deleted" — is why the
 	// versions table carries no foreign key to this row.
-	if _, err := insertMemoryVersion(ctx, tx, storeID, memoryID, "deleted",
-		row.path, nil, memoryActor(ctx)); err != nil {
+	if err := insertMemoryVersion(ctx, tx, domain.NewID(domain.PrefixMemoryVersion).String(), storeID, memoryID,
+		"deleted", row.path, nil, memoryActor(ctx)); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM memories WHERE id = $1`, memoryID); err != nil {
