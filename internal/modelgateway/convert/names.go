@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -16,31 +17,56 @@ import (
 // back on the way in (#981).
 const maxFunctionName = 64
 
+// maxGeminiName is the longest function name Gemini takes, by the genai SDK
+// and by the Gemini API reference alike. The SDK also says a name "Must start
+// with a letter or an underscore" (google.golang.org/genai 1.73.0, types.go
+// FunctionDeclaration.Name), which the API reference does not say. A Messages
+// tool name may start with a digit or a dash, so GeminiName sends it with a
+// "_" in front, which both readings accept (#985).
+const maxGeminiName = 128
+
 // nameHash is how many hex digits of a name's SHA-256 its shortened form
 // carries: 64 bits, so two long names one request carries are vanishingly
-// unlikely to shorten alike, and Tools refuses a pair that does.
+// unlikely to shorten alike, and Tools and geminiTools refuse a pair that does.
 const nameHash = 16
 
-// nameEnd is how many bytes a shortened name keeps from each end of the name.
-const nameEnd = (maxFunctionName - nameHash - 2) / 2
-
 // FunctionName is the function name a Chat Completions upstream is sent for a
-// Messages tool name. A name that fits is sent as it is. A longer one is sent
-// as its first and last nameEnd bytes, each cut back to a rune boundary, with
-// "_", nameHash hex digits of its SHA-256 and "_" between them. Both ends
-// stay, because an MCP tool's composed name opens with what every tool on its
-// server shares and ends in the tool's own name. The same name always
-// shortens the same way, so a request's tools, its tool_choice and the calls
-// its history made agree.
+// Messages tool name. A name that fits is sent as it is. A longer one is
+// shortened (shorten).
 func FunctionName(name string) string {
-	if len(name) <= maxFunctionName {
+	return shorten(name, maxFunctionName)
+}
+
+// GeminiName is the function name a Gemini upstream is sent for a Messages
+// tool name. A name that starts with an ASCII letter or "_" is sent as it is,
+// and any other with a "_" in front. Then a name past maxGeminiName is
+// shortened (shorten), which keeps its first byte.
+func GeminiName(name string) string {
+	if name != "" {
+		if c := name[0]; c != '_' && !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z') {
+			name = "_" + name
+		}
+	}
+	return shorten(name, maxGeminiName)
+}
+
+// shorten fits a name into limit bytes. A name that fits is kept as it is. A
+// longer one becomes its first and last bytes, as many of each as limit leaves
+// beside "_", nameHash hex digits of its SHA-256 and "_", each end cut back to
+// a rune boundary. Both ends stay, because an MCP tool's composed name opens
+// with what every tool on its server shares and ends in the tool's own name.
+// The same name always shortens the same way, so a request's tools, its
+// tool_choice and the calls its history made agree.
+func shorten(name string, limit int) string {
+	if len(name) <= limit {
 		return name
 	}
-	head := nameEnd
+	end := (limit - nameHash - 2) / 2
+	head := end
 	for head > 0 && !utf8.RuneStart(name[head]) {
 		head--
 	}
-	tail := len(name) - nameEnd
+	tail := len(name) - end
 	for tail < len(name) && !utf8.RuneStart(name[tail]) {
 		tail++
 	}
@@ -48,22 +74,42 @@ func FunctionName(name string) string {
 	return name[:head] + "_" + hex.EncodeToString(sum[:nameHash/2]) + "_" + name[tail:]
 }
 
+// claim records that tools[i], name, goes out as the function fn, and refuses
+// it where another tool name already goes out as fn.
+func claim(taken map[string]string, i int, name, fn string) error {
+	if other, ok := taken[fn]; ok && other != name {
+		return fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
+	}
+	taken[fn] = name
+	return nil
+}
+
 // Names reads an answer's function names back as the tool names a request
-// sent them for. It holds the shortened names only, so a nil Names reads
-// every name as itself.
+// sent them for. It holds the names that went out changed only, so a nil
+// Names reads every name as itself.
 type Names map[string]string
 
-// NamesOf is the Names of a request: the names its history's calls carried,
-// in order, then its tools' names, each read by its exact key, as Messages
-// and Tools read them. A call on a tool the request no longer offers still
-// reads back whole. Where two names go out alike the later one wins, so the
-// request's tools win over its history, and a later call over an earlier
-// one. Tools has refused two tools that share a function name before any
-// answer is read.
+// NamesOf is the Names of a request to a Chat Completions upstream: the names
+// its history's calls carried, in order, then its tools' names, each read by
+// its exact key, as Messages and Tools read them. A call on a tool the
+// request no longer offers still reads back whole. Where two names go out
+// alike the later one wins, so the request's tools win over its history, and
+// a later call over an earlier one. Tools has refused two tools that share a
+// function name before any answer is read.
 func NamesOf(tools []json.RawMessage, history []Message) Names {
+	return namesOf(tools, history, FunctionName)
+}
+
+// GeminiNamesOf is NamesOf for a request to a Gemini upstream, whose names
+// GeminiName makes, and whose two tools that share one geminiTools refuses.
+func GeminiNamesOf(tools []json.RawMessage, history []Message) Names {
+	return namesOf(tools, history, GeminiName)
+}
+
+func namesOf(tools []json.RawMessage, history []Message, function func(string) string) Names {
 	n := Names{}
 	read := func(name string) {
-		if fn := FunctionName(name); fn != name {
+		if fn := function(name); fn != name {
 			n[fn] = name
 		} else {
 			delete(n, name)

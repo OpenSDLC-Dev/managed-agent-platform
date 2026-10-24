@@ -22,8 +22,11 @@ import (
 // additionalProperties, and a tool_choice naming one; a tool loop's history,
 // its calls under their ids, the first carrying a Gemini signature and the
 // second the sentinel, its results an error with an image and a
-// search_result; an image in a user turn; the sampling fields; and each
-// thinking setting.
+// search_result; an image in a user turn; the sampling fields; each
+// thinking setting; tool names that start with a digit or a dash, which go
+// out with a "_" in front, in a tool loop and a tool_choice; and two tool
+// names of 128 characters, one sent as it is and one shortened back to 128
+// after its "_", which pin the bound convert.GeminiName keeps to (#985).
 func TestLiveGeminiCountsTheConvertedRequest(t *testing.T) {
 	v := namedVendor(t, "gemini")
 	const model = "gemini-3.8-flash"
@@ -53,6 +56,13 @@ func TestLiveGeminiCountsTheConvertedRequest(t *testing.T) {
 		"effort medium":             `{"max_tokens":2048,` + hi + `,"output_config":{"effort":"medium"}}`,
 		"effort max":                `{"max_tokens":2048,` + hi + `,"output_config":{"effort":"max"}}`,
 		"thinking disabled":         `{"max_tokens":256,` + hi + `,"thinking":{"type":"disabled"}}`,
+		"names from a digit and a dash": `{"max_tokens":256,"messages":[{"role":"user","content":"Look it up."},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"1password","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"none"}]}],
+			"tools":[{"name":"1password","input_schema":{"type":"object"}},{"name":"-dash","input_schema":{"type":"object"}}],
+			"tool_choice":{"type":"tool","name":"1password"}}`,
+		"names of 128 characters": `{"max_tokens":256,` + hi + `,"tools":[{"name":"a` + strings.Repeat("x", 127) + `","input_schema":{"type":"object"}},
+			{"name":"1` + strings.Repeat("y", 127) + `","input_schema":{"type":"object"}}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var top map[string]json.RawMessage
@@ -85,4 +95,34 @@ func TestLiveGeminiCountsTheConvertedRequest(t *testing.T) {
 			t.Logf("%d tokens", count.TotalTokens)
 		})
 	}
+}
+
+// TestLiveGeminiRefusesANamePast128 has countTokens parse a request the
+// conversion never sends, one declaring a function name of 129 characters,
+// which the genai SDK and the Gemini API reference both put past Gemini's
+// bound. Its 400 shows that countTokens checks a name's length at all, so the
+// accepted 128-character row above is evidence of the bound convert.GeminiName
+// keeps to (#985), and not of a parser that reads no name.
+func TestLiveGeminiRefusesANamePast128(t *testing.T) {
+	v := namedVendor(t, "gemini")
+	const model = "gemini-3.8-flash"
+	name := "a" + strings.Repeat("x", 128)
+	payload := `{"generateContentRequest":{"model":"models/` + model + `",` +
+		`"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"` + name + `"}]}]}}`
+	req, err := http.NewRequestWithContext(liveCtx(t), http.MethodPost, v.base+"/models/"+model+":countTokens", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", v.keyEnv)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		liveFatalf(t, "countTokens: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		liveFatalf(t, "countTokens answered %d %s for a name of 129 characters, want a 400", resp.StatusCode, b)
+	}
+	t.Logf("%s", b)
 }

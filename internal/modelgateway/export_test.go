@@ -126,3 +126,6 @@ func RewrittenLength(alias string, chunk []byte) int {
 
 // ToolNames is the Names a converted answer to top is read back with.
 func ToolNames(top map[string]json.RawMessage) convert.Names { return toolNames(top) }
+
+// GeminiToolNames is the Names a Gemini answer to top is read back with.
+func GeminiToolNames(top map[string]json.RawMessage) convert.Names { return geminiToolNames(top) }

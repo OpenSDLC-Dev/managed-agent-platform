@@ -303,3 +303,51 @@ func TestGeminiRequestRefusals(t *testing.T) {
 		}
 	}
 }
+
+// Every place a request names a tool sends the name GeminiName makes: its
+// declarations, tool_choice, and the calls and results of its history. Two
+// tools that would go out under one name are refused, in either order; a
+// name listed twice is not. Nor is a tool_choice let land on a tool it does
+// not name (#985).
+func TestGeminiRequestMapsAToolNameGeminiWouldRefuse(t *testing.T) {
+	got := geminiRequest(t, `{"max_tokens":8,
+		"tools":[{"name":"1password","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"1password"},
+		"messages":[{"role":"user","content":"hi"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"1password","input":{}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}]}`)
+	want := decoded(t, `{
+		"tools":[{"functionDeclarations":[{"name":"_1password","parametersJsonSchema":{"type":"object"}}]}],
+		"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["_1password"]}},
+		"contents":[{"role":"user","parts":[{"text":"hi"}]},
+			{"role":"model","parts":[{"functionCall":{"id":"t1","name":"_1password","args":{}},"thoughtSignature":"skip_thought_signature_validator"}]},
+			{"role":"user","parts":[{"functionResponse":{"id":"t1","name":"_1password","response":{"output":"ok"}}}]}]}`).(map[string]any)
+	for _, k := range []string{"tools", "toolConfig", "contents"} {
+		if !reflect.DeepEqual(got[k], want[k]) {
+			t.Errorf("%s = %v\nwant %v", k, got[k], want[k])
+		}
+	}
+
+	tool := func(name string) string { return `{"name":"` + name + `","input_schema":{"type":"object"}}` }
+	choose := func(name string) string { return `,"tool_choice":{"type":"tool","name":"` + name + `"}` }
+	for _, c := range []struct {
+		body, refusal string // refusal is the start of the error; "" for none
+	}{
+		{`"tools":[` + tool("1password") + "," + tool("_1password") + `]`, `tools[1]: name "_1password" goes out as`},
+		{`"tools":[` + tool("_1password") + "," + tool("1password") + `]`, `tools[1]: name "1password" goes out as`},
+		{`"tools":[` + tool("1password") + "," + tool("1password") + `]`, ""},
+		{`"tools":[` + tool("_1password") + `]` + choose("1password"), `tool_choice.name: "1password" goes out as "_1password", as tools' "_1password" does`},
+		{`"tools":[` + tool("1password") + `]` + choose("_1password"), `tool_choice.name: "_1password" goes out as "_1password", as tools' "1password" does`},
+		{`"tools":[` + tool("1password") + `]` + choose("1password"), ""},
+		{`"tools":[` + tool("_1password") + `]` + choose("_1password"), ""},
+	} {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(`{"max_tokens":8,`+hi+`,`+c.body+`}`), &top); err != nil {
+			t.Fatalf("%s: %v", c.body, err)
+		}
+		_, err := convert.GeminiRequest(top)
+		if c.refusal == "" && err != nil || c.refusal != "" && (err == nil || !strings.HasPrefix(err.Error(), c.refusal)) {
+			t.Errorf("%s: err = %v, want %q", c.body, err, c.refusal)
+		}
+	}
+}

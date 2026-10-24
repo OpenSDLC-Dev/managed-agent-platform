@@ -46,10 +46,9 @@ func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error)
 			return nil, fmt.Errorf("tools[%d]: missing name", i)
 		}
 		fn := FunctionName(name)
-		if other, ok := taken[fn]; ok && other != name {
-			return nil, fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
+		if err := claim(taken, i, name, fn); err != nil {
+			return nil, err
 		}
-		taken[fn] = name
 		description, _ := text(def, "description")
 		params := def["input_schema"]
 		if builtin[name] {

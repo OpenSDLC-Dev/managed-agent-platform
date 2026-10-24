@@ -35,14 +35,16 @@ type GeminiStream struct {
 	calls    int
 	reason   string // the finish reason
 	blocked  bool
-	answered bool // a chunk has carried some of the answer
+	answered bool  // a chunk has carried some of the answer
+	names    Names // reads each call's name back as its tool's
 }
 
 // NewGeminiStream converts a stream for a caller that named alias as its
 // model; id is the message's when the upstream names no responseId, and sign
-// wraps the leading thinking block's signature, as GeminiAnswer's does.
-func NewGeminiStream(alias, id string, sign func(value string) string) *GeminiStream {
-	g := &GeminiStream{s: Stream{alias: alias, id: id}, leading: true}
+// wraps the leading thinking block's signature, as GeminiAnswer's does, and
+// names reads each call's name back, as GeminiAnswer's does.
+func NewGeminiStream(alias, id string, sign func(value string) string, names Names) *GeminiStream {
+	g := &GeminiStream{s: Stream{alias: alias, id: id}, leading: true, names: names}
 	g.s.signature = func() string { return sign(GeminiSignaturePrefix + g.callSig) }
 	return g
 }
@@ -107,7 +109,7 @@ func (g *GeminiStream) part(out *bytes.Buffer, p map[string]json.RawMessage) err
 		return err
 	}
 	if !null(p["functionCall"]) {
-		call, err := geminiCallOf(p["functionCall"], g.s.id, g.calls)
+		call, err := geminiCallOf(p["functionCall"], g.s.id, g.calls, g.names)
 		if err != nil {
 			return err
 		}

@@ -53,8 +53,20 @@ func convertedBody(c call, d store.Deployment, prof profile.Profile, strip bool)
 
 // toolNames reads a converted answer's function names back as the caller's
 // tool names, which convert.FunctionName may have shortened (#981).
-// convert.Request refused a tools or messages of any other shape.
 func toolNames(top map[string]json.RawMessage) convert.Names {
+	return convert.NamesOf(namedTools(top))
+}
+
+// geminiToolNames is toolNames for a Gemini upstream, whose function names
+// convert.GeminiName makes (#985).
+func geminiToolNames(top map[string]json.RawMessage) convert.Names {
+	return convert.GeminiNamesOf(namedTools(top))
+}
+
+// namedTools is the tools and the history that name a converted request's
+// tools. convert.Request and convert.GeminiRequest refused a tools or
+// messages of any other shape.
+func namedTools(top map[string]json.RawMessage) ([]json.RawMessage, []convert.Message) {
 	var tools []json.RawMessage
 	_ = json.Unmarshal(top["tools"], &tools)
 	var raws []map[string]json.RawMessage
@@ -63,7 +75,7 @@ func toolNames(top map[string]json.RawMessage) convert.Names {
 	for i, m := range raws {
 		history[i] = convert.Message{Content: m["content"]}
 	}
-	return convert.NamesOf(tools, history)
+	return tools, history
 }
 
 // signer signs each thinking block a converted answer carries: the

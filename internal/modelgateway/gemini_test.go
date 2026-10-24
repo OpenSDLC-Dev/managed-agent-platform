@@ -395,3 +395,71 @@ func TestBothConversionsRefusingAnswerOneWay(t *testing.T) {
 		}
 	}
 }
+
+// A tool name that starts with a digit, which Gemini refuses, goes to a
+// Gemini upstream with a "_" in front, and the call comes back under the
+// tool's own name, whole and streamed (#985).
+func TestAToolNameGeminiWouldRefuseComesBackWhole(t *testing.T) {
+	const name = "1password"
+	sentName := func(c fakeCall) string {
+		var sent struct {
+			Tools []struct {
+				FunctionDeclarations []struct{ Name string } `json:"functionDeclarations"`
+			} `json:"tools"`
+		}
+		_ = json.Unmarshal(c.Raw, &sent)
+		if len(sent.Tools) != 1 || len(sent.Tools[0].FunctionDeclarations) != 1 {
+			return ""
+		}
+		return sent.Tools[0].FunctionDeclarations[0].Name
+	}
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request, c fakeCall) {
+		called := `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"` + sentName(c) +
+			`","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":` + geminiUsage + `,"responseId":"resp-1"}`
+		if c.Query == "alt=sse" {
+			geminiSSE("text/event-stream", called)(w, r, c)
+			return
+		}
+		writeBody(w, 200, called)
+	})
+	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	cl := e.client(key)
+	params := anthropic.MessageNewParams{Model: "g", MaxTokens: 64, Messages: hello(),
+		Tools: []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: name, InputSchema: anthropic.ToolInputSchemaParam{}}}}}
+
+	whole, err := cl.Messages.New(context.Background(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamed := stream(t, cl, params)
+	for label, m := range map[string]anthropic.Message{"whole": *whole, "streamed": streamed} {
+		if len(m.Content) != 1 || m.Content[0].Name != name || m.StopReason != "tool_use" {
+			t.Errorf("%s: %+v, want one call on %q", label, m.Content, name)
+		}
+	}
+	for i, c := range f.recorded() {
+		if got := sentName(c); got != "_"+name {
+			t.Errorf("call %d declared %q, want %q", i, got, "_"+name)
+		}
+	}
+}
+
+// A Gemini answer reads back the names of the request's tools and of the
+// calls its history made, so a call on a tool no longer offered keeps its
+// name too (#985).
+func TestAGeminiAnswerReadsTheHistorysNamesBack(t *testing.T) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"tools":[{"name":"1password"}],"messages":[{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"2fa","input":{}}]}]}`), &top); err != nil {
+		t.Fatal(err)
+	}
+	names := modelgateway.GeminiToolNames(top)
+	for fn, want := range map[string]string{"_1password": "1password", "_2fa": "2fa", "get_time": "get_time"} {
+		if got := names.Tool(fn); got != want {
+			t.Errorf("Tool(%q) = %q, want %q", fn, got, want)
+		}
+	}
+}

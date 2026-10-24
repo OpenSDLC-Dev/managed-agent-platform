@@ -24,7 +24,7 @@ func sseData(raw []byte) []string {
 // events.
 func geminiStreamed(t *testing.T, chunks ...string) []byte {
 	t.Helper()
-	s := convert.NewGeminiStream("alias", "req_1", wrapSig)
+	s := convert.NewGeminiStream("alias", "req_1", wrapSig, nil)
 	var out bytes.Buffer
 	for _, c := range chunks {
 		b, err := s.Chunk([]byte(c))
@@ -117,7 +117,7 @@ func TestGeminiStreamLeadingBlock(t *testing.T) {
 		`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"c2ln"},{"text":"hi"}]},"finishReason":"STOP"}],"responseId":"r9"}`,
 	} {
 		streamed, _ := accumulated(t, geminiStreamed(t, answer))
-		whole, err := convert.GeminiAnswer([]byte(answer), "alias", "req_1", nil, wrapSig)
+		whole, err := convert.GeminiAnswer([]byte(answer), "alias", "req_1", nil, wrapSig, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -131,7 +131,7 @@ func TestGeminiStreamLeadingBlock(t *testing.T) {
 // A stream has not finished until a candidate names its finish reason, or
 // the prompt is blocked, and not once it goes on after one.
 func TestGeminiStreamFinished(t *testing.T) {
-	s := convert.NewGeminiStream("alias", "req_1", wrapSig)
+	s := convert.NewGeminiStream("alias", "req_1", wrapSig, nil)
 	if _, err := s.Chunk([]byte(`{"candidates":[{"content":{"parts":[{"text":"a"}]}}],"usageMetadata":{"trafficType":"ON_DEMAND"}}`)); err != nil || s.Finished() {
 		t.Fatalf("finished %v, %v", s.Finished(), err)
 	}
@@ -155,7 +155,7 @@ func TestGeminiStreamRefusals(t *testing.T) {
 		`{"candidates":[{"content":{"parts":[{"text":7}]}}]}`:                                                "text is not a string",
 		`{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"call f was malformed"}]}`: "MALFORMED_FUNCTION_CALL: call f was malformed",
 	} {
-		s := convert.NewGeminiStream("alias", "req_1", wrapSig)
+		s := convert.NewGeminiStream("alias", "req_1", wrapSig, nil)
 		if _, err := s.Chunk([]byte(chunk)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: err = %v, want one naming %q", chunk, err, want)
 		}
