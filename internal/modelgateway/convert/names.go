@@ -25,7 +25,7 @@ const maxGeminiName = 128
 
 // nameHash is how many hex digits of a name's SHA-256 its shortened form
 // carries: 64 bits, so two long names one request carries are vanishingly
-// unlikely to shorten alike, and Tools refuses a pair that does.
+// unlikely to shorten alike, and Tools and geminiTools refuse a pair that does.
 const nameHash = 16
 
 // FunctionName is the function name a Chat Completions upstream is sent for a
