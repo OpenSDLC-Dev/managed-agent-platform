@@ -51,6 +51,14 @@ func convertedBody(c call, d store.Deployment, prof profile.Profile, strip bool)
 	return convert.Request(top, d.UpstreamModel, prof.ChatThinking)
 }
 
+// toolNames reads a converted answer's function names back as the caller's
+// tool names, which convert.FunctionName may have shortened (#981).
+func toolNames(top map[string]json.RawMessage) convert.Names {
+	var tools []json.RawMessage
+	_ = json.Unmarshal(top["tools"], &tools) // convert.Request refused any other shape
+	return convert.NamesOf(tools)
+}
+
 // signer signs each thinking block a converted answer carries: the
 // deployment's provenance wrapper around an empty upstream signature, so the
 // block goes back to the deployment that produced it, and no other, as the

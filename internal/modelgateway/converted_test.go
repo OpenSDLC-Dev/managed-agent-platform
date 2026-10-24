@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/anthropics/anthropic-sdk-go"
@@ -803,5 +804,70 @@ func TestAConvertedAnswersCacheWrites(t *testing.T) {
 	if m.Usage.InputTokens != 10 || m.Usage.CacheCreationInputTokens != 50 || m.Usage.CacheReadInputTokens != 40 ||
 		len(rows) != 1 || rows[0].Tokens == nil || *rows[0].Tokens != (store.Tokens{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}) {
 		t.Errorf("usage %+v, ledger %+v", m.Usage, rows)
+	}
+}
+
+// A tool name past the 64 characters a Chat Completions function name takes
+// reaches the vendor shortened, and the vendor's call on it reaches the
+// caller under the tool's own name, whole and streamed (#981).
+func TestAConvertedLongToolNameComesBackWhole(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	e := newEnv(t)
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request, c fakeCall) {
+		var sent struct {
+			Stream bool `json:"stream"`
+			Tools  []struct {
+				Function struct{ Name string } `json:"function"`
+			} `json:"tools"`
+		}
+		_ = json.Unmarshal(c.Raw, &sent)
+		call := `"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"` + sent.Tools[0].Function.Name + `","arguments":"{}"}}]`
+		if !sent.Stream {
+			writeBody(w, 200, `{"id":"c1","choices":[{"index":0,"message":{"role":"assistant",`+call+`},"finish_reason":"tool_calls"}],"usage":`+chatUsage+`}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, d := range []string{`{"choices":[{"index":0,"delta":{` + call + `}}]}`,
+			`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":` + chatUsage + `}`, `[DONE]`} {
+			_, _ = io.WriteString(w, "data: "+d+"\n\n")
+			w.(http.Flusher).Flush()
+		}
+	})
+	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
+	key := e.key(everyAlias)
+	e.start()
+	cl := e.client(key)
+	params := anthropic.MessageNewParams{Model: "fast", MaxTokens: 64, Messages: hello(),
+		Tools: []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: long, InputSchema: anthropic.ToolInputSchemaParam{}}}}}
+
+	whole, err := cl.Messages.New(context.Background(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cl.Messages.NewStreaming(context.Background(), params)
+	var streamed anthropic.Message
+	for s.Next() {
+		if err := streamed.Accumulate(s.Current()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for name, m := range map[string]anthropic.Message{"whole": *whole, "streamed": streamed} {
+		if len(m.Content) != 1 || m.Content[0].Name != long || m.StopReason != "tool_use" {
+			t.Errorf("%s: %+v, want one call on %q", name, m.Content, long)
+		}
+	}
+	for i, c := range f.recorded() {
+		var sent struct {
+			Tools []struct {
+				Function struct{ Name string } `json:"function"`
+			} `json:"tools"`
+		}
+		_ = json.Unmarshal(c.Raw, &sent)
+		if len(sent.Tools) != 1 || sent.Tools[0].Function.Name != convert.FunctionName(long) {
+			t.Errorf("call %d sent tools %+v, want the shortened name", i, sent.Tools)
+		}
 	}
 }

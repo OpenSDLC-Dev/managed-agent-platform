@@ -22,6 +22,7 @@ import (
 type Stream struct {
 	alias, id string
 	signature func() string
+	names     Names
 	usage     Usage
 
 	started  bool
@@ -41,9 +42,10 @@ type Stream struct {
 
 // NewStream converts a stream for a caller that named alias as its model.
 // id is the message's when the upstream's first chunk names none; signature
-// signs each thinking block, as Answer's does.
-func NewStream(alias, id string, signature func() string) *Stream {
-	return &Stream{alias: alias, id: id, signature: signature}
+// signs each thinking block, and names reads each call's function back, as
+// Answer's do.
+func NewStream(alias, id string, signature func() string, names Names) *Stream {
+	return &Stream{alias: alias, id: id, signature: signature, names: names}
 }
 
 // SetUsage records the usage a chunk reported, which message_delta reports.
@@ -132,7 +134,7 @@ func (s *Stream) choice(out *bytes.Buffer, ch map[string]json.RawMessage) error 
 		case s.calls[index]:
 			return fmt.Errorf("the upstream went back to tool call %d after starting another", index)
 		default:
-			s.into(out, "tool_use", map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}})
+			s.into(out, "tool_use", map[string]any{"type": "tool_use", "id": id, "name": s.names.Tool(name), "input": map[string]any{}})
 			s.call, s.callID, s.callName, s.callArgs, s.callObj, s.called = index, id, name, 0, false, true
 			if s.calls == nil {
 				s.calls = map[int64]bool{}

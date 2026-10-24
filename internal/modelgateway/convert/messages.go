@@ -27,7 +27,10 @@
 //     field; its content, which says what failed, goes on;
 //   - an image in a user turn becomes an image_url part, a base64 source as
 //     a data URL; anywhere else, and every other block — a document, a
-//     search_result outside a tool_result, a server tool's — is refused.
+//     search_result outside a tool_result, a server tool's — is refused;
+//   - a tool name past the 64 characters a function name takes goes out
+//     shortened (FunctionName) and comes back as the tool's own (Names), and
+//     two tools that would go out under one name are refused.
 package convert
 
 import (
@@ -141,7 +144,7 @@ func message(m Message) ([]ChatMessage, error) {
 			if err != nil {
 				return nil, fmt.Errorf("content[%d].input: %w", j, err)
 			}
-			calls = append(calls, ToolCall{ID: id, Type: "function", Function: Function{Name: name, Arguments: args}})
+			calls = append(calls, ToolCall{ID: id, Type: "function", Function: Function{Name: FunctionName(name), Arguments: args}})
 		case "tool_result":
 			id, _ := text(b, "tool_use_id")
 			content, err := resultText(b["content"])

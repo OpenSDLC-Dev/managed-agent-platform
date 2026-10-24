@@ -15,7 +15,7 @@ import (
 // returns the events.
 func streamed(t *testing.T, usage *convert.Usage, chunks ...string) []byte {
 	t.Helper()
-	s := convert.NewStream("alias", "req_1", sig)
+	s := convert.NewStream("alias", "req_1", sig, nil)
 	var out bytes.Buffer
 	for _, c := range chunks {
 		b, err := s.Chunk([]byte(c))
@@ -115,7 +115,7 @@ func TestStream(t *testing.T) {
 // A stream with no chunk but its end is an empty message, and one naming
 // no id takes the id given.
 func TestStreamEmpty(t *testing.T) {
-	s := convert.NewStream("alias", "req_1", sig)
+	s := convert.NewStream("alias", "req_1", sig, nil)
 	m, names := accumulated(t, s.End())
 	if m.ID != "req_1" || len(m.Content) != 0 || m.StopReason != "end_turn" || strings.Join(names, ",") != "message_start,message_delta,message_stop" {
 		t.Errorf("%+v %v", m, names)
@@ -125,7 +125,7 @@ func TestStreamEmpty(t *testing.T) {
 // A choice that goes on after its finish has not finished, and a chunk
 // that only repeats an empty value is no going on.
 func TestStreamFinish(t *testing.T) {
-	s := convert.NewStream("alias", "req_1", sig)
+	s := convert.NewStream("alias", "req_1", sig, nil)
 	for _, c := range []struct {
 		chunk    string
 		finished bool
@@ -174,7 +174,7 @@ func TestStreamRefusals(t *testing.T) {
 			chunk(`{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{}"}}]}`, "")}, "name or id"},
 		{[]string{chunk(`{"tool_calls":{}}`, "")}, "tool_calls"},
 	} {
-		s := convert.NewStream("alias", "req_1", sig)
+		s := convert.NewStream("alias", "req_1", sig, nil)
 		var err error
 		for _, ch := range c.chunks {
 			if _, err = s.Chunk([]byte(ch)); err != nil {
@@ -198,7 +198,7 @@ func TestPing(t *testing.T) {
 // A tool call's id and name sent again with each fragment, unchanged, are a
 // repeat: the call is named once and its arguments joined.
 func TestStreamRepeatedToolCallFields(t *testing.T) {
-	s := convert.NewStream("alias", "req_1", sig)
+	s := convert.NewStream("alias", "req_1", sig, nil)
 	var out []byte
 	for _, ch := range []string{
 		chunk(`{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":"{\"tz\":"}}]}`, ""),
@@ -219,7 +219,7 @@ func TestStreamRepeatedToolCallFields(t *testing.T) {
 
 // A stream the token limit cut short in a tool call stops for max_tokens.
 func TestStreamCutShortInACall(t *testing.T) {
-	s := convert.NewStream("alias", "req_1", sig)
+	s := convert.NewStream("alias", "req_1", sig, nil)
 	var out []byte
 	for _, ch := range []string{
 		chunk(`{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"f","arguments":"{\"a\":"}}]}`, ""),
@@ -257,7 +257,7 @@ func TestStreamVendorShapes(t *testing.T) {
 		{[]string{chunk(`{"tool_calls":[{"index":0,"id":"c","function":{"name":"f","arguments":{"x":1}}}]}`, ""), chunk(`{}`, "tool_calls")},
 			func(m anthropic.Message) bool { return len(m.Content) == 1 && string(m.Content[0].Input) == `{"x":1}` }},
 	} {
-		s := convert.NewStream("alias", "req_1", sig)
+		s := convert.NewStream("alias", "req_1", sig, nil)
 		var out []byte
 		for _, ch := range c.chunks {
 			b, err := s.Chunk([]byte(ch))
