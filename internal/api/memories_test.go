@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The memory wire surface (plan 36 slice 2, #52): shapes per the SDK's
@@ -719,8 +720,9 @@ func TestMemoryList(t *testing.T) {
 		t.Errorf("paged walk = %v, want %v", seen, newestFirst)
 	}
 	// A memory written mid-walk is newer than every cursor, so the walk's
-	// remaining pages neither repeat a memory nor take the new one. That holds
-	// when no create waits on the store lock (#975).
+	// remaining pages neither repeat a memory nor take the new one. Since #975
+	// that holds for a create that waited on the store lock too, because it is
+	// stamped after the lock.
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=2", nil)
 	if status != http.StatusOK {
 		t.Fatalf("first page: status %d (%v)", status, body)
@@ -1219,5 +1221,66 @@ func TestMemoryNullsTakeTheRecordedWords(t *testing.T) {
 	wantInvalidRequest(t, "a null precondition hash", status, body, "precondition.content_sha256: Value is not nullable")
 	if _, after := s.do(http.MethodGet, base+"/"+id, nil); !reflect.DeepEqual(after, before) {
 		t.Errorf("a refused update changed the memory: %v, was %v", after, before)
+	}
+}
+
+// A memory is stamped when it is written, not when its transaction began
+// (#975), as its versions are (#552). A create or an update that waits on the
+// store lock is stamped after the writer it waited on commits, so the list,
+// ordered on created_at, follows the commits. now(), frozen at BEGIN, would
+// stamp it at least hold earlier. A create's two stamps are one reading, so
+// they are equal, as the reference shows them. The assertion gives back half
+// of hold, for TestMemoryVersionIsStampedAfterTheLockWait's reason.
+func TestMemoryIsStampedAfterTheLockWait(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "notes")
+	id := createMemory(t, s, store, "/a.md", "first")["id"].(string)
+
+	for _, c := range []struct {
+		name, route, path string
+		body              map[string]any
+	}{
+		{"create", "/v1/memory_stores/" + store + "/memories", "/b.md", map[string]any{"path": "/b.md", "content": "b"}},
+		{"update", "/v1/memory_stores/" + store + "/memories/" + id, "/a.md", map[string]any{"content": "second"}},
+	} {
+		ctx := t.Context()
+		holder, err := s.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("%s: begin the lock holder: %v", c.name, err)
+		}
+		var pid int
+		if err := holder.QueryRow(ctx,
+			`SELECT pg_backend_pid() FROM memory_stores WHERE id = $1 FOR UPDATE`, store).Scan(&pid); err != nil {
+			t.Fatalf("%s: take the store lock: %v", c.name, err)
+		}
+		done := s.sendAsync(http.MethodPost, c.route, c.body, map[string]string{"x-api-key": testKey})
+		waitUntilBlockedOnALock(t, s.pool, pid, done)
+		time.Sleep(hold)
+		var released time.Time
+		if err := holder.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&released); err != nil {
+			t.Fatalf("%s: read the clock: %v", c.name, err)
+		}
+		if err := holder.Commit(ctx); err != nil {
+			t.Fatalf("%s: release the store lock: %v", c.name, err)
+		}
+		if r := awaitReply(t, done); r.err != nil || r.code != http.StatusOK {
+			t.Fatalf("%s: %d %s (%v)", c.name, r.code, r.body, r.err)
+		}
+
+		var created, updated time.Time
+		if err := s.pool.QueryRow(ctx,
+			`SELECT created_at, updated_at FROM memories WHERE memory_store_id = $1 AND path = $2`,
+			store, c.path).Scan(&created, &updated); err != nil {
+			t.Fatalf("%s: read the memory: %v", c.name, err)
+		}
+		if !updated.After(released.Add(-hold / 2)) {
+			t.Errorf("%s: updated_at is %s, before the lock it waited on was released at %s", c.name,
+				updated.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
+		}
+		if c.name == "create" && !created.Equal(updated) {
+			t.Errorf("create: created_at %s and updated_at %s differ",
+				created.Format(time.RFC3339Nano), updated.Format(time.RFC3339Nano))
+		}
 	}
 }

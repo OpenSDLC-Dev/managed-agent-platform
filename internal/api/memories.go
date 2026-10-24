@@ -370,10 +370,20 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// created_at and updated_at are statement_timestamp(), the start of this
+	// INSERT, which comes after the store lock. They are never the column
+	// default now(), which Postgres freezes at BEGIN (#975): now() would date a
+	// create that waited on the lock before rows committed while it waited, and
+	// the list, ordered on created_at, would show it out of commit order.
+	// internal/events/log.go stamps an event the same way. It is one reading,
+	// so the two columns are equal, as the reference returned them at create
+	// (2026-10-22 memory-list-order `order.create.m1`).
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO memories
-		   (id, memory_store_id, path, content, content_sha256, content_size_bytes, memory_version_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING created_at, updated_at`,
+		   (id, memory_store_id, path, content, content_sha256, content_size_bytes, memory_version_id,
+		    created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, statement_timestamp(), statement_timestamp())
+		 RETURNING created_at, updated_at`,
 		row.id, storeID, path, content, row.sha, row.size, row.versionID).
 		Scan(&row.createdAt, &row.updatedAt); err != nil {
 		return nil, err
@@ -537,10 +547,11 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// updated_at is statement_timestamp() for createMemory's reason (#975).
 	if err := tx.QueryRow(ctx,
 		`UPDATE memories
 		    SET path = $2, content = $3, content_sha256 = $4, content_size_bytes = $5,
-		        memory_version_id = $6, updated_at = now()
+		        memory_version_id = $6, updated_at = statement_timestamp()
 		  WHERE id = $1 RETURNING updated_at`,
 		memoryID, next.path, next.content, next.sha, next.size, next.versionID).
 		Scan(&next.updatedAt); err != nil {
@@ -779,8 +790,8 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	// Without a depth the list is newest first, as the reference was recorded
 	// answering (2026-09-02 free_batch1 `mem.list.noprefix`; #549), with id as
 	// the tiebreak the memory-versions list documents for itself. created_at is
-	// still the creating transaction's now(), so a create that waited on the
-	// store lock can list behind a row that committed before it (#975).
+	// stamped after the store lock (#975), so the order follows the commits, as
+	// far as the database clock keeps time (#411).
 	//
 	// At depth=1 the remainder after the prefix decides each row: no "/" in it
 	// and the row is a memory at this level; a "/" and the row rolls up to the

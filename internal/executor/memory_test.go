@@ -593,6 +593,54 @@ func TestMemorySyncReplacesADirectoryWithAFile(t *testing.T) {
 	}
 }
 
+// TestMemorySyncStampsEachMemoryAsItWritesIt: one settlement stamps each
+// memory when it writes it, not when the settlement began (#975), as it
+// stamps their versions (#552). now() would tie its two creates and its
+// update, and leave the list's id tiebreak, which is random, to order the
+// creates. A create's two stamps are one reading, so they are equal. Distinct,
+// not ordered, for TestMemorySyncReplacesADirectoryWithAFile's reason.
+func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
+	h, sb := materialized(t, "read_write")
+	sb.files[memMount+"/new.md"] = "fresh"
+	sb.files[memMount+"/other.md"] = "also fresh"
+	sb.files[memMount+"/notes.md"] = "hello v2"
+	h.step(t)
+
+	rows, err := h.pool.Query(context.Background(),
+		`SELECT path, created_at, updated_at FROM memories
+		  WHERE memory_store_id = $1 AND path = ANY($2)`,
+		memStoreID, []string{"/new.md", "/other.md", "/notes.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, updated := map[string]time.Time{}, map[string]time.Time{}
+	for rows.Next() {
+		var p string
+		var c, u time.Time
+		if err := rows.Scan(&p, &c, &u); err != nil {
+			t.Fatal(err)
+		}
+		created[p], updated[p] = c, u
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 3 {
+		t.Fatalf("the settlement left %d of its 3 memories: %v", len(created), created)
+	}
+	for _, p := range []string{"/new.md", "/other.md"} {
+		if !created[p].Equal(updated[p]) {
+			t.Errorf("%s: created_at %v and updated_at %v differ", p, created[p], updated[p])
+		}
+	}
+	if created["/new.md"].Equal(created["/other.md"]) {
+		t.Errorf("the settlement's two creates are both stamped %v", created["/new.md"])
+	}
+	if u := updated["/notes.md"]; u.Equal(created["/new.md"]) || u.Equal(created["/other.md"]) {
+		t.Errorf("the settlement's update is stamped %v, as one of its creates is", u)
+	}
+}
+
 // TestMemorySyncStoreWinsAPrefixConflict: a memory created in the store at
 // an ancestor or a descendant of a file the agent created cannot share the
 // filesystem with it, and left in place the file would block the memory's
