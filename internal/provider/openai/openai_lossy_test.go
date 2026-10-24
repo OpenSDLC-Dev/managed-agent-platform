@@ -907,3 +907,25 @@ func TestALongToolNameGoesOutShortAndComesBackWhole(t *testing.T) {
 		t.Errorf("tool_use names = %v, want the tool's own name", got)
 	}
 }
+
+// A call on a tool the turn no longer offers, sent under the short name its
+// history's call went out with, still comes back under the tool's own name.
+func TestACallOnAToolOnlyTheHistoryNamesComesBackWhole(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"` + convert.FunctionName(long) + `","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+	}}
+	stream, err := start(t, f).Generate(context.Background(), provider.Request{Messages: []provider.Message{
+		{Role: "user", Content: json.RawMessage(`"go"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_1","name":"` + long + `","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]`)},
+	}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, c := range collect(t, stream) {
+		if c.Kind == provider.KindToolUse && c.ToolUse.Name != long {
+			t.Errorf("tool_use name = %q, want %q", c.ToolUse.Name, long)
+		}
+	}
+}

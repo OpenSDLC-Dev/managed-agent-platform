@@ -871,3 +871,18 @@ func TestAConvertedLongToolNameComesBackWhole(t *testing.T) {
 		}
 	}
 }
+
+// A converted answer reads back the names of the request's tools and of the
+// calls its history made, so a call on a tool no longer offered keeps its name.
+func TestAConvertedAnswerReadsTheHistorysNamesBack(t *testing.T) {
+	long, gone := strings.Repeat("x", 100), strings.Repeat("y", 100)
+	var top map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(`{"tools":[{"name":"`+long+`"}],"messages":[{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"`+gone+`","input":{}}]}]}`), &top)
+	names := modelgateway.ToolNames(top)
+	for _, name := range []string{long, gone} {
+		if got := names.Tool(convert.FunctionName(name)); got != name {
+			t.Errorf("Tool(FunctionName(%.8s…)) = %q, want the name back", name, got)
+		}
+	}
+}

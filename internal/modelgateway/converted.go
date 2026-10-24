@@ -53,10 +53,17 @@ func convertedBody(c call, d store.Deployment, prof profile.Profile, strip bool)
 
 // toolNames reads a converted answer's function names back as the caller's
 // tool names, which convert.FunctionName may have shortened (#981).
+// convert.Request refused a tools or messages of any other shape.
 func toolNames(top map[string]json.RawMessage) convert.Names {
 	var tools []json.RawMessage
-	_ = json.Unmarshal(top["tools"], &tools) // convert.Request refused any other shape
-	return convert.NamesOf(tools)
+	_ = json.Unmarshal(top["tools"], &tools)
+	var raws []map[string]json.RawMessage
+	_ = json.Unmarshal(top["messages"], &raws)
+	history := make([]convert.Message, len(raws))
+	for i, m := range raws {
+		history[i] = convert.Message{Content: m["content"]}
+	}
+	return convert.NamesOf(tools, history)
 }
 
 // signer signs each thinking block a converted answer carries: the

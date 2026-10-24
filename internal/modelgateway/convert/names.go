@@ -16,27 +16,36 @@ import (
 // back on the way in (#981).
 const maxFunctionName = 64
 
-// nameHash is how many hex digits of a name's SHA-256 its shortened form ends
-// in: 64 bits, so two long names one request carries are vanishingly unlikely
-// to shorten alike, and Tools refuses a pair that does.
+// nameHash is how many hex digits of a name's SHA-256 its shortened form
+// carries: 64 bits, so two long names one request carries are vanishingly
+// unlikely to shorten alike, and Tools refuses a pair that does.
 const nameHash = 16
+
+// nameEnd is how many bytes a shortened name keeps from each end of the name.
+const nameEnd = (maxFunctionName - nameHash - 2) / 2
 
 // FunctionName is the function name a Chat Completions upstream is sent for a
 // Messages tool name. A name that fits is sent as it is. A longer one is sent
-// as its first 47 bytes, cut back to a rune boundary, then "_" and nameHash
-// hex digits of its SHA-256. The model still reads what the tool is from the
-// kept head, and the same name always shortens the same way, so a request's
-// tools, its tool_choice and the calls its history made agree.
+// as its first and last nameEnd bytes, each cut back to a rune boundary, with
+// "_", nameHash hex digits of its SHA-256 and "_" between them. Both ends
+// stay, because an MCP tool's composed name opens with what every tool on its
+// server shares and ends in the tool's own name. The same name always
+// shortens the same way, so a request's tools, its tool_choice and the calls
+// its history made agree.
 func FunctionName(name string) string {
 	if len(name) <= maxFunctionName {
 		return name
 	}
-	cut := maxFunctionName - 1 - nameHash
-	for cut > 0 && !utf8.RuneStart(name[cut]) {
-		cut--
+	head := nameEnd
+	for head > 0 && !utf8.RuneStart(name[head]) {
+		head--
+	}
+	tail := len(name) - nameEnd
+	for tail < len(name) && !utf8.RuneStart(name[tail]) {
+		tail++
 	}
 	sum := sha256.Sum256([]byte(name))
-	return name[:cut] + "_" + hex.EncodeToString(sum[:])[:nameHash]
+	return name[:head] + "_" + hex.EncodeToString(sum[:nameHash/2]) + "_" + name[tail:]
 }
 
 // Names reads an answer's function names back as the tool names a request
@@ -44,22 +53,36 @@ func FunctionName(name string) string {
 // every name as itself.
 type Names map[string]string
 
-// NamesOf is the Names of a request's tool definitions, each name read by its
-// exact key, as Tools reads it. Tools has refused tools that share a function
-// name before any answer is read.
-func NamesOf(tools []json.RawMessage) Names {
-	var n Names
+// NamesOf is the Names of a request: the names its history's calls carried,
+// and its tools' names, each read by its exact key, as Messages and Tools
+// read them. A call on a tool the request no longer offers still reads back
+// whole. The tools win where the two meet: a name a tool goes out under reads
+// back as that tool. Tools has refused two tools that share a function name
+// before any answer is read.
+func NamesOf(tools []json.RawMessage, history []Message) Names {
+	n := Names{}
+	for _, m := range history {
+		var blocks []map[string]json.RawMessage
+		if json.Unmarshal(m.Content, &blocks) != nil {
+			continue // a string, which holds no call
+		}
+		for _, b := range blocks {
+			if typ, _ := text(b, "type"); typ == "tool_use" {
+				name, _ := text(b, "name")
+				if fn := FunctionName(name); fn != name {
+					n[fn] = name
+				}
+			}
+		}
+	}
 	for _, t := range tools {
 		var def map[string]json.RawMessage
-		if json.Unmarshal(t, &def) != nil {
-			continue
-		}
+		_ = json.Unmarshal(t, &def)
 		name, _ := text(def, "name")
 		if fn := FunctionName(name); fn != name {
-			if n == nil {
-				n = Names{}
-			}
 			n[fn] = name
+		} else {
+			delete(n, name)
 		}
 	}
 	return n

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 )
@@ -18,18 +19,18 @@ func TestFunctionNameFitsChatCompletions(t *testing.T) {
 	}
 	long := "mcp__" + strings.Repeat("s", 50) + "__" + strings.Repeat("t", 71) // 128
 	got := convert.FunctionName(long)
-	if len(got) != 64 || !strings.HasPrefix(got, long[:47]+"_") {
-		t.Errorf("FunctionName(128 characters) = %q (%d), want 64 starting with the name's first 47 and _", got, len(got))
+	if len(got) != 64 || !strings.HasPrefix(got, long[:23]+"_") || !strings.HasSuffix(got, "_"+long[len(long)-23:]) {
+		t.Errorf("FunctionName(128 characters) = %q (%d), want 64: the first 23, _, 16 hex digits, _, the last 23", got, len(got))
 	}
 	if again := convert.FunctionName(long); again != got {
 		t.Errorf("FunctionName is not stable: %q then %q", got, again)
 	}
-	if other := convert.FunctionName(long[:127] + "u"); other == got {
-		t.Errorf("two names that differ only in their last byte shorten alike: %q", got)
+	if other := convert.FunctionName(long[:60] + "u" + long[61:]); other == got {
+		t.Errorf("two names that differ only in a byte neither end keeps shorten alike: %q", got)
 	}
 	names := convert.NamesOf([]json.RawMessage{
 		json.RawMessage(`{"name":"` + short + `"}`), json.RawMessage(`{"name":"` + long + `"}`),
-	})
+	}, nil)
 	if back := names.Tool(got); back != long {
 		t.Errorf("Tool(%q) = %q, want the tool's own name", got, back)
 	}
@@ -41,19 +42,47 @@ func TestFunctionNameFitsChatCompletions(t *testing.T) {
 	}
 }
 
-// A name whose 47th byte falls inside a rune is cut at the rune before it, so
-// the function name stays valid UTF-8 and reads back.
+// A long MCP server's name is what every tool on it opens with, so the
+// shortened name keeps the tool's own name at its end.
+func TestFunctionNameKeepsAnMCPToolsOwnName(t *testing.T) {
+	got := convert.FunctionName("mcp__acme-corp-internal-knowledge-base-connector__delete_repository")
+	if len(got) != 64 || !strings.HasPrefix(got, "mcp__acme-corp-internal") || !strings.HasSuffix(got, "__delete_repository") {
+		t.Errorf("FunctionName = %q, want the server's start and the tool's whole name kept", got)
+	}
+}
+
+// An end that would cut a rune is cut at a rune boundary instead, so the
+// function name stays valid UTF-8 and reads back.
 func TestFunctionNameCutsAtARune(t *testing.T) {
-	long := strings.Repeat("a", 46) + "é" + strings.Repeat("b", 30)
+	long := strings.Repeat("a", 22) + "é" + strings.Repeat("c", 30) + "é" + strings.Repeat("b", 22)
 	got := convert.FunctionName(long)
-	if !strings.HasPrefix(got, strings.Repeat("a", 46)+"_") || len(got) != 63 {
-		t.Errorf("FunctionName = %q (%d), want the cut before é", got, len(got))
+	if !strings.HasPrefix(got, strings.Repeat("a", 22)+"_") || !strings.HasSuffix(got, "_"+strings.Repeat("b", 22)) ||
+		len(got) != 62 || !utf8.ValidString(got) {
+		t.Errorf("FunctionName = %q (%d), want both cuts outside é", got, len(got))
+	}
+}
+
+// A call the history made on a tool the request no longer offers reads back
+// whole too. Where a history name and a tool's meet, the tool wins.
+func TestNamesOfReadsAHistoryCallBack(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	fn := convert.FunctionName(long)
+	history := []convert.Message{
+		{Role: "user", Content: json.RawMessage(`"hi"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"calling"},{"type":"tool_use","id":"t1","name":"` + long + `","input":{}}]`)},
+	}
+	if got := convert.NamesOf(nil, history).Tool(fn); got != long {
+		t.Errorf("Tool(%q) = %q, want the history's tool", fn, got)
+	}
+	tools := []json.RawMessage{json.RawMessage(`{"name":"` + fn + `"}`)}
+	if got := convert.NamesOf(tools, history).Tool(fn); got != fn {
+		t.Errorf("Tool(%q) = %q, want the tool the request offers under that name", fn, got)
 	}
 }
 
 // Every place a request names a tool sends the same function name: its tools,
-// tool_choice, and the calls its history made. A shortened name that another
-// tool already takes is refused rather than sent twice.
+// tool_choice, and the calls its history made. Two tools that would go out
+// under one name are refused, in either order; a name listed twice is not.
 func TestRequestShortensLongToolNames(t *testing.T) {
 	long := strings.Repeat("x", 100)
 	fn := convert.FunctionName(long)
@@ -75,11 +104,21 @@ func TestRequestShortensLongToolNames(t *testing.T) {
 		t.Errorf("history call name = %v, want %q", got, fn)
 	}
 
-	var top map[string]json.RawMessage
-	_ = json.Unmarshal([]byte(`{"model":"m","max_tokens":5,`+hi+`,"tools":[
-		{"name":"`+long+`","input_schema":{"type":"object"}},{"name":"`+fn+`","input_schema":{"type":"object"}}]}`), &top)
-	if _, err := convert.Request(top, "up", nil); err == nil || !strings.Contains(err.Error(), "tools[1]") {
-		t.Errorf("Request with a tool already named another's shortened name: err = %v, want tools[1] refused", err)
+	tool := func(name string) string { return `{"name":"` + name + `","input_schema":{"type":"object"}}` }
+	for _, c := range []struct {
+		tools   string
+		refused bool
+	}{
+		{tool(long) + "," + tool(fn), true},
+		{tool(fn) + "," + tool(long), true},
+		{tool(long) + "," + tool(long), false},
+	} {
+		var top map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(`{"model":"m","max_tokens":5,`+hi+`,"tools":[`+c.tools+`]}`), &top)
+		_, err := convert.Request(top, "up", nil)
+		if refused := err != nil && strings.Contains(err.Error(), "tools[1]") && strings.Contains(err.Error(), "goes out as"); refused != c.refused {
+			t.Errorf("tools %s: err = %v, want refused %v", c.tools[:20], err, c.refused)
+		}
 	}
 }
 
@@ -88,7 +127,7 @@ func TestRequestShortensLongToolNames(t *testing.T) {
 func TestAnswerReadsShortenedNamesBack(t *testing.T) {
 	long := strings.Repeat("x", 100)
 	fn := convert.FunctionName(long)
-	names := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"` + long + `"}`)})
+	names := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"` + long + `"}`)}, nil)
 	call := `"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"` + fn + `","arguments":"{}"}}]`
 
 	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant",`+call+`},"finish_reason":"tool_calls"}]}`),
@@ -128,7 +167,7 @@ func TestAnswerReadsShortenedNamesBack(t *testing.T) {
 func TestNamesOfReadsTheNameKeyAlone(t *testing.T) {
 	long := strings.Repeat("x", 100)
 	fn := convert.FunctionName(long)
-	names := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"` + fn + `","Name":"` + long + `"}`)})
+	names := convert.NamesOf([]json.RawMessage{json.RawMessage(`{"name":"` + fn + `","Name":"` + long + `"}`)}, nil)
 	if got := names.Tool(fn); got != fn {
 		t.Errorf("Tool(%q) = %q, want the name the tool was sent under", fn, got)
 	}

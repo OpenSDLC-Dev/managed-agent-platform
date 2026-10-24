@@ -189,7 +189,7 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// and naming the stall instead would throw it away.
 		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
-	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard, names: convert.NamesOf(req.Tools)}, nil
+	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard, names: convert.NamesOf(req.Tools, turns)}, nil
 }
 
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---

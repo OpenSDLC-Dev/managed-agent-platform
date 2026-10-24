@@ -35,8 +35,7 @@ func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error)
 		return nil, nil
 	}
 	out := make([]ChatTool, 0, len(tools))
-	taken := map[string]int{} // function name -> the tool sent under it
-	names := make([]string, 0, len(tools))
+	taken := map[string]string{} // function name -> the tool name sent under it
 	for i, t := range tools {
 		var def map[string]json.RawMessage
 		if err := json.Unmarshal(t, &def); err != nil {
@@ -47,11 +46,10 @@ func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error)
 			return nil, fmt.Errorf("tools[%d]: missing name", i)
 		}
 		fn := FunctionName(name)
-		if j, ok := taken[fn]; ok && names[j] != name {
-			return nil, fmt.Errorf("tools[%d]: name %q goes out as %q, as tools[%d]'s does", i, name, fn, j)
+		if other, ok := taken[fn]; ok && other != name {
+			return nil, fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
 		}
-		taken[fn] = i
-		names = append(names, name)
+		taken[fn] = name
 		description, _ := text(def, "description")
 		params := def["input_schema"]
 		if builtin[name] {

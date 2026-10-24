@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
@@ -122,3 +123,6 @@ func RewrittenLength(alias string, chunk []byte) int {
 	(&answerRewriter{alias: encodeJSON(alias)}).rewrite(chunk, func(p []byte) { n += len(p) })
 	return n
 }
+
+// ToolNames is the Names a converted answer to top is read back with.
+func ToolNames(top map[string]json.RawMessage) convert.Names { return toolNames(top) }
