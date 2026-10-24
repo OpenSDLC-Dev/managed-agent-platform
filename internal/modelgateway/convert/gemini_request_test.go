@@ -337,6 +337,7 @@ func TestGeminiRequestMapsAToolNameGeminiWouldRefuse(t *testing.T) {
 		{`"tools":[` + tool("_1password") + "," + tool("1password") + `]`, `tools[1]: name "1password" goes out as`},
 		{`"tools":[` + tool("1password") + "," + tool("1password") + `]`, ""},
 		{`"tools":[` + tool("_1password") + `]` + choose("1password"), `tool_choice.name: "1password" goes out as "_1password", as tools' "_1password" does`},
+		{`"tools":[` + tool("1password") + `]` + choose("_1password"), `tool_choice.name: "_1password" goes out as "_1password", as tools' "1password" does`},
 		{`"tools":[` + tool("1password") + `]` + choose("1password"), ""},
 		{`"tools":[` + tool("_1password") + `]` + choose("_1password"), ""},
 	} {

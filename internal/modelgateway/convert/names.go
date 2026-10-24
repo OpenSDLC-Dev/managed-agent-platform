@@ -17,11 +17,12 @@ import (
 // back on the way in (#981).
 const maxFunctionName = 64
 
-// maxGeminiName is the longest function name Gemini takes, one that "Must
-// start with a letter or an underscore" (google.golang.org/genai 1.73.0,
-// types.go FunctionDeclaration.Name). A Messages tool name may start with a
-// digit or a dash, and Gemini refuses the whole request over one such name,
-// so GeminiName sends it with a "_" in front (#985).
+// maxGeminiName is the longest function name Gemini takes, by the genai SDK
+// and by the Gemini API reference alike. The SDK also says a name "Must start
+// with a letter or an underscore" (google.golang.org/genai 1.73.0, types.go
+// FunctionDeclaration.Name), which the API reference does not say. A Messages
+// tool name may start with a digit or a dash, so GeminiName sends it with a
+// "_" in front, which both readings accept (#985).
 const maxGeminiName = 128
 
 // nameHash is how many hex digits of a name's SHA-256 its shortened form
