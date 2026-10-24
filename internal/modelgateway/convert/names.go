@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -48,18 +49,18 @@ func GeminiName(name string) string {
 	return shorten(name, maxGeminiName)
 }
 
-// shorten fits a name into max bytes. A name that fits is kept as it is. A
-// longer one becomes its first and last bytes, as many of each as max leaves
+// shorten fits a name into limit bytes. A name that fits is kept as it is. A
+// longer one becomes its first and last bytes, as many of each as limit leaves
 // beside "_", nameHash hex digits of its SHA-256 and "_", each end cut back to
 // a rune boundary. Both ends stay, because an MCP tool's composed name opens
 // with what every tool on its server shares and ends in the tool's own name.
 // The same name always shortens the same way, so a request's tools, its
 // tool_choice and the calls its history made agree.
-func shorten(name string, max int) string {
-	if len(name) <= max {
+func shorten(name string, limit int) string {
+	if len(name) <= limit {
 		return name
 	}
-	end := (max - nameHash - 2) / 2
+	end := (limit - nameHash - 2) / 2
 	head := end
 	for head > 0 && !utf8.RuneStart(name[head]) {
 		head--
@@ -70,6 +71,16 @@ func shorten(name string, max int) string {
 	}
 	sum := sha256.Sum256([]byte(name))
 	return name[:head] + "_" + hex.EncodeToString(sum[:nameHash/2]) + "_" + name[tail:]
+}
+
+// claim records that tools[i], name, goes out as the function fn, and refuses
+// it where another tool name already goes out as fn.
+func claim(taken map[string]string, i int, name, fn string) error {
+	if other, ok := taken[fn]; ok && other != name {
+		return fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
+	}
+	taken[fn] = name
+	return nil
 }
 
 // Names reads an answer's function names back as the tool names a request

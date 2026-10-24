@@ -307,7 +307,8 @@ func TestGeminiRequestRefusals(t *testing.T) {
 // Every place a request names a tool sends the name GeminiName makes: its
 // declarations, tool_choice, and the calls and results of its history. Two
 // tools that would go out under one name are refused, in either order; a
-// name listed twice is not (#985).
+// name listed twice is not. Nor is a tool_choice let land on a tool it does
+// not name (#985).
 func TestGeminiRequestMapsAToolNameGeminiWouldRefuse(t *testing.T) {
 	got := geminiRequest(t, `{"max_tokens":8,
 		"tools":[{"name":"1password","input_schema":{"type":"object"}}],
@@ -328,19 +329,24 @@ func TestGeminiRequestMapsAToolNameGeminiWouldRefuse(t *testing.T) {
 	}
 
 	tool := func(name string) string { return `{"name":"` + name + `","input_schema":{"type":"object"}}` }
+	choose := func(name string) string { return `,"tool_choice":{"type":"tool","name":"` + name + `"}` }
 	for _, c := range []struct {
-		tools   string
-		refused bool
+		body, refusal string // refusal is the start of the error; "" for none
 	}{
-		{tool("1password") + "," + tool("_1password"), true},
-		{tool("_1password") + "," + tool("1password"), true},
-		{tool("1password") + "," + tool("1password"), false},
+		{`"tools":[` + tool("1password") + "," + tool("_1password") + `]`, `tools[1]: name "_1password" goes out as`},
+		{`"tools":[` + tool("_1password") + "," + tool("1password") + `]`, `tools[1]: name "1password" goes out as`},
+		{`"tools":[` + tool("1password") + "," + tool("1password") + `]`, ""},
+		{`"tools":[` + tool("_1password") + `]` + choose("1password"), `tool_choice.name: "1password" goes out as "_1password", as tools' "_1password" does`},
+		{`"tools":[` + tool("1password") + `]` + choose("1password"), ""},
+		{`"tools":[` + tool("_1password") + `]` + choose("_1password"), ""},
 	} {
 		var top map[string]json.RawMessage
-		_ = json.Unmarshal([]byte(`{"max_tokens":8,`+hi+`,"tools":[`+c.tools+`]}`), &top)
+		if err := json.Unmarshal([]byte(`{"max_tokens":8,`+hi+`,`+c.body+`}`), &top); err != nil {
+			t.Fatalf("%s: %v", c.body, err)
+		}
 		_, err := convert.GeminiRequest(top)
-		if refused := err != nil && strings.Contains(err.Error(), "tools[1]") && strings.Contains(err.Error(), "goes out as"); refused != c.refused {
-			t.Errorf("tools %s: err = %v, want refused %v", c.tools, err, c.refused)
+		if c.refusal == "" && err != nil || c.refusal != "" && (err == nil || !strings.HasPrefix(err.Error(), c.refusal)) {
+			t.Errorf("%s: err = %v, want %q", c.body, err, c.refusal)
 		}
 	}
 }

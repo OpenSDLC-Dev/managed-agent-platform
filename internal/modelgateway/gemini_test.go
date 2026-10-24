@@ -446,3 +446,20 @@ func TestAToolNameGeminiWouldRefuseComesBackWhole(t *testing.T) {
 		}
 	}
 }
+
+// A Gemini answer reads back the names of the request's tools and of the
+// calls its history made, so a call on a tool no longer offered keeps its
+// name too (#985).
+func TestAGeminiAnswerReadsTheHistorysNamesBack(t *testing.T) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(`{"tools":[{"name":"1password"}],"messages":[{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"2fa","input":{}}]}]}`), &top); err != nil {
+		t.Fatal(err)
+	}
+	names := modelgateway.GeminiToolNames(top)
+	for fn, want := range map[string]string{"_1password": "1password", "_2fa": "2fa", "get_time": "get_time"} {
+		if got := names.Tool(fn); got != want {
+			t.Errorf("Tool(%q) = %q, want %q", fn, got, want)
+		}
+	}
+}
