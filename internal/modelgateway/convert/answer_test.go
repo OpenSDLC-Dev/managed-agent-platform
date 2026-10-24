@@ -57,7 +57,7 @@ func TestAnswer(t *testing.T) {
 		{"empty", `{"message":{"role":"assistant","content":""},"finish_reason":"stop"}`, " / end_turn"},
 	} {
 		b, err := convert.Answer([]byte(`{"id":"chatcmpl-1","object":"chat.completion","model":"up","choices":[`+c.choice+`]}`),
-			"alias", "req_1", &convert.Usage{Input: 6, Output: 3, CacheRead: 4}, sig)
+			"alias", "req_1", &convert.Usage{Input: 6, Output: 3, CacheRead: 4}, sig, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -75,7 +75,7 @@ func TestAnswer(t *testing.T) {
 // An answer naming no id takes the one given; one reporting no usage
 // reports zeros.
 func TestAnswerFallbacks(t *testing.T) {
-	b, err := convert.Answer([]byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`), "alias", "req_1", nil, sig)
+	b, err := convert.Answer([]byte(`{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}]}`), "alias", "req_1", nil, sig, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestAnswerRefusals(t *testing.T) {
 		`{"choices":[{"message":{"tool_calls":[{"id":"c","function":{"name":"f","arguments":"[1]"}}]}}]}`:     "not a JSON object",
 		`{"choices":[{"message":{"tool_calls":{}}}]}`:                                                         "tool_calls",
 	} {
-		if _, err := convert.Answer([]byte(answer), "alias", "req_1", nil, sig); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := convert.Answer([]byte(answer), "alias", "req_1", nil, sig, nil); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Answer(%s) = %v, want an error saying %q", answer, err, want)
 		}
 	}
@@ -124,7 +124,7 @@ func TestStopReason(t *testing.T) {
 func TestAnswerCutShort(t *testing.T) {
 	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"calling","tool_calls":[
 		{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}},
-		{"id":"c2","type":"function","function":{"name":"g","arguments":"{\"a\":"}}]},"finish_reason":"length"}]}`), "alias", "msg_1", nil, sig)
+		{"id":"c2","type":"function","function":{"name":"g","arguments":"{\"a\":"}}]},"finish_reason":"length"}]}`), "alias", "msg_1", nil, sig, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestAnswerCutShort(t *testing.T) {
 // rather than read as no text.
 func TestAnswerNonStringText(t *testing.T) {
 	for _, key := range []string{"content", "refusal", "reasoning_content"} {
-		_, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","`+key+`":[{"type":"text","text":"hello"}]},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig)
+		_, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","`+key+`":[{"type":"text","text":"hello"}]},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig, nil)
 		if err == nil || !strings.Contains(err.Error(), key) {
 			t.Errorf("%s: %v, want an error naming it", key, err)
 		}
@@ -152,19 +152,19 @@ func TestAnswerNonStringText(t *testing.T) {
 // the answer's text and its stop reason; tool arguments sent as a JSON
 // object are read as its JSON; and cache writes are counted apart.
 func TestAnswerVendorShapes(t *testing.T) {
-	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"No"},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig)
+	b, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"No"},"finish_reason":"stop"}]}`), "alias", "msg_1", nil, sig, nil)
 	var m anthropic.Message
 	if err != nil || json.Unmarshal(b, &m) != nil || len(m.Content) != 1 || m.Content[0].Text != "No" || m.StopReason != "refusal" {
 		t.Errorf("refusal: %s, %v", b, err)
 	}
 	b, err = convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":{"x":1}}}]},"finish_reason":"tool_calls"}]}`),
-		"alias", "msg_1", &convert.Usage{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}, sig)
+		"alias", "msg_1", &convert.Usage{Input: 10, Output: 10, CacheWrite: 50, CacheRead: 40}, sig, nil)
 	m = anthropic.Message{}
 	if err != nil || json.Unmarshal(b, &m) != nil || len(m.Content) != 1 || string(m.Content[0].Input) != `{"x":1}` ||
 		m.Usage.InputTokens != 10 || m.Usage.CacheCreationInputTokens != 50 || m.Usage.CacheReadInputTokens != 40 {
 		t.Errorf("object arguments and usage: %s, %v", b, err)
 	}
-	if _, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":7}}]},"finish_reason":"tool_calls"}]}`), "alias", "msg_1", nil, sig); err == nil || !strings.Contains(err.Error(), "neither a string nor an object") {
+	if _, err := convert.Answer([]byte(`{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":7}}]},"finish_reason":"tool_calls"}]}`), "alias", "msg_1", nil, sig, nil); err == nil || !strings.Contains(err.Error(), "neither a string nor an object") {
 		t.Errorf("number arguments: %v", err)
 	}
 }
@@ -176,7 +176,7 @@ func TestAnswerRefusalBesideOthers(t *testing.T) {
 		`{"choices":[{"index":0,"message":{"role":"assistant","content":"Preface. ","refusal":"I cannot help."},"finish_reason":"stop"}]}`:                                                     "Preface. I cannot help.",
 		`{"choices":[{"index":0,"message":{"role":"assistant","refusal":"No.","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"stop"}]}`: "No.",
 	} {
-		b, err := convert.Answer([]byte(answer), "alias", "msg_1", nil, sig)
+		b, err := convert.Answer([]byte(answer), "alias", "msg_1", nil, sig, nil)
 		var m anthropic.Message
 		if err != nil || json.Unmarshal(b, &m) != nil || m.Content[0].Text != want || m.StopReason != "refusal" {
 			t.Errorf("%s: %s, %v", answer, b, err)

@@ -21,18 +21,21 @@ type ToolFn struct {
 	Strict      json.RawMessage `json:"strict,omitempty"`
 }
 
-// Tools converts Anthropic tool definitions to function tools. input_schema
-// becomes parameters as it came, except that a built-in's (builtin, the
-// brain's provider.Request.BuiltinTools) loses the keywords
-// stripSchemaKeywords removes. strict is never set: OpenAI's strict mode
-// requires every object closed with additionalProperties: false and every
-// field required (its structured-outputs guide), which the built-ins'
-// schemas — optional fields, and additionalProperties stripped — do not meet.
+// Tools converts Anthropic tool definitions to function tools, each under its
+// FunctionName; two names that would go out as one are refused, since the
+// answer could not say which was called. input_schema becomes parameters as
+// it came, except that a built-in's (builtin, the brain's
+// provider.Request.BuiltinTools) loses the keywords stripSchemaKeywords
+// removes. strict is never set: OpenAI's strict mode requires every object
+// closed with additionalProperties: false and every field required (its
+// structured-outputs guide), which the built-ins' schemas — optional fields,
+// and additionalProperties stripped — do not meet.
 func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
 	out := make([]ChatTool, 0, len(tools))
+	taken := map[string]string{} // function name -> the tool name sent under it
 	for i, t := range tools {
 		var def map[string]json.RawMessage
 		if err := json.Unmarshal(t, &def); err != nil {
@@ -42,6 +45,11 @@ func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error)
 		if name == "" {
 			return nil, fmt.Errorf("tools[%d]: missing name", i)
 		}
+		fn := FunctionName(name)
+		if other, ok := taken[fn]; ok && other != name {
+			return nil, fmt.Errorf("tools[%d]: name %q goes out as %q, as %q does", i, name, fn, other)
+		}
+		taken[fn] = name
 		description, _ := text(def, "description")
 		params := def["input_schema"]
 		if builtin[name] {
@@ -51,7 +59,7 @@ func Tools(tools []json.RawMessage, builtin map[string]bool) ([]ChatTool, error)
 			}
 			params = stripped
 		}
-		out = append(out, ChatTool{Type: "function", Function: ToolFn{Name: name, Description: description, Parameters: params}})
+		out = append(out, ChatTool{Type: "function", Function: ToolFn{Name: fn, Description: description, Parameters: params}})
 	}
 	return out, nil
 }

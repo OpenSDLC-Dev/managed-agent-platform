@@ -6,7 +6,8 @@
 // out is internal/modelgateway/convert's (Messages and Tools), which the model
 // gateway's conversion path shares, and whose comments name what it drops and
 // refuses — a signed thinking block and a tool_result's is_error dropped, a
-// built-in tool's schema keywords stripped, an unsupported block failing
+// built-in tool's schema keywords stripped, a tool name past 64 characters
+// shortened and read back on the answer, an unsupported block failing
 // loudly rather than vanishing. The way in is this package's, tested against a
 // fake Chat Completions server: the deprecated single-function_call streaming
 // format is rejected loudly (the endpoint must emit tool_calls) rather than
@@ -188,7 +189,7 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		// and naming the stall instead would throw it away.
 		return nil, fmt.Errorf("openai endpoint returned %s: %s", p.redact.String(resp.Status), quoted)
 	}
-	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard}, nil
+	return &stream{body: respBody, r: bufio.NewReader(respBody), redact: p.redact, guard: guard, names: convert.NamesOf(req.Tools, turns)}, nil
 }
 
 // --- outgoing request shapes (Anthropic-native -> OpenAI Chat Completions) ---
@@ -228,6 +229,7 @@ type stream struct {
 
 	tools     map[int]*toolAccum
 	toolOrder []int
+	names     convert.Names // reads a call's function name back as the tool's (convert.FunctionName)
 
 	stopReason string
 	usage      domain.ModelUsage
@@ -499,7 +501,7 @@ func (s *stream) flushTools() {
 		s.pending = append(s.pending, provider.Chunk{
 			Kind:    provider.KindToolUse,
 			Index:   int64(idx),
-			ToolUse: &provider.ToolUse{ID: acc.id, Name: acc.name, Input: input},
+			ToolUse: &provider.ToolUse{ID: acc.id, Name: s.names.Tool(acc.name), Input: input},
 		})
 	}
 	s.toolOrder = nil

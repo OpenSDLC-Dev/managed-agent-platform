@@ -21,8 +21,9 @@ type Usage struct {
 // in the order a Messages answer has it: the reasoning as a thinking block
 // signed by signature (the gateway's provenance wrapper, which the caller
 // returns), the text — the content's, then a refusal's — and each tool
-// call as a tool_use block. usage is the upstream's, as the caller reads it;
-// nil reports zeros. The id is the upstream's, or id when it names none.
+// call as a tool_use block, named as names reads its function back. usage is
+// the upstream's, as the caller reads it; nil reports zeros. The id is the
+// upstream's, or id when it names none.
 //
 // It fails on an answer it cannot carry: no choice, a tool call whose
 // arguments are not a JSON object, the deprecated function_call, which
@@ -31,7 +32,7 @@ type Usage struct {
 // limit cut short, its arguments no JSON object under finish_reason length,
 // is left out: the answer stops for max_tokens, which tells the caller to
 // ask again with more.
-func Answer(b []byte, alias, id string, usage *Usage, signature func() string) ([]byte, error) {
+func Answer(b []byte, alias, id string, usage *Usage, signature func() string, names Names) ([]byte, error) {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(b, &obj) != nil || obj == nil {
 		return nil, fmt.Errorf("the answer is not a JSON object")
@@ -82,7 +83,7 @@ func Answer(b []byte, alias, id string, usage *Usage, signature func() string) (
 		} else if err != nil {
 			return nil, fmt.Errorf("the answer's tool call %d: %w", i, err)
 		}
-		content = append(content, map[string]any{"type": "tool_use", "id": callID, "name": name, "input": input})
+		content = append(content, map[string]any{"type": "tool_use", "id": callID, "name": names.Tool(name), "input": input})
 	}
 	if content == nil {
 		content = []any{}

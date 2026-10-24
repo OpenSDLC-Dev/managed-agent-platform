@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/convert"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/openai"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
@@ -861,5 +862,74 @@ func TestEmptyTextBlockReplays(t *testing.T) {
 	want := []map[string]any{{"role": "user", "content": "hi"}, {"role": "assistant", "content": ""}, {"role": "user", "content": "again"}}
 	if got := messagesOf(t, body); !reflect.DeepEqual(got, want) {
 		t.Errorf("messages = %v, want %v", got, want)
+	}
+}
+
+// A tool name past the 64 characters a Chat Completions function name takes
+// goes out shortened, in the tools and in the history's calls alike, and the
+// model's call on it comes back under the tool's own name (#981).
+func TestALongToolNameGoesOutShortAndComesBackWhole(t *testing.T) {
+	long := "mcp__" + strings.Repeat("s", 50) + "__" + strings.Repeat("t", 71) // 128
+	fn := convert.FunctionName(long)
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"` + fn + `","arguments":"{}"}}]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`"go"`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_1","name":"` + long + `","input":{}}]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]`)},
+		},
+		Tools: []json.RawMessage{json.RawMessage(`{"name":"` + long + `","input_schema":{"type":"object"}}`)},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	chunks := collect(t, stream)
+
+	tools, _ := f.gotBody["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["function"].(map[string]any)["name"] != fn {
+		t.Errorf("tools = %v, want one function named %q", f.gotBody["tools"], fn)
+	}
+	calls, _ := messagesOf(t, f.gotBody)[1]["tool_calls"].([]any)
+	if len(calls) != 1 || calls[0].(map[string]any)["function"].(map[string]any)["name"] != fn {
+		t.Errorf("history tool_calls = %v, want one call named %q", calls, fn)
+	}
+	var got []string
+	for _, c := range chunks {
+		if c.Kind == provider.KindToolUse {
+			got = append(got, c.ToolUse.Name)
+		}
+	}
+	if !reflect.DeepEqual(got, []string{long}) {
+		t.Errorf("tool_use names = %v, want the tool's own name", got)
+	}
+}
+
+// A call on a tool the turn no longer offers, sent under the short name its
+// history's call went out with, still comes back under the tool's own name.
+func TestACallOnAToolOnlyTheHistoryNamesComesBackWhole(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	f := &fakeServer{sse: []string{
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_2","type":"function","function":{"name":"` + convert.FunctionName(long) + `","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+	}}
+	stream, err := start(t, f).Generate(context.Background(), provider.Request{Messages: []provider.Message{
+		{Role: "user", Content: json.RawMessage(`"go"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"call_1","name":"` + long + `","input":{}}]`)},
+		{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]`)},
+	}})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	var got []string
+	for _, c := range collect(t, stream) {
+		if c.Kind == provider.KindToolUse {
+			got = append(got, c.ToolUse.Name)
+		}
+	}
+	if !reflect.DeepEqual(got, []string{long}) {
+		t.Errorf("tool_use names = %v, want one call on %q", got, long)
 	}
 }

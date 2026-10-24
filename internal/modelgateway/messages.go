@@ -788,7 +788,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 			p = &convStream{c: c, s: convert.NewGeminiStream(c.alias, requestID(r), wrap.wrap), ctx: ctx, red: red, rid: requestID(r),
 				usage: func(o map[string]json.RawMessage) *store.Tokens { return geminiUsageOf(o["usageMetadata"]) }, status: geminiStatus}
 		case conv:
-			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap)), ctx: ctx, red: red, rid: requestID(r),
+			p = &convStream{c: c, s: convert.NewStream(c.alias, requestID(r), signer(wrap), toolNames(c.top)), ctx: ctx, red: red, rid: requestID(r),
 				usage: func(o map[string]json.RawMessage) *store.Tokens { return chatUsageOf(o["usage"]) }, status: statedStatus}
 		case c.proto == profile.OpenAI:
 			p = &chatStream{c: c, red: red, withhold: !c.usage}
@@ -876,7 +876,7 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 		}
 	case conv:
 		c.out.tokens = chatUsageOf(member(b, "usage"))
-		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap)); err != nil {
+		if answer, err = convert.Answer(b, c.alias, requestID(r), callerUsage(c.out.tokens), signer(wrap), toolNames(c.top)); err != nil {
 			return &failure{status: http.StatusBadGateway, typ: "api_error",
 				err: fmt.Errorf("upstream answer could not be converted: %w", red.Error(err))}, false
 		}

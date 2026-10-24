@@ -236,7 +236,7 @@ func toolChoice(raw json.RawMessage) (choice, parallel json.RawMessage, err erro
 		if !ok {
 			return nil, nil, fmt.Errorf(".name: must be a string")
 		}
-		choice = encode(map[string]any{"type": "function", "function": map[string]string{"name": name}})
+		choice = encode(map[string]any{"type": "function", "function": map[string]string{"name": FunctionName(name)}})
 	default:
 		return nil, nil, fmt.Errorf(".type: %q has no Chat Completions counterpart", typ)
 	}
