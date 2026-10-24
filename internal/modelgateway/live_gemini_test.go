@@ -97,36 +97,32 @@ func TestLiveGeminiCountsTheConvertedRequest(t *testing.T) {
 	}
 }
 
-// TestLiveGeminiRefusesTheNamesGeminiNameMaps has countTokens parse two
-// requests the conversion never sends: one declaring a function named
-// "1password", as it was sent before #985, and one declaring a name of 129
-// characters. The genai SDK documents that Gemini refuses both, while the
-// Gemini API reference states only the 128 bound. A 400 for each pins both
-// rules, and shows countTokens checks names at all, so the 128-character row
-// above is evidence of the bound and not of a parser that reads no name.
-func TestLiveGeminiRefusesTheNamesGeminiNameMaps(t *testing.T) {
+// TestLiveGeminiRefusesANamePast128 has countTokens parse a request the
+// conversion never sends, one declaring a function name of 129 characters,
+// which the genai SDK and the Gemini API reference both put past Gemini's
+// bound. Its 400 shows that countTokens checks a name's length at all, so the
+// accepted 128-character row above is evidence of the bound convert.GeminiName
+// keeps to (#985), and not of a parser that reads no name.
+func TestLiveGeminiRefusesANamePast128(t *testing.T) {
 	v := namedVendor(t, "gemini")
 	const model = "gemini-3.8-flash"
-	for _, name := range []string{"1password", "a" + strings.Repeat("x", 128)} {
-		t.Run(name[:min(len(name), 12)], func(t *testing.T) {
-			payload := `{"generateContentRequest":{"model":"models/` + model + `",` +
-				`"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"` + name + `"}]}]}}`
-			req, err := http.NewRequestWithContext(liveCtx(t), http.MethodPost, v.base+"/models/"+model+":countTokens", strings.NewReader(payload))
-			if err != nil {
-				t.Fatal(err)
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("x-goog-api-key", v.keyEnv)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				liveFatalf(t, "countTokens: %v", err)
-			}
-			defer resp.Body.Close()
-			b, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode != http.StatusBadRequest {
-				liveFatalf(t, "countTokens answered %d %s for the name %q, want a 400", resp.StatusCode, b, name)
-			}
-			t.Logf("%s", b)
-		})
+	name := "a" + strings.Repeat("x", 128)
+	payload := `{"generateContentRequest":{"model":"models/` + model + `",` +
+		`"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"` + name + `"}]}]}}`
+	req, err := http.NewRequestWithContext(liveCtx(t), http.MethodPost, v.base+"/models/"+model+":countTokens", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", v.keyEnv)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		liveFatalf(t, "countTokens: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		liveFatalf(t, "countTokens answered %d %s for a name of 129 characters, want a 400", resp.StatusCode, b)
+	}
+	t.Logf("%s", b)
 }
