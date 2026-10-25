@@ -147,10 +147,11 @@ func ParseRole(s string) (Role, bool) {
 
 // Identity is one verified human principal.
 //
-// The four strings are exactly the principals-table columns upsertPrincipal
-// writes (internal/api); Role is re-derived from the token per request and never
-// stored,
-// because the IdP stays authoritative. A field that is not here cannot be
+// The four strings are exactly the principals-table columns principal.Resolve
+// writes from it (internal/principal). Role is what the IdP's mapping asserts
+// for this token, and RoleNone when it asserts nothing. Resolve derives the
+// principal's stored role from it at each sign-in, and the stored role, not
+// this field, is what authorizes a request. A field that is not here cannot be
 // persisted or logged by accident: no raw claims, no token, no expiry.
 type Identity struct {
 	Issuer      string // the verified iss, equal to the configured issuer

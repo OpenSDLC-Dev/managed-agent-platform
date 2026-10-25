@@ -390,7 +390,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		Issuer:  v.issuer,
 		Subject: std.Subject,
 		// Bounded, because these two are the only fields whose length the token
-		// alone decides, and upsertPrincipal persists them. Under maxTokenBytes a
+		// alone decides, and principal.Resolve persists them. Under maxTokenBytes a
 		// claim can reach roughly 12 KiB, which is a valid login turning into an
 		// insert failure against a bounded column. Truncating keeps the login
 		// working and the descriptive value intact; neither field carries any
@@ -401,14 +401,14 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		// no use for the claim beyond display. Anything that MATCHES or LINKS on
 		// an email must make its own verification decision — on an IdP with
 		// self-service profile attributes, Casdoor included, the user chooses
-		// this string. upsertPrincipal (internal/api) is written to that rule:
-		// it conflicts on (issuer, subject) — never on email — and treats these
-		// two as the provider's to restate, refreshing them alongside
-		// last_seen_at on every request rather than writing them once.
+		// this string. principal.Resolve (internal/principal) is written to
+		// that rule: it conflicts on (issuer, subject) — never on email — and
+		// treats these two as the provider's to restate, refreshing them
+		// alongside last_seen_at on every request rather than writing them once.
 		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
 		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
-		// RoleNone is not an error: the principal is authenticated with no
-		// authority, and a role-gated route refuses it.
+		// RoleNone is not an error: the mapping asserts no role, and
+		// principal.Resolve decides the stored role from there.
 		Role: strongestRole(roleValues(claimAt(all, v.rolesClaim)), v.roleMap),
 	}, nil
 }
