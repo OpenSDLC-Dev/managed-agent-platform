@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 ---
 
 # Principal-bound authentication: platform login, stored roles, no preset keys (plan 69)
