@@ -1510,6 +1510,37 @@ func TestNoMappedRoleYieldsRoleNone(t *testing.T) {
 	}
 }
 
+// TestNewAcceptsAnEmptyRoleMap pins the other half of an optional role map: New
+// builds a verifier from no map, nil or empty, and every token it verifies then
+// carries RoleNone, the IdP asserting nothing about the person.
+func TestNewAcceptsAnEmptyRoleMap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		m    map[string]identity.Role
+	}{
+		{name: "nil", m: nil},
+		{name: "empty", m: map[string]identity.Role{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(c *identity.Config) { c.RoleMap = tc.m })
+
+			// A roles claim that would map to admin under a configured map.
+			got, err := v.Verify(context.Background(), idp.Mint(t, verifierXClaims(idp, clock)))
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			want := verifierXWant(idp)
+			want.Role = identity.RoleNone
+			if got != want {
+				t.Errorf("Identity = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 // TestVerifyRoleClaimTypes walks the JSON shapes a roles claim arrives in, all
 // the way through Verify. The strongest mapped value wins whatever the shape,
 // and a claim that is not a string or an array of them maps nothing rather than

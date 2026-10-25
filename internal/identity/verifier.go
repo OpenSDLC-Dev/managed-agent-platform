@@ -78,15 +78,15 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		return nil, fmt.Errorf("identity: assertion header must not be %q; that header carries a machine credential",
 			cfg.AssertionHeader)
 	}
-	if len(cfg.RoleMap) == 0 {
-		return nil, errors.New("identity: a role map is required")
-	}
-	// Validated AND copied. ConfigFromEnv already rejects these shapes, but New is
-	// the package's own boundary and a caller can build a Config literally: an
-	// empty claim value would grant its role to every token whose roles claim
-	// carries an empty string, and keeping the caller's map would leave live
-	// authority mutable from outside — a data race against every concurrent
-	// Verify, and a silent privilege change.
+	// An empty map is allowed: every verified token then carries RoleNone, "the
+	// IdP asserts nothing", and the caller decides what such a person may do.
+	//
+	// Every entry it is given is validated AND copied. ConfigFromEnv already
+	// rejects these shapes, but New is the package's own boundary and a caller can
+	// build a Config literally: an empty claim value would grant its role to every
+	// token whose roles claim carries an empty string, and keeping the caller's
+	// map would leave live authority mutable from outside — a data race against
+	// every concurrent Verify, and a silent privilege change.
 	roleMap := make(map[string]Role, len(cfg.RoleMap))
 	for value, role := range cfg.RoleMap {
 		if value == "" {

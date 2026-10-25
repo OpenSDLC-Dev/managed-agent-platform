@@ -26,7 +26,7 @@ type Config struct {
 	RolesClaim string          // default "roles"
 	EmailClaim string          // default "email"
 	NameClaim  string          // default "name"
-	RoleMap    map[string]Role // claim value → role; empty is an error in New
+	RoleMap    map[string]Role // claim value → role; empty means the IdP asserts no role
 
 	// HTTPClient replaces the guarded client wholesale. A supplied client gives up
 	// everything productionClient carries — the dial-time address guard, the
@@ -307,6 +307,10 @@ func valueOr(v, def string) string {
 //
 // Every defect is an error rather than a dropped entry. A duplicate source in
 // particular: last-wins would be a silent authority change.
+//
+// An empty value parses to an empty map and no error. The map is optional: it
+// only states what the IdP asserts, and an install may keep every role in the
+// platform's own store.
 func parseRoleMap(s string) (map[string]Role, error) {
 	pairs := strings.Split(s, ",")
 	out := make(map[string]Role, len(pairs))
@@ -335,9 +339,6 @@ func parseRoleMap(s string) (map[string]Role, error) {
 			return nil, fmt.Errorf("%s maps %q twice", envRoleMap, value)
 		}
 		out[value] = role
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("%s is required and must map at least one claim value", envRoleMap)
 	}
 	return out, nil
 }

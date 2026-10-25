@@ -58,7 +58,7 @@ func TestRoleAtLeast(t *testing.T) {
 // annotation denies every caller instead of admitting every caller.
 func TestRoleAtLeastRejectsUnknownMinimum(t *testing.T) {
 	t.Parallel()
-	for _, min := range []identity.Role{"owner", "", "Admin", "viewer ", "root"} {
+	for _, min := range []identity.Role{"owner", "", "Admin", "viewer", "viewer ", "root"} {
 		for _, role := range []identity.Role{
 			identity.RoleNone, identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin,
 		} {
