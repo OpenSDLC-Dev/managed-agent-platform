@@ -225,21 +225,30 @@ func TestAuthByKey(t *testing.T) {
 	}
 }
 
-// An operator token reads with user or developer and writes with admin.
+// An operator token reads with developer and writes with admin. A user has no
+// read-only role to fall back on, so it is refused everywhere; the refusal is
+// the same on a path that exists and one that does not, which is what keeps a
+// caller who can call nothing from learning which paths exist.
 func TestAuthByRole(t *testing.T) {
 	e := newEnv(t, true)
 	body := map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth}
 	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
-	for _, role := range []string{"readers", "devs", "admins"} {
+	for _, role := range []string{"devs", "admins"} {
 		e.ok(e.do("GET", "/admin/v1/providers", nil, bearer(e.token(role))), role+" reads")
 	}
-	for _, role := range []string{"readers", "devs"} {
-		e.refused(e.do("POST", "/admin/v1/providers", body, bearer(e.token(role))), http.StatusForbidden, "permission_error", "admin")
-	}
+	e.refused(e.do("POST", "/admin/v1/providers", body, bearer(e.token("devs"))), http.StatusForbidden, "permission_error", "admin")
 	e.ok(e.do("POST", "/admin/v1/providers", body, bearer(e.token("admins"))), "admin writes")
-	e.refused(e.do("GET", "/admin/v1/providers", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
-	e.refused(e.do("GET", "/admin/v1/nothing", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
-	e.refused(e.do("PUT", "/admin/v1/providers", nil, bearer(e.token("strangers"))), http.StatusForbidden, "permission_error", "role")
+	for _, role := range []string{"readers", "strangers"} {
+		known := e.do("GET", "/admin/v1/providers", nil, bearer(e.token(role)))
+		unknown := e.do("GET", "/admin/v1/nothing", nil, bearer(e.token(role)))
+		e.refused(known, http.StatusForbidden, "permission_error", "developer")
+		if unknown.status != known.status || unknown.raw != known.raw {
+			t.Errorf("%s: an unknown path answered %d %s but a known one %d %s; both must read as the same refusal",
+				role, unknown.status, unknown.raw, known.status, known.raw)
+		}
+		e.refused(e.do("POST", "/admin/v1/providers", body, bearer(e.token(role))), http.StatusForbidden, "permission_error", "developer")
+		e.refused(e.do("PUT", "/admin/v1/providers", nil, bearer(e.token(role))), http.StatusForbidden, "permission_error", "developer")
+	}
 	if r := e.do("GET", "/admin/v1/providers", nil, bearer("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")); r.status != http.StatusUnauthorized {
 		t.Errorf("forged token: %d %s", r.status, r.raw)
 	}

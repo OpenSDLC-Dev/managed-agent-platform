@@ -12,7 +12,7 @@ import (
 
 // The role matrix over real HTTP. TestEveryIdentityReachableRouteDeclaresARole
 // proves every route declares a minimum; this proves the minimums are the ones
-// plan 31 specifies, and that the check actually fires.
+// plan 69 specifies, and that the check actually fires.
 //
 // No route needs a real resource to answer the question being asked. A 404 for a
 // made-up id is a PASS here: it means the role check let the request through and
@@ -72,10 +72,11 @@ func (r matrixRoute) request() string {
 	).Replace(r.path)
 }
 
-// roleMatrix mirrors docs/plan/31_console-sso-rbac.md's table, route for route:
-// viewer reads everything but the environment-key surface; developer adds
-// resource CRUD and session lifecycle, including the vault container; admin adds
-// the credential surfaces, enumerated rather than inferred.
+// roleMatrix mirrors docs/plan/69_principal-bound-auth.md's table, route for
+// route: developer reads every resource and creates, changes and deletes them,
+// vault credentials included; admin adds memory redaction and the
+// environment-key and API-key surfaces, which have their own tests. user
+// reaches none of these routes: there is no read-only role.
 func roleMatrix() []matrixRoute {
 	const (
 		agent   = "/v1/agents/{id}"
@@ -91,76 +92,76 @@ func roleMatrix() []matrixRoute {
 		dream   = "/v1/dreams/{id}"
 		depl    = "/v1/deployments/{id}"
 	)
-	v, d, a := identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin
+	d, a := identity.RoleDeveloper, identity.RoleAdmin
 
 	return []matrixRoute{
 		// Agents.
-		{"GET", "/v1/agents", v}, {"GET", agent, v}, {"GET", agent + "/versions", v},
+		{"GET", "/v1/agents", d}, {"GET", agent, d}, {"GET", agent + "/versions", d},
 		{"POST", "/v1/agents", d}, {"POST", agent, d}, {"POST", agent + "/archive", d},
 
 		// Deployments. pause and unpause take developer for the same reason
 		// archive does: each rewrites what the schedule will do next.
-		{"GET", "/v1/deployments", v}, {"GET", depl, v},
+		{"GET", "/v1/deployments", d}, {"GET", depl, d},
 		{"POST", "/v1/deployments", d}, {"POST", depl, d},
 		{"POST", depl + "/archive", d},
 		{"POST", depl + "/pause", d}, {"POST", depl + "/unpause", d},
 		// run takes developer because it does session-create's work (§5.1).
 		{"POST", depl + "/run", d},
-		// The run record surface is read-only and at the user tier, like every list.
-		{"GET", "/v1/deployment_runs", v}, {"GET", "/v1/deployment_runs/{id}", v},
+		// The run record surface is read-only, and a read needs developer like every other.
+		{"GET", "/v1/deployment_runs", d}, {"GET", "/v1/deployment_runs/{id}", d},
 
 		// Environments. The work API under /v1/environments/{id}/work is a
 		// different lane entirely and is covered by TestEnvironmentKeyLane below.
-		{"GET", "/v1/environments", v}, {"GET", env, v},
+		{"GET", "/v1/environments", d}, {"GET", env, d},
 		{"POST", "/v1/environments", d}, {"POST", env, d},
 		{"DELETE", env, d}, {"POST", env + "/archive", d},
 
 		// Sessions, including the streaming read.
-		{"GET", "/v1/sessions", v}, {"GET", sesn, v},
+		{"GET", "/v1/sessions", d}, {"GET", sesn, d},
 		{"POST", "/v1/sessions", d}, {"POST", sesn, d},
 		{"DELETE", sesn, d}, {"POST", sesn + "/archive", d},
-		{"GET", sesn + "/events", v}, {"POST", sesn + "/events", d},
-		{"GET", sesn + "/events/stream", v},
-		{"GET", sesn + "/threads", v}, {"GET", sesn + "/threads/{tid}", v},
+		{"GET", sesn + "/events", d}, {"POST", sesn + "/events", d},
+		{"GET", sesn + "/events/stream", d},
+		{"GET", sesn + "/threads", d}, {"GET", sesn + "/threads/{tid}", d},
 		{"POST", sesn + "/threads/{tid}/archive", d},
-		{"GET", sesn + "/threads/{tid}/events", v}, {"GET", sesn + "/threads/{tid}/stream", v},
-		{"GET", sesn + "/resources", v}, {"POST", sesn + "/resources", d},
-		{"GET", sesn + "/resources/{rid}", v},
+		{"GET", sesn + "/threads/{tid}/events", d}, {"GET", sesn + "/threads/{tid}/stream", d},
+		{"GET", sesn + "/resources", d}, {"POST", sesn + "/resources", d},
+		{"GET", sesn + "/resources/{rid}", d},
 		{"POST", sesn + "/resources/{rid}", d}, {"DELETE", sesn + "/resources/{rid}", d},
 
-		// Vaults: the container is developer CRUD, the credentials inside it are
-		// admin — reads excepted, which render sealed metadata only.
-		{"GET", "/v1/vaults", v}, {"GET", vault, v},
+		// Vaults: developer throughout, the credentials inside a vault included —
+		// the reference lets a developer manage both (plan 69 decision 4).
+		{"GET", "/v1/vaults", d}, {"GET", vault, d},
 		{"POST", "/v1/vaults", d}, {"POST", vault, d},
 		{"DELETE", vault, d}, {"POST", vault + "/archive", d},
-		{"GET", vault + "/credentials", v}, {"GET", cred, v},
-		{"POST", vault + "/credentials", a}, {"POST", cred, a}, {"DELETE", cred, a},
-		{"POST", cred + "/archive", a}, {"POST", cred + "/mcp_oauth_validate", a},
+		{"GET", vault + "/credentials", d}, {"GET", cred, d},
+		{"POST", vault + "/credentials", d}, {"POST", cred, d}, {"DELETE", cred, d},
+		{"POST", cred + "/archive", d}, {"POST", cred + "/mcp_oauth_validate", d},
 
 		// Skills, including the archive download.
-		{"GET", "/v1/skills", v}, {"GET", skill, v}, {"GET", skill + "/versions", v},
-		{"GET", skill + "/versions/{version}", v}, {"GET", skill + "/versions/{version}/content", v},
+		{"GET", "/v1/skills", d}, {"GET", skill, d}, {"GET", skill + "/versions", d},
+		{"GET", skill + "/versions/{version}", d}, {"GET", skill + "/versions/{version}/content", d},
 		{"POST", "/v1/skills", d}, {"DELETE", skill, d},
 		{"POST", skill + "/versions", d}, {"DELETE", skill + "/versions/{version}", d},
 
 		// Files, including the content download.
-		{"GET", "/v1/files", v}, {"GET", file, v}, {"GET", file + "/content", v},
+		{"GET", "/v1/files", d}, {"GET", file, d}, {"GET", file + "/content", d},
 		{"POST", "/v1/files", d}, {"DELETE", file, d},
 
-		// Memory stores (plan 36 decision 14): reads viewer, the whole
-		// lifecycle developer — memory writes included — and redaction admin,
+		// Memory stores (plan 36 decision 14): the whole family developer —
+		// reads and memory writes included — except redaction, which is admin,
 		// the one write in the family that destroys history.
-		{"GET", "/v1/memory_stores", v}, {"GET", store, v},
+		{"GET", "/v1/memory_stores", d}, {"GET", store, d},
 		{"POST", "/v1/memory_stores", d}, {"POST", store, d},
 		{"DELETE", store, d}, {"POST", store + "/archive", d},
-		{"GET", store + "/memories", v}, {"GET", memory, v},
+		{"GET", store + "/memories", d}, {"GET", memory, d},
 		{"POST", store + "/memories", d}, {"POST", memory, d}, {"DELETE", memory, d},
-		{"GET", store + "/memory_versions", v}, {"GET", version, v},
+		{"GET", store + "/memory_versions", d}, {"GET", version, d},
 		{"POST", version + "/redact", a},
 
-		// Dreams (plan 41 §5.1): reads viewer, create and both lifecycle
-		// actions developer — the memory-store family's own split.
-		{"GET", "/v1/dreams", v}, {"GET", dream, v},
+		// Dreams (plan 41 §5.1): developer throughout — reads, create and both
+		// lifecycle actions.
+		{"GET", "/v1/dreams", d}, {"GET", dream, d},
 		{"POST", "/v1/dreams", d},
 		{"POST", dream + "/archive", d}, {"POST", dream + "/cancel", d},
 	}
@@ -171,12 +172,12 @@ func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 
 	// One token per tier, minted once: the matrix is about routes, not tokens.
 	//
-	// RoleNone is a real caller here, not a placeholder — a person the deployment
-	// authenticated whose IdP groups map to nothing. It is the only tier that is
-	// denied on EVERY route, which makes it the denied-case control for the
-	// user routes: without it, every tier under test would satisfy a user
-	// minimum, and a user check that stopped running entirely would still see
-	// each row pass on the handler's own 404.
+	// RoleNone and RoleUser are real callers here, not placeholders: a person the
+	// deployment authenticated whose IdP groups map to nothing, and one it mapped
+	// to user. Both are denied on EVERY route, which makes them the denied-case
+	// controls for the developer minimum: without them, every tier under test
+	// would satisfy it, and a developer check that stopped running entirely would
+	// still see each row pass on the handler's own 404.
 	tokens := map[identity.Role]string{
 		identity.RoleNone:      s.token("unmapped-group"),
 		identity.RoleUser:      s.token("platform-read"),
