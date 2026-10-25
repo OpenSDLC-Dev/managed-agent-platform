@@ -357,7 +357,8 @@ IAP mode the login reads the proxy's assertion.
   - The gateway's admin API takes the bootstrap key and the operator token.
     It refuses every other key, owned or not, as today.
   - Every authenticated route this plan adds takes only the cookie, from
-    the slice that adds it: members and service accounts, naming a principal
+    the slice that adds it, except the setup code's redemption (next):
+    members and service accounts, naming a principal
     when a key is created, a deployment's initiator, the proxy path, and the
     gateway's rate limits. An install without a login therefore sets no
     rate limit before slice 7.
@@ -496,8 +497,10 @@ Notes on the table:
 - **A person who only needs to read gets developer**, which can also write.
   The reference has the same gap.
 - **developer's vault credentials follow the reference.** Limited developer
-  and above manage vaults and credentials there (support 10186004). Here
-  developer manages vaults today, but only admin writes their credentials.
+  and above manage vaults and credentials there (support 10186004). Today
+  developer manages vaults here, but only admin writes their credentials.
+  Slice 1 opens credential writes to developer, so the table's rule holds
+  from then on.
 - **developer reads the gateway's usage** (author's call), as the
   reference's developer views usage.
 - **Environment keys stay admin-only.** No recording shows which reference
@@ -608,8 +611,8 @@ Notes on the table:
     the turn as today's no-provider failure does, with the `session.error`
     that failure draws (`model_request_failed_error`) and a message of
     ours. Every turn such a session starts is refused the same way.
-  - The check also covers every model call that skips the gateway: the
-    grader's, and every call on Helm with `modelgateway.enabled=false` or
+  - The check also covers the grader's model call, and every model call
+    that skips the gateway: Helm with `modelgateway.enabled=false`, or
     compose with a direct providers file.
 - **The gateway checks the same on each call**, in the lookup that
   authenticates the token: one joined query, not extra round trips (author's
