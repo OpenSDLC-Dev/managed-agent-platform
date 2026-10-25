@@ -6,11 +6,15 @@ status: approved
 
 The owner named two problems on 2026-10-24:
 
-1. **Preset secrets.** Compose requires two of them, `CONTROLPLANE_API_KEY`
-   and `BRAIN_API_KEY`; Helm requires the second one while the model gateway
-   is on, which is its default. Each one is full management authority, and
-   each one stays in the deployment's configuration for as long as the
-   install runs. A leak of either one is a leak of everything.
+1. **Preset secrets.**
+   - Compose requires two of them, `CONTROLPLANE_API_KEY` and
+     `BRAIN_API_KEY`. Its example file ships the well-known values
+     `local-dev-key` and `local-brain-key`.
+   - Helm requires the first one always, and the second one while the model
+     gateway is on, which is its default.
+   - Each one is full management authority, and each one stays in the
+     deployment's configuration for as long as the install runs. A leak of
+     either one is a leak of everything.
 2. **The console's path differs from the reference.** The console's server
    holds the platform key, or forwards the user's IdP token. The reference's
    browser sends only a session cookie.
@@ -30,10 +34,10 @@ The owner stated the requirements:
   that started it.
 
 The owner made the decisions below on 2026-10-24 and 2026-10-25. On
-2026-10-25 a builder check and a code review read the draft, and the owner
-settled the points they raised that change a security boundary. The
-author settled the rest; those say so ("author's call"). "Left to the
-builder" lists what neither settled.
+2026-10-25 a builder check and two code-review passes read the draft. The
+owner settled the points they raised that change a security boundary, and
+set the roles to match the reference. The author settled the rest; those say
+so ("author's call"). "Left to the builder" lists what neither settled.
 
 ## What the reference does
 
@@ -56,18 +60,22 @@ What they say:
   - A key carries no scope. It acts with its owner's role.
   - Personal keys are archived when their user is removed, and archived keys
     are not restored.
+  - The Admin API accepts a personal key or a service-account key that is not
+    scoped to a workspace.
 - **Console login** is Google, an email link, or SSO (SAML or OIDC). There is
   no password. A member who first arrives through SSO gets the User role,
   and an IdP group can map to a role (support 13132885).
-- **Roles are stored in the Console's member list.** An admin assigns them in
-  the Console or through the Admin API (docs `manage-claude/admin-api`,
-  `manage-claude/workspaces`; support 10186004):
+- **Roles are stored in the Console's member list** (docs
+  `manage-claude/admin-api`, `manage-claude/workspaces`; support 10186004):
+  - An admin assigns them in the Console. The Admin API assigns every role
+    but admin (the SDK's `BetaOrganizationUserUpdateParams`).
   - user: the playground only. Cannot see API keys, usage or billing.
   - developer: manages API keys, vaults and credentials, and webhook
     endpoints. Views usage and session traces. Downloads files.
   - admin: everything above, plus members and their roles.
-  - The other organization roles are claude_code_user, billing, the owner
-    pair and, in the support centre only, limited developer. Workspace roles
+  - The SDK's `BetaOrganizationUser` lists six more organization roles:
+    billing, claude_code_user, managed, membership_admin, owner and
+    primary_owner. The support centre adds limited developer. Workspace roles
     refine them per workspace.
   - A service account's organization role is developer or admin (docs
     `manage-claude/wif-reference`; the SDK's `BetaServiceAccount`).
@@ -77,13 +85,18 @@ What they say:
   - rate limits per workspace and per model: requests, input tokens and
     output tokens per minute;
   - a monthly spend limit per workspace.
-- **The Console's own calls use a cookie, from the same origin:**
+- **The Console's own calls use a cookie, on the Console's host:**
+  - Its resource calls go to `https://platform.claude.com/v1/...`, a
+    same-origin proxy, with the cookie. The API's own host never sees the
+    cookie (recordings `2026-09-05` and `2026-09-12-console-141`).
+  - It mints an environment key at
+    `POST /api/oauth/organizations/{org}/environments/{env}/tokens`, with the
+    cookie (recording `2026-09-05`).
   - The playground sends `POST /api/organizations/<uuid>/proxy/v1/messages`
     with a Cookie and no `Authorization` or `x-api-key` (recording
     `2026-10-22-playground-protocol`).
-  - The Console's private calls, the playground's among them, carry
-    `x-organization-uuid` and `x-workspace-id` beside the cookie (recordings
-    `2026-09-05` and `2026-10-22-playground-protocol`).
+  - Every one of these calls carries `x-organization-uuid` and
+    `x-workspace-id` beside the cookie.
 - **Scopes exist on OAuth tokens only** (docs `manage-claude/wif-reference`):
   - Workload identity federation exchanges an IdP JWT at
     `POST /v1/oauth/token` (the RFC 7523 `jwt-bearer` grant) for a
@@ -101,7 +114,8 @@ What they say:
 - **`ant auth login`** runs an authorization-code flow:
   - It goes to `{console}/oauth/authorize`, then `{api}/v1/oauth/token`.
   - It asks for `user:profile user:inference user:developer`
-    (anthropic-cli `pkg/cmd/cmd_auth.go:35`).
+    (anthropic-cli `pkg/cmd/cmd_auth.go:35`). Its `/v1/organizations`
+    routes need `org:admin` as well (`cmd_auth.go:36-38`).
   - No source says what each `user:*` scope admits. Recording request
     managed-agents-wire-recordings#66 asks.
 
@@ -111,14 +125,16 @@ What they say:
   request:
   - **The management key** (`x-api-key`): full authority, no role.
     `apiKeyOffered` reads only `x-api-key`, so a key sent as a Bearer is
-    refused. On the dual-auth routes, `dualAuth` sends any Bearer without an
-    `x-api-key` to the environment-key lane.
+    refused. On the dual-auth routes, `dualAuth` sends a Bearer that comes
+    without an `x-api-key` to the environment-key lane. The exception is OIDC
+    mode, where a JWT-shaped Bearer goes to the human lane.
   - **The identity lane** (`IDENTITY_MODE=oidc` or `trusted_proxy`):
     - The roles are viewer, developer and admin. They come from the claim
       `IDENTITY_CLAIM_ROLES` names, through `IDENTITY_ROLE_MAP`, on every
       request. A person whose claim maps to nothing gets 403 everywhere.
     - The platform stores no role (plan 31). `principals` (migration 0022)
-      holds identity bookkeeping only.
+      holds identity bookkeeping only, which the lane writes on every
+      request.
   - **Machine credentials**, for one environment, one work item or one gate:
     `sk-map-env01-` keys, `wtk_` and `gtk_`.
 - **Preset keys:**
@@ -129,24 +145,31 @@ What they say:
   - The model gateway takes `CONTROLPLANE_API_KEY` as its admin bootstrap
     key. It lets the bootstrap key and the brain key reach every model with
     no grant.
-  - Compose requires both values from the operator. Helm requires the brain
-    key while `modelgateway.enabled` is true, its default.
-  - CD's post-deploy check (`.github/workflows/deploy.yml`) reads
-    `controlplane-api-key` back and calls `GET /v1/agents` with it.
+  - Automated callers depend on them:
+    - CD's post-deploy check (`.github/workflows/deploy.yml`) and
+      `deploy/gcp/mode2-secret.sh` read `controlplane-api-key` back;
+    - CI's gateway checks (`.github/workflows/ci.yml`) call
+      `/admin/v1/profiles` with the bootstrap key and the brain key;
+    - deploy/gcp/README.md configures staging's gateway catalogue by `curl`
+      with the bootstrap key.
 - **The gateway** (plan 59):
   - It refuses any other key that has no key policy ("this API key has no
     model grant").
   - A key policy (`key_policies`) names the aliases the key may use. It can
     also set RPM and TPM limits.
+  - Its usage ledger, daily rollups and rate windows are keyed by
+    `api_key_id` (migration 0050).
   - The admin API (`/admin/v1`) takes the bootstrap key or an operator token.
     An operator token is an IdP token: viewer and developer can read, admin
     can write.
 - **The console** (managed-agent-console) is a Next.js server that proxies
-  the browser's calls:
+  the browser's calls through its own `/api/` routes:
   - In password mode or open mode it sends `PLATFORM_API_KEY`, which is
     `CONTROLPLANE_API_KEY`.
   - In OIDC mode it forwards the user's ID token as a Bearer.
   - It refuses `trusted_proxy` at boot.
+  - It neither shows nor revokes a `cloud` environment's keys. Revoking one
+    is API-only (docs/self-hosted-security.md §6).
 - **The brain's model-turn claim** is one statement (`queue.Claim`), with no
   transaction around it. `wtk_` is minted elsewhere: in the worker poll's
   transaction (`claimWork` in `internal/api/workapi.go`), and only for a
@@ -154,52 +177,64 @@ What they say:
 - **Ownership is audit only.**
   - `api_keys` records who issued a key, not who owns it.
   - `sessions.created_by` and `deployments.created_by` record the acting
-    credential. They authorize nothing (design principle 5).
-- **GCP staging** is plain HTTP on a bare LoadBalancer IP, with
-  `identity.mode` empty. Its values file prepares `trusted_proxy` with
-  `roles: email` and a role map for when IAP fronts it.
+    credential. They authorize nothing (design principle 5). A session that
+    a deployment's schedule fires has no `created_by` (migration 0031).
+- **The default installs have no login.** Compose, Helm and GCP staging all
+  leave `IDENTITY_MODE` empty. Staging is plain HTTP on a bare LoadBalancer
+  IP. Its values file prepares `trusted_proxy` with `roles: email` and a role
+  map for when IAP fronts it.
 
 ## Decisions
 
 ### 1. No preset credential, and how the first admin appears
 
-- These four credentials are removed:
-  - `CONTROLPLANE_API_KEY`;
+- These credentials are removed:
+  - `CONTROLPLANE_API_KEY`, which the gateway also takes as its admin
+    bootstrap key;
   - `BRAIN_API_KEY`;
-  - the gateway's bootstrap key;
   - the gateway's operator token.
-- **There is no transition release.** Slices 1 to 6 land with no release
-  between them (owner, 2026-10-25). If a fix release has to be cut in that
-  time, its upgrade note states the intermediate state as it is. Under
-  SemVer 0.x the removal is a minor bump (docs/RELEASING.md).
+- **There is no transition release.** No release is cut between slice 1 and
+  slice 7 (owner, 2026-10-25). docs/RELEASING.md already refuses a release
+  that would half-ship the work in flight. Under SemVer 0.x the removal is a
+  minor bump.
 - **Every management API key that exists before this plan stops working at
-  slice 6**, whoever issued it. Environment keys (`sk-map-env01-`) are not
+  slice 7**, whoever issued it. Environment keys (`sk-map-env01-`) are not
   affected. People create new keys in the console. The upgrade note says
   so. Work that an old key started:
-  - keeps running until slice 6 (decision 8);
-  - at slice 6, a session started by an old key stops at its next model
+  - keeps running until slice 7 (decision 8);
+  - at slice 7, a session started by an old key stops at its next model
     turn, and a deployment created by one fails at its next run. An admin
     can point such a deployment at a service account.
 - **The first admin is created with a one-time setup code:**
   - The control plane prints a code to its log at start-up, but only while
-    the install has never had an admin. A stored flag records that the
-    first admin exists, so a later "no admin" state never reopens the
-    door (author's call).
+    both of these hold (author's calls):
+    - The install has never had an admin. A stored flag records the first
+      admin, so a later "no admin" state never reopens the door.
+    - No IdP mapping can give the admin role. Where one can, the IdP
+      supplies the admins. So an upgraded install whose mapping names admins
+      prints no code.
   - Each replica prints its own code. Any unexpired code works, and
-    redeeming one spends them all (author's call).
-  - In OIDC and IAP modes, the first person who signs in and presents a
-    code becomes admin.
+    redeeming one spends them all (author's call). Each code is 20 random
+    bytes, so several live codes do not make a guess practical.
+  - In OIDC and IAP modes, the first person who signs in and presents a code
+    becomes admin. A person whom a mapping matches cannot redeem a code,
+    because the mapping owns their role.
   - In password mode, no account can exist before an admin does. So
     presenting a code creates the first local account, with the password
-    given at that moment, as admin (author's call).
+    given at that moment, as admin (author's call). That redemption is
+    unauthenticated, so it is throttled like a login.
   - Whoever can read the logs before the first admin exists can claim the
     role. The security doc says so, and says to redeem the code at once.
 - **There is no built-in recovery.** If no admin can sign in (the IdP is
   down, the last admin left, a password is lost), the operator edits the
   database by hand. docs/self-hosted-security.md will say how (slice 1).
-- **The last admin is protected** (author's call). No admin can demote or
-  remove the last active admin, themselves included. An IdP mapping can
-  still demote them (decision 4); recovery is then a database edit.
+- **The last admin is protected** (author's call):
+  - No admin can demote or remove the last active admin, themselves
+    included.
+  - Only people count. An admin service account does not, because it cannot
+    hold the cookie that every admin surface needs (decision 3).
+  - An IdP mapping can still demote the last admin (decision 4). Recovery is
+    then a database edit.
 
 ### 2. The platform owns login
 
@@ -233,45 +268,58 @@ request on the identity lane.
   gateway's admin API (author's call: the same entry point routes the
   gateway's admin paths to it).
 - The session cookie is accepted on the private `/api/...` paths and on the
-  gateway's admin API, and nowhere else. `/v1` never accepts it. This
-  matches the reference, whose Console and API are on separate hosts.
-- **Those two surfaces take the cookie only.** No API key reaches them
-  (owner, 2026-10-25):
+  gateway's admin API, and nowhere else. `/v1` never accepts it.
+- **The console's resource views use a private proxy path,**
+  `/api/organizations/{org}/proxy/v1/...`. A playground, when one exists,
+  takes the same path, as the reference's playground does. Its calls carry
+  the signed-in person's authority and reach the gateway with it.
+- **That is a divergence** (author's call). The reference's Console calls
+  `/v1/...` with the cookie, but on the Console's own host, so the API host
+  never sees the cookie. Here the console and the API share one origin, so a
+  cookie on `/v1` would reach the SDK's surface. docs/DIVERGENCES.md records
+  it.
+- **Those two surfaces take the cookie only** (owner, 2026-10-25). This
+  holds from slice 7. Until then they also take today's credentials, so that
+  an install without a login keeps working.
   - A leaked key cannot create keys, members or environment keys, and cannot
     repoint the gateway's providers or vendor credentials.
   - Issuing or revoking an environment key needs a person signed in to the
-    console, including during an incident. The scripted issuance in
-    docs/self-hosted-security.md §6 goes.
+    console, including during an incident. The reference also mints them
+    from its console. So the console must issue and revoke every
+    environment's keys, `cloud` ones included (slice 6). The scripted
+    issuance in docs/self-hosted-security.md §6 goes.
+  - **This diverges from the reference's Admin API**, which takes an admin's
+    key. This plan builds no Admin API: members, service accounts and keys
+    are managed only in the console. docs/DIVERGENCES.md records it.
   - Automated fleets get no issuance route from this plan. Workload identity
     federation (decision 11) needs one, because its tokens are not cookies;
     that route is designed then.
-- **`/v1` takes no human session.** The identity lane's IdP Bearer leaves
-  `/v1` in slice 3, when owned keys replace it. A person's credential on
-  `/v1` is then an API key. `/v1` keeps its machine credentials on their own
-  routes: environment keys, `wtk_` and `gtk_`, and on the gateway's `/v1`
-  the delegated inference token (decision 8).
-- **A Bearer is told apart by its prefix** on the dual-auth routes (author's
-  call): `sk-map-api01-` takes the API-key lane, and anything else stays on
-  the environment-key lane, as today. A grandfathered environment key
-  without a prefix therefore keeps working.
-- The console's resource views go through a private proxy path,
-  `/api/organizations/{org}/proxy/v1/...`, as the reference's playground
-  does. When a playground exists, its calls take the same path, carry the
-  signed-in person's authority, and reach the gateway with it.
+- **`/v1` takes no human session.** From slice 3, the identity lane leaves
+  `/v1`: both the IdP Bearer and the proxy's assertion header. A person's
+  credential on `/v1` is then an API key. `/v1` keeps its machine
+  credentials on their own routes: environment keys, `wtk_` and `gtk_`, and
+  on the gateway's `/v1` the delegated inference token (decision 8).
+- **A Bearer is told apart by its prefix** on the dual-auth routes, from
+  slice 3 (author's call). `sk-map-api01-` takes the API-key lane. Anything
+  else takes the environment-key lane, as today, so a grandfathered
+  environment key without a prefix keeps working.
 
 ### 4. Principals and stored roles
 
 - A principal is a **user** or a **service account**. An admin creates
   service accounts in the console.
-- A principal has one organization role, **user**, **developer** or
-  **admin**, or none yet:
+- **A principal has one organization role: user, developer or admin, as in
+  the reference** (owner, 2026-10-25):
   - The role is stored in the platform. An admin assigns it in the console.
-  - **A person whose first sign-in matches no mapping gets no role** (owner,
-    2026-10-25, after the review). They exist as a member who waits for a
-    role, and they see nothing until an admin assigns one. This keeps
-    today's boundary on upgrade, where an unmapped person gets 403
-    everywhere. It also keeps an open IdP, such as Google accounts, from
-    admitting readers.
+  - **user can only use the playground.** This plan builds no playground, so
+    for now a user can sign in and do nothing else.
+  - **There is no read-only role.** Reading resources needs developer, as in
+    the reference, where viewing usage and session traces is developer's.
+  - **A first sign-in that matches no mapping gets user**, as in the
+    reference. A user reaches nothing in this plan, so an open IdP, such as
+    Google accounts, admits no reader. The playground changes that, because
+    a user can then spend on models. The plan that builds the playground
+    settles the first sign-in's role again.
   - A service account is developer or admin, as in the reference.
 - **The IdP mapping is optional**, in OIDC and IAP modes alike, on the claim
   `IDENTITY_CLAIM_ROLES` names (staging's values map emails). When one is
@@ -279,11 +327,15 @@ request on the identity lane.
   - A person a mapping matches has the role the IdP gives. The console
     cannot change that role.
   - A person whose role came from the mapping, and whom it no longer
-    matches, goes back to no role.
+    matches, goes back to user. From then on the console manages their
+    role.
   - A person no mapping has matched is managed in the console.
+  - A setup code does not exempt anyone. If a mapping later matches the
+    person who redeemed it, the mapping sets their role.
   - On upgrade, an existing `IDENTITY_ROLE_MAP` keeps working, so a mapped
-    admin is still admin at their next sign-in. A map that says `viewer`
-    means `user`.
+    admin is still admin at their next sign-in. A map entry that says
+    `viewer` now gives user, which reads nothing. The upgrade note says to
+    map those people to developer if they must read.
 - **The IdP reaches the platform only at sign-in.** A demotion or a removal
   there takes effect at the person's next sign-in. A person who uses only
   API keys never signs in, so their keys keep their stored role. An admin
@@ -294,32 +346,32 @@ request on the identity lane.
     refused, not re-created.
   - It wins over the mapping: a removed person whom a mapping still matches
     stays removed.
-  - It archives every key the member owns.
+  - It archives every key the member owns, from slice 3, when keys get
+    owners.
   - Restoring the member restores no key.
 - **Retention.** The principal DELETE that docs/self-hosted-security.md §8
   recommends must keep deactivated principals, and principals that own
   keys, sessions or deployments. §8 is rewritten in slice 1.
 - Roles are organization-wide. There is no workspace layer.
-- The existing viewer role folds into user. Plan 31's claim-derived roles end
-  here.
-- **No playground is built by this plan.** The owner wants one later.
+- The existing viewer role goes. Plan 31's per-request roles end here: a role
+  is now stored, whether the mapping or an admin set it.
+- **No playground is built by this plan.** It is later work (decision 11).
 
 | Role | May |
 |---|---|
-| (none yet) | Sign in, and see that an admin has to assign a role. Nothing else. |
-| user | Read every resource: agents, environments, sessions and their events, deployments, files, skills, memory stores, vaults and credential metadata, dreams. Use the playground, once one exists. Create no API key. |
-| developer | Everything user may. Create and manage their own API keys. Call every non-administrative endpoint, with every model. Create, change, archive and delete resources, including vault credentials. Read the gateway's configuration and usage. |
+| user | Sign in. Use the playground, once one exists. Nothing else: reads no resource and creates no key. |
+| developer | Read every resource: agents, environments, sessions and their events, deployments, files, skills, memory stores, vaults and credential metadata, dreams. Create, change, archive and delete them, including vault credentials. Create and manage their own API keys. Call every non-administrative endpoint, with every model. Read the gateway's configuration and usage. |
 | admin | Everything developer may. Manage members, their roles and service accounts. Manage every API key. Issue and revoke environment keys. Change the model gateway's configuration and rate limits. Redact memory versions. |
 
 Notes on the table:
 
-- **user's read access goes beyond the reference.** The reference's user has
-  the playground only.
+- **A person who only needs to read gets developer**, which can also write.
+  The reference has the same gap.
 - **developer's vault credentials follow the reference.** Limited developer
   and above manage vaults and credentials there (support 10186004). Here only
   admin does today.
-- **developer reads the gateway's usage** (author's call), as today's viewer
-  and developer do, and as the reference's developer views usage.
+- **developer reads the gateway's usage** (author's call), as the
+  reference's developer views usage.
 - **Environment keys stay admin-only.** No recording shows which reference
   role may issue them (managed-agents-wire-recordings#40).
 
@@ -332,8 +384,10 @@ Notes on the table:
   request:
   - When the owner is removed, the key is archived (decision 4).
   - When the owner's role changes, the key's reach changes with it.
-- `/v1` and the gateway's inference endpoints accept a key as `x-api-key` or
-  as `Authorization: Bearer`, as the reference does.
+- From slice 3, `/v1` and the gateway's inference endpoints accept a key as
+  `x-api-key` or as `Authorization: Bearer`, as the reference does. That
+  holds for keys from before this plan too. They keep full management
+  authority until slice 7 (decision 1).
 
 ### 6. Scopes, only where a credential needs one
 
@@ -344,7 +398,8 @@ Notes on the table:
   A request outside that gets 403 `permission_error`.
 - Classes for the control plane's routes (`workspace:developer`,
   `org:admin`) come with workload identity federation, the first credential
-  that needs them.
+  that needs them. #550 tracks that the reference splits admission by route
+  and this platform does not.
 - The `user:*` scopes wait for recording #66.
 
 ### 7. Principle 5, amended
@@ -354,7 +409,7 @@ Notes on the table:
 - A session now records the principal that started it: the signed-in person,
   or the API key's owner.
 - Internal calls made for the session act with that principal's authority.
-- CLAUDE.md and AGENTS.md change in the slice that does this.
+- CLAUDE.md changes in the slice that does this.
 
 ### 8. A delegated inference token replaces the brain key
 
@@ -370,19 +425,24 @@ Notes on the table:
   cookie, only developer and admin. A user reaches a model only through the
   console's playground path, once it exists (decision 3).
 - **The claim checks the initiator before it mints** (author's call). If the
-  initiator is gone, has no role, or holds only user, the claim mints
-  nothing and the turn fails. So a demoted initiator's sessions stop at
-  their next model turn. The check also covers a route that skips the
-  gateway: Helm with `modelgateway.enabled=false`, or compose with a direct
-  providers file.
+  initiator is gone or holds only user, the claim mints nothing and the turn
+  fails. So a demoted initiator's sessions stop at their next model turn.
+  The check also covers a route that skips the gateway: Helm with
+  `modelgateway.enabled=false`, or compose with a direct providers file.
 - **The gateway checks again on each call**, in the same lookup that
   authenticates the token: one joined query, not extra round trips (author's
   call).
-- **Every session has an initiator from slice 4 on** (author's call):
-  - Rows from before slice 4 are backfilled from `created_by` where it names
-    a principal, and otherwise from the old key's row.
-  - Until slice 6, an old key counts as a valid initiator, with today's
-    authority. At slice 6 it does not (decision 1).
+- **Every session has an initiator from slice 5 on.** The backfill takes it
+  from `created_by` (author's calls):
+  - a principal: that principal;
+  - a key that has an owner (slice 3 on): the owner;
+  - a key from before this plan: that key;
+  - none, for a session that a deployment's schedule fired: the deployment's
+    initiator, which is backfilled the same way from its own `created_by`.
+
+  Until slice 7, a key from before this plan counts as a valid initiator,
+  with today's authority. At slice 7 it does not (decision 1). A row with no
+  initiator fails its next model turn with a recorded error.
 
 ### 9. Deployments name their initiator
 
@@ -403,24 +463,31 @@ Notes on the table:
 - An admin sets rate limits per model for the whole organization: requests,
   input tokens and output tokens per minute. They replace the RPM and TPM
   limits of each key policy.
+- **Usage is attributed to the principal a call acts for** (author's call):
+  an API key's owner, or a delegated token's initiator. The key is recorded
+  too when the call used one. A key from before this plan stands for itself.
+  The ledger, its rollups and the rate windows stop being keyed by
+  `api_key_id`.
 - A monthly spend limit comes later, because it needs a price for each
   model.
-- The admin API takes the console cookie only (decision 3). Developer and
-  above read; admin writes.
+- The admin API takes the console cookie, from slice 4. From slice 7 it takes
+  nothing else (decision 3). Developer and above read; admin writes.
 
-### 11. Later phases
+### 11. Later work
 
-These are not in this plan, but the plan's shape keeps room for them:
+The plan's shape keeps room for this work. GitHub issues track it:
 
-- **Workload identity federation:**
+- **Workload identity federation** (#992):
   - the OAuth token endpoint with the `jwt-bearer` grant;
   - federation issuers and rules;
   - short-lived, scoped tokens for service accounts;
   - the route classes of decision 6, and an issuance route for automated
     fleets (decision 3).
-- **`ant auth login`:** the authorization-code flow and the `user:*`
-  scopes, after recording #66.
-- **The monthly spend limit.**
+- **`ant auth login`** (#993): the authorization-code flow and the
+  `user:*` scopes, after recording #66.
+- **The monthly spend limit** (#994).
+- **The console playground** (#995), and with it the first
+  sign-in's role (decision 4).
 
 ## Left to the builder
 
@@ -434,105 +501,137 @@ decisions above.
 - **Protection against cross-site requests** that carry the cookie. A
   cross-site form must not be able to make one. The reference's
   `x-organization-uuid` header is one way.
-- **Password storage and login throttling.**
+- **Password storage, and throttling** of login and of the setup code's
+  unauthenticated redemption.
 - **The private paths** for login, members, service accounts and rate
   limits:
   - Use a reference shape where one exists. The SDK's Admin API types
     (`BetaOrganizationUser`, `BetaServiceAccount`) are one.
   - Where none exists, register the choice in docs/DIVERGENCES.md.
 - **How one origin is served** in compose and Helm: a reverse proxy, an
-  ingress, or the console's rewrites.
+  ingress, or the console's rewrites. The console's own server routes under
+  `/api/` (`health`, and the proxies this plan retires) must not collide with
+  the control plane's private paths.
+- **IAP topology.** `/v1` must be reachable with an API key alone, so an IAP
+  deployment routes `/v1` past the proxy.
 - **The setup code's** length and lifetime: hours, not days.
-- **How tests and CI get a key.** They use the same login and private API
-  that a person uses, not a second path.
+- **How tests and CI get a key.** They use the same setup code, login and
+  private API that a person uses, not a second path.
 - **The OIDC client library.** `internal/identity` already verifies ID
   tokens. golang.org/x/oauth2 is an indirect dependency; if it is adopted
   for the code exchange, it stays in one package, as go-jose does.
 - **The delegated token's** storage, and how the brain's provider sends it
   in place of a route's static `api_key`.
+- **The usage ledger's** new columns, and what happens to its existing rows.
 - **The slice order** below. Each slice keeps main deployable.
 
 ## Out of scope
 
 - Workspaces.
-- The roles that need workspaces or billing: limited developer,
-  claude_code_user, billing, owner.
+- The roles that need workspaces, billing or an Enterprise plan: limited
+  developer, claude_code_user, billing, managed, membership_admin, owner and
+  primary_owner.
 - SAML, SCIM (and with it any automatic sync from the IdP), App Attest and
-  Admin API keys.
-- Multi-tenant activation (#56).
+  the Admin API.
+- Multi-tenant activation (#56). Its dormant plan, plan 42, still assumes
+  plan 31's claim-derived roles. When it resumes, it starts from this plan.
 
 ## Slices
 
 A suggested order. Each slice is one PR in this repository. When the console
 changes, a companion PR goes to managed-agent-console. No release is cut
-until slice 6 has landed (decision 1).
+until slice 7 has landed (decision 1). Slices 1 to 5 add the new path beside
+the old one; slice 6 moves every install onto it; slice 7 removes the old
+one.
 
 1. **Stored roles:**
-   - roles on principals, including the no-role state;
+   - user, developer and admin stored on principals; viewer goes, and reads
+     need developer;
    - the principal kind for service accounts;
    - the setup code, redeemed on the identity lane until slice 2;
    - the identity lane reads stored roles, and the mapping applies, in both
      modes, at every verified request;
    - deactivation is honoured (no API sets it yet);
-   - viewer becomes user;
    - vault credentials open to developer.
 2. **Platform login and the cookie:**
    - password (with the setup code's first account), OIDC and IAP login on
      the control plane;
-   - the session cookie, on private paths and the gateway's admin API;
+   - the session cookie, on private paths and the gateway's admin API,
+     beside today's credentials;
    - the private API for members and service accounts, with the last-admin
-     guard and key archiving on removal;
-   - the proxy path;
-   - in the console: one origin, no `PLATFORM_API_KEY`, login, members and
-     setup-code pages.
+     guard;
+   - the proxy path, and one origin for an install that configures a login;
+   - in the console: login, members and setup-code pages, and the cookie
+     wherever a login is configured. Without one, it keeps
+     `PLATFORM_API_KEY` until slice 7.
 3. **Principal-owned keys:**
    - keys created from now on are bound to owners and act with their roles;
+   - removing a member archives the keys they own;
    - `x-api-key` and Bearer on `/v1`, with the prefix rule on dual-auth
      routes;
-   - the identity lane's IdP Bearer leaves `/v1`;
-   - keys from before this plan keep today's lane until slice 6.
-4. **The initiator and the delegated token:**
-   - sessions and deployments record their initiator, with the backfill;
-   - the per-claim inference token, and the claim's initiator check;
-   - the deployment's service-account rule;
-   - `BRAIN_API_KEY` removed.
-5. **The gateway:**
+   - the identity lane leaves `/v1`: the IdP Bearer and the proxy's
+     assertion;
+   - keys from before this plan keep their authority until slice 7.
+4. **The gateway:**
    - grants and key policies removed;
    - rate limits per model for the organization;
-   - the admin API on the cookie;
-   - the bootstrap key and the operator token removed.
-6. **No preset key:**
-   - `CONTROLPLANE_API_KEY` removed;
+   - usage attributed to principals;
+   - the admin API takes the cookie, beside the bootstrap key and the
+     operator token.
+5. **The initiator and the delegated token:**
+   - sessions and deployments record their initiator, with the backfill;
+   - the per-claim inference token, which the gateway authenticates, and
+     the claim's initiator check;
+   - the deployment's service-account rule;
+   - `BRAIN_API_KEY` removed, with its handling in compose, Helm and
+     `deploy/gcp/mode2-secret.sh`.
+6. **Every install signs in:**
+   - compose defaults to password mode, as a development install;
+   - Helm requires a login mode;
+   - CI, the acceptance suite and the evals get their keys through the
+     setup code and login, and CI's gateway checks use the cookie;
+   - the console issues and revokes every environment's keys, `cloud` ones
+     included;
+   - GCP staging moves to OIDC, with Google accounts
+     (`accounts.google.com`) as the IdP. That needs HTTPS first: Google
+     refuses an `http` or bare-IP redirect URI, and the Secure cookie is not
+     sent over `http`. The owner settles how staging gets HTTPS before this
+     slice (2026-10-25). The OAuth client is a cloud change the owner makes;
+   - after this slice deploys, an admin creates a service-account key in
+     staging's console and stores it as a CD secret (author's call).
+     deploy/gcp/README.md says how.
+7. **No preset key:**
+   - `CONTROLPLANE_API_KEY`, the bootstrap key, the operator token and the
+     console's `PLATFORM_API_KEY` removed;
+   - the private paths and the gateway's admin API take the cookie only;
    - every management key from before this plan stops working;
-   - compose, Helm, CI, the acceptance suite and the evals move to the setup
-     code and login;
-   - CD's post-deploy check, and `deploy/gcp/mode2-secret.sh`, move to a
-     service-account key created in the console and kept as a CD secret
-     (author's call);
-   - GCP staging moves to OIDC, with Google accounts (`accounts.google.com`)
-     as the IdP. That needs HTTPS first: Google refuses an `http` or bare-IP
-     redirect URI, and the Secure cookie is not sent over `http`. The owner
-     settles how staging gets HTTPS before this slice (2026-10-25), and the
-     OAuth client is a cloud change the owner makes.
+   - CD's post-deploy check and `deploy/gcp/mode2-secret.sh` use slice 6's
+     service-account key;
+   - deploy/gcp/README.md configures staging's gateway in the console.
 
 ## Docs that move with the change
 
-- **CLAUDE.md and AGENTS.md:** principle 5, and the wire rule "Auth:
-  management via `x-api-key`".
+- **CLAUDE.md:** principle 5, and the wire rule "Auth: management via
+  `x-api-key`".
 - **docs/ARCHITECTURE.md:** the auth lanes and the gateway's auth.
 - **docs/self-hosted-security.md:**
-  - §6: environment keys are issued and revoked in the console only;
+  - §6: environment keys are issued and revoked in the console only,
+    `cloud` ones included;
   - §8: the principal retention DELETE (decision 4);
-  - §9 (SSO): who may sign in, the no-role first sign-in, the mapping, and
+  - §9 (SSO): who may sign in, the first sign-in as user, the mapping, and
     that the IdP reaches the platform only at sign-in;
   - §10 (the management key's lifecycle), rewritten; it also says how to
     recover by editing the database.
 - **docs/DIVERGENCES.md:**
   - New entries:
     - local password accounts;
-    - the no-role first sign-in, and user's read access;
     - roles and limits at organization level, with no workspaces;
-    - the private paths this plan adds, where no reference shape exists.
+    - the console's resource views on a private proxy path, with no cookie
+      on `/v1` (decision 3);
+    - no Admin API: members, service accounts and keys are console-only
+      (decision 3);
+    - the setup code, and the other private paths this plan adds where no
+      reference shape exists.
   - Converged:
     - the Bearer API key;
     - the console's cookie-authenticated private API;
@@ -541,15 +640,23 @@ until slice 6 has landed (decision 1).
     - "Human authentication (`/v1` management paths and the `/api/`
       console namespace)". Its sentence "its console authenticates humans
       with the tokens that endpoint mints" has no source and goes.
+    - "Console roles — three (`admin`/`developer`/`viewer`), bound to IdP
+      claims rather than a platform user store".
+    - "Which role each management route requires".
+    - "Model gateway admin API (`/admin/v1/`)".
+    - "`can_manage` omitted from the listing while the surface stays
+      admin-only".
     - "`sk-map-api01-` as the issued-key prefix, and `principal`/`api_key`
       actors where the reference says `user`".
     - "A key seeded from `CONTROLPLANE_API_KEY` is listed but not
       console-mutable".
+    - "Memory-version actors — `user_actor.user_id` is a `principal_` id,
+      `api_actor.api_key_id` an `apikey_` id", once password accounts exist.
     - "Memory-version `created_by` / `redacted_by` —
       `service_account_actor` is never emitted", once service accounts
       act.
-- **README.md and the compose and Helm docs:** installing without a preset
-  key.
+- **README.md, deploy/gcp/README.md and the compose and Helm docs:**
+  installing without a preset key, and staging's login and gateway setup.
 - **Plan 31 (archived):** this plan supersedes it on two points. Plan 31
   kept roles in the IdP, and it gave the management key full authority.
   docs/HISTORY.md records the reversal.
@@ -563,5 +670,5 @@ until slice 6 has landed (decision 1).
 - End to end, the real `ant` CLI runs against a fresh compose install. It
   uses a key created in the console, sent once as `x-api-key` and once as a
   Bearer.
-- A compose install with no preset key in its configuration starts and
-  passes its smoke test.
+- After slice 7, a compose install with no preset key in its configuration
+  starts and passes its smoke test.
