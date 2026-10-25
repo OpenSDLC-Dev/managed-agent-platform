@@ -722,7 +722,7 @@ func TestParseRoleMap(t *testing.T) {
 		})
 	}
 
-	// The six rejection rules. Every defect is an error rather than a dropped
+	// The rejection rules. Every defect is an error rather than a dropped
 	// entry, because a dropped entry is a silent authority change.
 	msgs := map[string]string{}
 	for _, tc := range []struct {
