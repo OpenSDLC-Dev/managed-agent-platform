@@ -96,10 +96,10 @@ What they say:
   - The playground sends `POST /api/organizations/<uuid>/proxy/v1/messages`
     with a Cookie and no `Authorization` or `x-api-key` (recording
     `2026-10-22-playground-protocol`).
-  - Every captured proxy call (28 of 28) carries the header names
-    `x-organization-uuid` and `x-workspace-id`. The cookie shows in the 25
-    of 27 Runs whose full headers were captured. The recording does not
-    show whether a CSRF mechanism exists.
+  - All 28 captured proxy calls (27 Runs and one import helper) carry the
+    header names `x-organization-uuid` and `x-workspace-id`. The 26 whose
+    full request headers were captured carry the cookie. The recording does
+    not show whether a CSRF mechanism exists.
 - **Scopes exist on OAuth tokens only** (docs `manage-claude/wif-reference`):
   - Workload identity federation exchanges an IdP JWT at
     `POST /v1/oauth/token` (the RFC 7523 `jwt-bearer` grant) for a
@@ -219,22 +219,23 @@ What they say:
   a minor bump.
 - **The rule does not make a slice safe.** CD deploys every merge to main to
   GCP staging, so each slice must be safe to run there as it lands (author's
-  call). A slice may give a credential the authority it holds today or the
-  authority its role holds at the end state, whichever is greater, and
-  nothing beyond. Today an unowned key holds full
-  authority over the control plane, and the bootstrap key over the
-  gateway's admin API.
+  call). A slice may let a credential do what it can do today, or what a
+  credential of its kind can do at the end state, and nothing else. Today an
+  unowned key can do anything on the control plane, and the bootstrap key
+  anything on the gateway's admin API.
 - **An unowned key** is a management key with no owner: a seeded key, any
   key issued before slice 3 gives keys owners, or a key an unowned key
   issues after that. A session, deployment or dream whose creator's
-  principal row is gone (deleted under today's retention) counts as started
+  principal row is gone (deleted before slice 1, under today's retention)
+  counts as started
   by one.
 - **What an unowned key does until slice 7** is stated here, once; other
   decisions refer to this list:
   - It keeps today's authority on `/v1` and on the private API's existing
     routes, through `x-api-key` only, as today.
   - It creates only unowned keys and names no principal. It reaches none of
-    the routes this plan adds, which take only the cookie (decision 3). So
+    the authenticated routes this plan adds, which take only the cookie
+    (decision 3). So
     it can make nothing that outlives slice 7 beyond what it can make today:
     environment keys and resources.
   - On the gateway it keeps today's grant check and key policy. The
@@ -251,8 +252,8 @@ What they say:
   Environment keys (`sk-map-env01-`) are not affected. People create new
   keys in the console. The upgrade note says so. At slice 7, a session
   started by an unowned key stops at its next model turn, and a deployment
-  created by one fails at its next run. A developer or an admin can point
-  such a deployment at a service account.
+  created by one fails at its next run. An admin can point such a
+  deployment at a service account.
 - **The control plane needs a login mode from slice 7** (author's call). It
   refuses to start with `IDENTITY_MODE` empty or `disabled`, because without a login and
   a preset key nobody could manage it. Before slice 7, an install with no
@@ -352,12 +353,12 @@ IAP mode the login reads the proxy's assertion.
     today's handling would admit any active key row.
   - The gateway's admin API takes the bootstrap key and the operator token.
     It refuses every other key, owned or not, as today.
-  - Every route this plan adds takes only the cookie, from the slice that
-    adds it: members and service accounts, naming a principal when a key is
-    created, a deployment's initiator, the proxy path, and the gateway's
-    rate limits. The setup code's redemption is the one exception
-    (decision 1). So an install without a login sets no rate limit before
-    slice 7.
+  - Every authenticated route this plan adds takes only the cookie, from
+    the slice that adds it: members and service accounts, naming a principal
+    when a key is created, a deployment's initiator, the proxy path, and the
+    gateway's rate limits. The login routes and the setup code's redemption
+    (decision 1) are how a person gets the cookie, so they take none. An
+    install without a login therefore sets no rate limit before slice 7.
 
   From slice 7:
   - A leaked key cannot create keys, members or environment keys, and cannot
@@ -396,8 +397,8 @@ IAP mode the login reads the proxy's assertion.
     that an owned key is refused there.
 
   So of the management keys, only an owned key works as a Bearer on the
-  control plane's `/v1`. Environment keys, `wtk_` tokens and the gateway's
-  inference endpoints keep today's Bearer handling.
+  control plane's `/v1`. Environment keys and `wtk_` tokens keep today's
+  Bearer handling. The gateway's changes are decisions 8 and 10.
 
 ### 4. Principals and stored roles
 
@@ -453,19 +454,18 @@ IAP mode the login reads the proxy's assertion.
   - It revokes no environment key the person issued. An environment key
     belongs to its environment, and an admin revokes it in the console. The
     security doc says so.
-- **Retention.** The principal DELETE that docs/self-hosted-security.md §8
-  recommends must keep these principals (§8 is rewritten in slice 1):
-  - deactivated ones;
-  - ones with a role above user, so that it cannot delete the last admin;
-  - ones that own keys, or initiate sessions, deployments or dreams.
+- **Principals are never deleted, from slice 1** (author's call). The
+  DELETE that docs/self-hosted-security.md §8 recommends becomes a scrub:
+  - It clears a principal's personal fields, such as the email and name.
+  - It keeps the row: its id, role and deactivation, and what sign-in needs
+    to recognise the person (a digest of the IdP subject will do).
 
-  The database also refuses, with an error, a DELETE of such a row: slice 1
-  for deactivated principals and roles above user, slices 3 and 5 for
-  owners and initiators. A retention job written to today's §8 then fails
-  loudly instead of undoing a removal, and the upgrade note says to replace
-  it. An operator who must erase such a row, for an erasure request or a
-  recovery, sets a documented override in the same transaction. An erased
-  person who signs in again is a new principal; the security doc says so.
+  So a removed person stays removed after an erasure, because the row and
+  its deactivation survive, and the work anyone started still resolves to
+  its initiator. Slice 1 makes
+  the database refuse every DELETE on principals. A retention job written
+  to today's §8 then fails loudly instead of undoing a removal, and the
+  upgrade note says to switch it to the scrub.
 - Roles are organization-wide. There is no workspace layer.
 - The existing viewer role goes. Plan 31's per-request roles end here: a role
   is now stored, whether the mapping or an admin set it.
@@ -473,7 +473,7 @@ IAP mode the login reads the proxy's assertion.
 
 | Role | May |
 |---|---|
-| user | Sign in. Nothing else in this plan: reads no resource, creates no key, starts no session and calls no model directly. Work the person started before a demotion keeps running: their sessions, and their deployments' scheduled runs (decision 8). The reference's user uses the playground; #995 decides what this platform's user may do there. |
+| user | Sign in. Nothing else in this plan: reads no resource, creates no key, starts no session itself and calls no model directly. What the person set up before a demotion keeps running: their sessions and dreams, and their deployments' scheduled runs, which start new sessions in their name (decision 8). The reference's user uses the playground; #995 decides what this platform's user may do there. |
 | developer | Read every resource: agents, environments, sessions and their events, deployments, files, skills, memory stores, vaults and credential metadata, dreams. Create, change, archive and delete them, including vault credentials. Create and manage their own API keys. Call every non-administrative endpoint, with every model. Read the gateway's configuration and usage. |
 | admin | Everything developer may. Manage members, their roles and service accounts. Manage every API key. Issue and revoke environment keys. Change the model gateway's configuration and rate limits. Redact memory versions. |
 
@@ -581,19 +581,21 @@ Notes on the table:
 - **The claim checks the initiator before it mints.** It checks
   membership, not role (owner, 2026-10-25):
   - A removed person or an archived service account stops the session at
-    its next model turn. A role change stops neither a session nor a
-    deployment's scheduled runs: the work began while its initiator held
+    its next model turn. A role change stops neither a session, a dream,
+    nor a deployment's scheduled runs, which start new sessions under the
+    initiator's name: the work was set up while its initiator held
     developer.
   - Until slice 7, an unowned key passes whatever its state (decision 1),
     so slice 5 stops nothing that runs today.
   - A refused turn fails on the brain's existing path. The claim leases the
-    item as usual and mints nothing. The brain then settles the
+    item as usual and mints nothing, so it takes no new lock (#643). The
+    brain refuses where a failed model call is settled today, after replay,
+    so the settlement covers the input that woke the turn. It settles the
     `session.error` a refused model call draws today
-    (`model_request_failed_error`), with a message of ours. So the claim
-    takes no new lock (#643). The item is settled as a failed model call's
-    is: it leaves the queue, unless input arrived during the turn, when it
-    is requeued and the next claim refuses it again. Each input sent to such
-    a session draws one refusal.
+    (`model_request_failed_error`), with a message of ours.
+  - The item then leaves the queue as a failed model call's does. Input
+    that arrives while the refusal settles requeues it once, however many
+    events it holds, and draws one more refusal.
   - The check also covers a route that skips the gateway: Helm with
     `modelgateway.enabled=false`, or compose with a direct providers file.
 - **The gateway checks the same on each call**, in the lookup that
@@ -622,16 +624,16 @@ Notes on the table:
   start their sessions with that initiator's authority.
 - A manual run starts its session with the authority of the person or key
   that fired it, as `created_by` records today (author's call).
-- A deployment may name a service account as its initiator instead, so that
-  it outlives a change of staff. The service account's role must be no
-  higher than the role of the person who sets it (author's call). Only a
-  signed-in person sets it (decision 3).
+- An admin may name a service account as a deployment's initiator instead,
+  so that it outlives a change of staff (author's call). Only an admin sees
+  service accounts, and the setting takes the cookie (decision 3).
 - The initiator is set through the console's private API, not through a
   `/v1` field, so the wire shape does not change (author's call).
 - If the initiator is no longer a member when a scheduled run fires, the
   run fails with `unknown_error` (author's call), which auto-pauses the
-  deployment. A developer or an admin then names another initiator and
-  unpauses it. A demotion alone fails no run (decision 8).
+  deployment. An admin then points it at a service account, and it is
+  unpaused as any paused deployment is. A demotion alone fails no run
+  (decision 8).
 - Dreams follow the same rule (author's call). A dream's session is checked
   as any session is (decision 8), and the dream then fails as it does today
   when its session's model call fails, with `internal_error`.
@@ -756,8 +758,8 @@ the new paths, and slice 7 removes the old ones.
    - the setup code, redeemed on the identity lane until slice 2;
    - the identity lane reads stored roles, and the mapping applies, in both
      modes, at every verified request;
-   - deactivation is honoured (no API sets it yet), and the database
-     refuses to delete a deactivated principal or one above user
+   - deactivation is honoured (no API sets it yet), the database refuses
+     every DELETE on principals, and §8's retention becomes a scrub
      (decision 4);
    - the gateway's operator token reads the stored role too;
    - vault credentials open to developer;
@@ -788,7 +790,6 @@ the new paths, and slice 7 removes the old ones.
      API takes new key policies for unowned keys only;
    - a preset value that matches an owned key stops start-up, and the seed's
      comment that records refusing to boot as rejected is rewritten;
-   - the database refuses to delete a principal that owns a key;
    - the identity lane leaves `/v1`: the IdP Bearer and the proxy's
      assertion.
 4. **The gateway:**
@@ -798,7 +799,7 @@ the new paths, and slice 7 removes the old ones.
    - usage attributed to principals.
 5. **The initiator and the delegated token:**
    - sessions, deployments and dreams record their initiator, with the
-     backfill, and the database refuses to delete a principal that is one;
+     backfill;
    - the gateway accepts the per-claim inference token; the claim mints it
      and checks the initiator's membership;
    - the deployment's service-account rule, and a scheduled run's
@@ -826,11 +827,14 @@ the new paths, and slice 7 removes the old ones.
      gateway's `IDENTITY_*` admin sign-in) removed, with every reference to
      them: compose and `.env.example`, Helm, CI's workflows (`ci.yml` and
      `deploy.yml`), `deploy/gcp`'s values, README, `mode2-secret.sh` and its
-     test, and docs/deploy-gcp.md. A search of this repository for
-     `CONTROLPLANE_API_KEY`, `BRAIN_API_KEY`, `controlplane-api-key` and
-     `brain-api-key` then finds only the upgrade note, merged migrations,
-     dormant and archived plans, and history. The console's companion PR
-     removes `PLATFORM_API_KEY`;
+     test, and every doc that tells an operator to set them. The console's
+     `PLATFORM_API_KEY` goes from compose and Helm (slice 2 added it) and,
+     in the companion PR, from the console. A search of this repository
+     for `CONTROLPLANE_API_KEY`, `BRAIN_API_KEY`, `PLATFORM_API_KEY`,
+     `controlplane-api-key` and `brain-api-key` then finds no live use,
+     only records that keep history: merged migrations, plans,
+     docs/DIVERGENCES.md's entries, the changelog and its fragments, and
+     the upgrade note;
    - CD's post-deploy check reads slice 6's service-account key from the CD
      secret;
    - the control plane refuses to start without a login mode;
@@ -851,8 +855,8 @@ the new paths, and slice 7 removes the old ones.
 - **docs/self-hosted-security.md:**
   - §6: environment keys are issued and revoked in the console only,
     `cloud` ones included, and removing a person revokes none they issued;
-  - §8: the principal retention DELETE, the rows the database refuses to
-    delete, and the override for erasure (decision 4);
+  - §8: the principal retention DELETE becomes a scrub, and the database
+    refuses every DELETE on principals (decision 4);
   - §9 (SSO): who may sign in, the first sign-in as user, the mapping, and
     that the IdP reaches the platform only at sign-in;
   - §10 (the management key's lifecycle), rewritten; it also says how to
@@ -870,6 +874,9 @@ the new paths, and slice 7 removes the old ones.
       and rerank routes, which the reference does not serve (decision 6);
     - the setup code, and the other private paths this plan adds where no
       reference shape exists;
+    - a deployment's and a dream's initiator: the creator by default, a
+      service account an admin names, set through the private API, and
+      unchanged by a demotion (decisions 8 and 9);
     - a session whose initiator is gone fails its turn with today's
       `session.error` and a message of ours, a scheduled run fails with
       `unknown_error`, and a dream with `internal_error` (decisions 8 and
@@ -885,8 +892,8 @@ the new paths, and slice 7 removes the old ones.
     - "Human authentication (`/v1` management paths and the `/api/`
       console namespace)". Its sentence "its console authenticates humans
       with the tokens that endpoint mints" has no source and goes. Its
-      missing-key 401 for a Bearer on a management path narrows to a Bearer
-      that is no owned key.
+      missing-key 401 for a Bearer on a management path no longer covers an
+      issued-prefix Bearer, which draws the invalid-key 401 (decision 3).
     - "unknown_error is never recorded, and an unclassified fire failure
       records nothing at all", which decision 9's scheduled run makes
       untrue for a gone initiator.
