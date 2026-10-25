@@ -468,18 +468,21 @@ func TestAMappingTakesOverAConsoleRole(t *testing.T) {
 // TestADeactivatedPrincipalIsRefusedAndNotRecreated: removal is a lasting
 // deactivation. A removed person who signs in again is refused, even when a
 // mapping still matches them, and their row is neither re-created nor
-// touched: last_seen_at keeps the time it had.
+// touched: the refused token's new email and name are not recorded, and
+// last_seen_at keeps the time it had.
 func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	s := newLaneServer(t)
-	admin := s.token("platform-admins")
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", admin, nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token("platform-admins"), nil)); status != http.StatusOK {
 		t.Fatalf("GET /v1/agents as an admin: status %d, error %q, want 200", status, errType)
 	}
 	lastSeen := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	setPrincipal(t, s, `status = 'deactivated', last_seen_at = '2026-01-01T00:00:00Z'`)
 
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", admin, nil))
+	changed := s.claims("platform-admins")
+	changed["email"] = "ada.byron@corp.example"
+	changed["name"] = "Ada L. Byron"
+	status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", s.idp.Mint(t, changed), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET /v1/agents as a removed admin: status %d, error %q, want 403 permission_error", status, errType)
 	} else if msg := laneMessage(t, body); msg != "this account has been removed from the organization" {
@@ -489,9 +492,15 @@ func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	if n := countPrincipals(t, s); n != 1 {
 		t.Errorf("principals rows = %d, want 1: a removed person is not re-created", n)
 	}
+	var email, name string
 	var got time.Time
-	if err := s.pool.QueryRow(context.Background(), `SELECT last_seen_at FROM principals`).Scan(&got); err != nil {
-		t.Fatalf("read last_seen_at: %v", err)
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT email, display_name, last_seen_at FROM principals`).Scan(&email, &name, &got); err != nil {
+		t.Fatalf("read the principal: %v", err)
+	}
+	if email != "ada@corp.example" || name != "Ada Lovelace" {
+		t.Errorf("(email, display_name) = (%q, %q), want the values before the removal: the refused request must not touch the row",
+			email, name)
 	}
 	if !got.Equal(lastSeen) {
 		t.Errorf("last_seen_at = %s, want %s: the refused request must not touch the row", got, lastSeen)

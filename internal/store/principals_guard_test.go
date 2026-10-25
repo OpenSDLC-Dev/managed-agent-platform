@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -60,5 +61,33 @@ func TestPrincipalsRefuseDeleteAndTruncate(t *testing.T) {
 	}
 	if tag.RowsAffected() != 1 {
 		t.Errorf("scrub updated %d rows, want 1", tag.RowsAffected())
+	}
+}
+
+// Each column 0056 added takes only its listed values, and a service account
+// is developer or admin, as in the reference. The first row breaks only the
+// table constraint: each of its values is valid alone.
+func TestPrincipalsCheckTheirColumns(t *testing.T) {
+	pool := open(t, pgtest.FreshDB(t))
+	for i, tc := range []struct {
+		cols, vals string
+		ok         bool
+	}{
+		{"kind, role", "'service_account', 'user'", false},
+		{"kind, role", "'service_account', 'developer'", true},
+		{"role", "'viewer'", false},
+		{"role_source", "'scim'", false},
+		{"status", "'archived'", false},
+		{"kind", "'robot'", false},
+	} {
+		_, err := pool.Exec(context.Background(), fmt.Sprintf(`INSERT INTO principals (id, issuer, subject, %s)
+			VALUES ('principal_%d', 'https://idp.example', 'user-%d', %s)`, tc.cols, i, i, tc.vals))
+		var pgErr *pgconn.PgError
+		switch {
+		case tc.ok && err != nil:
+			t.Errorf("(%s) = (%s) => %v, want it accepted", tc.cols, tc.vals, err)
+		case !tc.ok && (!errors.As(err, &pgErr) || pgErr.Code != pgCheckViolation):
+			t.Errorf("(%s) = (%s) => %v, want check violation %s", tc.cols, tc.vals, err, pgCheckViolation)
+		}
 	}
 }

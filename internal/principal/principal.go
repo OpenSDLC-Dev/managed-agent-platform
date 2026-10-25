@@ -35,7 +35,10 @@ type Querier interface {
 
 // Resolve records that a verified person was seen and returns their principal,
 // creating the row at their first sign-in. Every verified request counts as a
-// sign-in, so the IdP's mapping is applied here each time.
+// sign-in, so the IdP's mapping is applied here each time. A token re-applies
+// the mapping it carries on every request until it expires, so a demotion at
+// the IdP takes hold once the person's older tokens have expired: until then,
+// a request made with one of them restores the role it maps to.
 //
 // It is a single statement because it is on the authentication path of every
 // request a person makes: a read-then-write would double the round trips and

@@ -35,11 +35,10 @@
 -- them as they are.
 --
 -- The ALTER takes principals ACCESS EXCLUSIVE, and every human request writes
--- principals, so, as 0045 does, this waits at most 2s for the lock and
--- migrate.go retries the give-up (55P03). Validating the new CHECKs reads the
--- whole table under that lock, which is cheap: it holds one row per person
--- who has signed in.
-SET LOCAL lock_timeout = '2s';
+-- principals. The bound migrate.go lays before every migration
+-- (migrateLockWait) keeps the wait for that lock to 2s, and migrate.go retries
+-- the give-up (55P03). Validating the new CHECKs reads the whole table under
+-- that lock, which is cheap: it holds one row per person who has signed in.
 
 ALTER TABLE principals
     ADD COLUMN kind text NOT NULL DEFAULT 'user'
@@ -66,8 +65,6 @@ CREATE TRIGGER principals_refuse_delete BEFORE DELETE ON principals
 
 CREATE TRIGGER principals_refuse_truncate BEFORE TRUNCATE ON principals
     FOR EACH STATEMENT EXECUTE FUNCTION principals_refuse_delete();
-
-SET LOCAL lock_timeout TO DEFAULT;
 
 -- The setup codes the replicas printed at start-up, by hash. Any unexpired
 -- one redeems, and redeeming one deletes them all.
