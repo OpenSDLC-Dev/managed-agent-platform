@@ -34,7 +34,7 @@ The owner stated the requirements:
   that started it.
 
 The owner made the decisions below on 2026-10-24 and 2026-10-25. On
-2026-10-25 a builder check and two code-review passes read the draft. The
+2026-10-25 a builder check and code reviews read the draft. The
 owner settled the points they raised that change a security boundary, and
 set the roles to match the reference. The author settled the rest; those say
 so ("author's call"). "Left to the builder" lists what neither settled.
@@ -190,8 +190,11 @@ What they say:
   - Compose, Helm and GCP staging all leave `IDENTITY_MODE` empty.
   - Neither compose nor Helm deploys the console. It ships as its own image,
     `ghcr.io/opensdlc-dev/managed-agent-console`.
-  - The bundled Casdoor registers the console's callback,
-    `http://localhost:5173/callback`, as a public client.
+  - The bundled Casdoor registers the console as a confidential client. In
+    compose, the callback is `http://localhost:5173/callback` and the
+    secret a seeded development value (`deploy/compose/casdoor-init-data.json`).
+    In Helm, both come from `casdoor.console` values, and the secret is
+    required.
   - Staging is plain HTTP on a bare LoadBalancer IP. Its values file
     prepares `trusted_proxy` with `roles: email` and a role map for when IAP
     fronts it.
@@ -210,21 +213,30 @@ What they say:
   STATE.md's active work is mid-slice, so STATE.md says "no release until
   plan 69 slice 7" from slice 1 to slice 7. Under SemVer 0.x the removal is a
   minor bump.
-- **Between slices, an old key can do more than it could before** (author's
-  call, under the no-release rule). From slice 4 to slice 7, a key from
-  before this plan that had a narrow model grant, or none, can call every
-  model, within the organization's rate limits.
-- **Every management API key that exists before this plan stops working at
-  slice 7**, whoever issued it. Environment keys (`sk-map-env01-`) are not
-  affected. People create new keys in the console. The upgrade note says
-  so. Work that an old key started:
+- **The rule does not make a slice safe.** CD deploys every merge to main to
+  GCP staging, so each slice must be safe to run there as it lands (author's
+  call). No slice widens what an existing credential can do.
+- **An unowned key** is a management key with no owner: a seeded key, or
+  any key issued before slice 3 gives keys owners.
+- **Every unowned key stops working at slice 7**, whoever issued it.
+  Environment keys (`sk-map-env01-`) are not affected. People create new
+  keys in the console. The upgrade note says so. Work that an unowned key
+  started:
   - keeps running until slice 7 (decision 8);
-  - at slice 7, a session started by an old key stops at its next model
+  - at slice 7, a session started by an unowned key stops at its next model
     turn, and a deployment created by one fails at its next run. An admin
     can point such a deployment at a service account.
+- **Rotating `CONTROLPLANE_API_KEY` between slices 5 and 7** archives the
+  old seeded row, so the sessions and deployments it started stop the same
+  way. The upgrade note says so.
+- **The control plane needs a login mode from slice 7** (author's call). It
+  refuses to start with `IDENTITY_MODE` empty, because without a login and
+  a preset key nobody could manage it. Before slice 7, an install with no
+  login mode prints no setup code, because nobody could redeem it.
 - **The first admin is created with a one-time setup code:**
   - The control plane prints a code to its log at start-up, but only while
-    both of these hold (author's calls):
+    all of these hold (author's calls):
+    - A login mode is configured.
     - The install has never had an admin. A stored flag records the first
       admin, so a later "no admin" state never reopens the door.
     - No IdP mapping can give the admin role. Where one can, the IdP
@@ -253,8 +265,8 @@ What they say:
   - No admin can demote or remove the last active admin, themselves
     included.
   - Only people count. An admin service account does not, because member
-    management needs the cookie (decision 3), so a service account cannot
-    add another admin.
+    management never takes an owned key (decision 3), so a service account
+    cannot add another admin.
   - An IdP mapping can still demote the last admin (decision 4). Recovery is
     then a database edit.
 
@@ -307,7 +319,9 @@ request on the identity lane.
   it.
 - **Those two surfaces take the cookie only** (owner, 2026-10-25). This
   holds from slice 7. Until then they also take today's credentials, so that
-  an install without a login keeps working.
+  an install without a login keeps working: unowned keys, the bootstrap key,
+  and the IdP Bearer or the operator token. An owned key (slice 3 on) never
+  reaches them.
   - A leaked key cannot create keys, members or environment keys, and cannot
     repoint the gateway's providers or vendor credentials.
   - Issuing or revoking an environment key needs a person signed in to the
@@ -327,12 +341,15 @@ request on the identity lane.
   their own routes: environment keys and `wtk_` on `/v1`, `gtk_` on
   `/internal/v1/gate/config`, and the delegated inference token (decision 8)
   on the gateway's `/v1`.
-- **A Bearer is looked up as an API key first**, by its hash, from slice 3
-  (author's call). One that matches no API key goes where a Bearer goes
-  today:
-  - on a dual-auth route, to the environment-key lane;
-  - on a management route, to today's refusals, including #840's answer to a
-    revoked environment key.
+- **How a Bearer on `/v1` is read**, from slice 3 (author's call):
+  - The work routes still take only an environment key.
+  - On every other `/v1` route, a Bearer that carries the environment-key
+    prefix goes where it goes today, with no extra lookup.
+  - Any other Bearer is looked up as an API key first, by its hash. One that
+    matches no API key goes where a Bearer goes today: on a dual-auth route,
+    to the environment-key lane; on a management route, to today's refusals,
+    including #840's answer to a revoked environment key.
+  - The private `/api/` paths keep today's handling until slice 7.
 
   So a seeded key whose value has no prefix, such as compose's
   `local-dev-key`, works as a Bearer until slice 7 removes it. A
@@ -351,9 +368,9 @@ request on the identity lane.
     the reference, where viewing usage and session traces is developer's.
   - **A first sign-in that matches no mapping gets user**, as in the
     reference. A user reaches nothing in this plan, so an open IdP, such as
-    Google accounts, admits no reader. The playground changes that, because
-    a user can then spend on models. The plan that builds the playground
-    settles the first sign-in's role again.
+    Google accounts, admits no reader. If the playground (#995) lets a user
+    call models, an outsider could spend, so that issue settles the first
+    sign-in's role again.
   - A service account is developer or admin, as in the reference.
 - **The IdP mapping is optional**, in OIDC and IAP modes alike, on the claim
   `IDENTITY_CLAIM_ROLES` names (staging's values map emails). When one is
@@ -372,8 +389,9 @@ request on the identity lane.
     map those people to developer if they must read.
 - **The gateway's operator token follows the same rules**, from slice 1
   (author's call). Until slice 7 removes it, it is the gateway admin API's
-  identity lane, so it reads the stored role and refuses a removed member,
-  as the control plane's identity lane does.
+  identity lane. So, as the control plane's identity lane does, it applies
+  the mapping, creates the principal on first use, reads the stored role,
+  and refuses a removed member.
 - **The IdP reaches the platform only at sign-in.** A demotion or a removal
   there takes effect at the person's next sign-in. A person who uses only
   API keys never signs in, so their keys keep their stored role. An admin
@@ -388,8 +406,10 @@ request on the identity lane.
     owners.
   - Restoring the member restores no key.
 - **Retention.** The principal DELETE that docs/self-hosted-security.md §8
-  recommends must keep deactivated principals, and principals that own
-  keys, sessions or deployments. §8 is rewritten in slice 1.
+  recommends must keep these principals (§8 is rewritten in slice 1):
+  - deactivated ones;
+  - ones with a role above user, so that it cannot delete the last admin;
+  - ones that own keys, or initiate sessions, deployments or dreams.
 - Roles are organization-wide. There is no workspace layer.
 - The existing viewer role goes. Plan 31's per-request roles end here: a role
   is now stored, whether the mapping or an admin set it.
@@ -397,7 +417,7 @@ request on the identity lane.
 
 | Role | May |
 |---|---|
-| user | Sign in. Use the playground, once one exists. Nothing else: reads no resource and creates no key. |
+| user | Sign in. Nothing else in this plan: reads no resource, creates no key and calls no model. The reference's user uses the playground; #995 decides what this platform's user may do there. |
 | developer | Read every resource: agents, environments, sessions and their events, deployments, files, skills, memory stores, vaults and credential metadata, dreams. Create, change, archive and delete them, including vault credentials. Create and manage their own API keys. Call every non-administrative endpoint, with every model. Read the gateway's configuration and usage. |
 | admin | Everything developer may. Manage members, their roles and service accounts. Manage every API key. Issue and revoke environment keys. Change the model gateway's configuration and rate limits. Redact memory versions. |
 
@@ -424,8 +444,8 @@ Notes on the table:
   - When the owner's role changes, the key's reach changes with it.
 - From slice 3, `/v1` accepts a key as `x-api-key` or as
   `Authorization: Bearer`, as the reference does. The gateway's inference
-  endpoints already do. That holds for keys from before this plan too. They
-  keep full management authority until slice 7 (decision 1).
+  endpoints already do. That holds for unowned keys too. They keep full
+  management authority until slice 7 (decision 1).
 
 ### 6. Scopes, only where a credential needs one
 
@@ -466,6 +486,9 @@ Notes on the table:
 - **The token** names the session's initiator as its subject and the brain
   as its actor. Its scope is `workspace:inference`. It is valid only while
   the claim holds.
+- **Only the gateway's inference endpoints accept it.** It is stored apart
+  from API keys, so the control plane's Bearer lookup (decision 3) can never
+  match it (author's call).
 - **Who may call models.** Only developer and admin, whatever the
   credential. The playground (#995) decides whether a user may call models
   through the console.
@@ -481,15 +504,17 @@ Notes on the table:
   from `created_by` (author's calls):
   - a principal: that principal;
   - a key that has an owner (slice 3 on): the owner;
-  - a key from before this plan: that key;
+  - an unowned key: that key;
   - none, for a session that a deployment's schedule fired: the deployment's
     initiator, which is backfilled the same way from its own `created_by`;
   - none, for a dream's session: the dream's initiator, which is backfilled
     the same way from the dream's own `created_by`.
 
-  Until slice 7, a key from before this plan counts as a valid initiator,
-  with today's authority. At slice 7 it does not (decision 1). A row with no
-  initiator fails its next model turn with a recorded error.
+  The claim applies the same rules to a session that still has no
+  initiator, such as one an old replica creates during a rolling deploy.
+  Only a session that none of them resolves fails its turn, with a recorded
+  error. Until slice 7, an unowned key counts as a valid initiator, with
+  today's authority. At slice 7 it does not (decision 1).
 
 ### 9. Deployments name their initiator
 
@@ -510,14 +535,20 @@ Notes on the table:
 ### 10. The model gateway
 
 - Every role that may call models may call every model.
-- Model grants and key policies are removed. No allowlist replaces them. The
-  bootstrap key's and the brain key's pass around grants goes with them.
+- **From slice 4, an owned key needs no model grant.** The gateway admits it
+  while its owner may call models, checked in the lookup that authenticates
+  it. A delegated token is checked the same way (decision 8).
+- **An unowned key keeps today's rules until it goes** (author's call): its
+  grant check and key policy, or the bootstrap key's and the brain key's
+  pass. So no slice widens which models an existing key reaches.
+- Grants and key policies are deleted at slice 7. No allowlist replaces
+  them.
 - An admin sets rate limits per model for the whole organization: requests,
-  input tokens and output tokens per minute. They replace the RPM and TPM
-  limits of each key policy.
+  input tokens and output tokens per minute. They apply to every call from
+  slice 4, and replace the key policies' RPM and TPM limits when those go.
 - **Usage is attributed to the principal a call acts for** (author's call):
   an API key's owner, or a delegated token's initiator. The key is recorded
-  too when the call used one. A key from before this plan stands for itself.
+  too when the call used one. An unowned key stands for itself.
   The ledger, its rollups and the rate windows stop being keyed by
   `api_key_id`.
 - A monthly spend limit comes later, because it needs a price for each
@@ -564,7 +595,10 @@ decisions above.
   ingress, or the console's rewrites. The console's own server routes under
   `/api/` must not collide with the control plane's private paths. Those
   routes are `health`, `login`, `auth/{login,callback,logout,session}`, and
-  the proxies this plan retires.
+  the proxies. The `console` and `oauth` proxies serve an install without a
+  login until slice 7, while an install with a login sends those paths
+  straight to the control plane. So the routing depends on the login mode
+  until slice 7.
 - **IAP topology.** `/v1` must be reachable with an API key alone, so an IAP
   deployment routes `/v1` past the proxy.
 - **The setup code's** lifetime: hours, not days.
@@ -573,10 +607,11 @@ decisions above.
 - **The OIDC client library.** `internal/identity` already verifies ID
   tokens. golang.org/x/oauth2 is an indirect dependency; if it is adopted
   for the code exchange, it stays in one package, as go-jose does.
-- **The delegated token's** storage, and how the brain's provider sends it
-  in place of a route's static `api_key`.
+- **The delegated token's** storage, apart from API keys (decision 8), and
+  how the brain's provider sends it in place of a route's static `api_key`.
 - **The usage ledger's** new columns, and what happens to its existing rows.
-- **The slice order** below. Each slice keeps main deployable.
+- **The slice order** below. Each slice keeps main deployable, and safe to
+  run on staging (decision 1).
 
 ## Out of scope
 
@@ -593,9 +628,10 @@ decisions above.
 
 A suggested order. Each slice is one PR in this repository. When the console
 changes, a companion PR goes to managed-agent-console. No release is cut
-until slice 7 has landed (decision 1). Slices 1 to 5 add the new path beside
-the old one; slice 6 moves every install onto it; slice 7 removes the old
-one.
+until slice 7 has landed (decision 1), but CD deploys each slice to staging,
+so each one must be safe to run as it lands. Slices 1 to 5 add the new path
+beside the old one; slice 6 moves every install onto it; slice 7 removes the
+old one.
 
 1. **Stored roles:**
    - user, developer and admin stored on principals; viewer goes, and reads
@@ -610,7 +646,9 @@ one.
 2. **Platform login and the cookie:**
    - password (with the setup code's first account), OIDC and IAP login on
      the control plane;
-   - the bundled Casdoor registers the control plane's callback;
+   - the bundled Casdoor, in compose and Helm, registers the control plane's
+     callback, and the control plane holds that client's secret (the one
+     configured secret, decision 2);
    - the session cookie, on private paths and the gateway's admin API,
      beside today's credentials;
    - the private API for members and service accounts, with the last-admin
@@ -627,9 +665,10 @@ one.
      first;
    - the identity lane leaves `/v1`: the IdP Bearer and the proxy's
      assertion;
-   - keys from before this plan keep their authority until slice 7.
+   - unowned keys keep their authority until slice 7.
 4. **The gateway:**
-   - grants and key policies removed;
+   - an owned key needs no grant, and is admitted while its owner may call
+     models; unowned keys keep their grants and policies;
    - rate limits per model for the organization;
    - usage attributed to principals.
 5. **The initiator and the delegated token:**
@@ -639,8 +678,9 @@ one.
      the claim's initiator check;
    - the deployment's service-account rule;
    - `BRAIN_API_KEY` removed, with its handling in compose, Helm, CI's
-     checks and `deploy/gcp/mode2-secret.sh`, and its seeded `brain` key
-     archived.
+     checks, `deploy/gcp/mode2-secret.sh` and docs/deploy-gcp.md. Its seeded
+     `brain` row stays until slice 7, like every unowned key, so that a
+     brain still rolling over keeps working.
 6. **Every install signs in:**
    - compose defaults to password mode, as a development install;
    - Helm requires a login mode;
@@ -659,10 +699,13 @@ one.
 7. **No preset key:**
    - `CONTROLPLANE_API_KEY`, the bootstrap key, the operator token and the
      console's `PLATFORM_API_KEY` removed;
+   - the control plane refuses to start without a login mode;
    - the private paths and the gateway's admin API take the cookie only;
-   - every management key from before this plan stops working;
-   - CD's post-deploy check and `deploy/gcp/mode2-secret.sh` use slice 6's
-     service-account key;
+   - every unowned key stops working, and grants and key policies are
+     deleted;
+   - `deploy/gcp/mode2-secret.sh` and docs/deploy-gcp.md stop carrying
+     `controlplane-api-key`, and CD's post-deploy check reads slice 6's
+     service-account key from the CD secret;
    - deploy/gcp/README.md configures staging's gateway in the console.
 
 ## Docs that move with the change
@@ -705,6 +748,9 @@ one.
     - "`sk-map-api01-` as the issued-key prefix, and `principal`/`api_key`
       actors where the reference says `user`".
     - "Environment worker keys — issuance".
+    - "Which console role may issue an environment key — `admin` here,
+      unobserved there".
+    - "`IDENTITY_MODE=trusted_proxy` — a mode with no reference analog".
     - "`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens[…]`
       — the console-API dialect".
     - "A revoked environment key on a management route — the reference's
@@ -716,12 +762,15 @@ one.
     - "Memory-version `created_by` / `redacted_by` —
       `service_account_actor` is never emitted", once service accounts
       act.
-- **README.md, deploy/gcp/README.md and the compose and Helm docs:**
-  installing with the console and without a preset key, and staging's login
-  and gateway setup.
-- **Plan 31 (archived):** this plan supersedes it on two points. Plan 31
-  kept roles in the IdP, and it gave the management key full authority.
-  docs/HISTORY.md records the reversal.
+- **README.md, deploy/gcp/README.md, docs/deploy-gcp.md and the compose and
+  Helm docs:** installing with the console and without a preset key, and
+  staging's login and gateway setup.
+- **Archived plans this one reverses**, each recorded in docs/HISTORY.md:
+  - plan 31, which kept roles in the IdP and gave the management key full
+    authority;
+  - plan 32, which kept the key seeded from `CONTROLPLANE_API_KEY` beside
+    the issued ones;
+  - plan 59, whose key policies, bootstrap key and brain-key pass go.
 
 ## Verification
 
