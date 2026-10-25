@@ -5,6 +5,8 @@ issue: "#56"
 
 # Multi-tenant activation — the workspace becomes a real scoping key (plan 42)
 
+> **Plan 69 changes two premises below.** It stores roles on `principals`, so that row becomes an authority (§6.2 assumes it is not). It also ends plan 31's per-request roles, which rule 6 of §2 mirrors. Read [plan 69](./69_principal-bound-auth.md) before this plan resumes.
+
 Resolves **#56**. Today the reserved tenancy columns are decoration. Fourteen tables carry
 `org_id`/`workspace_id`/`project_id` as `text NOT NULL DEFAULT 'default'`; **exactly two
 statement lines in the whole non-test tree name any of those columns**, and they are the two
