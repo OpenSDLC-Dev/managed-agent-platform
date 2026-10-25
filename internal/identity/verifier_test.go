@@ -66,7 +66,7 @@ func verifierXRoleMap() map[string]identity.Role {
 	return map[string]identity.Role{
 		"platform-admins": identity.RoleAdmin,
 		"devs":            identity.RoleDeveloper,
-		"everyone":        identity.RoleViewer,
+		"everyone":        identity.RoleUser,
 	}
 }
 
@@ -1505,8 +1505,8 @@ func TestNoMappedRoleYieldsRoleNone(t *testing.T) {
 	if got != want {
 		t.Errorf("Identity = %+v, want %+v", got, want)
 	}
-	if got.Role.AtLeast(identity.RoleViewer) {
-		t.Error("an unmapped principal satisfies the viewer minimum; RoleNone must satisfy nothing")
+	if got.Role.AtLeast(identity.RoleUser) {
+		t.Error("an unmapped principal satisfies the user minimum; RoleNone must satisfy nothing")
 	}
 }
 

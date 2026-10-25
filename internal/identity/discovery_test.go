@@ -416,7 +416,7 @@ func TestNewValidatesTheRoleMap(t *testing.T) {
 	}{
 		{name: "empty claim value", m: map[string]identity.Role{"": identity.RoleAdmin}},
 		{name: "empty value beside a good one", m: map[string]identity.Role{
-			"platform-admins": identity.RoleAdmin, "": identity.RoleViewer}},
+			"platform-admins": identity.RoleAdmin, "": identity.RoleUser}},
 		{name: "unknown role", m: map[string]identity.Role{"eng": identity.Role("superuser")}},
 		{name: "RoleNone as a target", m: map[string]identity.Role{"eng": identity.RoleNone}},
 		{name: "role differing only in case", m: map[string]identity.Role{"eng": identity.Role("Admin")}},

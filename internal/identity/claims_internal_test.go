@@ -96,17 +96,17 @@ func TestClaimAtDottedPathOnly(t *testing.T) {
 	t.Run("Keycloak shape, flat shadow present", func(t *testing.T) {
 		t.Parallel()
 		// The realistic attack: the attacker-placed flat claim grants admin, the
-		// genuine nested claim grants viewer. Resolving the flat one is privilege
+		// genuine nested claim grants user. Resolving the flat one is privilege
 		// escalation.
 		claims := claimsXDecode(t, `{
 			"resource_access.console.roles": ["platform-admin"],
 			"resource_access": {"console": {"roles": ["platform-viewer"]}}
 		}`)
-		roles := map[string]Role{"platform-viewer": RoleViewer, "platform-admin": RoleAdmin}
+		roles := map[string]Role{"platform-viewer": RoleUser, "platform-admin": RoleAdmin}
 		got := strongestRole(roleValues(claimAt(claims, "resource_access.console.roles")), roles)
-		if got != RoleViewer {
+		if got != RoleUser {
 			t.Errorf("role from the shadowed Keycloak claim = %q, want %q — the flat "+
-				"claim escalated the user to their own role", got, RoleViewer)
+				"claim escalated the user to their own role", got, RoleUser)
 		}
 	})
 
@@ -380,7 +380,7 @@ func TestSpaceDelimitedScalarIsOneValue(t *testing.T) {
 	if want := []string{"eng admin"}; !slices.Equal(got, want) {
 		t.Errorf("roleValues(%q) = %#v, want %#v — the scalar was split on spaces", "eng admin", got, want)
 	}
-	if r := strongestRole(got, map[string]Role{"admin": RoleAdmin, "eng": RoleViewer}); r != RoleNone {
+	if r := strongestRole(got, map[string]Role{"admin": RoleAdmin, "eng": RoleUser}); r != RoleNone {
 		t.Errorf("strongestRole over the unsplit scalar = %q, want %q — a space-delimited "+
 			"value matched a role map entry it does not equal", r, RoleNone)
 	}
@@ -390,8 +390,8 @@ func TestSpaceDelimitedScalarIsOneValue(t *testing.T) {
 // neither claim order nor Go's randomized map iteration can change the answer.
 func TestStrongestRoleIsOrderIndependent(t *testing.T) {
 	t.Parallel()
-	m := map[string]Role{"eng": RoleViewer, "sre": RoleAdmin, "build": RoleDeveloper}
-	// Every permutation of one viewer-mapped, one admin-mapped and one unmapped
+	m := map[string]Role{"eng": RoleUser, "sre": RoleAdmin, "build": RoleDeveloper}
+	// Every permutation of one user-mapped, one admin-mapped and one unmapped
 	// value. The strongest is admin in all six.
 	for _, values := range [][]string{
 		{"eng", "sre", "unmapped"},
@@ -413,7 +413,7 @@ func TestStrongestRoleIsOrderIndependent(t *testing.T) {
 			}
 		})
 	}
-	// Developer beats viewer for the same reason, so the order is a full order
+	// Developer beats user for the same reason, so the order is a full order
 	// and not just "admin wins".
 	for i := 0; i < 100; i++ {
 		if got := strongestRole([]string{"build", "eng"}, m); got != RoleDeveloper {
@@ -424,14 +424,14 @@ func TestStrongestRoleIsOrderIndependent(t *testing.T) {
 
 func TestStrongestRoleUnmappedDrop(t *testing.T) {
 	t.Parallel()
-	m := map[string]Role{"everyone": RoleViewer}
+	m := map[string]Role{"everyone": RoleUser}
 	for _, tc := range []struct {
 		name   string
 		values []string
 		roles  map[string]Role
 		want   Role
 	}{
-		{name: "unmapped values drop", values: []string{"unknown", "everyone"}, roles: m, want: RoleViewer},
+		{name: "unmapped values drop", values: []string{"unknown", "everyone"}, roles: m, want: RoleUser},
 		{name: "nothing mapped", values: []string{"unknown", "other"}, roles: m, want: RoleNone},
 		{name: "no values", values: nil, roles: m, want: RoleNone},
 		{name: "empty role map", values: []string{"everyone"}, roles: map[string]Role{}, want: RoleNone},

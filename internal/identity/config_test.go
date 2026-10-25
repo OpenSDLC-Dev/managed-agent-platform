@@ -693,13 +693,13 @@ func TestParseRoleMap(t *testing.T) {
 			name: "all three roles",
 			spec: "r=viewer,d=developer,a=admin",
 			want: map[string]identity.Role{
-				"r": identity.RoleViewer, "d": identity.RoleDeveloper, "a": identity.RoleAdmin,
+				"r": identity.RoleUser, "d": identity.RoleDeveloper, "a": identity.RoleAdmin,
 			},
 		},
 		{
 			name: "an empty pair is skipped rather than refused",
 			spec: "eng=viewer,",
-			want: map[string]identity.Role{"eng": identity.RoleViewer},
+			want: map[string]identity.Role{"eng": identity.RoleUser},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

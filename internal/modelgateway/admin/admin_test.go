@@ -56,7 +56,7 @@ func newEnv(t *testing.T, withIdentity bool) *env {
 		v, err := identity.New(context.Background(), identity.Config{
 			Mode: identity.ModeOIDC, Issuer: e.idp.Issuer(), Audience: audience, JWKSURL: e.idp.JWKSURL(),
 			RoleMap: map[string]identity.Role{
-				"admins": identity.RoleAdmin, "devs": identity.RoleDeveloper, "readers": identity.RoleViewer,
+				"admins": identity.RoleAdmin, "devs": identity.RoleDeveloper, "readers": identity.RoleUser,
 			},
 			HTTPClient: e.idp.Client(), Now: e.clock.Now,
 		})
@@ -225,7 +225,7 @@ func TestAuthByKey(t *testing.T) {
 	}
 }
 
-// An operator token reads with viewer or developer and writes with admin.
+// An operator token reads with user or developer and writes with admin.
 func TestAuthByRole(t *testing.T) {
 	e := newEnv(t, true)
 	body := map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth}

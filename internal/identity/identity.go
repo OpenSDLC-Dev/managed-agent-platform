@@ -107,17 +107,17 @@ type Role string
 // The three roles, plus the absence of one.
 const (
 	RoleNone      Role = "" // authenticated, nothing mapped — satisfies nothing
-	RoleViewer    Role = "viewer"
+	RoleUser      Role = "user"
 	RoleDeveloper Role = "developer"
 	RoleAdmin     Role = "admin"
 )
 
 // roleRank fixes the strength order. RoleNone is absent from the map, so it
 // ranks zero.
-var roleRank = map[Role]int{RoleViewer: 1, RoleDeveloper: 2, RoleAdmin: 3}
+var roleRank = map[Role]int{RoleUser: 1, RoleDeveloper: 2, RoleAdmin: 3}
 
 // AtLeast reports whether r satisfies a route's minimum role, on the fixed order
-// admin > developer > viewer.
+// admin > developer > user.
 //
 // Fail-closed at both ends: RoleNone satisfies nothing, and a minimum that is not
 // one of the three — including "" — is satisfied by nothing, so a typo in a route
@@ -130,8 +130,14 @@ func (r Role) AtLeast(min Role) bool {
 	return roleRank[r] >= want
 }
 
-// ParseRole accepts exactly the three role names.
+// ParseRole accepts exactly the three role names, plus "viewer" as the old name
+// of RoleUser. The alias keeps an IDENTITY_ROLE_MAP written before plan 69 from
+// failing startup; the person it maps now reads nothing, because user reaches
+// only the playground.
 func ParseRole(s string) (Role, bool) {
+	if s == "viewer" {
+		return RoleUser, true
+	}
 	r := Role(s)
 	if _, ok := roleRank[r]; !ok {
 		return RoleNone, false

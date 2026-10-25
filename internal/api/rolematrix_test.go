@@ -38,7 +38,7 @@ import (
 type routeReg struct {
 	line    int
 	pattern string // rendered: "GET /v1/agents", or `"POST "+consoleTokensPath`
-	role    string // "RoleViewer" … ; empty when the handler declares none
+	role    string // "RoleUser" … ; empty when the handler declares none
 	isFunc  bool   // the handler is a bare closure, not one of the adapters
 }
 
@@ -181,7 +181,7 @@ func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 	}
 }
 
-// roleValue turns the identifier "RoleViewer" into the wire value "viewer" that
+// roleValue turns the identifier "RoleUser" into the wire value "user" that
 // identity.ParseRole accepts, so the test validates against the real parser
 // rather than a second list of role names that could drift from it.
 func roleValue(ident string) string {
@@ -313,7 +313,7 @@ func roleIn(e ast.Expr) string {
 		// matched node's children — the walk still visits its siblings — so
 		// without this guard a handler expression naming two roles would report
 		// whichever came last, and the test could certify a route as admin while
-		// requireRole enforces viewer.
+		// requireRole enforces user.
 		if found != "" {
 			return false
 		}

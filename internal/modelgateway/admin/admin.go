@@ -12,7 +12,7 @@
 // do anything; a key an application issues under the name bootstrap is
 // nothing to it, since it is never looked up in api_keys. An operator token,
 // verified by internal/identity under the same IDENTITY_* configuration the
-// control plane reads, reads with viewer or developer and writes with admin.
+// control plane reads, reads with user or developer and writes with admin.
 // Every other platform API key is refused: a key that could edit key policies
 // could lift its own limits.
 //
@@ -118,7 +118,7 @@ func New(cfg Config) (http.Handler, error) {
 }
 
 func (h *handler) routes() {
-	read, write := identity.RoleViewer, identity.RoleAdmin
+	read, write := identity.RoleUser, identity.RoleAdmin
 	h.route("/admin/v1/profiles", ep("GET", read, h.listProfiles))
 	h.route("/admin/v1/profiles/{name}", ep("GET", read, h.getProfile))
 	h.route("/admin/v1/providers", ep("GET", read, h.listProviders), ep("POST", write, h.createProvider))
@@ -184,7 +184,7 @@ func (h *handler) route(path string, eps ...endpoint) {
 type roleKey struct{}
 
 // ServeHTTP authenticates before routing, and refuses a token that maps to
-// no role before routing too: every route needs the viewer role at least, so
+// no role before routing too: every route needs the user role at least, so
 // a caller who can call nothing learns nothing about which paths exist.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role, err := h.authenticate(r)
@@ -193,7 +193,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := context.WithValue(r.Context(), roleKey{}, role)
-	if err := requireRole(ctx, identity.RoleViewer); err != nil {
+	if err := requireRole(ctx, identity.RoleUser); err != nil {
 		writeError(w, r, err)
 		return
 	}

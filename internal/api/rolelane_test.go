@@ -91,7 +91,7 @@ func roleMatrix() []matrixRoute {
 		dream   = "/v1/dreams/{id}"
 		depl    = "/v1/deployments/{id}"
 	)
-	v, d, a := identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin
+	v, d, a := identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin
 
 	return []matrixRoute{
 		// Agents.
@@ -106,7 +106,7 @@ func roleMatrix() []matrixRoute {
 		{"POST", depl + "/pause", d}, {"POST", depl + "/unpause", d},
 		// run takes developer because it does session-create's work (§5.1).
 		{"POST", depl + "/run", d},
-		// The run record surface is read-only and viewer, like every list.
+		// The run record surface is read-only and at the user tier, like every list.
 		{"GET", "/v1/deployment_runs", v}, {"GET", "/v1/deployment_runs/{id}", v},
 
 		// Environments. The work API under /v1/environments/{id}/work is a
@@ -174,16 +174,16 @@ func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 	// RoleNone is a real caller here, not a placeholder — a person the deployment
 	// authenticated whose IdP groups map to nothing. It is the only tier that is
 	// denied on EVERY route, which makes it the denied-case control for the
-	// viewer routes: without it, every tier under test would satisfy a viewer
-	// minimum, and a viewer check that stopped running entirely would still see
+	// user routes: without it, every tier under test would satisfy a user
+	// minimum, and a user check that stopped running entirely would still see
 	// each row pass on the handler's own 404.
 	tokens := map[identity.Role]string{
 		identity.RoleNone:      s.token("unmapped-group"),
-		identity.RoleViewer:    s.token("platform-read"),
+		identity.RoleUser:      s.token("platform-read"),
 		identity.RoleDeveloper: s.token("platform-devs"),
 		identity.RoleAdmin:     s.token("platform-admins"),
 	}
-	callers := []identity.Role{identity.RoleNone, identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin}
+	callers := []identity.Role{identity.RoleNone, identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin}
 
 	for _, route := range roleMatrix() {
 		for _, caller := range callers {
@@ -229,7 +229,7 @@ func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 // deny-only suite cannot: that the gate lets the right caller THROUGH.
 //
 // Who is denied on this surface is already pinned over real HTTP by
-// TestIdentityLaneEnvironmentKeyRoutesRequireAdmin (viewer and developer on the
+// TestIdentityLaneEnvironmentKeyRoutesRequireAdmin (user and developer on the
 // list, the issue and the revoke). What nothing asserted is the allow path of
 // handleNoContent, which this revoke at admin is now the only route to use —
 // the work-API stop, whose lane has no role to check, left it for a 200 with a

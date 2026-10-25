@@ -35,7 +35,7 @@ func laneRoles() map[string]identity.Role {
 	return map[string]identity.Role{
 		"platform-admins": identity.RoleAdmin,
 		"platform-devs":   identity.RoleDeveloper,
-		"platform-read":   identity.RoleViewer,
+		"platform-read":   identity.RoleUser,
 	}
 }
 
@@ -347,12 +347,12 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 	}
 
 	// The denial names the requirement and never the caller — a 403 that told a
-	// viewer they are a viewer would map their own authority for them.
+	// user they are a user would map their own authority for them.
 	_, _, body := laneRead(t, s.bearer(http.MethodGet, path, s.token("platform-read"), nil))
 	if !strings.Contains(body, "admin") {
 		t.Errorf("denial %q does not name the required role", body)
 	}
-	for _, leak := range []string{"viewer", "platform-read"} {
+	for _, leak := range []string{"user", "platform-read"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("denial %q names the caller's own role or claim value", body)
 		}
@@ -583,7 +583,7 @@ func TestIdentityDisabledIsUnchanged(t *testing.T) {
 func TestManagementKeyWinsOverAHumanCredential(t *testing.T) {
 	s := newLaneServer(t)
 
-	// A viewer token, which is forbidden on this route, alongside the management
+	// A user-role token, which is forbidden on this route, alongside the management
 	// key: the key lane serves it, with no role check at all.
 	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{
 		"x-api-key":     testKey,
