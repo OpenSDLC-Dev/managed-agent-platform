@@ -93,7 +93,7 @@ What they say:
   - It mints an environment key at
     `POST /api/oauth/organizations/{org}/environments/{env}/tokens`, with the
     cookie (recording `2026-09-05`).
-  - The playground sends `POST /api/organizations/<uuid>/proxy/v1/messages`
+  - The playground sends `POST /api/organizations/<uuid>/proxy/v1/messages?beta=true`
     with a Cookie and no `Authorization` or `x-api-key` (recording
     `2026-10-22-playground-protocol`).
   - All 28 captured proxy calls (27 Runs and one import helper) carry the
@@ -219,25 +219,28 @@ What they say:
   a minor bump.
 - **The rule does not make a slice safe.** CD deploys every merge to main to
   GCP staging, so each slice must be safe to run there as it lands (author's
-  call). A slice may let a credential do what it can do today, or what a
-  credential of its kind can do at the end state, and nothing else. Today an
-  unowned key can do anything on the control plane, and the bootstrap key
-  anything on the gateway's admin API.
+  call). A slice may let a credential do what it can do today, or what its
+  holder could do at the end state with the matching credential, and
+  nothing else:
+  - an API key matches an owned key;
+  - a person's IdP Bearer, proxy assertion or operator token matches the
+    cookie.
+
+  Today an unowned key can do anything on the control plane, and the
+  bootstrap key anything on the gateway's admin API.
 - **An unowned key** is a management key with no owner: a seeded key, any
   key issued before slice 3 gives keys owners, or a key an unowned key
   issues after that. A session, deployment or dream whose creator's
   principal row is gone (deleted before slice 1, under today's retention)
-  counts as started
-  by one.
+  counts as started by one.
 - **What an unowned key does until slice 7** is stated here, once; other
   decisions refer to this list:
   - It keeps today's authority on `/v1` and on the private API's existing
     routes, through `x-api-key` only, as today.
   - It creates only unowned keys and names no principal. It reaches none of
     the authenticated routes this plan adds, which take only the cookie
-    (decision 3). So
-    it can make nothing that outlives slice 7 beyond what it can make today:
-    environment keys and resources.
+    (decision 3). So it can make nothing that outlives slice 7 beyond what
+    it can make today: environment keys and resources.
   - On the gateway it keeps today's grant check and key policy. The
     bootstrap key and the brain key keep their passes.
   - The work it started keeps running, even if the key is later archived or
@@ -356,9 +359,14 @@ IAP mode the login reads the proxy's assertion.
   - Every authenticated route this plan adds takes only the cookie, from
     the slice that adds it: members and service accounts, naming a principal
     when a key is created, a deployment's initiator, the proxy path, and the
-    gateway's rate limits. The login routes and the setup code's redemption
-    (decision 1) are how a person gets the cookie, so they take none. An
-    install without a login therefore sets no rate limit before slice 7.
+    gateway's rate limits. An install without a login therefore sets no
+    rate limit before slice 7.
+  - The login routes and the setup code's redemption are how a person gets
+    the cookie. They take what the login mode verifies (decision 2): a
+    password, the IdP's code exchange, or the proxy's assertion. Before
+    slice 2, the redemption takes the identity lane's credentials. In
+    password mode it takes the code alone (decision 1). Logout and the
+    session read take the cookie.
 
   From slice 7:
   - A leaked key cannot create keys, members or environment keys, and cannot
@@ -457,15 +465,21 @@ IAP mode the login reads the proxy's assertion.
 - **Principals are never deleted, from slice 1** (author's call). The
   DELETE that docs/self-hosted-security.md §8 recommends becomes a scrub:
   - It clears a principal's personal fields, such as the email and name.
-  - It keeps the row: its id, role and deactivation, and what sign-in needs
-    to recognise the person (a digest of the IdP subject will do).
+  - It keeps the row: its id, role and deactivation, and the issuer and
+    subject that sign-in matches on. A local account keeps its login name
+    and loses its password.
+  - §8's job scrubs deactivated principals only. An erasure request scrubs
+    the person it names. A service account or an active member who uses
+    only keys keeps their name.
 
   So a removed person stays removed after an erasure, because the row and
   its deactivation survive, and the work anyone started still resolves to
-  its initiator. Slice 1 makes
-  the database refuse every DELETE on principals. A retention job written
-  to today's §8 then fails loudly instead of undoing a removal, and the
-  upgrade note says to switch it to the scrub.
+  its initiator. Slice 1 makes the database refuse every DELETE and
+  TRUNCATE on principals. A retention job written to today's §8 then fails
+  loudly instead of undoing a removal, and the upgrade note says to switch
+  it to the scrub. The platform offers no hard delete. The security doc
+  says what a scrubbed row keeps and why, so an operator can weigh it
+  against their erasure duty.
 - Roles are organization-wide. There is no workspace layer.
 - The existing viewer role goes. Plan 31's per-request roles end here: a role
   is now stored, whether the mapping or an admin set it.
@@ -589,15 +603,14 @@ Notes on the table:
     so slice 5 stops nothing that runs today.
   - A refused turn fails on the brain's existing path. The claim leases the
     item as usual and mints nothing, so it takes no new lock (#643). The
-    brain refuses where a failed model call is settled today, after replay,
-    so the settlement covers the input that woke the turn. It settles the
-    `session.error` a refused model call draws today
-    (`model_request_failed_error`), with a message of ours.
-  - The item then leaves the queue as a failed model call's does. Input
-    that arrives while the refusal settles requeues it once, however many
-    events it holds, and draws one more refusal.
-  - The check also covers a route that skips the gateway: Helm with
-    `modelgateway.enabled=false`, or compose with a direct providers file.
+    brain refuses before it does any work for the turn, grading included:
+    no replay, no MCP discovery, no span. It settles the input that woke
+    the turn as today's no-provider failure does, with the `session.error`
+    that failure draws (`model_request_failed_error`) and a message of
+    ours. Every turn such a session starts is refused the same way.
+  - The check also covers every model call that skips the gateway: the
+    grader's, and every call on Helm with `modelgateway.enabled=false` or
+    compose with a direct providers file.
 - **The gateway checks the same on each call**, in the lookup that
   authenticates the token: one joined query, not extra round trips (author's
   call).
@@ -634,9 +647,10 @@ Notes on the table:
   deployment. An admin then points it at a service account, and it is
   unpaused as any paused deployment is. A demotion alone fails no run
   (decision 8).
-- Dreams follow the same rule (author's call). A dream's session is checked
-  as any session is (decision 8), and the dream then fails as it does today
-  when its session's model call fails, with `internal_error`.
+- A dream's initiator is its creator, and no route names another (author's
+  call). Its session is checked as any session is (decision 8), and the
+  dream then fails as it does today when its session's model call fails,
+  with `internal_error`.
 - No recording shows the reference's rule or its answers.
   docs/DIVERGENCES.md records both.
 
@@ -759,8 +773,9 @@ the new paths, and slice 7 removes the old ones.
    - the identity lane reads stored roles, and the mapping applies, in both
      modes, at every verified request;
    - deactivation is honoured (no API sets it yet), the database refuses
-     every DELETE on principals, and §8's retention becomes a scrub
-     (decision 4);
+     every DELETE and TRUNCATE on principals, and §8's retention becomes a
+     scrub (decision 4); the new migration's comment says that 0022's "an
+     operator may DELETE a stale row" no longer holds;
    - the gateway's operator token reads the stored role too;
    - vault credentials open to developer;
    - docs/RELEASING.md's new precondition, and STATE.md's release hold.
@@ -833,8 +848,8 @@ the new paths, and slice 7 removes the old ones.
      for `CONTROLPLANE_API_KEY`, `BRAIN_API_KEY`, `PLATFORM_API_KEY`,
      `controlplane-api-key` and `brain-api-key` then finds no live use,
      only records that keep history: merged migrations, plans,
-     docs/DIVERGENCES.md's entries, the changelog and its fragments, and
-     the upgrade note;
+     docs/HISTORY.md, docs/DIVERGENCES.md's entries, the changelog (its
+     fragments and archived sections), and the upgrade note;
    - CD's post-deploy check reads slice 6's service-account key from the CD
      secret;
    - the control plane refuses to start without a login mode;
@@ -855,8 +870,9 @@ the new paths, and slice 7 removes the old ones.
 - **docs/self-hosted-security.md:**
   - §6: environment keys are issued and revoked in the console only,
     `cloud` ones included, and removing a person revokes none they issued;
-  - §8: the principal retention DELETE becomes a scrub, and the database
-    refuses every DELETE on principals (decision 4);
+  - §8: the principal retention DELETE becomes a scrub, the database
+    refuses every DELETE and TRUNCATE on principals, and a scrubbed row
+    keeps the issuer and subject (decision 4);
   - §9 (SSO): who may sign in, the first sign-in as user, the mapping, and
     that the IdP reaches the platform only at sign-in;
   - §10 (the management key's lifecycle), rewritten; it also says how to
@@ -874,9 +890,9 @@ the new paths, and slice 7 removes the old ones.
       and rerank routes, which the reference does not serve (decision 6);
     - the setup code, and the other private paths this plan adds where no
       reference shape exists;
-    - a deployment's and a dream's initiator: the creator by default, a
-      service account an admin names, set through the private API, and
-      unchanged by a demotion (decisions 8 and 9);
+    - who initiates work: a deployment's creator, or a service account an
+      admin names through the private API, and a dream's creator; a
+      demotion does not stop that work (decisions 8 and 9);
     - a session whose initiator is gone fails its turn with today's
       `session.error` and a message of ours, a scheduled run fails with
       `unknown_error`, and a dream with `internal_error` (decisions 8 and
