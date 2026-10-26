@@ -413,11 +413,10 @@ variable "iap_members" {
 
     Admission is not authorization, and the two are configured in different
     places. Passing IAP only means the platform receives a verified assertion;
-    what that human may DO comes from the role map (the chart's
-    identity.roleMap → IDENTITY_ROLE_MAP), and a claim value mapping to no role
-    holds no authority at all (internal/identity, fail-closed). So a member listed
-    here and absent from the role map reaches the control plane and is refused by
-    every role-gated route — 403, not 401.
+    what that human may do comes from the stored principal role. The optional
+    identity.roleMap → IDENTITY_ROLE_MAP applies on each verified request. A first
+    unmatched sign-in gets user, which reads nothing; a never-mapped person keeps
+    the stored role. IAP membership alone therefore grants no resource access.
   EOT
   default     = []
 

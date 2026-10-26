@@ -275,9 +275,11 @@ identity:
   # startup rather than mapping something unintended. Email and Google group
   # addresses are unaffected.
   #
-  # Mapping is the authorization; IAP membership is only admission. An
-  # authenticated human whose email matches no entry here holds no role and is
-  # refused by every role-gated route — 403, not 401.
+  # IAP membership is only admission. This optional map applies on every verified
+  # request: first unmatched sign-in gets user, a former match now absent resets
+  # to user, and a never-mapped person keeps the stored role. Reads need developer.
+  # This admin-granting placeholder suppresses setup-code minting even before it
+  # matches anyone; replace it with a real operator before enabling identity.
   roleMap:
     "admin@your-domain.invalid": admin
 

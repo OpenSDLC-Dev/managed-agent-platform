@@ -23,8 +23,12 @@ This file is the operative ritual; day-to-day changelog mechanics live in
 
 Releases are **plan-archive driven**: cut one when an archived plan (or a batch
 of them) completes a capability worth shipping — a human judgment, not a
-schedule. Preconditions: `main` is green and STATE.md's active work is not
-mid-slice in something the release would half-ship.
+schedule. Preconditions:
+
+- `main` is green.
+- STATE.md's active work is not mid-slice in something the release would half-ship.
+- STATE.md names no plan that holds releases. Plan 69 holds releases from
+  slice 1 until slice 7 lands.
 
 ## The ritual
 

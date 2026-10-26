@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 ---
 
 # Principal-bound authentication: platform login, stored roles, no preset keys (plan 69)
@@ -260,19 +260,30 @@ What they say:
 - **The control plane needs a login mode from slice 7** (author's call). It
   refuses to start with `IDENTITY_MODE` empty or `disabled`, because without a login and
   a preset key nobody could manage it. Before slice 7, an install with no
-  login mode prints no setup code, because nobody could redeem it.
+  login mode mints no setup code, because nobody could redeem it.
 - **The first admin is created with a one-time setup code:**
-  - The control plane prints a code to its log at start-up, but only while
-    all of these hold (author's calls):
+  - The control plane delivers a code at start-up, but only while all of
+    these hold (author's calls):
     - A login mode is configured.
     - The install has never had an admin. A stored flag records the first
-      admin, so a later "no admin" state never reopens the door.
+      admin, including a mapped admin, so later demotion or removal never
+      reopens the door.
     - No IdP mapping can give the admin role. Where one can, the IdP
-      supplies the admins. So an upgraded install whose mapping names admins
-      prints no code.
-  - Each replica prints its own code. Any unexpired code works, and
+      supplies the admins. An upgraded install whose mapping names admins
+      mints no code.
+  - **Restricted local delivery replaces raw-code logging (owner,
+    2026-10-26).** Each process creates a fresh `0700` directory under its
+    temporary directory. It exclusively creates a `0600` file named
+    `setup-code` inside it. Ordinary logs show only its path and the
+    one-hour expiry, never the code. A delivery failure stops startup.
+    When the process returns, it removes its own file and directory,
+    including after a later startup failure. A crash can leave them until
+    container or temporary-directory cleanup; expiry or redemption still
+    invalidates the code.
+  - Each replica delivers its own code. Any unexpired code works, and
     redeeming one spends them all (author's call). Each code is 20 random
-    bytes, so several live codes do not make a guess practical.
+    bytes, so several live codes do not make a guess practical. Only its
+    SHA-256 hash is stored in the database.
   - In OIDC and IAP modes, the first person who signs in and presents a code
     becomes admin. A person whom a mapping matches cannot redeem a code,
     because the mapping owns their role. So an install whose mapping matches
@@ -281,11 +292,15 @@ What they say:
     the password given at that moment, as admin (author's call). That
     redemption is unauthenticated, so it is throttled like a login.
   - Password mode is for development only, so there the rule is looser: a
-    code is printed whenever no local account holds admin (author's call).
+    code is delivered whenever no local account holds admin (author's call).
     An install that moves to password mode from another mode then gets its
-    first local admin the same way.
-  - Whoever can read the logs before the first admin exists can claim the
-    role. The security doc says so, and says to redeem the code at once.
+    first local admin the same way. Password mode arrives in slice 2;
+    restricted local delivery also applies there (owner, 2026-10-26).
+  - Same-UID processes, root and anyone who can read the file can claim
+    admin with a qualifying sign-in. Log access alone does not reveal the
+    code. The security doc says to retrieve it inside the specific
+    control-plane container or pod and redeem it promptly, without copying
+    it into shared logs (owner, 2026-10-26).
 - **There is no built-in recovery.** If no admin can sign in (the IdP is
   down, the last admin left, a password is lost), the operator edits the
   database by hand. docs/self-hosted-security.md will say how (slice 1).
@@ -446,11 +461,14 @@ IAP mode the login reads the proxy's assertion.
   identity lane. So, as the control plane's identity lane does, it applies
   the mapping, creates the principal on first use, reads the stored role,
   and refuses a removed member.
-- **The IdP reaches the platform only at sign-in.** A demotion or a removal
-  there takes effect at the person's next sign-in. A person who uses only
-  API keys never signs in, so their keys keep their stored role. An admin
-  removes such a person in the console. The security doc says so.
-  Automatic sync needs SCIM, which is out of scope (owner, 2026-10-25).
+- **The IdP reaches the platform only at sign-in.** Until slice 7, every
+  verified request counts as a sign-in. Older unexpired tokens can reapply
+  their old mapped role, so an IdP demotion takes hold once those tokens
+  expire. From slice 7 only a login applies the mapping. A person who uses
+  only API keys never signs in, so their keys keep their stored role. An
+  admin removes such a person in the console once member management lands
+  in slice 2. The security doc says so. Automatic sync needs SCIM, which is
+  out of scope (owner, 2026-10-25).
 - **Removing a member, or archiving a service account** (author's calls;
   archiving the keys and restoring none follow the reference):
   - It is a lasting deactivation. A removed person who signs in again is
@@ -772,7 +790,9 @@ the new paths, and slice 7 removes the old ones.
    - user, developer and admin stored on principals; viewer goes, and reads
      need developer;
    - the principal kind for service accounts;
-   - the setup code, redeemed on the identity lane until slice 2;
+   - the setup code, redeemed on the identity lane until slice 2, with
+     restricted local-file delivery rather than raw-code logs (owner,
+     2026-10-26; decision 1);
    - the identity lane reads stored roles, and the mapping applies, in both
      modes, at every verified request;
    - deactivation is honoured (no API sets it yet), the database refuses

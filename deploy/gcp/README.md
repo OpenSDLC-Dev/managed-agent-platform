@@ -653,17 +653,22 @@ configuration", above). Configure the consent screen in the Cloud console, use I
 Google-managed OAuth client where you can, and treat a custom client as an out-of-band
 credential like the Workload Identity Federation provider already is.
 
-**Roles come from the email claim, because an IAP assertion names a person rather than their
-groups.** `identity.claims.roles: email` points the mapper at the claim the assertion
-actually carries, and `identity.roleMap` maps addresses to `admin` / `developer` / `viewer`.
-Two consequences to hold on to. A claim value may contain neither `,` nor `=` — `parseRoleMap`
-splits on both, and a value carrying one fails startup rather than mapping something
-unintended; email and Google group addresses are unaffected. And **admission is not
-authorization**: `iap_members` decides who reaches the control plane, the role map decides
-what they may do, and a human who passes IAP and matches no entry in the map holds no role
-and is refused by every role-gated route — 403, not 401. An IdP that does place a group claim
-in the assertion is configured by pointing `identity.claims.roles` at that name instead;
-nothing in the platform presumes `email`.
+**The optional mapping reads email, not groups.** IAP assertions name the person.
+`identity.claims.roles: email` selects that claim. `identity.roleMap` maps addresses to `user`,
+`developer` or `admin`. It applies on every verified request: a match sets the
+stored role, a former match now absent resets to user, and a never-mapped person
+keeps the stored role. First unmatched sign-in gets user, which reads nothing;
+readers need developer. Legacy viewer entries now mean user. Older unexpired
+assertions can reapply their old mapped role.
+
+A claim value may contain neither `,` nor `=`; email and Google group addresses
+are unaffected. **Admission is not authorization**: `iap_members` decides who
+reaches the control plane, not their stored role. An IdP with a group claim can
+name it in `identity.claims.roles` instead; nothing presumes `email`. The staging
+placeholder maps admin and therefore suppresses setup-code minting even without
+a match. Replace it with a real operator before enabling identity. Without an
+admin-granting map, a never-bootstrapped install delivers a restricted-file setup
+code; see [the security guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider).
 
 **The topology is a requirement, not a diagram.** The proxy must front the *control plane's
 own* backend service, so that every human request carries an assertion audience-bound to it
