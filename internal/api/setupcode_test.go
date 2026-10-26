@@ -145,6 +145,16 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &got); err != nil || got.ID == "" || got.Role != "admin" {
 		t.Fatalf("redemption response = %s, %v", body, err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &fields); err != nil {
+		t.Fatalf("decode redemption response fields: %v", err)
+	}
+	if len(fields) != 2 || fields["id"] == nil || fields["role"] == nil {
+		t.Error("redemption response must contain exactly id and role")
+	}
+	if strings.Contains(body, code) {
+		t.Error("redemption response leaked the submitted setup code")
+	}
 	var role, source string
 	if err := s.pool.QueryRow(context.Background(), `SELECT role, role_source FROM principals WHERE id = $1`, got.ID).Scan(&role, &source); err != nil || role != "admin" || source != "console" {
 		t.Fatalf("promoted row = %q/%q, %v", role, source, err)
