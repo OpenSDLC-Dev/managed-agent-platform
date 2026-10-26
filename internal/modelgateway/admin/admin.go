@@ -12,8 +12,11 @@
 // do anything; a key an application issues under the name bootstrap is
 // nothing to it, since it is never looked up in api_keys. An operator token,
 // verified by internal/identity under the same IDENTITY_* configuration the
-// control plane reads, reads with developer and writes with admin. A user has
-// no read-only role to fall back on, so it reads nothing here.
+// control plane reads, is an identity lane that shares the control plane's
+// stored-role rule (docs/plan/69_principal-bound-auth.md decision 4).
+// internal/principal resolves its stored role and refuses a removed member.
+// It reads with developer and writes with admin. A user has no read-only role
+// to fall back on, so it reads nothing here.
 // Every other platform API key is refused: a key that could edit key policies
 // could lift its own limits.
 //
@@ -83,6 +86,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 )
 
@@ -91,6 +95,7 @@ type Config struct {
 	Store        *store.Store
 	Cipher       secrets.Cipher     // seals credential keys
 	Verifier     *identity.Verifier // nil: no operator identity, the bootstrap key alone
+	Principals   principal.Querier  // stored roles; required with a Verifier
 	BootstrapKey string             // CONTROLPLANE_API_KEY
 	Prober       Prober             // calls vendors for the check and test routes (modelgateway.NewProber)
 }
@@ -112,6 +117,8 @@ func New(cfg Config) (http.Handler, error) {
 		return nil, errors.New("modelgateway admin: the bootstrap key is required")
 	case cfg.Prober == nil:
 		return nil, errors.New("modelgateway admin: a prober is required for the check and test routes")
+	case cfg.Verifier != nil && cfg.Principals == nil:
+		return nil, errors.New("modelgateway admin: an operator identity needs the principals table to read a role from")
 	}
 	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), mux: http.NewServeMux()}
 	h.routes()
@@ -184,10 +191,9 @@ func (h *handler) route(path string, eps ...endpoint) {
 
 type roleKey struct{}
 
-// ServeHTTP authenticates before routing, and refuses a token that maps to
-// no role before routing too: every route needs the developer role at least, so
-// a caller who can call nothing, a user included, learns nothing about which
-// paths exist.
+// ServeHTTP authenticates before routing, and refuses a caller below developer
+// before routing too: every route needs the developer role at least, so a
+// caller who can call nothing, a user, learns nothing about which paths exist.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	role, err := h.authenticate(r)
 	if err != nil {
@@ -202,6 +208,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// authenticate returns the role that authorizes r. The bootstrap key is admin.
+// An operator token shares the control plane's identity lane rule (plan 69
+// decision 4): principal.Resolve applies the mapping and rejects removed
+// members. Authorization uses the resolved stored role.
 func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
@@ -230,7 +240,16 @@ func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
 				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
 				return "", unauthenticated("invalid operator token")
 			}
-			return id.Role, nil
+			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
+			if errors.Is(err, principal.ErrDeactivated) {
+				// A 403 as on the control plane: the token is genuine, and the
+				// refusal is of the account.
+				return "", forbidden("this account has been removed from the organization")
+			}
+			if err != nil {
+				return "", err
+			}
+			return p.Role, nil
 		}
 	}
 	return "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
@@ -245,14 +264,10 @@ func (h *handler) isBootstrap(key string) bool {
 
 func requireRole(ctx context.Context, min identity.Role) error {
 	role, _ := ctx.Value(roleKey{}).(identity.Role)
-	switch {
-	case role.AtLeast(min):
+	if role.AtLeast(min) {
 		return nil
-	case role == identity.RoleNone:
-		return forbidden("this request needs the %s role; your token maps to no role", min)
-	default:
-		return forbidden("this request needs the %s role; yours is %s", min, role)
 	}
+	return forbidden("this request needs the %s role; yours is %s", min, role)
 }
 
 type apiError struct {

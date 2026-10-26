@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,6 +46,13 @@ type env struct {
 
 func newEnv(t *testing.T, withIdentity bool) *env {
 	t.Helper()
+	return newEnvWith(t, withIdentity, nil)
+}
+
+// newEnvWith is newEnv with the principals table the operator lane reads
+// replaced, when principals is not nil.
+func newEnvWith(t *testing.T, withIdentity bool, principals principal.Querier) *env {
+	t.Helper()
 	pool := pgtest.NewPool(t)
 	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
 	if err != nil {
@@ -64,6 +74,10 @@ func newEnv(t *testing.T, withIdentity bool) *env {
 			t.Fatal(err)
 		}
 		cfg.Verifier = v
+		cfg.Principals = pool
+		if principals != nil {
+			cfg.Principals = principals
+		}
 	}
 	h, err := admin.New(cfg)
 	if err != nil {
@@ -241,7 +255,7 @@ func TestAuthByRole(t *testing.T) {
 	for _, role := range []string{"readers", "strangers"} {
 		known := e.do("GET", "/admin/v1/providers", nil, bearer(e.token(role)))
 		unknown := e.do("GET", "/admin/v1/nothing", nil, bearer(e.token(role)))
-		e.refused(known, http.StatusForbidden, "permission_error", "developer")
+		e.refused(known, http.StatusForbidden, "permission_error", "yours is user")
 		if unknown.status != known.status || unknown.raw != known.raw {
 			t.Errorf("%s: an unknown path answered %d %s but a known one %d %s; both must read as the same refusal",
 				role, unknown.status, unknown.raw, known.status, known.raw)
@@ -251,6 +265,120 @@ func TestAuthByRole(t *testing.T) {
 	}
 	if r := e.do("GET", "/admin/v1/providers", nil, bearer("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")); r.status != http.StatusUnauthorized {
 		t.Errorf("forged token: %d %s", r.status, r.raw)
+	}
+}
+
+// storedRole reads the one principal row an operator token's tests make.
+func (e *env) storedRole() (role, source, status string) {
+	e.t.Helper()
+	var n int
+	if err := e.pool.QueryRow(context.Background(), `SELECT count(*) FROM principals`).Scan(&n); err != nil || n != 1 {
+		e.t.Fatalf("principals rows = %d (err %v), want exactly 1", n, err)
+	}
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT role, role_source, status FROM principals`).Scan(&role, &source, &status); err != nil {
+		e.t.Fatal(err)
+	}
+	return role, source, status
+}
+
+// setPrincipal changes the one principal row, as the console will. The
+// database refuses to delete it, so a test sets its state with an UPDATE.
+func (e *env) setPrincipal(set string) {
+	e.t.Helper()
+	tag, err := e.pool.Exec(context.Background(), `UPDATE principals SET `+set)
+	if err != nil || tag.RowsAffected() != 1 {
+		e.t.Fatalf("UPDATE principals SET %s: %d rows, error %v; want exactly 1 row", set, tag.RowsAffected(), err)
+	}
+}
+
+// The operator token is an identity lane that follows the control plane's:
+// the role that authorizes a request is the one stored on the person's row,
+// not the one the token carries. A token that maps to nothing signs in as a
+// user, and the console may raise that to developer. A mapping that matches
+// takes the role back.
+func TestOperatorTokenUsesTheStoredRole(t *testing.T) {
+	e := newEnv(t, true)
+	unmapped := map[string]string{"Authorization": "Bearer " + e.token("strangers")}
+	body := map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth}
+
+	// The first request creates the row, as a user, who reads nothing.
+	e.refused(e.do("GET", "/admin/v1/profiles", nil, unmapped), http.StatusForbidden, "permission_error", "developer")
+	e.setPrincipal(`role = 'developer', role_source = 'console'`)
+
+	e.ok(e.do("GET", "/admin/v1/profiles", nil, unmapped), "a console developer reads")
+	e.refused(e.do("POST", "/admin/v1/providers", body, unmapped), http.StatusForbidden, "permission_error", "admin")
+	if role, source, _ := e.storedRole(); role != "developer" || source != "console" {
+		t.Errorf("stored (role, role_source) = (%q, %q), want (developer, console)", role, source)
+	}
+
+	// The console may raise the role to admin as well.
+	e.setPrincipal(`role = 'admin'`)
+	e.ok(e.do("POST", "/admin/v1/providers", body, unmapped), "a console admin writes")
+
+	// A mapping that matches the person is the IdP's word, whatever the
+	// console set.
+	e.setPrincipal(`role = 'admin', role_source = 'console'`)
+	mapped := map[string]string{"Authorization": "Bearer " + e.token("devs")}
+	e.refused(e.do("POST", "/admin/v1/providers", body, mapped), http.StatusForbidden, "permission_error", "admin")
+	if role, source, _ := e.storedRole(); role != "developer" || source != "idp" {
+		t.Errorf("stored (role, role_source) = (%q, %q), want (developer, idp)", role, source)
+	}
+}
+
+// A person an admin removed is refused on every path, though a mapping still
+// matches them, and their row is not re-created. The refusal is a 403, as the
+// control plane's is: the token is genuine.
+func TestOperatorTokenForARemovedMemberIsRefused(t *testing.T) {
+	e := newEnv(t, true)
+	admins := map[string]string{"Authorization": "Bearer " + e.token("admins")}
+	e.ok(e.do("GET", "/admin/v1/profiles", nil, admins), "an admin reads before removal")
+	e.setPrincipal(`status = 'deactivated'`)
+
+	const removed = "this account has been removed from the organization"
+	for name, r := range map[string]reply{
+		"a read":          e.do("GET", "/admin/v1/profiles", nil, admins),
+		"a write":         e.do("POST", "/admin/v1/providers", map[string]any{"name": "p"}, admins),
+		"an unknown path": e.do("GET", "/admin/v1/nothing", nil, admins),
+	} {
+		if r.status != http.StatusForbidden || r.errType() != "permission_error" || r.errMessage() != removed {
+			t.Errorf("%s: got %d %s %q, want 403 permission_error %q", name, r.status, r.errType(), r.errMessage(), removed)
+		}
+	}
+	if role, source, status := e.storedRole(); role != "admin" || source != "idp" || status != "deactivated" {
+		t.Errorf("stored (role, role_source, status) = (%q, %q, %q), want (admin, idp, deactivated)", role, source, status)
+	}
+	// The bootstrap key is no one's account.
+	e.ok(e.admin("GET", "/admin/v1/profiles", nil), "the bootstrap key still reads")
+}
+
+// A token the mapping matches leaves its role on the person's row, as the
+// control plane's lane does.
+func TestOperatorTokenMappedRoleIsStored(t *testing.T) {
+	e := newEnv(t, true)
+	e.ok(e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")}), "an admin reads")
+	if role, source, status := e.storedRole(); role != "admin" || source != "idp" || status != "active" {
+		t.Errorf("stored (role, role_source, status) = (%q, %q, %q), want (admin, idp, active)", role, source, status)
+	}
+}
+
+// failingQuerier is a principals table that cannot be read.
+type failingQuerier struct{}
+
+func (failingQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return failingRow{} }
+
+type failingRow struct{}
+
+func (failingRow) Scan(...any) error { return errors.New("connection refused") }
+
+// A role that cannot be read is no role: the token's own claim does not stand
+// in for it, and the caller is told nothing of why.
+func TestOperatorTokenWhenTheStoredRoleCannotBeRead(t *testing.T) {
+	e := newEnvWith(t, true, failingQuerier{})
+	r := e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")})
+	e.refused(r, http.StatusInternalServerError, "api_error", "internal error")
+	if strings.Contains(r.raw, "refused") {
+		t.Errorf("the failure reached the caller: %s", r.raw)
 	}
 }
 
@@ -628,6 +756,10 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 		"no cipher":        {Store: store.New(pool), BootstrapKey: bootstrap, Prober: &stubProber{}},
 		"no bootstrap key": {Store: store.New(pool), Cipher: cipher, Prober: &stubProber{}},
 		"no prober":        {Store: store.New(pool), Cipher: cipher, BootstrapKey: bootstrap},
+		// An operator lane with no stored roles to read could only fall back
+		// on the token's own claim.
+		"a verifier without principals": {Store: store.New(pool), Cipher: cipher, BootstrapKey: bootstrap, Prober: &stubProber{},
+			Verifier: &identity.Verifier{}},
 	} {
 		if _, err := admin.New(cfg); err == nil {
 			t.Errorf("%s: New accepted it", name)
@@ -651,7 +783,7 @@ func TestAuthBehindAProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, BootstrapKey: bootstrap, Prober: &stubProber{}})
+	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, Principals: pool, BootstrapKey: bootstrap, Prober: &stubProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}
