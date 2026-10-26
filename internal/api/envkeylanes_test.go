@@ -331,6 +331,7 @@ var consoleRoutePaths = map[string]string{
 	"consoleAPIKeysPath":   "/api/console/organizations/default/workspaces/default/api_keys",
 	"consoleAPIKeyPath":    "/api/console/organizations/default/workspaces/default/api_keys/{key_id}",
 	"consoleOrgAPIKeyPath": "/api/console/organizations/default/api_keys/{key_id}",
+	"consoleSetupCodePath": "/api/console/organizations/default/setup_code/redeem",
 	"gateconfig.Path":      gateconfig.Path,
 }
 

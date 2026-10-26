@@ -99,14 +99,16 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 // user role: it signs in and does nothing else, because there is no read-only
 // role and the playground it is meant for does not exist yet. A route
 // registered at RoleUser would hand every first sign-in whatever that route
-// serves. The one exception is the setup-code redemption, which a person who
-// has no role yet must be able to reach to become the first admin.
+// serves. The one exception is the setup-code redemption, which a signed-in
+// user must be able to reach before bootstrap to become the first admin.
 //
 // It reads the source for the same reason the completeness test does: no
 // request-driven test can enumerate routes it was not told about. The
 // exception is named by its registered pattern, so the route passes the day it
 // is added and no other route does.
 func TestNoRouteAdmitsUserExceptRedemption(t *testing.T) {
+	// This is render's expression form of `"POST "+consoleSetupCodePath`,
+	// not a URL path. TestConsoleSetupCodePath pins the constant's value.
 	const redemption = "POST +consoleSetupCodePath"
 
 	regs := parseRoutes(t, "server.go")

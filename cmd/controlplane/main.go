@@ -86,6 +86,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
@@ -118,6 +120,33 @@ func main() {
 	}, run) {
 		os.Exit(1)
 	}
+}
+
+// logSetupCode does not construct a verifier: config parsing alone can decide
+// whether a signed-in person could use setup, without contacting the IdP.
+func logSetupCode(ctx context.Context, pool *pgxpool.Pool) error {
+	cfg, err := identity.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if cfg.Mode == identity.ModeDisabled {
+		return nil
+	}
+	mapGrantsAdmin := false
+	for _, role := range cfg.RoleMap {
+		if role == identity.RoleAdmin {
+			mapGrantsAdmin = true
+			break
+		}
+	}
+	code, err := api.MintSetupCode(ctx, pool, time.Now(), mapGrantsAdmin)
+	if err != nil {
+		return err
+	}
+	if code != "" {
+		slog.Warn("no admin exists yet: redeem this one-time setup code from a signed-in session now", "setup_code", code, "expires_in", "1h")
+	}
+	return nil
 }
 
 func run(ctx context.Context) error {
@@ -155,6 +184,9 @@ func run(ctx context.Context) error {
 		err = api.RetireAPIKey(ctx, pool, "brain")
 	}
 	if err != nil {
+		return err
+	}
+	if err := logSetupCode(ctx, pool); err != nil {
 		return err
 	}
 	// The queue depth/pending/workers_polling gauges sample the /work/stats view

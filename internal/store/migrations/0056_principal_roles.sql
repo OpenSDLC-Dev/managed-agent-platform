@@ -78,3 +78,20 @@ CREATE TABLE install_bootstrap (
     singleton      boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     first_admin_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Every admin grant closes setup permanently, including the IdP mapping and
+-- SQL recovery. Neither a later demotion nor deactivation clears this flag.
+CREATE FUNCTION principals_record_first_admin() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO install_bootstrap (singleton) VALUES (true) ON CONFLICT DO NOTHING;
+    RETURN NEW;
+END $$;
+
+CREATE TRIGGER principals_first_admin_insert AFTER INSERT ON principals
+    FOR EACH ROW WHEN (NEW.role = 'admin')
+    EXECUTE FUNCTION principals_record_first_admin();
+
+CREATE TRIGGER principals_first_admin_promotion AFTER UPDATE OF role ON principals
+    FOR EACH ROW WHEN (OLD.role IS DISTINCT FROM NEW.role AND NEW.role = 'admin')
+    EXECUTE FUNCTION principals_record_first_admin();

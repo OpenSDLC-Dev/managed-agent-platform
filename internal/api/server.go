@@ -252,6 +252,13 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		})
 	}
 
+	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(s.handle(identity.RoleUser, s.redeemSetupCode)))
+	mux.HandleFunc(consoleSetupCodePath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		writeError(w, r, errMethodNotAllowed)
+	})
+
 	// Internal gate-config endpoint — not on the public /v1 wire. A session's
 	// egress gate authenticates with its per-session gtk_ token (its own auth
 	// lane in dispatchAuth) and fetches its networking policy + resolved

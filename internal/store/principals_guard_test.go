@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -13,6 +14,45 @@ import (
 )
 
 const pgRestrictViolation = "23001"
+
+func TestAnAdminPermanentlyClosesBootstrap(t *testing.T) {
+	for _, grant := range []string{"insert", "promotion"} {
+		t.Run(grant, func(t *testing.T) {
+			pool := open(t, pgtest.FreshDB(t))
+			ctx := context.Background()
+			role := "user"
+			if grant == "insert" {
+				role = "admin"
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO principals (id, issuer, subject, role)
+				VALUES ('principal_first', 'https://idp.example', 'first', $1)`, role); err != nil {
+				t.Fatal(err)
+			}
+			if grant == "promotion" {
+				var n int
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM install_bootstrap`).Scan(&n); err != nil || n != 0 {
+					t.Fatalf("before promotion: flag rows = %d, err = %v; want 0", n, err)
+				}
+				if _, err := pool.Exec(ctx, `UPDATE principals SET role = 'admin' WHERE id = 'principal_first'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var first time.Time
+			if err := pool.QueryRow(ctx, `SELECT first_admin_at FROM install_bootstrap`).Scan(&first); err != nil {
+				t.Fatalf("admin %s did not record bootstrap: %v", grant, err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE principals SET role = 'user', status = 'deactivated';
+				INSERT INTO principals (id, issuer, subject, role) VALUES ('principal_next', 'https://idp.example', 'next', 'admin')`); err != nil {
+				t.Fatal(err)
+			}
+			var kept time.Time
+			var n int
+			if err := pool.QueryRow(ctx, `SELECT count(*), min(first_admin_at) FROM install_bootstrap`).Scan(&n, &kept); err != nil || n != 1 || !kept.Equal(first) {
+				t.Fatalf("bootstrap after demotion/deactivation and another admin = (%d, %v, %v), want original %v", n, kept, err, first)
+			}
+		})
+	}
+}
 
 // Principals are never deleted (plan 69 decision 4): a principal's row is what
 // keeps a removed person removed, so the database refuses every DELETE and
