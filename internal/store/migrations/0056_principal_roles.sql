@@ -23,7 +23,7 @@
 -- delete is a job to change.
 --
 -- install_bootstrap's one row records that the install has had an admin, and
--- a setup code is printed only while it is absent (plan 69 decision 1). The
+-- a setup code is delivered only while it is absent (plan 69 decision 1). The
 -- row is never deleted, so a later state with no admin never reopens that
 -- door.
 --
@@ -66,7 +66,7 @@ CREATE TRIGGER principals_refuse_delete BEFORE DELETE ON principals
 CREATE TRIGGER principals_refuse_truncate BEFORE TRUNCATE ON principals
     FOR EACH STATEMENT EXECUTE FUNCTION principals_refuse_delete();
 
--- The setup codes the replicas printed at start-up, by hash. Any unexpired
+-- The setup codes the replicas delivered at start-up, by hash. Any unexpired
 -- one redeems, and redeeming one deletes them all.
 CREATE TABLE setup_codes (
     code_hash  text PRIMARY KEY,

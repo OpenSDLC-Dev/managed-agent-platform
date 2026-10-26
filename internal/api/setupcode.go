@@ -17,8 +17,9 @@ import (
 const consoleSetupCodePath = "/api/console/organizations/{org}/setup_code/redeem"
 
 // MintSetupCode returns a replica's first-admin code only before bootstrap,
-// unless the IdP can supply admins. Only its hash is stored; the caller may
-// print the returned code once. Redeeming any replica's code spends them all.
+// unless the IdP can supply admins. Only its hash is stored; the caller must
+// deliver the code through a restricted file, never a log. Redeeming any
+// replica's code spends them all.
 func MintSetupCode(ctx context.Context, pool *pgxpool.Pool, now time.Time, mapGrantsAdmin bool) (string, error) {
 	if mapGrantsAdmin {
 		return "", nil
