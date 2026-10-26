@@ -122,15 +122,15 @@ func main() {
 	}
 }
 
-// logSetupCode does not construct a verifier: config parsing alone can decide
-// whether a signed-in person could use setup, without contacting the IdP.
-func logSetupCode(ctx context.Context, pool *pgxpool.Pool) error {
+// deliverSetupCode keeps the raw code out of logs and telemetry. Config
+// parsing decides whether setup is available without contacting the IdP.
+func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
 	cfg, err := identity.ConfigFromEnv(os.Getenv)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if cfg.Mode == identity.ModeDisabled {
-		return nil
+		return nil, nil
 	}
 	mapGrantsAdmin := false
 	for _, role := range cfg.RoleMap {
@@ -140,13 +140,42 @@ func logSetupCode(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	code, err := api.MintSetupCode(ctx, pool, time.Now(), mapGrantsAdmin)
+	if err != nil || code == "" {
+		return nil, err
+	}
+	path, cleanup, err := writeSetupCode(code)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if code != "" {
-		slog.Warn("no admin exists yet: redeem this one-time setup code from a signed-in session now", "setup_code", code, "expires_in", "1h")
+	slog.Warn("no admin exists yet: read the one-time setup code from this local file and redeem it from a signed-in session", "setup_code_file", path, "expires_in", "1h")
+	return cleanup, nil
+}
+
+func writeSetupCode(code string) (string, func(), error) {
+	// A fresh private directory and exclusive create avoid following or
+	// overwriting an existing operator-selected file. A hard crash may leave
+	// this file; database expiry and redemption still invalidate its code.
+	dir, err := os.MkdirTemp("", "map-setup-")
+	if err != nil {
+		return "", nil, err
 	}
-	return nil
+	path := filepath.Join(dir, "setup-code")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		_ = os.Remove(dir)
+		return "", nil, err
+	}
+	cleanup := func() {
+		_ = os.Remove(path)
+		_ = os.Remove(dir)
+	}
+	_, writeErr := file.WriteString(code + "\n")
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
 }
 
 func run(ctx context.Context) error {
@@ -186,8 +215,12 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := logSetupCode(ctx, pool); err != nil {
+	cleanupSetupCode, err := deliverSetupCode(ctx, pool)
+	if err != nil {
 		return err
+	}
+	if cleanupSetupCode != nil {
+		defer cleanupSetupCode()
 	}
 	// The queue depth/pending/workers_polling gauges sample the /work/stats view
 	// this process already serves. telemetry.Run installed the meter provider
