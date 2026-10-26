@@ -76,11 +76,54 @@ func setupCallerPool(t *testing.T) (*pgxpool.Pool, string) {
 		VALUES ('principal_caller', 'https://idp.example', 'caller')`); err != nil {
 		t.Fatal(err)
 	}
-	code, err := MintSetupCode(context.Background(), pool, time.Now(), false)
+	code, err := MintSetupCode(context.Background(), pool, false)
 	if err != nil || code == "" {
 		t.Fatalf("mint = %q, %v", code, err)
 	}
 	return pool, code
+}
+
+type unusedSetupBody struct{ read bool }
+
+func (b *unusedSetupBody) Read([]byte) (int, error) {
+	b.read = true
+	return 0, errors.New("closed setup must not read the body")
+}
+func (*unusedSetupBody) Close() error { return nil }
+
+func TestClosedSetupDoesNotBlockPrincipalWriters(t *testing.T) {
+	pool, _ := setupCallerPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE principals SET role = 'admin' WHERE id = 'principal_caller'`); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(context.Background()) }()
+	// An unrelated sign-in holds ROW EXCLUSIVE, which must not make a
+	// permanently closed redemption wait for a first-admin table lock.
+	if _, err := writer.Exec(ctx, `INSERT INTO principals (id, issuer, subject)
+		VALUES ('principal_busy', 'https://idp.example', 'busy')`); err != nil {
+		t.Fatal(err)
+	}
+	r := setupRequest(ctx, "irrelevant")
+	body := &unusedSetupBody{}
+	r.Body = body
+	w := httptest.NewRecorder()
+	s := &server{pool: pool}
+	noStore(s.handle(identity.RoleUser, s.redeemSetupCode))(w, r)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "an admin already exists") {
+		t.Fatalf("closed redemption waited for principal writes: status=%d body=%s", w.Code, w.Body.String())
+	}
+	if body.read {
+		t.Error("closed redemption read an irrelevant client body")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Pragma") != "no-cache" {
+		t.Error("closed redemption lost its no-store headers")
+	}
 }
 
 func TestSetupCodeRechecksTheCallerUnderLock(t *testing.T) {
@@ -151,6 +194,44 @@ func TestAnInFlightMappedAdminClosesSetup(t *testing.T) {
 	}
 }
 
+func TestMintSetupCodeStartsItsTTLAfterWaitingForLocks(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Rollback(context.Background()) }()
+	if _, err := writer.Exec(ctx, `INSERT INTO principals (id, issuer, subject)
+		VALUES ('principal_busy', 'https://idp.example', 'busy')`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan setupResult, 1)
+	go func() {
+		code, err := MintSetupCode(ctx, pool, false)
+		done <- setupResult{code, err}
+	}()
+	waitSetupLock(t, ctx, pool, "principals", done)
+	var barrier time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&barrier); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if result := <-done; result.err != nil || result.value == "" {
+		t.Fatalf("mint after lock release failed: %v", result.err)
+	}
+	var created, expires time.Time
+	if err := pool.QueryRow(ctx, `SELECT created_at, expires_at FROM setup_codes`).Scan(&created, &expires); err != nil {
+		t.Fatal(err)
+	}
+	if created.Before(barrier) || expires.Before(barrier.Add(time.Hour)) || expires.Sub(created) != time.Hour {
+		t.Fatalf("lock waiting consumed setup-code TTL: created=%v expires=%v released-after=%v", created, expires, barrier)
+	}
+}
+
 func TestMintSetupCodeWaitsForAnInFlightAdmin(t *testing.T) {
 	pool, _ := setupCallerPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -165,7 +246,7 @@ func TestMintSetupCodeWaitsForAnInFlightAdmin(t *testing.T) {
 	}
 	done := make(chan setupResult, 1)
 	go func() {
-		code, err := MintSetupCode(ctx, pool, time.Now(), false)
+		code, err := MintSetupCode(ctx, pool, false)
 		done <- setupResult{code, err}
 	}()
 	waitSetupLock(t, ctx, pool, "principals", done)

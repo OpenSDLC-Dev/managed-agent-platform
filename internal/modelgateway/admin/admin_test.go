@@ -268,6 +268,35 @@ func TestAuthByRole(t *testing.T) {
 	}
 }
 
+func TestOperatorTokenPersistsSanitizedProfileClaims(t *testing.T) {
+	e := newEnv(t, true)
+	claims := e.idp.Claims(audience, e.clock.Now())
+	claims["roles"] = []any{"devs"}
+	claims["email"] = "á" + string(rune(0)) + "da@example.test"
+	claims["name"] = string(rune(0)) + "Zoë 世"
+	res := e.do("GET", "/admin/v1/profiles", nil,
+		map[string]string{"Authorization": "Bearer " + e.idp.Mint(t, claims)})
+	if res.status != http.StatusOK {
+		t.Fatalf("valid operator with NUL descriptive claims got %d, want 200", res.status)
+	}
+	var email, name, subject string
+	if err := e.pool.QueryRow(context.Background(), `SELECT email, display_name, subject FROM principals`).Scan(&email, &name, &subject); err != nil {
+		t.Fatal(err)
+	}
+	if email != "áda@example.test" || name != "Zoë 世" || subject != "user-1" {
+		t.Error("gateway did not persist sanitized profiles with the original identity key")
+	}
+	if role, source, status := e.storedRole(); role != "developer" || source != "idp" || status != "active" {
+		t.Error("sanitizing the operator profile changed authority")
+	}
+	claims["sub"] = "user" + string(rune(0)) + "-1"
+	res = e.do("GET", "/admin/v1/profiles", nil,
+		map[string]string{"Authorization": "Bearer " + e.idp.Mint(t, claims)})
+	if res.status != http.StatusUnauthorized || res.errType() != "authentication_error" {
+		t.Fatalf("NUL identity key got %d/%s, want authentication failure", res.status, res.errType())
+	}
+}
+
 // storedRole reads the one principal row an operator token's tests make.
 func (e *env) storedRole() (role, source, status string) {
 	e.t.Helper()

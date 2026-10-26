@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
@@ -147,6 +148,37 @@ func TestSetupCodeDeliveryFailure(t *testing.T) {
 	}
 	if kept, err := os.ReadFile(blocked); err != nil || string(kept) != "unchanged" {
 		t.Fatalf("failed delivery changed its pre-existing destination: %v", err)
+	}
+}
+
+func TestStartupAdminMapInvalidatesOldSetupCodes(t *testing.T) {
+	setupIdentityEnv(t, "oidc", "owners=admin")
+	pool := pgtest.NewPool(t)
+	code, err := api.MintSetupCode(context.Background(), pool, false)
+	if err != nil || code == "" {
+		t.Fatalf("could not mint the old configuration's code: %v", err)
+	}
+	t.Setenv("DATABASE_URL", pool.Config().ConnString())
+	t.Setenv("CONTROLPLANE_API_KEY", "startup-test-key")
+	t.Setenv("BRAIN_API_KEY", "")
+	t.Setenv("BLOB_BACKEND", "stop-after-setup")
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(old)
+	if err := run(context.Background()); err == nil || !strings.Contains(err.Error(), `unknown BLOB_BACKEND "stop-after-setup"`) {
+		t.Fatalf("startup did not reach the stop point: %v", err)
+	}
+	var codes, flags int
+	if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM setup_codes),
+		(SELECT count(*) FROM install_bootstrap)`).Scan(&codes, &flags); err != nil || codes != 0 || flags != 0 {
+		t.Fatalf("admin-map startup left old setup codes or invented an admin: codes=%d flags=%d err=%v", codes, flags, err)
+	}
+	files, err := os.ReadDir(temp)
+	if err != nil || len(files) != 0 || logs.Len() != 0 {
+		t.Fatalf("admin-map startup delivered a code: entries=%d err=%v", len(files), err)
 	}
 }
 

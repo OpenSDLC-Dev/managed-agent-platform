@@ -269,8 +269,10 @@ What they say:
       admin, including a mapped admin, so later demotion or removal never
       reopens the door.
     - No IdP mapping can give the admin role. Where one can, the IdP
-      supplies the admins. An upgraded install whose mapping names admins
-      mints no code.
+      supplies the admins. Startup invalidates outstanding codes and mints none.
+      A server with that mapping also refuses redemption by unmatched people,
+      including codes an older replica minted. All replicas must use consistent
+      identity configuration.
   - **Restricted local delivery replaces raw-code logging (owner,
     2026-10-26).** Each process creates a fresh `0700` directory under its
     temporary directory. It exclusively creates a `0600` file named
@@ -280,10 +282,12 @@ What they say:
     including after a later startup failure. A crash can leave them until
     container or temporary-directory cleanup; expiry or redemption still
     invalidates the code.
-  - Each replica delivers its own code. Any unexpired code works, and
-    redeeming one spends them all (author's call). Each code is 20 random
+  - While setup is enabled, each replica delivers its own code. Redeeming an
+    unexpired code spends them all (author's call). Each code is 20 random
     bytes, so several live codes do not make a guess practical. Only its
-    SHA-256 hash is stored in the database.
+    SHA-256 hash is stored in the database. The database clock gives it one
+    hour from minting after lock acquisition. A new mint prunes expired hashes
+    but keeps other replicas' unexpired codes.
   - In OIDC and IAP modes, the first person who signs in and presents a code
     becomes admin. A person whom a mapping matches cannot redeem a code,
     because the mapping owns their role. So an install whose mapping matches

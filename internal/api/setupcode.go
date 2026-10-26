@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,14 +15,11 @@ import (
 
 const consoleSetupCodePath = "/api/console/organizations/{org}/setup_code/redeem"
 
-// MintSetupCode returns a replica's first-admin code only before bootstrap,
-// unless the IdP can supply admins. Only its hash is stored; the caller must
-// deliver the code through a restricted file, never a log. Redeeming any
-// replica's code spends them all.
-func MintSetupCode(ctx context.Context, pool *pgxpool.Pool, now time.Time, mapGrantsAdmin bool) (string, error) {
-	if mapGrantsAdmin {
-		return "", nil
-	}
+// MintSetupCode returns a replica's first-admin code only before bootstrap.
+// An admin-granting map invalidates outstanding codes instead. Only the hash
+// is stored; the caller must deliver the code through a restricted file,
+// never a log. Redeeming any replica's code spends them all.
+func MintSetupCode(ctx context.Context, pool *pgxpool.Pool, mapGrantsAdmin bool) (string, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return "", err
@@ -34,6 +30,12 @@ func MintSetupCode(ctx context.Context, pool *pgxpool.Pool, now time.Time, mapGr
 	if _, err := tx.Exec(ctx, `LOCK TABLE principals, setup_codes IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return "", err
 	}
+	if mapGrantsAdmin {
+		if _, err := tx.Exec(ctx, `DELETE FROM setup_codes`); err != nil {
+			return "", err
+		}
+		return "", tx.Commit(ctx)
+	}
 	var bootstrapped bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM install_bootstrap)`).Scan(&bootstrapped); err != nil {
 		return "", err
@@ -41,14 +43,20 @@ func MintSetupCode(ctx context.Context, pool *pgxpool.Pool, now time.Time, mapGr
 	if bootstrapped {
 		return "", nil
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM setup_codes WHERE expires_at <= clock_timestamp()`); err != nil {
+		return "", err
+	}
 	raw := make([]byte, 20)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	code := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
 	sum := sha256.Sum256([]byte(code))
-	if _, err := tx.Exec(ctx, `INSERT INTO setup_codes (code_hash, expires_at) VALUES ($1, $2)`,
-		hex.EncodeToString(sum[:]), now.Add(time.Hour)); err != nil {
+	// Use the database's redemption clock after lock waits, once for both
+	// timestamps. Replica clock skew and transaction start do not shorten TTL.
+	if _, err := tx.Exec(ctx, `WITH minted AS (SELECT clock_timestamp() AS created_at)
+		INSERT INTO setup_codes (code_hash, created_at, expires_at)
+		SELECT $1, created_at, created_at + interval '1 hour' FROM minted`, hex.EncodeToString(sum[:])); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -65,10 +73,22 @@ func (s *server) redeemSetupCode(r *http.Request) (any, error) {
 	if err := consoleOrganization(r); err != nil {
 		return nil, err
 	}
-	// Do not hold database locks while reading a client body. Its validation
-	// waits until after the permanent flag check, so even a spent code gets 409.
-	obj, bodyErr := decodeObject(r)
 	ctx := r.Context()
+	// The flag never clears. A closed install can refuse without a table lock
+	// that would serialize unrelated sign-ins, or reading an irrelevant body.
+	var bootstrapped bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM install_bootstrap)`).Scan(&bootstrapped); err != nil {
+		return nil, err
+	}
+	if bootstrapped {
+		return nil, errConflict("an admin already exists")
+	}
+	if s.setupMapGrantsAdmin {
+		return nil, errConflict("the identity provider's mapping supplies administrators")
+	}
+	// Read the client body before taking locks, but validate only after the
+	// in-transaction flag recheck: an admin may have appeared in the meantime.
+	obj, bodyErr := decodeObject(r)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
@@ -81,7 +101,6 @@ func (s *server) redeemSetupCode(r *http.Request) (any, error) {
 	if _, err := tx.Exec(ctx, `LOCK TABLE principals, setup_codes IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return nil, err
 	}
-	var bootstrapped bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM install_bootstrap)`).Scan(&bootstrapped); err != nil {
 		return nil, err
 	}

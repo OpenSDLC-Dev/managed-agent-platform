@@ -21,9 +21,16 @@ import (
 
 const setupCodeURL = "/api/console/organizations/default/setup_code/redeem"
 
-func mintSetupCode(t *testing.T, pool *pgxpool.Pool, now time.Time) string {
+func newSetupServer(t *testing.T) *laneServer {
 	t.Helper()
-	code, err := api.MintSetupCode(context.Background(), pool, now, false)
+	return newLaneServerWith(t, func(cfg *identity.Config) {
+		delete(cfg.RoleMap, "platform-admins")
+	})
+}
+
+func mintSetupCode(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	code, err := api.MintSetupCode(context.Background(), pool, false)
 	if err != nil || code == "" {
 		t.Fatalf("MintSetupCode = %q, %v; want a code", code, err)
 	}
@@ -43,24 +50,41 @@ func setupCounts(t *testing.T, pool *pgxpool.Pool, codes, flags, admins int) {
 	}
 }
 
+func TestMintSetupCodeUsesTheDatabaseClock(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	var before, after, created, expires time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	code, err := api.MintSetupCode(ctx, pool, false)
+	if err != nil || code == "" {
+		t.Fatalf("mint failed: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT created_at, expires_at, clock_timestamp() FROM setup_codes`).Scan(&created, &expires, &after); err != nil {
+		t.Fatal(err)
+	}
+	if created.Before(before) || created.After(after) || expires.Sub(created) != time.Hour {
+		t.Fatalf("setup validity is not one hour from the DB mint time: created=%v expires=%v window=%v..%v", created, expires, before, after)
+	}
+}
+
 func TestMintSetupCodeOnlyBeforeTheFirstAdmin(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	code := mintSetupCode(t, pool, now)
+	code := mintSetupCode(t, pool)
 	decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(code)
 	if err != nil || len(decoded) != 20 {
 		t.Fatalf("code is not 20 bytes of base32 without padding: %q, %v", code, err)
 	}
 	var hash string
-	var expires time.Time
-	if err := pool.QueryRow(context.Background(), `SELECT code_hash, expires_at FROM setup_codes`).Scan(&hash, &expires); err != nil {
+	if err := pool.QueryRow(context.Background(), `SELECT code_hash FROM setup_codes`).Scan(&hash); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(code))
-	if hash != hex.EncodeToString(sum[:]) || !expires.Equal(now.Add(time.Hour)) {
-		t.Fatalf("stored hash/expiry = %q/%v; want SHA256/now+1h", hash, expires)
+	if hash != hex.EncodeToString(sum[:]) {
+		t.Fatal("setup code was not stored by SHA256 hash")
 	}
-	other := mintSetupCode(t, pool, now)
+	other := mintSetupCode(t, pool)
 	if other == code {
 		t.Fatal("replicas minted the same code")
 	}
@@ -90,7 +114,7 @@ func TestNoCodeOnceAnAdminHasExisted(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				code, err := api.MintSetupCode(context.Background(), pool, time.Now(), false)
+				code, err := api.MintSetupCode(context.Background(), pool, false)
 				if err != nil || code != "" {
 					t.Fatalf("%s: MintSetupCode = %q, %v; want no code", state, code, err)
 				}
@@ -100,9 +124,69 @@ func TestNoCodeOnceAnAdminHasExisted(t *testing.T) {
 	}
 }
 
+func TestMintSetupCodePrunesOnlyExpiredHashes(t *testing.T) {
+	s := newSetupServer(t)
+	live := mintSetupCode(t, s.pool)
+	expired := mintSetupCode(t, s.pool)
+	sum := sha256.Sum256([]byte(expired))
+	if _, err := s.pool.Exec(context.Background(), `UPDATE setup_codes SET expires_at = clock_timestamp() - interval '1 second'
+		WHERE code_hash = $1`, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+	mintSetupCode(t, s.pool)
+	setupCounts(t, s.pool, 2, 0, 0)
+	var stale bool
+	if err := s.pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM setup_codes WHERE code_hash = $1)`,
+		hex.EncodeToString(sum[:])).Scan(&stale); err != nil || stale {
+		t.Fatalf("mint retained an expired hash: present=%v err=%v", stale, err)
+	}
+	setupResponse(t, s.bearer("POST", setupCodeURL, s.token(), map[string]any{"code": live}), 200, "")
+	setupCounts(t, s.pool, 0, 1, 1)
+}
+
+func TestAdminMapInvalidatesOutstandingSetupCodes(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	mintSetupCode(t, pool)
+	mintSetupCode(t, pool)
+	code, err := api.MintSetupCode(context.Background(), pool, true)
+	if err != nil || code != "" {
+		t.Fatalf("admin mapping minted a code or failed: %v", err)
+	}
+	setupCounts(t, pool, 0, 0, 0)
+}
+
+func TestAdminMapRefusesSetupEvenWithAnOldReplicaCode(t *testing.T) {
+	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+		t.Run(string(mode), func(t *testing.T) {
+			s := newLaneServerWith(t, func(cfg *identity.Config) {
+				cfg.Mode = mode
+				if mode == identity.ModeTrustedProxy {
+					cfg.AssertionHeader = "x-proxy-assertion"
+				}
+			})
+			code := strings.Repeat("B", 32)
+			sum := sha256.Sum256([]byte(code))
+			if _, err := s.pool.Exec(context.Background(), `INSERT INTO setup_codes (code_hash, expires_at)
+				VALUES ($1, clock_timestamp() + interval '1 hour')`, hex.EncodeToString(sum[:])); err != nil {
+				t.Fatal(err)
+			}
+			headers := map[string]string{"Authorization": "Bearer " + s.token()}
+			if mode == identity.ModeTrustedProxy {
+				headers = map[string]string{"x-proxy-assertion": s.token()}
+			}
+			setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, headers), 409,
+				"the identity provider's mapping supplies administrators")
+			setupCounts(t, s.pool, 1, 0, 0)
+			setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 403,
+				"only a signed-in person can redeem a setup code")
+			setupResponse(t, s.doRaw("POST", strings.Replace(setupCodeURL, "default", "not-an-org", 1), map[string]any{"code": code}, headers), 400, "")
+		})
+	}
+}
+
 func TestNoCodeWhenTheMapCanGrantAdmin(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	code, err := api.MintSetupCode(context.Background(), pool, time.Now(), true)
+	code, err := api.MintSetupCode(context.Background(), pool, true)
 	if err != nil || code != "" {
 		t.Fatalf("MintSetupCode(mapGrantsAdmin) = %q, %v; want no code", code, err)
 	}
@@ -113,6 +197,9 @@ func setupResponse(t *testing.T, res *http.Response, want int, message string) s
 	t.Helper()
 	if got := res.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := res.Header.Get("Pragma"); got != "no-cache" {
+		t.Errorf("Pragma = %q, want no-cache", got)
 	}
 	status, typ, body := laneRead(t, res)
 	if status != want {
@@ -133,10 +220,10 @@ func setupResponse(t *testing.T, res *http.Response, want int, message string) s
 }
 
 func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
-	s := newLaneServer(t)
+	s := newSetupServer(t)
 	token := s.token()
-	code := mintSetupCode(t, s.pool, time.Now())
-	mintSetupCode(t, s.pool, time.Now())
+	code := mintSetupCode(t, s.pool)
+	mintSetupCode(t, s.pool)
 	if status, typ := laneStatus(t, s.bearer("GET", "/v1/agents", token, nil)); status != 403 || typ != "permission_error" {
 		t.Fatalf("before bootstrap read = %d/%s, want 403", status, typ)
 	}
@@ -176,10 +263,15 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 }
 
 func TestAnExpiredOrMalformedSetupCodeIsRefused(t *testing.T) {
-	s := newLaneServer(t)
+	s := newSetupServer(t)
 	token := s.token()
-	valid := mintSetupCode(t, s.pool, time.Now())
-	expired := mintSetupCode(t, s.pool, time.Now().Add(-2*time.Hour))
+	valid := mintSetupCode(t, s.pool)
+	expired := mintSetupCode(t, s.pool)
+	sum := sha256.Sum256([]byte(expired))
+	if _, err := s.pool.Exec(context.Background(), `UPDATE setup_codes SET expires_at = clock_timestamp() - interval '1 second'
+		WHERE code_hash = $1`, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
 	for _, body := range []any{
 		map[string]any{"code": expired}, map[string]any{"code": strings.Repeat("A", 32)},
 		map[string]any{"code": "malformed"}, map[string]any{"code": ""},
@@ -192,8 +284,8 @@ func TestAnExpiredOrMalformedSetupCodeIsRefused(t *testing.T) {
 }
 
 func TestTheManagementKeyCannotRedeemASetupCode(t *testing.T) {
-	s := newLaneServer(t)
-	code := mintSetupCode(t, s.pool, time.Now())
+	s := newSetupServer(t)
+	code := mintSetupCode(t, s.pool)
 	// A real person already exists, so a mistaken machine promotion has a target.
 	laneStatus(t, s.bearer("GET", "/v1/agents", s.token(), nil))
 	setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 403,
@@ -204,8 +296,8 @@ func TestTheManagementKeyCannotRedeemASetupCode(t *testing.T) {
 func TestAnIdPMappedPersonCannotRedeem(t *testing.T) {
 	for _, claim := range []string{"platform-devs", "platform-read"} {
 		t.Run(claim, func(t *testing.T) {
-			s := newLaneServer(t)
-			code := mintSetupCode(t, s.pool, time.Now())
+			s := newSetupServer(t)
+			code := mintSetupCode(t, s.pool)
 			setupResponse(t, s.bearer("POST", setupCodeURL, s.token(claim), map[string]any{"code": code}), 409,
 				"your role comes from the identity provider's mapping")
 			setupCounts(t, s.pool, 1, 0, 0)
@@ -216,7 +308,7 @@ func TestAnIdPMappedPersonCannotRedeem(t *testing.T) {
 func TestSetupCodeOrganizationAndMethod(t *testing.T) {
 	s := newLaneServerWith(t, func(c *identity.Config) { c.RoleMap = nil })
 	token := s.token()
-	code := mintSetupCode(t, s.pool, time.Now())
+	code := mintSetupCode(t, s.pool)
 	for _, org := range []struct {
 		value  string
 		status int
@@ -228,7 +320,7 @@ func TestSetupCodeOrganizationAndMethod(t *testing.T) {
 }
 
 func TestConcurrentRedemptionsMakeOneAdmin(t *testing.T) {
-	s := newLaneServer(t)
+	s := newSetupServer(t)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	type response struct {
@@ -240,7 +332,7 @@ func TestConcurrentRedemptionsMakeOneAdmin(t *testing.T) {
 		claims := s.claims()
 		claims["sub"] = subject
 		token := s.idp.Mint(t, claims)
-		code := mintSetupCode(t, s.pool, time.Now())
+		code := mintSetupCode(t, s.pool)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		t.Cleanup(cancel)
 		wg.Add(1)

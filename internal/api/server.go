@@ -32,6 +32,9 @@ type server struct {
 	// runner's too — so POST /v1/dreams then refuses. The other four routes
 	// never read it.
 	dreamRunner bool
+	// setupMapGrantsAdmin is the verifier's immutable first-admin policy, not
+	// the caller's mapped role. An unmatched person cannot bypass that policy.
+	setupMapGrantsAdmin bool
 	// emitting marks sessions with an unreachable-credential advisory emission
 	// in flight, so a gate fetching faster than the emission drains cannot
 	// stack detached goroutines (startEmission).
@@ -86,6 +89,9 @@ func WithObjectDeletes(q *ObjectDeleteQueue) Option {
 // that offers no human credential beside it.
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier, opts ...Option) http.Handler {
 	s := newServer(pool, blobs, cipher)
+	if verifier != nil {
+		s.setupMapGrantsAdmin = verifier.RoleMapGrantsAdmin()
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -253,6 +259,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	}
 
 	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(s.handle(identity.RoleUser, s.redeemSetupCode)))
+	// The route completeness guard distinguishes fallback closures from typed
+	// handlers by their literal shape, so keep these headers in the closure.
 	mux.HandleFunc(consoleSetupCodePath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Pragma", "no-cache")

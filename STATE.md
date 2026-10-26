@@ -5,8 +5,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1: stored roles and first-admin setup.
-**no release until plan 69 slice 7**. Final branch reviews and CI remain.
-Independent verifier: PASS at `01912621` (`make verify`, 91.74% statement coverage).
+**no release until plan 69 slice 7**. Scoped final reviews and CI remain.
+Independent verifier: PASS for the hardening patch (`make verify`, 91.73% statement coverage).
 
 ## Tasks
 
@@ -17,4 +17,4 @@ Independent verifier: PASS at `01912621` (`make verify`, 91.74% statement covera
 - [x] Gateway operator token uses the shared resolver.
 - [x] Once-ever setup and restricted local delivery.
 - [x] Docs, Helm and upgrade notes.
-- [ ] Complete final reviews, CI and the companion console PR.
+- [ ] Complete scoped final reviews, CI and the companion console PR.

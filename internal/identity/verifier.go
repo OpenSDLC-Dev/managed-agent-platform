@@ -234,6 +234,17 @@ func FromEnv(ctx context.Context) (*Verifier, error) {
 // credential to look for.
 func (v *Verifier) Mode() Mode { return v.mode }
 
+// RoleMapGrantsAdmin reports whether this verifier's immutable configuration
+// reserves first-admin setup for the IdP, even before a mapped admin signs in.
+func (v *Verifier) RoleMapGrantsAdmin() bool {
+	for _, role := range v.roleMap {
+		if role == RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
 // AssertionHeader is the request header carrying the proxy's assertion in
 // trusted_proxy mode, and "" in oidc mode.
 func (v *Verifier) AssertionHeader() string { return v.header }
@@ -346,6 +357,11 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if std.Subject == "" {
 		return Identity{}, reject("missing sub")
 	}
+	// PostgreSQL cannot store NUL. Refuse it in the identity key rather than
+	// stripping it, which could merge two different people.
+	if strings.ContainsRune(std.Subject, 0) {
+		return Identity{}, reject("subject contains NUL")
+	}
 	// A 255-BYTE bound, from OIDC Core §2's "MUST NOT exceed 255 ASCII characters
 	// in length". The two coincide for any conforming subject, since ASCII is one
 	// byte per character, and the byte form is the stricter of the two for a
@@ -405,8 +421,10 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		// that rule: it conflicts on (issuer, subject) — never on email — and
 		// treats these two as the provider's to restate, refreshing them
 		// alongside last_seen_at on every request rather than writing them once.
-		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
-		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
+		// Descriptive fields confer no authority. Remove PostgreSQL's forbidden
+		// NUL before bounding, so discarded bytes do not consume the profile cap.
+		Email:       truncate(strings.ReplaceAll(stringClaim(all, v.emailClaim), "\x00", ""), maxProfileBytes),
+		DisplayName: truncate(strings.ReplaceAll(stringClaim(all, v.nameClaim), "\x00", ""), maxProfileBytes),
 		// RoleNone is not an error: the mapping asserts no role, and
 		// principal.Resolve decides the stored role from there.
 		Role: strongestRole(roleValues(claimAt(all, v.rolesClaim)), v.roleMap),

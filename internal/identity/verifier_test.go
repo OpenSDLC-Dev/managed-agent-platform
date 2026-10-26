@@ -1654,6 +1654,68 @@ func TestVerifyDistinguishesADecodeFailureFromABadSignature(t *testing.T) {
 	})
 }
 
+func TestVerifySanitizesNULProfileClaims(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+		t.Run(string(mode), func(t *testing.T) {
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(cfg *identity.Config) {
+				cfg.Mode = mode
+				if mode == identity.ModeTrustedProxy {
+					cfg.AssertionHeader = verifierXIAPHeader
+				}
+			})
+			nul := string(rune(0))
+			for _, tc := range []struct{ name, email, display, wantEmail, wantDisplay string }{
+				{"ordinary Unicode", "á" + nul + "da@example.test", nul + "Zoë 世" + nul, "áda@example.test", "Zoë 世"},
+				{"strip before bounding", strings.Repeat(nul, 64) + strings.Repeat("世", identity.MaxProfileBytesForTest),
+					strings.Repeat(nul, 64) + strings.Repeat("世", identity.MaxProfileBytesForTest),
+					strings.Repeat("世", identity.MaxProfileBytesForTest/3), strings.Repeat("世", identity.MaxProfileBytesForTest/3)},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					claims := verifierXClaims(idp, clock)
+					claims["email"], claims["name"] = tc.email, tc.display
+					got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+					if err != nil {
+						t.Fatalf("valid descriptive claims failed authentication: %v", err)
+					}
+					if got.Email != tc.wantEmail || got.DisplayName != tc.wantDisplay {
+						t.Error("descriptive claims were not stripped of NUL before UTF-8-safe bounding")
+					}
+					if got.Subject != "user-1" || got.Issuer != idp.Issuer() || got.Role != identity.RoleAdmin {
+						t.Error("sanitizing descriptive claims changed identity or authority")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsNULSubject(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+		t.Run(string(mode), func(t *testing.T) {
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(cfg *identity.Config) {
+				cfg.Mode = mode
+				if mode == identity.ModeTrustedProxy {
+					cfg.AssertionHeader = verifierXIAPHeader
+				}
+			})
+			claims := verifierXClaims(idp, clock)
+			claims["sub"] = "user" + string(rune(0)) + "-1"
+			got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+			if err == nil || got != (identity.Identity{}) {
+				t.Fatal("NUL subject was not rejected as an authentication failure")
+			}
+			var ie *identity.Error
+			if !errors.As(err, &ie) || ie.Error() != verifierXFailed || ie.Reason() != "subject contains NUL" {
+				t.Error("NUL subject did not receive the constant authentication error and diagnostic reason")
+			}
+		})
+	}
+}
+
 // TestVerifyBoundsTheProfileFields pins the cap on the two fields whose length
 // the token alone decides and a later slice persists. Neither carries authority,
 // so truncating keeps the login working rather than turning a valid one into an

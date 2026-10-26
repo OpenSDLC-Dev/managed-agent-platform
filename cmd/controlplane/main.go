@@ -139,7 +139,7 @@ func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
 			break
 		}
 	}
-	code, err := api.MintSetupCode(ctx, pool, time.Now(), mapGrantsAdmin)
+	code, err := api.MintSetupCode(ctx, pool, mapGrantsAdmin)
 	if err != nil || code == "" {
 		return nil, err
 	}

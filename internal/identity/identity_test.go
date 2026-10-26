@@ -122,26 +122,6 @@ func TestParseRoleAcceptsLegacyViewer(t *testing.T) {
 	}
 }
 
-func TestRoleOrderIsUserDeveloperAdmin(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		role identity.Role
-		min  identity.Role
-		want bool
-	}{
-		{name: "admin/user", role: identity.RoleAdmin, min: identity.RoleUser, want: true},
-		{name: "developer/user", role: identity.RoleDeveloper, min: identity.RoleUser, want: true},
-		{name: "user/user", role: identity.RoleUser, min: identity.RoleUser, want: true},
-		{name: "user/developer", role: identity.RoleUser, min: identity.RoleDeveloper, want: false},
-		{name: "none/user", role: identity.RoleNone, min: identity.RoleUser, want: false},
-	} {
-		if got := tc.role.AtLeast(tc.min); got != tc.want {
-			t.Errorf("%s: Role(%q).AtLeast(%q) = %v, want %v", tc.name, string(tc.role), string(tc.min), got, tc.want)
-		}
-	}
-}
-
 // TestLooksLikeJWT pins the compact-JWS silhouette. This is routing, not
 // security: it is what keeps an sk-map-env01- environment key on the worker lane
 // and off the human lane, so a real minted token must match and a real

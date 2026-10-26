@@ -1214,11 +1214,23 @@ that role reaches only setup-code redemption. The mapping rules are below.
 Cookies, platform passwords, member and service-account APIs, and owned API
 keys are later slices; the existing management keys still work unchanged.
 
+Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
+A subject containing NUL is an authentication failure, never normalized into
+a different identity.
+
 **The setup code is privileged local material, not a log secret.** With OIDC
 or trusted-proxy mode configured, startup mints a code only if the install
 has never had an admin and no mapping grants admin. Empty or disabled identity
 mode mints none. The database stores only a SHA-256 hash. Each replica has
-its own code, valid for one hour; redeeming any one spends them all.
+its own code, valid for one hour from database mint time after lock acquisition.
+Redeeming any one spends them all. A new mint prunes expired hashes but keeps
+other replicas' unexpired codes.
+
+Enabling an admin-granting map invalidates outstanding codes at startup. A
+server using that map also refuses redemption by unmatched people, even with
+an older replica's valid code. It returns 409 `invalid_request_error`,
+"the identity provider's mapping supplies administrators". All replicas must
+use consistent identity configuration.
 
 The control plane creates a fresh `0700` directory under its process temporary
 directory and an exclusive `0600` file named `setup-code` inside it. Ordinary
@@ -1249,13 +1261,14 @@ processes, root and other file readers can claim admin with such a sign-in;
 file permissions do not eliminate that privileged-local-reader risk. Log
 access alone does not reveal the code.
 
-Redemption locks principals before setup codes and rechecks eligibility
-inside the transaction. One concurrent redemption wins; later attempts get
-409 `invalid_request_error`, even with a spent or malformed code. A valid code
-also gets 409 when the caller's role comes from the mapping. Every first admin
-grant, including a mapped admin or SQL recovery, records a permanent bootstrap
-flag. Later demotion or deactivation never reopens setup. The exact response
-and error shapes are in [DIVERGENCES.md](./DIVERGENCES.md).
+An open setup attempt locks principals before setup codes and rechecks
+eligibility inside the transaction. One concurrent redemption wins. Every
+first admin grant, including a mapped admin or SQL recovery, records a
+permanent bootstrap flag. Later demotion or deactivation never reopens setup.
+Once flagged, redemption returns 409 `invalid_request_error` without those
+table locks, even with a spent or malformed code. A valid code also gets 409
+when the caller's role comes from the mapping. The exact response and error
+shapes are in [DIVERGENCES.md](./DIVERGENCES.md).
 
 **Recovery is a database edit, not another setup code.** If no admin can sign
 in, identify the existing person's row by issuer and subject. Check the row
