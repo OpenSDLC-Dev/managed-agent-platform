@@ -5,14 +5,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1: stored roles and first-admin setup.
-**no release until plan 69 slice 7**. Slice 1 awaits independent verification and review.
+**no release until plan 69 slice 7**. Final branch reviews and CI remain.
+Independent verifier: PASS at `01912621` (`make verify`, 91.74% statement coverage).
 
 ## Tasks
 
-- [ ] Principal role/kind/deactivation schema and deletion guard: implemented; verification pending.
-- [ ] Three roles and optional legacy-compatible mapping: implemented; verification pending.
-- [ ] Shared stored-role resolver on the control-plane identity lane: implemented; verification pending.
-- [ ] Resource role matrix and developer vault-credential writes: implemented; verification pending.
-- [ ] Gateway operator token uses the shared resolver: implemented; verification pending.
-- [ ] Once-ever setup and restricted local delivery: implemented; verification pending.
-- [ ] Docs, Helm and upgrade notes: prepared; independent verification and review pending.
+- [x] Principal role/kind/deactivation schema and deletion guard.
+- [x] Three roles and optional legacy-compatible mapping.
+- [x] Shared stored-role resolver on the control-plane identity lane.
+- [x] Resource role matrix and developer vault-credential writes.
+- [x] Gateway operator token uses the shared resolver.
+- [x] Once-ever setup and restricted local delivery.
+- [x] Docs, Helm and upgrade notes.
+- [ ] Complete final reviews, CI and the companion console PR.
