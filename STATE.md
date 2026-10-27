@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1: stored roles and first-admin setup.
-**no release until plan 69 slice 7**. Scoped fix reviews, CI and the console companion remain.
+**no release until plan 69 slice 7**. CI and the console companion remain.
 Independent verifier: PASS including precheck and CI cleanup (`make verify`, 91.74% statement coverage).
 
 ## Tasks
@@ -18,4 +18,5 @@ Independent verifier: PASS including precheck and CI cleanup (`make verify`, 91.
 - [x] Once-ever setup and restricted local delivery.
 - [x] Docs, Helm and upgrade notes.
 - [x] Complete both local reviews of the baseline and hardening patch.
-- [ ] Review setup precheck and CI cleanup; complete CI and the console companion.
+- [x] Review setup precheck and CI cleanup; no open local findings.
+- [ ] Complete CI and the console companion.
