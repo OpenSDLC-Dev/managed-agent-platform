@@ -259,7 +259,7 @@ func TestAnAdminAppearingWhileReadingTheSetupBodyTakesPriority(t *testing.T) {
 
 func TestSetupCodeRechecksValidityAfterWaitingForLocks(t *testing.T) {
 	for _, tc := range []struct{ name, change string }{
-		{"expiry", `UPDATE setup_codes SET expires_at = clock_timestamp() - interval '1 second'`},
+		{"expiry", `UPDATE setup_codes SET expires_at = clock_timestamp()`},
 		{"changed hash", `UPDATE setup_codes SET code_hash = 'invalidated-' || code_hash`},
 		{"removed hash", `DELETE FROM setup_codes`},
 	} {
@@ -276,13 +276,13 @@ func TestSetupCodeRechecksValidityAfterWaitingForLocks(t *testing.T) {
 				VALUES ('principal_busy', 'https://idp.example', 'busy')`); err != nil {
 				t.Fatal(err)
 			}
+			done := startSetupRedemption(ctx, pool, code)
+			waitSetupLock(t, ctx, pool, "principals", done)
+			// The unlocked precheck has passed and redemption's transaction
+			// is waiting. Expiry must use the post-wait clock, not now().
 			if _, err := writer.Exec(ctx, tc.change); err != nil {
 				t.Fatal(err)
 			}
-			// The unlocked read sees the old unexpired hash. Only the locked
-			// recheck can see the invalidation committed after this lock wait.
-			done := startSetupRedemption(ctx, pool, code)
-			waitSetupLock(t, ctx, pool, "principals", done)
 			if err := writer.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}
