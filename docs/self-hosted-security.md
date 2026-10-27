@@ -1140,33 +1140,37 @@ restore-ordering constraint you own:
 
 ### 8. Principal retention
 
-Human sign-in ([#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56),
-docs/plan/31_console-sso-rbac.md — landing incrementally, off unless you set
-`IDENTITY_MODE`) records each person who has authenticated in a `principals` row:
-their issuer, subject, email, display name, first-seen and `last_seen_at`. It holds
-**no roles and no tokens** — authorization is re-read from the provider's claims on
-every request — so the row is a record that someone appeared, never a grant. Deleting
-one revokes nothing and creating one grants nothing; revoking the person at your IdP
-is what ends their access, as soon as the token they hold expires.
+Human sign-in stores a `principals` row with the person's issuer, subject,
+profile, role, role source and status (plan 69 slice 1). No token is stored.
+Deactivation lasts: a later sign-in is refused, not provisioned afresh.
 
-**No retention timer ships, and that is deliberate.** An erasure regime wants the row
-gone quickly; an audit regime wants it stable for as long as a `sessions.created_by`
-value still needs to resolve to a name. Either default is silently wrong for the
-other, so the schedule is yours:
+**Upgrade: replace the old retention DELETE with a scrub.** The database now
+refuses every `DELETE` and `TRUNCATE` on `principals`, even a DELETE matching no
+rows. Old retention jobs fail loudly. The platform offers no hard delete.
+No retention timer ships; choose a schedule for your audit and erasure duties:
 
 ```sql
--- Everyone who has not signed in for 180 days. Pick your own interval.
-DELETE FROM principals WHERE last_seen_at < now() - interval '180 days';
+-- Scrub only deactivated principals. Pick your own retention interval.
+UPDATE principals
+SET email = '', display_name = '', description = ''
+WHERE status = 'deactivated'
+  AND last_seen_at < now() - interval '180 days';
 ```
 
-Two things to know before you run it. `sessions.created_by` is **plain text, not a
-foreign key**, so deleting a principal never cascades into session history — the
-audit trail survives, with the creator as an opaque `principal_…` id that no longer
-resolves to a person, which is usually exactly what an erasure request wants.
-And a deleted person who signs in again is simply provisioned afresh, with a **new**
-id: older sessions keep pointing at the old one. If your audit obligations need
-`created_by` to stay resolvable, retain rows at least as long as you retain sessions,
-and delete the sessions first.
+An erasure request instead scrubs the principal it names. An active person's
+next verified request refreshes profile fields from the IdP. The scheduled job
+must not scrub active members or service accounts merely because they use
+keys rather than sign in. Slice 1 has no member-management API; deactivation
+is a database operation until slice 2.
+
+A scrub keeps the id, role, role source, deactivation status, issuer and subject.
+The last two prevent a removed person from returning as a new active principal.
+They can themselves identify someone, so this is not complete anonymization.
+The stable id preserves the link from `created_by` to the initiator, though
+cleared profile fields no longer supply a name. `sessions.created_by` remains
+plain text, not a foreign key; scrubbing changes no session history. Local
+accounts arrive in slice 2: their scrub must keep the login name and clear the
+password. Those fields do not exist in slice 1.
 
 ### 9. Single sign-on and the bundled identity provider
 
@@ -1200,6 +1204,89 @@ bundle makes it part of the `iam` profile rather than a default. One failure
 mode to recognize: Go ignores a CA file it cannot open without saying so, so a
 `SSL_CERT_FILE` the control plane's user cannot read surfaces as a hard boot error out
 of the verifier's warming key fetch, never as a permissions message.
+
+#### Stored roles and first-admin setup
+
+Roles are `user`, `developer` and `admin`. There is no read-only role: someone
+who only needs to read must get `developer`, which can also write. A first
+sign-in with no matching mapping gets `user`. No playground is built yet, so
+that role reaches only setup-code redemption. The mapping rules are below.
+Cookies, platform passwords, member and service-account APIs, and owned API
+keys are later slices; the existing management keys still work unchanged.
+
+Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
+A subject containing NUL is an authentication failure, never normalized into
+a different identity.
+
+**The setup code is privileged local material, not a log secret.** With OIDC
+or trusted-proxy mode configured, startup mints a code only if the install
+has never had an admin and no mapping grants admin. Empty or disabled identity
+mode mints none. The database stores only a SHA-256 hash. Each replica has
+its own code, valid for one hour from database mint time after lock acquisition.
+Redeeming any one spends them all. A new mint prunes expired hashes but keeps
+other replicas' unexpired codes.
+
+Enabling an admin-granting map invalidates outstanding codes at startup. A
+server using that map also refuses redemption by unmatched people, even with
+an older replica's valid code. It returns 409 `invalid_request_error`,
+"the identity provider's mapping supplies administrators". All replicas must
+use consistent identity configuration.
+
+The control plane creates a fresh `0700` directory under its process temporary
+directory and an exclusive `0600` file named `setup-code` inside it. Ordinary
+logs contain only `setup_code_file` (the retrieval path) and `expires_in: 1h`,
+never the code. Failed delivery stops startup. The process removes its own
+file and directory when it returns, including after a later startup failure.
+A crash can leave the file until container or temporary-directory cleanup;
+expiry or redemption still invalidates its code.
+
+Choose one specific control-plane container or pod. Read **that replica's**
+startup log for the path, then retrieve the file there in a private terminal.
+Set the variables below to that container or pod and the exact logged path;
+do not use a load-balanced Deployment target or another replica's path:
+
+```sh
+# Docker: CONTROLPLANE_CONTAINER is the specific container, not the service.
+docker exec "$CONTROLPLANE_CONTAINER" cat "$SETUP_CODE_FILE"
+# Kubernetes: choose the specific pod and its controlplane container.
+kubectl -n "$NAMESPACE" exec "$CONTROLPLANE_POD" -c controlplane -- cat "$SETUP_CODE_FILE"
+```
+
+Do not copy the value into shared logs, tickets or command arguments. Redeem
+it promptly as the JSON `code` field at
+`POST /api/console/organizations/default/setup_code/redeem`, authenticated
+through the configured IdP lane. A management key cannot redeem it. Only an
+active `kind=user` principal whose role source is not `idp` qualifies. Same-UID
+processes, root and other file readers can claim admin with such a sign-in;
+file permissions do not eliminate that privileged-local-reader risk. Log
+access alone does not reveal the code.
+
+An open setup attempt locks principals before setup codes and rechecks
+eligibility inside the transaction. One concurrent redemption wins. Every
+first admin grant, including a mapped admin or SQL recovery, records a
+permanent bootstrap flag. Later demotion or deactivation never reopens setup.
+Once flagged, redemption returns 409 `invalid_request_error` without those
+table locks, even with a spent or malformed code. A valid code also gets 409
+when the caller's role comes from the mapping. The exact response and error
+shapes are in [DIVERGENCES.md](./DIVERGENCES.md).
+
+**Recovery is a database edit, not another setup code.** If no admin can sign
+in, identify the existing person's row by issuer and subject. Check the row
+before changing it. Through your controlled database connection, use its id:
+
+```sql
+-- Replace principal_REPLACE_ME with the verified person's existing id.
+UPDATE principals
+SET role = 'admin', role_source = 'console', status = 'active'
+WHERE id = 'principal_REPLACE_ME' AND kind = 'user'
+RETURNING id, role, role_source, status;
+```
+
+This promotes an active person or deliberately reactivates a removed one.
+It retains the id, issuer and subject; never delete their tombstone. If a
+mapping matches them, first change it to grant admin or stop matching them,
+or the next request will overwrite this recovery role. Repair an unavailable
+IdP separately: promoting a row does not bypass credential verification.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 
@@ -1238,7 +1325,7 @@ half of the SAML mitigation above.
 **The organization those people live in is a security choice, not a label.** The seed
 creates one of its own, `map`, and puts every human there rather than in Casdoor's
 `built-in` — a user in `built-in` is a Casdoor **global administrator**, so the separate
-organization is the whole difference between a platform `viewer` and someone who can
+organization is the whole difference between a platform `user` and someone who can
 reconfigure the identity provider. It is also why every `IDENTITY_ROLE_MAP` key is
 spelled `map/platform-admins` and friends: a Casdoor group reaches the token as
 `organization/name`, so the organization's name is part of the authorization policy, and
@@ -1291,13 +1378,16 @@ could be handed over.
   the render entirely, and `built-in/admin`'s password comes from the required
   `casdoor.adminPassword` rather than this file — so on Kubernetes there is no committed
   credential to replace, only one you supply.
-- **The role mapping itself.** Roles come from claims on every request, so the group
-  membership in your IdP *is* the authorization policy — §8 above and
-  [docs/ARCHITECTURE.md](./ARCHITECTURE.md#security-invariants) cover what the platform
-  does and does not store. A claim value that maps to nothing yields no role and is
-  denied everywhere, which is the fail-closed direction but also the shape a
-  misconfiguration takes: if every human is refused, check the claim name and the map
-  before you suspect the token.
+- **The optional role mapping.** `IDENTITY_ROLE_MAP` applies on every verified
+  request in both OIDC and trusted-proxy modes. A match sets the stored role and
+  makes the IdP its source. A formerly mapped person with no match returns to
+  `user`; a never-mapped person keeps the stored role. Legacy `viewer` entries
+  now mean `user`, so map people to `developer` if they must read. A wrong claim
+  name can therefore demote mapped people to `user`. The IdP reaches the platform
+  only at sign-in, which in this slice means every verified request. An older
+  unexpired token can reapply its old mapped role after a newer token demotes it;
+  IdP changes are not immediate revocation. Local deactivation refuses the
+  principal regardless of mapping. There is no automatic IdP synchronization.
 
 ### 10. Management-key lifecycle
 
@@ -1396,10 +1486,10 @@ What you own:
   create and list at `…/workspaces/{workspace}/api_keys`, update at
   `…/api_keys/{key_id}` (the reference's route) and at its workspace-scoped
   alias `…/workspaces/{workspace}/api_keys/{key_id}`, and the workspace read
-  `…/workspaces/{workspace}`. Admin is the tier that bounds writing a secret:
-  environment-key issuance, and vault *credential* mutation and validation (a
-  vault itself is `developer` to write and `viewer` to read; only what it holds
-  is admin-gated). Read that gate precisely: it
+  `…/workspaces/{workspace}`. Environment-key administration and memory-version
+  redaction also stay admin-only. Vault and credential reads, writes and
+  validation now require `developer`; writing a secret is not a universal
+  admin boundary. Read the key gate precisely: it
   binds the *human* lane. `requireRole` applies only to identity-authenticated
   requests, so with `IDENTITY_MODE` unset or `disabled` — the default — anyone
   holding the management `x-api-key` reaches these routes, and **a management key

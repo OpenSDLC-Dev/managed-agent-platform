@@ -38,7 +38,7 @@ import (
 type routeReg struct {
 	line    int
 	pattern string // rendered: "GET /v1/agents", or `"POST "+consoleTokensPath`
-	role    string // "RoleViewer" … ; empty when the handler declares none
+	role    string // "RoleUser" … ; empty when the handler declares none
 	isFunc  bool   // the handler is a bare closure, not one of the adapters
 }
 
@@ -95,13 +95,42 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 	}
 }
 
+// TestNoRouteAdmitsUserExceptRedemption holds the line the plan draws under the
+// user role: it signs in and does nothing else, because there is no read-only
+// role and the playground it is meant for does not exist yet. A route
+// registered at RoleUser would hand every first sign-in whatever that route
+// serves. The one exception is the setup-code redemption, which a signed-in
+// user must be able to reach before bootstrap to become the first admin.
+//
+// It reads the source for the same reason the completeness test does: no
+// request-driven test can enumerate routes it was not told about. The
+// exception is named by its registered pattern, so the route passes the day it
+// is added and no other route does.
+func TestNoRouteAdmitsUserExceptRedemption(t *testing.T) {
+	// This is render's expression form of `"POST "+consoleSetupCodePath`,
+	// not a URL path. TestConsoleSetupCodePath pins the constant's value.
+	const redemption = "POST +consoleSetupCodePath"
+
+	regs := parseRoutes(t, "server.go")
+	if len(regs) < 60 {
+		t.Fatalf("parsed %d registrations from server.go; the route table is far larger — the parser is broken, not the table", len(regs))
+	}
+	for _, reg := range regs {
+		if reg.role == "RoleUser" && reg.pattern != redemption {
+			t.Errorf("server.go:%d: %s is registered at RoleUser; only the setup-code redemption may admit a user, and a read needs RoleDeveloper",
+				reg.line, reg.pattern)
+		}
+	}
+}
+
 // TestTheMatrixCoversEveryAnnotatedRoute joins the two halves of the guard.
 // TestEveryIdentityReachableRouteDeclaresARole proves each route declares SOME
 // valid role; TestRoleMatrixIsEnforcedOnEveryRoute proves the roles in its own
 // table are enforced. Neither notices a route that exists in the source but not
-// in that table — a new credential route annotated `developer` would satisfy the
-// first and never be requested by the second, and an admin surface would be open
-// to developers with the suite green. This compares the two lists directly.
+// in that table — a new route that destroys history, annotated `developer`,
+// would satisfy the first and never be requested by the second, and an admin
+// surface would be open to developers with the suite green. This compares the
+// two lists directly.
 //
 // Console routes are excluded: their patterns are built from constants rather
 // than literals, and they need a real environment to address, so they are
@@ -181,7 +210,7 @@ func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 	}
 }
 
-// roleValue turns the identifier "RoleViewer" into the wire value "viewer" that
+// roleValue turns the identifier "RoleUser" into the wire value "user" that
 // identity.ParseRole accepts, so the test validates against the real parser
 // rather than a second list of role names that could drift from it.
 func roleValue(ident string) string {
@@ -313,7 +342,7 @@ func roleIn(e ast.Expr) string {
 		// matched node's children — the walk still visits its siblings — so
 		// without this guard a handler expression naming two roles would report
 		// whichever came last, and the test could certify a route as admin while
-		// requireRole enforces viewer.
+		// requireRole enforces user.
 		if found != "" {
 			return false
 		}

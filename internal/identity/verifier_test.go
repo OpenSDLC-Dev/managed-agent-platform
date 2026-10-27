@@ -66,7 +66,7 @@ func verifierXRoleMap() map[string]identity.Role {
 	return map[string]identity.Role{
 		"platform-admins": identity.RoleAdmin,
 		"devs":            identity.RoleDeveloper,
-		"everyone":        identity.RoleViewer,
+		"everyone":        identity.RoleUser,
 	}
 }
 
@@ -1505,8 +1505,39 @@ func TestNoMappedRoleYieldsRoleNone(t *testing.T) {
 	if got != want {
 		t.Errorf("Identity = %+v, want %+v", got, want)
 	}
-	if got.Role.AtLeast(identity.RoleViewer) {
-		t.Error("an unmapped principal satisfies the viewer minimum; RoleNone must satisfy nothing")
+	if got.Role.AtLeast(identity.RoleUser) {
+		t.Error("an unmapped principal satisfies the user minimum; RoleNone must satisfy nothing")
+	}
+}
+
+// TestNewAcceptsAnEmptyRoleMap pins the other half of an optional role map: New
+// builds a verifier from no map, nil or empty, and every token it verifies then
+// carries RoleNone, the IdP asserting nothing about the person.
+func TestNewAcceptsAnEmptyRoleMap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		m    map[string]identity.Role
+	}{
+		{name: "nil", m: nil},
+		{name: "empty", m: map[string]identity.Role{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(c *identity.Config) { c.RoleMap = tc.m })
+
+			// A roles claim that would map to admin under a configured map.
+			got, err := v.Verify(context.Background(), idp.Mint(t, verifierXClaims(idp, clock)))
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			want := verifierXWant(idp)
+			want.Role = identity.RoleNone
+			if got != want {
+				t.Errorf("Identity = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
@@ -1621,6 +1652,68 @@ func TestVerifyDistinguishesADecodeFailureFromABadSignature(t *testing.T) {
 			t.Errorf("Reason() = %q, want %q", ie.Reason(), want)
 		}
 	})
+}
+
+func TestVerifySanitizesNULProfileClaims(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+		t.Run(string(mode), func(t *testing.T) {
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(cfg *identity.Config) {
+				cfg.Mode = mode
+				if mode == identity.ModeTrustedProxy {
+					cfg.AssertionHeader = verifierXIAPHeader
+				}
+			})
+			nul := string(rune(0))
+			for _, tc := range []struct{ name, email, display, wantEmail, wantDisplay string }{
+				{"ordinary Unicode", "á" + nul + "da@example.test", nul + "Zoë 世" + nul, "áda@example.test", "Zoë 世"},
+				{"strip before bounding", strings.Repeat(nul, 64) + strings.Repeat("世", identity.MaxProfileBytesForTest),
+					strings.Repeat(nul, 64) + strings.Repeat("世", identity.MaxProfileBytesForTest),
+					strings.Repeat("世", identity.MaxProfileBytesForTest/3), strings.Repeat("世", identity.MaxProfileBytesForTest/3)},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					claims := verifierXClaims(idp, clock)
+					claims["email"], claims["name"] = tc.email, tc.display
+					got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+					if err != nil {
+						t.Fatalf("valid descriptive claims failed authentication: %v", err)
+					}
+					if got.Email != tc.wantEmail || got.DisplayName != tc.wantDisplay {
+						t.Error("descriptive claims were not stripped of NUL before UTF-8-safe bounding")
+					}
+					if got.Subject != "user-1" || got.Issuer != idp.Issuer() || got.Role != identity.RoleAdmin {
+						t.Error("sanitizing descriptive claims changed identity or authority")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsNULSubject(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+		t.Run(string(mode), func(t *testing.T) {
+			idp, clock := verifierXIdP(t)
+			v := verifierXNew(t, idp, clock, func(cfg *identity.Config) {
+				cfg.Mode = mode
+				if mode == identity.ModeTrustedProxy {
+					cfg.AssertionHeader = verifierXIAPHeader
+				}
+			})
+			claims := verifierXClaims(idp, clock)
+			claims["sub"] = "user" + string(rune(0)) + "-1"
+			got, err := v.Verify(context.Background(), idp.Mint(t, claims))
+			if err == nil || got != (identity.Identity{}) {
+				t.Fatal("NUL subject was not rejected as an authentication failure")
+			}
+			var ie *identity.Error
+			if !errors.As(err, &ie) || ie.Error() != verifierXFailed || ie.Reason() != "subject contains NUL" {
+				t.Error("NUL subject did not receive the constant authentication error and diagnostic reason")
+			}
+		})
+	}
 }
 
 // TestVerifyBoundsTheProfileFields pins the cap on the two fields whose length

@@ -428,13 +428,11 @@ values — sits orders of magnitude below either.
 
 ## Single sign-on and roles (`identity.*`, `casdoor.*`)
 
-Humans authenticate through an OIDC provider and the control plane resolves each
-request to a principal holding one of three roles — `admin`, `developer`,
-`viewer` — enforced per route (docs/plan/31_console-sso-rbac.md,
-[#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)). The
-`identity` block is that configuration and the chart injects it into the
-controlplane Deployment always; `casdoor.enabled` additionally deploys a bundled
-provider for clusters that have none.
+Humans authenticate through OIDC or a trusted proxy. The control plane and
+model gateway's operator lane share stored `user`, `developer` and `admin`
+roles (plan 69 slice 1). Reads require developer; no read-only role exists.
+The `identity` block configures both Deployments; `casdoor.enabled` also
+deploys a bundled provider for clusters that have none.
 
 **Off is the default and means exactly today's platform.** With `identity.mode`
 empty the chart renders no `IDENTITY_*` env at all — `IDENTITY_MODE` unset and
@@ -456,8 +454,20 @@ model, and worker environment keys are untouched.
 `identity.roleMap` is written as a **map** — claim value to role — and the chart
 encodes it into the flat `value=role,...` the verifier parses; a claim value or
 role containing `,` or `=` fails the render, because it would encode as a
-different, still-valid map. A principal whose claims map to nothing holds **no
-role** and is denied on every route, so this map is the whole grant.
+different, still-valid map. The map is **optional** in both modes. Each verified
+request applies it: a match sets the stored role, a former match now absent
+resets to user, and a never-mapped person keeps the stored role. First unmatched
+sign-in gets user, which reaches only setup-code redemption in this slice.
+Legacy viewer entries mean user and lose read access; map readers to developer.
+Older unexpired tokens can reapply their old mapped role. Deactivated principals
+are refused regardless of mapping.
+
+Without an admin-granting map, a never-bootstrapped install delivers a one-hour
+setup code in a restricted local file. Logs show only its path and expiry.
+Retrieve it from that specific control-plane pod and redeem it promptly; see
+[the security guide](../../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider)
+for retrieval, recovery and local-reader risks. Later demotion never reopens setup.
+
 `identity.claims.roles` names the claim those values come from (default `roles`),
 and **how you spell that name decides how it is read**:
 
@@ -473,8 +483,9 @@ inferred from the token — so a user who can place a flat claim literally named
 nested claim and grant themselves a role.
 
 Everything else the platform refuses, it refuses at **startup** and by variable
-name — an unreachable issuer, an empty role map, a malformed pair, a role outside
-the three. Both URLs must be `https`: the verifier requires an https key set and
+name — an unreachable issuer, a malformed pair, or an unknown role. Required
+issuer, audience and key-set settings are unchanged. Both URLs must be `https`:
+the verifier requires an https key set and
 its dial guard refuses loopback, so a plain-HTTP provider cannot be wired to this
 platform at all, and the control plane must be able to reach the issuer from
 inside the cluster with a certificate its image's trust store already accepts.
@@ -512,7 +523,7 @@ templates means owning their lifecycle — image tag, database, seed, CVE tracki
 --set identity.claims.roles=groups \
 --set 'identity.roleMap.map/platform-admins=admin' \
 --set 'identity.roleMap.map/platform-devs=developer' \
---set 'identity.roleMap.map/platform-read=viewer'
+--set 'identity.roleMap.map/platform-read=user'
 ```
 
 Four of those values are load-bearing in ways a plausible guess gets backwards,
@@ -520,8 +531,8 @@ each measured against a running 3.152.0 rather than read off its structs:
 
 - **`identity.claims.roles` is `groups`, not `roles`.** Casdoor's `roles` claim
   carries role **objects**, and the platform collects only string values out of a
-  claim — so mapping `roles` gives every human no role and denies them
-  everywhere. `groups` arrives as strings spelled `organization/name`, which is
+  claim. Mapping `roles` leaves new principals at user, which reads nothing.
+  `groups` arrives as strings spelled `organization/name`, which is
   why the map keys carry the seeded organization, `map`.
 - **The audience is the application's client id**, because that is what Casdoor
   puts in `aud`.
@@ -534,8 +545,7 @@ each measured against a running 3.152.0 rather than read off its structs:
 The last two are the pair the chart owns both sides of, so a mismatch on either
 **fails the render** rather than leaving every login to end in the same uniform
 401 a forged token gets. So do a missing `casdoor.ingress.host`, `adminPassword`,
-`console.clientSecret`, `console.clientId` or `console.redirectURIs`; an
-`identity.roleMap` that maps nothing while `identity.mode` is set; any of those
+`console.clientSecret`, `console.clientId` or `console.redirectURIs`; any of those
 credentials written unquoted, so YAML read it as a number or a bool; and a missing
 `casdoor.database.dataSourceName` when the bundled Postgres is off.
 
@@ -581,7 +591,8 @@ The three groups the seed creates — `map/platform-admins`, `map/platform-devs`
 `map/platform-read` — are what `identity.roleMap` keys on. Create your operators
 in the `map` organization and put each in one of them; the compose bundle's three
 demo accounts are deliberately **not** seeded here, since they carry documented
-passwords and this IdP is published.
+passwords and this IdP is published. `platform-read` keeps its legacy group name;
+the example maps it to user, which cannot read. Use developer for readers.
 
 ## Security notes
 

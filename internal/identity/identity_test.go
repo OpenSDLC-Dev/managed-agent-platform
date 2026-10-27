@@ -25,22 +25,22 @@ func TestRoleAtLeast(t *testing.T) {
 		want bool
 	}{
 		{name: "none/none", role: identity.RoleNone, min: identity.RoleNone, want: false},
-		{name: "none/viewer", role: identity.RoleNone, min: identity.RoleViewer, want: false},
+		{name: "none/user", role: identity.RoleNone, min: identity.RoleUser, want: false},
 		{name: "none/developer", role: identity.RoleNone, min: identity.RoleDeveloper, want: false},
 		{name: "none/admin", role: identity.RoleNone, min: identity.RoleAdmin, want: false},
 
-		{name: "viewer/none", role: identity.RoleViewer, min: identity.RoleNone, want: false},
-		{name: "viewer/viewer", role: identity.RoleViewer, min: identity.RoleViewer, want: true},
-		{name: "viewer/developer", role: identity.RoleViewer, min: identity.RoleDeveloper, want: false},
-		{name: "viewer/admin", role: identity.RoleViewer, min: identity.RoleAdmin, want: false},
+		{name: "user/none", role: identity.RoleUser, min: identity.RoleNone, want: false},
+		{name: "user/user", role: identity.RoleUser, min: identity.RoleUser, want: true},
+		{name: "user/developer", role: identity.RoleUser, min: identity.RoleDeveloper, want: false},
+		{name: "user/admin", role: identity.RoleUser, min: identity.RoleAdmin, want: false},
 
 		{name: "developer/none", role: identity.RoleDeveloper, min: identity.RoleNone, want: false},
-		{name: "developer/viewer", role: identity.RoleDeveloper, min: identity.RoleViewer, want: true},
+		{name: "developer/user", role: identity.RoleDeveloper, min: identity.RoleUser, want: true},
 		{name: "developer/developer", role: identity.RoleDeveloper, min: identity.RoleDeveloper, want: true},
 		{name: "developer/admin", role: identity.RoleDeveloper, min: identity.RoleAdmin, want: false},
 
 		{name: "admin/none", role: identity.RoleAdmin, min: identity.RoleNone, want: false},
-		{name: "admin/viewer", role: identity.RoleAdmin, min: identity.RoleViewer, want: true},
+		{name: "admin/user", role: identity.RoleAdmin, min: identity.RoleUser, want: true},
 		{name: "admin/developer", role: identity.RoleAdmin, min: identity.RoleDeveloper, want: true},
 		{name: "admin/admin", role: identity.RoleAdmin, min: identity.RoleAdmin, want: true},
 	} {
@@ -58,9 +58,9 @@ func TestRoleAtLeast(t *testing.T) {
 // annotation denies every caller instead of admitting every caller.
 func TestRoleAtLeastRejectsUnknownMinimum(t *testing.T) {
 	t.Parallel()
-	for _, min := range []identity.Role{"owner", "", "Admin", "viewer ", "root"} {
+	for _, min := range []identity.Role{"owner", "", "Admin", "viewer", "viewer ", "root"} {
 		for _, role := range []identity.Role{
-			identity.RoleNone, identity.RoleViewer, identity.RoleDeveloper, identity.RoleAdmin,
+			identity.RoleNone, identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin,
 		} {
 			if role.AtLeast(min) {
 				t.Errorf("Role(%q).AtLeast(%q) = true, want false for a minimum outside the three roles",
@@ -78,7 +78,7 @@ func TestParseRole(t *testing.T) {
 		want identity.Role
 		ok   bool
 	}{
-		{name: "viewer", in: "viewer", want: identity.RoleViewer, ok: true},
+		{name: "user", in: "user", want: identity.RoleUser, ok: true},
 		{name: "developer", in: "developer", want: identity.RoleDeveloper, ok: true},
 		{name: "admin", in: "admin", want: identity.RoleAdmin, ok: true},
 		// Case, whitespace and near-misses are rejected rather than coerced: the
@@ -104,6 +104,21 @@ func TestParseRole(t *testing.T) {
 				t.Errorf("ParseRole(%q) = %q, want %q", tc.in, string(got), string(want))
 			}
 		})
+	}
+}
+
+// TestParseRoleAcceptsLegacyViewer pins the alias that keeps an install whose
+// IDENTITY_ROLE_MAP still names "viewer" starting: the old name parses to the
+// role that replaced it, and a name that was never a role still does not parse.
+func TestParseRoleAcceptsLegacyViewer(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"viewer", "user"} {
+		if got, ok := identity.ParseRole(in); !ok || got != identity.RoleUser {
+			t.Errorf("ParseRole(%q) = (%q, %v), want (%q, true)", in, string(got), ok, string(identity.RoleUser))
+		}
+	}
+	if got, ok := identity.ParseRole("billing"); ok || got != identity.RoleNone {
+		t.Errorf("ParseRole(%q) = (%q, %v), want (%q, false)", "billing", string(got), ok, string(identity.RoleNone))
 	}
 }
 

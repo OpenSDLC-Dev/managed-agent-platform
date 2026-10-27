@@ -633,8 +633,9 @@ gcpKMS:
 # not change its controlplane pod spec and does not roll it.
 #
 # Whatever the platform refuses, it refuses at STARTUP, loudly and by variable
-# name: an unreachable issuer, an empty role map, a malformed pair, a role outside
-# admin/developer/viewer. The chart does not restate those rules. It refuses only
+# name: an unreachable issuer, a malformed pair, or an unknown role. The map is
+# optional; roles are user/developer/admin, and legacy viewer means user.
+# The chart does not restate those rules. It refuses only
 # what it alone can see — the encoding separators below, and the two equalities it
 # owns both sides of when the bundled IdP is on.
 identity:
@@ -673,23 +674,23 @@ identity:
     algs: ""
   # -- Claim names, for a provider that does not use the defaults (`roles` /
   # `email` / `name`). The roles claim is the load-bearing one: the platform
-  # collects STRING values out of it, so a provider that puts objects there maps
-  # to nothing, every human authenticates and holds no role, and every role-gated
-  # route answers 403. Casdoor is exactly that provider — its `roles` claim
+  # collects STRING values out of it, so objects match no mapping. A first
+  # unmatched sign-in gets user, which reads nothing. Casdoor's `roles` claim
   # carries role objects — which is why the bundle below wants `roles: groups`.
   claims:
     roles: ""
     email: ""
     name: ""
-  # -- Claim value → platform role (`admin` | `developer` | `viewer`), written as
-  # a map and encoded by the chart into the `value=role,value=role` string
-  # IDENTITY_ROLE_MAP takes. A principal whose claims map to nothing holds no role
-  # and is denied everywhere, so this map is the whole grant. With the bundled
-  # Casdoor the keys are group names, spelled organization/name:
+  # -- Optional claim value → stored role (`user` | `developer` | `admin`).
+  # Applied on every verified request in both modes; legacy viewer means user.
+  # A first unmatched sign-in gets user; a former match now absent resets to user;
+  # a never-mapped person keeps the stored role. Reads need developer.
+  # The chart encodes this as the value=role,value=role IDENTITY_ROLE_MAP string.
+  # Casdoor keys are organization/name; platform-read keeps its legacy name:
   #   roleMap:
   #     map/platform-admins: admin
   #     map/platform-devs: developer
-  #     map/platform-read: viewer
+  #     map/platform-read: user
   roleMap: {}
 
 # -- The bundled identity provider (docs/plan/31_console-sso-rbac.md, #56): a

@@ -107,17 +107,17 @@ type Role string
 // The three roles, plus the absence of one.
 const (
 	RoleNone      Role = "" // authenticated, nothing mapped — satisfies nothing
-	RoleViewer    Role = "viewer"
+	RoleUser      Role = "user"
 	RoleDeveloper Role = "developer"
 	RoleAdmin     Role = "admin"
 )
 
 // roleRank fixes the strength order. RoleNone is absent from the map, so it
 // ranks zero.
-var roleRank = map[Role]int{RoleViewer: 1, RoleDeveloper: 2, RoleAdmin: 3}
+var roleRank = map[Role]int{RoleUser: 1, RoleDeveloper: 2, RoleAdmin: 3}
 
 // AtLeast reports whether r satisfies a route's minimum role, on the fixed order
-// admin > developer > viewer.
+// admin > developer > user.
 //
 // Fail-closed at both ends: RoleNone satisfies nothing, and a minimum that is not
 // one of the three — including "" — is satisfied by nothing, so a typo in a route
@@ -130,8 +130,14 @@ func (r Role) AtLeast(min Role) bool {
 	return roleRank[r] >= want
 }
 
-// ParseRole accepts exactly the three role names.
+// ParseRole accepts exactly the three role names, plus "viewer" as the old name
+// of RoleUser. The alias keeps an IDENTITY_ROLE_MAP written before plan 69 from
+// failing startup; the person it maps now reads nothing, because user reaches
+// only the playground.
 func ParseRole(s string) (Role, bool) {
+	if s == "viewer" {
+		return RoleUser, true
+	}
 	r := Role(s)
 	if _, ok := roleRank[r]; !ok {
 		return RoleNone, false
@@ -141,10 +147,11 @@ func ParseRole(s string) (Role, bool) {
 
 // Identity is one verified human principal.
 //
-// The four strings are exactly the principals-table columns upsertPrincipal
-// writes (internal/api); Role is re-derived from the token per request and never
-// stored,
-// because the IdP stays authoritative. A field that is not here cannot be
+// The four strings are exactly the principals-table columns principal.Resolve
+// writes from it (internal/principal). Role is what the IdP's mapping asserts
+// for this token, and RoleNone when it asserts nothing. Resolve derives the
+// principal's stored role from it at each sign-in, and the stored role, not
+// this field, is what authorizes a request. A field that is not here cannot be
 // persisted or logged by accident: no raw claims, no token, no expiry.
 type Identity struct {
 	Issuer      string // the verified iss, equal to the configured issuer

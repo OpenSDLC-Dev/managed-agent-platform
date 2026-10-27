@@ -723,6 +723,31 @@ jobs:
           echo "$rendered" | awk '$1 == "path:" && $2 == "/minio/health/ready" { exit 1 }' \
             || { echo "/minio/health/ready answers 200 before the object layer can serve S3; no probe may gate on it (#216)" >&2; exit 1; }
           echo "ok: minio readiness probe is $p"
+      - name: identity role mapping is optional in both modes
+        run: |
+          for mode in oidc trusted_proxy; do
+            args=(--set "identity.mode=$mode")
+            if [ "$mode" = oidc ]; then
+              args+=(--set identity.oidc.issuer=https://idp.ci.example
+                     --set identity.oidc.audience=map-console)
+            else
+              args+=(--set identity.proxy.preset=gcp-iap
+                     --set identity.proxy.audience=/projects/123456789/global/backendServices/987654321)
+            fi
+            out="$(helm template t "$CHART" -f "$VALUES" "${args[@]}")" \
+              || { echo "identity without a roleMap must render: $mode" >&2; exit 1; }
+            echo "$out" | grep 'name: IDENTITY_MODE' > /dev/null \
+              || { echo "identity mode was dropped: $mode" >&2; exit 1; }
+            echo "$out" | grep 'name: IDENTITY_ROLE_MAP' > /dev/null \
+              && { echo "an empty map must emit no IDENTITY_ROLE_MAP: $mode" >&2; exit 1; }
+            echo "ok: optional role map ($mode)"
+          done
+          # The old spelling must still reach the binary, which treats it as user.
+          helm template t "$CHART" -f "$VALUES" "${args[@]}" \
+            --set identity.roleMap.readers=viewer \
+            | grep 'value: "readers=viewer"' > /dev/null \
+            || { echo "legacy viewer mapping must still render" >&2; exit 1; }
+          echo "ok: legacy viewer mapping"
       - name: the identity lane is off by default and complete when set
         # Off by default has a stronger meaning here than "no behaviour change":
         # IDENTITY_MODE unset and IDENTITY_MODE=disabled are ONE state to
@@ -740,16 +765,6 @@ jobs:
               | grep 'IDENTITY_' > /dev/null \
               && { echo "$tpl has no identity lane and must not receive its configuration" >&2; exit 1; }
           done
-          # A mode with no role map renders a control plane that cannot boot:
-          # parseRoleMap refuses an empty IDENTITY_ROLE_MAP, FromEnv propagates it
-          # and the process exits, so the MACHINE lanes go down with the human one.
-          # Refused at render, like every other value whose absence is fatal.
-          err="$(helm template t "$CHART" -f "$VALUES" --set identity.mode=oidc \
-            --set identity.oidc.issuer=https://idp.ci.example \
-            --set identity.oidc.audience=map-console 2>&1 >/dev/null)" \
-            && { echo "identity.mode with an empty roleMap must fail the render" >&2; exit 1; }
-          echo "$err" | grep 'identity.roleMap must map at least one claim value' > /dev/null \
-            || { echo "the empty-roleMap render failed for the wrong reason: $err" >&2; exit 1; }
           out="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/controlplane-deployment.yaml)"
           # The variable NAME and its VALUE together: these names are read verbatim
           # by internal/identity/config.go and nothing else in the release would
@@ -765,14 +780,14 @@ jobs:
           # IDENTITY_CLAIM_ROLES is the one whose wrong value fails silently in
           # the worst direction: Casdoor's `roles` claim carries role OBJECTS and
           # the platform collects only strings out of a claim, so the default maps
-          # every human to no role — everyone authenticates, nobody is authorized.
+          # no new principal above user, which reads nothing.
           # `groups` is asserted above because the bundle depends on it.
           #
           # The role map is the one value the chart ENCODES rather than passes
           # through — a YAML map into the flat `value=role,...` the verifier
           # parses, sorted by claim value the way `range` over a map renders.
           # Nothing else would notice the two sides drifting.
-          want='value: "map/platform-admins=admin,map/platform-devs=developer,map/platform-read=viewer"'
+          want='value: "map/platform-admins=admin,map/platform-devs=developer,map/platform-read=user"'
           echo "$out" | grep -A1 'name: IDENTITY_ROLE_MAP' | grep -F "$want" > /dev/null \
             || { echo "the role map did not render as the encoding the verifier parses" >&2
                  echo "  want: $want" >&2
@@ -865,7 +880,7 @@ jobs:
           cm="$(helm template t "$CHART" -f "$VALUES" -f "$IAM_VALUES" --show-only templates/casdoor-init-data-secret.yaml)"
           # tokenFormat JWT: the alternative, JWT-Standard, drops `roles`,
           # `permissions` and `groups` from the token entirely, which would leave
-          # IDENTITY_ROLE_MAP nothing to map and every human no role.
+          # IDENTITY_ROLE_MAP nothing to map; first sign-in would get user.
           echo "$cm" | grep '"tokenFormat": "JWT"' > /dev/null \
             || { echo "the seeded application must mint JWT (not JWT-Standard) tokens" >&2; exit 1; }
           # The grant CVE-2026-9097 (9.8, a revoked JWT accepted) lives on, and
@@ -1180,11 +1195,8 @@ jobs:
             || { echo "a quoted credential did not render as a JSON string" >&2; exit 1; }
           # The audience Casdoor mints is the client id, so a render where the two
           # disagree is refused rather than left to fail every token behind a 401.
-          # roleMap is set here only so this render reaches the audience check:
-          # a mode with an empty role map is itself refused, one template earlier.
           err="$(helm template t "$CHART" -f "$VALUES" "${full[@]}" \
             --set identity.mode=oidc --set identity.oidc.issuer=https://idp.example.test \
-            --set 'identity.roleMap.map/platform-admins=admin' \
             --set identity.oidc.audience=wrong 2>&1 >/dev/null)" \
             && { echo "an audience that is not the client id must fail the render" >&2; exit 1; }
           echo "$err" | grep 'must equal casdoor.console.clientId' > /dev/null \

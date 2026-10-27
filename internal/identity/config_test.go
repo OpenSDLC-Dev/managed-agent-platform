@@ -336,7 +336,6 @@ func TestConfigFromEnvOIDCRequired(t *testing.T) {
 	}{
 		{name: "no issuer", missing: configXVarOIDCIssuer},
 		{name: "no audience", missing: configXVarOIDCAudience},
-		{name: "no role map", missing: configXVarRoleMap},
 	} {
 		_, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{tc.missing: ""})))
 		if err == nil {
@@ -691,15 +690,22 @@ func TestParseRoleMap(t *testing.T) {
 		},
 		{
 			name: "all three roles",
-			spec: "r=viewer,d=developer,a=admin",
+			spec: "r=user,d=developer,a=admin",
 			want: map[string]identity.Role{
-				"r": identity.RoleViewer, "d": identity.RoleDeveloper, "a": identity.RoleAdmin,
+				"r": identity.RoleUser, "d": identity.RoleDeveloper, "a": identity.RoleAdmin,
 			},
 		},
 		{
 			name: "an empty pair is skipped rather than refused",
-			spec: "eng=viewer,",
-			want: map[string]identity.Role{"eng": identity.RoleViewer},
+			spec: "eng=user,",
+			want: map[string]identity.Role{"eng": identity.RoleUser},
+		},
+		{
+			// A map that names no pair is the same as no map: the platform's own
+			// store then holds every role.
+			name: "nothing but separators maps nothing",
+			spec: " , , ",
+			want: map[string]identity.Role{},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -716,7 +722,7 @@ func TestParseRoleMap(t *testing.T) {
 		})
 	}
 
-	// The six rejection rules. Every defect is an error rather than a dropped
+	// The rejection rules. Every defect is an error rather than a dropped
 	// entry, because a dropped entry is a silent authority change.
 	msgs := map[string]string{}
 	for _, tc := range []struct {
@@ -724,12 +730,14 @@ func TestParseRoleMap(t *testing.T) {
 		spec     string
 		mentions []string
 	}{
-		{name: "empty", spec: "", mentions: []string{configXVarRoleMap}},
-		{name: "nothing but separators", spec: " , , ", mentions: []string{configXVarRoleMap}},
 		{name: "no '='", spec: "eng", mentions: []string{configXVarRoleMap, "eng"}},
 		{name: "empty claim value", spec: "=admin", mentions: []string{configXVarRoleMap, "=admin"}},
 		{name: "empty role", spec: "eng=", mentions: []string{configXVarRoleMap, "eng="}},
-		{name: "role outside the three", spec: "eng=owner", mentions: []string{configXVarRoleMap, "owner"}},
+		{
+			name:     "role outside the three",
+			spec:     "eng=owner",
+			mentions: []string{configXVarRoleMap, "owner", "user, developer or admin"},
+		},
 		{name: "role names are case-sensitive", spec: "eng=Admin", mentions: []string{configXVarRoleMap, "Admin"}},
 		{
 			name:     "duplicate claim value",
@@ -758,10 +766,34 @@ func TestParseRoleMap(t *testing.T) {
 		}
 		msgs[tc.name] = err.Error()
 	}
-	// "empty" and "nothing but separators" are the same rule (nothing mapped) and
-	// share a message by design; the rest are separate rules.
-	delete(msgs, "nothing but separators")
 	configXWantDistinct(t, msgs)
+}
+
+// TestRoleMapIsOptional pins that an install may run with no role map at all:
+// every role then comes from the platform's own store.
+func TestRoleMapIsOptional(t *testing.T) {
+	t.Parallel()
+	cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{configXVarRoleMap: ""})))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv with no %s: %v", configXVarRoleMap, err)
+	}
+	if len(cfg.RoleMap) != 0 {
+		t.Errorf("RoleMap = %v, want empty", cfg.RoleMap)
+	}
+}
+
+// TestRoleMapAcceptsViewerAsUser is the legacy alias seen through the
+// environment: an install that still maps a group to viewer keeps starting, and
+// the group gets the role that replaced it.
+func TestRoleMapAcceptsViewerAsUser(t *testing.T) {
+	t.Parallel()
+	cfg, err := identity.ConfigFromEnv(configXEnv(configXOIDC(map[string]string{configXVarRoleMap: "readers=viewer"})))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv(%s=readers=viewer): %v", configXVarRoleMap, err)
+	}
+	if want := map[string]identity.Role{"readers": identity.RoleUser}; !maps.Equal(cfg.RoleMap, want) {
+		t.Errorf("RoleMap = %v, want %v", cfg.RoleMap, want)
+	}
 }
 
 func TestConfigFromEnvClaimNames(t *testing.T) {

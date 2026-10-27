@@ -78,15 +78,15 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		return nil, fmt.Errorf("identity: assertion header must not be %q; that header carries a machine credential",
 			cfg.AssertionHeader)
 	}
-	if len(cfg.RoleMap) == 0 {
-		return nil, errors.New("identity: a role map is required")
-	}
-	// Validated AND copied. ConfigFromEnv already rejects these shapes, but New is
-	// the package's own boundary and a caller can build a Config literally: an
-	// empty claim value would grant its role to every token whose roles claim
-	// carries an empty string, and keeping the caller's map would leave live
-	// authority mutable from outside — a data race against every concurrent
-	// Verify, and a silent privilege change.
+	// An empty map is allowed: every verified token then carries RoleNone, "the
+	// IdP asserts nothing", and the caller decides what such a person may do.
+	//
+	// Every entry it is given is validated AND copied. ConfigFromEnv already
+	// rejects these shapes, but New is the package's own boundary and a caller can
+	// build a Config literally: an empty claim value would grant its role to every
+	// token whose roles claim carries an empty string, and keeping the caller's
+	// map would leave live authority mutable from outside — a data race against
+	// every concurrent Verify, and a silent privilege change.
 	roleMap := make(map[string]Role, len(cfg.RoleMap))
 	for value, role := range cfg.RoleMap {
 		if value == "" {
@@ -234,6 +234,17 @@ func FromEnv(ctx context.Context) (*Verifier, error) {
 // credential to look for.
 func (v *Verifier) Mode() Mode { return v.mode }
 
+// RoleMapGrantsAdmin reports whether this verifier's immutable configuration
+// reserves first-admin setup for the IdP, even before a mapped admin signs in.
+func (v *Verifier) RoleMapGrantsAdmin() bool {
+	for _, role := range v.roleMap {
+		if role == RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
 // AssertionHeader is the request header carrying the proxy's assertion in
 // trusted_proxy mode, and "" in oidc mode.
 func (v *Verifier) AssertionHeader() string { return v.header }
@@ -346,6 +357,11 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if std.Subject == "" {
 		return Identity{}, reject("missing sub")
 	}
+	// PostgreSQL cannot store NUL. Refuse it in the identity key rather than
+	// stripping it, which could merge two different people.
+	if strings.ContainsRune(std.Subject, 0) {
+		return Identity{}, reject("subject contains NUL")
+	}
 	// A 255-BYTE bound, from OIDC Core §2's "MUST NOT exceed 255 ASCII characters
 	// in length". The two coincide for any conforming subject, since ASCII is one
 	// byte per character, and the byte form is the stricter of the two for a
@@ -390,7 +406,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		Issuer:  v.issuer,
 		Subject: std.Subject,
 		// Bounded, because these two are the only fields whose length the token
-		// alone decides, and upsertPrincipal persists them. Under maxTokenBytes a
+		// alone decides, and principal.Resolve persists them. Under maxTokenBytes a
 		// claim can reach roughly 12 KiB, which is a valid login turning into an
 		// insert failure against a bounded column. Truncating keeps the login
 		// working and the descriptive value intact; neither field carries any
@@ -401,14 +417,16 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		// no use for the claim beyond display. Anything that MATCHES or LINKS on
 		// an email must make its own verification decision — on an IdP with
 		// self-service profile attributes, Casdoor included, the user chooses
-		// this string. upsertPrincipal (internal/api) is written to that rule:
-		// it conflicts on (issuer, subject) — never on email — and treats these
-		// two as the provider's to restate, refreshing them alongside
-		// last_seen_at on every request rather than writing them once.
-		Email:       truncate(stringClaim(all, v.emailClaim), maxProfileBytes),
-		DisplayName: truncate(stringClaim(all, v.nameClaim), maxProfileBytes),
-		// RoleNone is not an error: the principal is authenticated with no
-		// authority, and a role-gated route refuses it.
+		// this string. principal.Resolve (internal/principal) is written to
+		// that rule: it conflicts on (issuer, subject) — never on email — and
+		// treats these two as the provider's to restate, refreshing them
+		// alongside last_seen_at on every request rather than writing them once.
+		// Descriptive fields confer no authority. Remove PostgreSQL's forbidden
+		// NUL before bounding, so discarded bytes do not consume the profile cap.
+		Email:       truncate(strings.ReplaceAll(stringClaim(all, v.emailClaim), "\x00", ""), maxProfileBytes),
+		DisplayName: truncate(strings.ReplaceAll(stringClaim(all, v.nameClaim), "\x00", ""), maxProfileBytes),
+		// RoleNone is not an error: the mapping asserts no role, and
+		// principal.Resolve decides the stored role from there.
 		Role: strongestRole(roleValues(claimAt(all, v.rolesClaim)), v.roleMap),
 	}, nil
 }

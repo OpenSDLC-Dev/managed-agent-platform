@@ -4,8 +4,18 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.**
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1: stored roles and first-admin setup.
+**no release until plan 69 slice 7**. CI and the companion console PR remain.
+Independent verifier: PASS for the hardening patch (`make verify`, 91.73% statement coverage).
 
 ## Tasks
 
-None in flight.
+- [x] Principal role/kind/deactivation schema and deletion guard.
+- [x] Three roles and optional legacy-compatible mapping.
+- [x] Shared stored-role resolver on the control-plane identity lane.
+- [x] Resource role matrix and developer vault-credential writes.
+- [x] Gateway operator token uses the shared resolver.
+- [x] Once-ever setup and restricted local delivery.
+- [x] Docs, Helm and upgrade notes.
+- [x] Complete both scoped final reviews; no open findings.
+- [ ] Complete CI and the companion console PR.

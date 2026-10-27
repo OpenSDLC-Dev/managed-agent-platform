@@ -308,11 +308,11 @@ func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
 	live := issueViaConsole(t, s.tserver, envID, "stale-but-live")
 	revoked := issueViaConsole(t, s.tserver, envID, "stale-and-revoked")
 	revokeViaConsole(t, s.tserver, envID, "stale-and-revoked")
-	viewer := s.token("platform-read")
+	human := s.token("platform-devs")
 
 	for name, key := range map[string]string{"a live key": live, "a revoked key": revoked} {
 		for _, path := range []string{"/v1/agents", "/v1/skills"} {
-			res := s.doRaw(http.MethodGet, path, nil, map[string]string{header: viewer, "Authorization": "Bearer " + key})
+			res := s.doRaw(http.MethodGet, path, nil, map[string]string{header: human, "Authorization": "Bearer " + key})
 			if status, body := readJSON(t, res); status != http.StatusOK {
 				t.Errorf("an assertion beside %s on %s: status %d, body %v; want the human served", name, path, status, body)
 			}

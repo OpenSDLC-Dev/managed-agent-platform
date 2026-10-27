@@ -228,17 +228,20 @@ on a laptop; and **idp**, a small Caddy proxy that is the only published way to 
 The sign-in page is `http://localhost:8000`. Nothing else about the stack changes — with
 the profile off, `IDENTITY_MODE` stays empty and management auth is `x-api-key` only.
 
-The seven variables move as a set, because `IDENTITY_MODE` gates the rest: with it unset the
-control plane reads none of the others, so uncommenting six of seven changes nothing. The
-seventh, `SSL_CERT_FILE`, is the one whose absence is not silent — leave it commented and
-the control plane cannot verify the proxy's certificate, so it exits at boot with
-`x509: certificate signed by unknown authority` and restarts forever.
-`.env.example` explains all six in one block above the commented-out assignments. Three of
-them are load-bearing rather than cosmetic: the issuer must equal the IdP's `origin` byte
-for byte; `IDENTITY_OIDC_JWKS_URL` is **not** optional here, because the control plane
-requires an https key set and so fetches through the proxy's TLS listener while the browser
-keeps plain HTTP on the issuer; and `IDENTITY_CLAIM_ROLES` must be `groups` rather than
-`roles`.
+`IDENTITY_MODE` gates the other identity settings: with it unset, none are read.
+For this local TLS proxy, `SSL_CERT_FILE` is required. Without it the control
+plane cannot verify the proxy's certificate and exits at boot with
+`x509: certificate signed by unknown authority`.
+
+`.env.example` supplies the seeded role examples. The issuer must equal the IdP's
+`origin` byte for byte. `IDENTITY_OIDC_JWKS_URL` is **not** optional here: the
+control plane needs an https key set through the proxy, while the browser keeps
+plain HTTP on the issuer. The role examples need `IDENTITY_CLAIM_ROLES=groups`,
+not `roles`. `IDENTITY_ROLE_MAP` itself is optional. Without it, first sign-in
+gets user and a never-bootstrapped install delivers its first-admin code through
+a restricted local file. Retrieve it from the specific control-plane container;
+[the security guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider)
+covers delivery and recovery. Logs contain only the path and expiry.
 
 Three accounts are seeded, one per role:
 
@@ -246,7 +249,11 @@ Three accounts are seeded, one per role:
 |---|---|---|---|
 | `map-admin` | `map-admin-dev` | `map/platform-admins` | `admin` |
 | `map-dev` | `map-dev-dev` | `map/platform-devs` | `developer` |
-| `map-viewer` | `map-viewer-dev` | `map/platform-read` | `viewer` |
+| `map-viewer` | `map-viewer-dev` | `map/platform-read` | `user` |
+
+`map-viewer` and `platform-read` keep their legacy login and group names, not a
+read-only grant. User reads nothing; map a reader to developer, which can also
+write. The seed's display label is now "Platform user".
 
 They live in a seeded `map` organization rather than Casdoor's `built-in`, whose users are
 all Casdoor global administrators. **These are well-known dev credentials** — committed in
@@ -257,8 +264,9 @@ replaces them before it exposes the port.
 Casdoor's own administrator is separate from all three — `built-in/admin`, password
 `map-iam-admin-dev` — and it is the login for the IdP's admin UI, where you add real users
 and put them in groups. The seed **resets** that password, because Casdoor's own default
-for the account is the publicly documented `123`. It is not a platform principal (no group,
-no role); it is simply the fourth dev credential to replace.
+for the account is the publicly documented `123`. It has no mapped platform role:
+if used to authenticate to the platform, a first sign-in gets user like any other
+unmatched person. It is the fourth dev credential to replace.
 
 One restart behaviour to know, since it is what lets the seed own that password: the
 profile keeps `initDataNewOnly=false`, so every entity the seed **names** is re-applied on

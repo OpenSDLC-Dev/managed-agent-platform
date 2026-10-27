@@ -188,7 +188,7 @@ func errAuth(message string) *apiError {
 //
 // Like errAuth it takes a plain string rather than a format, and for a sharper
 // reason: the message names WHAT THE ROUTE REQUIRES and never what the caller
-// holds. Telling a viewer "you are a viewer" turns every 403 into a probe that
+// holds. Telling a developer "you are a developer" turns every 403 into a probe that
 // maps the caller's own authority, and telling them nothing at all leaves an
 // operator unable to explain the denial. Naming the requirement does neither —
 // which is also why workScope's message names the environment mismatch without

@@ -6,7 +6,7 @@
 # The four values below are one configuration and each is load-bearing:
 #   - claims.roles is `groups`, not `roles`. Casdoor's `roles` claim carries role
 #     OBJECTS and the platform collects only string values out of a claim, so
-#     mapping `roles` would give every human no role and deny them everywhere.
+#     mapping `roles` would leave a first sign-in at user, which reads nothing.
 #   - roleMap keys are spelled organization/name, because that is how Casdoor
 #     writes a group, and the seeded organization is `map`.
 #   - oidc.audience is the application's CLIENT ID: that is what Casdoor puts in
@@ -24,7 +24,7 @@ identity:
   roleMap:
     map/platform-admins: admin
     map/platform-devs: developer
-    map/platform-read: viewer
+    map/platform-read: user
 
 casdoor:
   enabled: true

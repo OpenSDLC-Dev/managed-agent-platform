@@ -12,9 +12,9 @@ import (
 )
 
 // identityPrincipal is the verified human a request authenticated as: the
-// principals row that records them, and the role their provider asserted THIS
-// request. The role is carried, never stored — internal/store/migrations/
-// 0022_principals.sql says why.
+// principals row that records them, and the role stored on it. The IdP's
+// mapping sets that role at each sign-in where it matches, and the console
+// otherwise (internal/principal's Resolve says how).
 type identityPrincipal struct {
 	ID   string
 	Role identity.Role
@@ -28,14 +28,16 @@ func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 	return p, ok
 }
 
-// requireIdentity verifies the human credential, provisions the principal, and
+// requireIdentity verifies the human credential, resolves the principal, and
 // puts it on the context.
 //
 // Provisioning is on the AUTHENTICATION path on purpose: a verified token is
 // already proof the human exists, so there is nothing to approve, and a request
 // that could not record who made it should not proceed to act as them. A
-// database failure here is a 500 rather than a 401 — the credential was good,
-// and reporting an outage as an auth failure sends an operator hunting the IdP.
+// removed person is refused here too, with errDeactivated's 403, before any
+// route sees them. A database failure here is a 500 rather than a 401 — the
+// credential was good, and reporting an outage as an auth failure sends an
+// operator hunting the IdP.
 func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := v.Credential(r)
@@ -59,13 +61,12 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 			return
 		}
 		markVerified(r.Context())
-		principalID, err := upsertPrincipal(r.Context(), pool, id)
+		p, err := resolvePrincipal(r.Context(), pool, id)
 		if err != nil {
 			writeError(w, r, err)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyIdentity,
-			identityPrincipal{ID: principalID, Role: id.Role})
+		ctx := context.WithValue(r.Context(), ctxKeyIdentity, p)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -77,12 +78,14 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler
 // Default-deny falls out of Role.AtLeast rather than being coded here. AtLeast
 // fails closed at both ends — a minimum that is not one of the three roles
 // denies, and RoleNone satisfies nothing — and identity.RoleNone is not one of
-// the three. So a route registered with RoleNone denies every human, and a human
-// whose claims mapped to nothing denies everywhere. Neither case needs a branch,
-// and neither can be forgotten. Slice 3 annotated every identity-reachable route
-// per the plan's matrix; the registrations still at RoleNone are the machine
-// lanes. Usually this function has already returned nil for those, min unread —
-// but not always, and the exception is the reason they keep RoleNone rather than
+// the three. So a route registered with RoleNone denies every human, with no
+// branch to forget. A human whose claims mapped to nothing is not RoleNone here:
+// they hold their stored role, which is user unless the console set another, and
+// the route table admits a user only where TestNoRouteAdmitsUserExceptRedemption
+// allows. Slice 3 annotated every identity-reachable route per the plan's
+// matrix; the registrations still at RoleNone are the machine lanes. Usually
+// this function has already returned nil for those, min unread — but not
+// always, and the exception is the reason they keep RoleNone rather than
 // nothing: dispatchAuth classifies the escaped path while ServeMux matches the
 // decoded one, so a percent-encoded spelling of a work or gate route arrives HERE,
 // on the identity lane, with a real principal. RoleNone is what turns it away.

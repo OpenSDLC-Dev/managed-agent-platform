@@ -496,7 +496,8 @@ Layout order is by layer, as the repo is.
 | `vaultresolve/` | Credential resolution at read time: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree, plus a third lane resolving an MCP endpoint's bearer by URL. Current rows every time, so rotation needs no session restart. It also performs the **one write** in this area — the OAuth refresh grant reseals the rotated token onto the credential row under a compare-and-set. |
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
-| `identity/` | The human-authentication boundary: verify the credential a human presents and reduce it to a principal holding one of three roles — or `RoleNone`, the fourth value and a live denial, which is what an authenticated human whose claims mapped to nothing receives and what no route minimum accepts. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
+| `identity/` | Verify a human's IdP credential and extract its mapped role. `RoleNone` means no mapping matched, not the resolved request's role; it also serves as a route minimum that admits no human. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
+| `principal/` | Resolve a verified person to their stored role, apply the optional IdP mapping, and refuse deactivated rows. Shared by the control plane and the gateway's operator-token lane. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 | `apikey/` | The platform API key check — the stored hash, looked up active and unexpired by the database's clock — shared by the control plane and the model gateway, so a revoked key stops on both at once. |
 
@@ -641,8 +642,8 @@ and holds the two OS-touching adapters `gaterun/` declares.
   both deployment points — the executor's pull-only sync, the reference worker's
   read-only roots — rather than by the token: it reaches an attached store whatever
   the attachment's access.
-- **Humans authenticate through the deployment's own IdP, and the platform stores no
-  authority** (plan 31, #56). Off by default: with `IDENTITY_MODE` unset or `disabled`
+- **Humans authenticate through the deployment's own IdP; the platform stores
+  their roles** (plan 69 slice 1). Off by default: with `IDENTITY_MODE` unset or `disabled`
   no JWT is accepted anywhere and the surface is the machine-credential platform
   above — byte-for-byte on every request shape but two, each answered the same in
   every mode: a repeated `x-api-key` field, which is refused as ambiguous rather than
@@ -657,12 +658,19 @@ and holds the two OS-touching adapters `gaterun/` declares.
   and a worker's environment key resolves before a human's credential on the routes
   where it admits; on a management route, where it is only ever refused, it is
   answered only when no human credential is offered. So a second credential can
-  never change which lane, and so which role check, a request takes. The request's role is computed from the IdP's claim on **that
-  request** through the operator's map: `principals` records who signed in, never what
-  they may do, so revoking a group at the IdP takes effect on the next request rather
-  than after someone remembers to mirror it. Enforcement is one check at the control
-  plane, stated per route as a minimum role, and fails closed — an unannotated route
-  denies every human, as does a human whose claims mapped to nothing.
+  never change which lane, and so which role check, a request takes.
+  `internal/principal` resolves the stored `user`, `developer` or `admin` role.
+  First sign-in without a mapping gets `user`; reads require `developer`, and
+  no read-only role exists. `user` reaches only setup-code redemption in this slice.
+  In both OIDC and trusted-proxy modes, every verified request counts as a
+  sign-in and applies the optional mapping. A match sets the mapped role; a
+  formerly mapped person with no match returns to `user`. A never-mapped person
+  keeps their stored role. Older unexpired assertions can reapply an old mapped
+  role, so IdP changes are not immediate revocation. A deactivated row is refused,
+  never re-created; the database rejects principal deletion and truncation.
+  The gateway's operator-token lane shares this resolver. Route minimums fail
+  closed: an unannotated route denies every human. Member-management APIs,
+  cookies, passwords and owned API keys arrive in later slices.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

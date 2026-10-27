@@ -104,7 +104,7 @@ func roleValues(v any) []string {
 }
 
 // strongestRole reduces mapped values to the single strongest role by the fixed
-// order admin > developer > viewer. Unmapped values drop; nothing mapped yields
+// order admin > developer > user. Unmapped values drop; nothing mapped yields
 // RoleNone.
 //
 // Reducing by rank rather than by position is the property: neither claim order

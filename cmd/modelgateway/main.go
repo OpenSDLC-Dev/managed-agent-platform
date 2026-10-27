@@ -144,7 +144,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, BootstrapKey: bootKey, Prober: prober})
+	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, Principals: pool, BootstrapKey: bootKey, Prober: prober})
 	if err != nil {
 		return err
 	}

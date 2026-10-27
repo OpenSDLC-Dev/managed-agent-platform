@@ -25,7 +25,7 @@ func row(key, alias, dep string, tokens *store.Tokens) store.Usage {
 
 // The daily rollups answer by UTC day, filtered by key, alias or
 // deployment, over the 30 days to today unless the caller names its span;
-// a viewer may read them.
+// a user may read them.
 func TestDailyUsage(t *testing.T) {
 	e := newEnv(t, true)
 	e.record(row("key_a", "chat", "gwdep_1", &store.Tokens{Input: 10, Output: 5, CacheWrite: 2, CacheRead: 100}))
@@ -41,7 +41,7 @@ func TestDailyUsage(t *testing.T) {
 	}
 	today := time.Now().UTC().Format(time.DateOnly)
 
-	got := (reply{body: e.ok(e.do("GET", "/admin/v1/usage/daily", nil, map[string]string{"Authorization": "Bearer " + e.token("readers")}), "viewer reads")}).list()
+	got := (reply{body: e.ok(e.do("GET", "/admin/v1/usage/daily", nil, map[string]string{"Authorization": "Bearer " + e.token("devs")}), "developer reads")}).list()
 	if len(got) != 3 || got[0]["day"] != time.Now().UTC().AddDate(0, 0, -29).Format(time.DateOnly) {
 		t.Fatalf("the default span holds %v, want the rollup of 29 days ago and today's two", got)
 	}

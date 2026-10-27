@@ -131,9 +131,9 @@ func TestTheProbeRoutesNeedTheAdminRole(t *testing.T) {
 	d := e.deployment(p, "chat")
 	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
 	for _, path := range []string{"/admin/v1/providers/" + p + "/credentials/" + c + "/check", "/admin/v1/deployments/" + d + "/test"} {
-		for _, role := range []string{"readers", "devs"} {
-			e.refused(e.do("POST", path, nil, bearer(e.token(role))), http.StatusForbidden, "permission_error", "admin")
-		}
+		// A user is turned away before routing, so its refusal names the floor.
+		e.refused(e.do("POST", path, nil, bearer(e.token("readers"))), http.StatusForbidden, "permission_error", "developer")
+		e.refused(e.do("POST", path, nil, bearer(e.token("devs"))), http.StatusForbidden, "permission_error", "admin")
 		e.ok(e.do("POST", path, nil, bearer(e.token("admins"))), "admin on "+path)
 	}
 	if checked, tested := e.prober.calls(); len(checked) != 1 || len(tested) != 1 {

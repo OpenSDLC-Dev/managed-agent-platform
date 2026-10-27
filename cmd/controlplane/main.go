@@ -86,6 +86,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
@@ -118,6 +120,62 @@ func main() {
 	}, run) {
 		os.Exit(1)
 	}
+}
+
+// deliverSetupCode keeps the raw code out of logs and telemetry. Config
+// parsing decides whether setup is available without contacting the IdP.
+func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
+	cfg, err := identity.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Mode == identity.ModeDisabled {
+		return nil, nil
+	}
+	mapGrantsAdmin := false
+	for _, role := range cfg.RoleMap {
+		if role == identity.RoleAdmin {
+			mapGrantsAdmin = true
+			break
+		}
+	}
+	code, err := api.MintSetupCode(ctx, pool, mapGrantsAdmin)
+	if err != nil || code == "" {
+		return nil, err
+	}
+	path, cleanup, err := writeSetupCode(code)
+	if err != nil {
+		return nil, err
+	}
+	slog.Warn("no admin exists yet: read the one-time setup code from this local file and redeem it from a signed-in session", "setup_code_file", path, "expires_in", "1h")
+	return cleanup, nil
+}
+
+func writeSetupCode(code string) (string, func(), error) {
+	// A fresh private directory and exclusive create avoid following or
+	// overwriting an existing operator-selected file. A hard crash may leave
+	// this file; database expiry and redemption still invalidate its code.
+	dir, err := os.MkdirTemp("", "map-setup-")
+	if err != nil {
+		return "", nil, err
+	}
+	path := filepath.Join(dir, "setup-code")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		_ = os.Remove(dir)
+		return "", nil, err
+	}
+	cleanup := func() {
+		_ = os.Remove(path)
+		_ = os.Remove(dir)
+	}
+	_, writeErr := file.WriteString(code + "\n")
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
 }
 
 func run(ctx context.Context) error {
@@ -156,6 +214,13 @@ func run(ctx context.Context) error {
 	}
 	if err != nil {
 		return err
+	}
+	cleanupSetupCode, err := deliverSetupCode(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if cleanupSetupCode != nil {
+		defer cleanupSetupCode()
 	}
 	// The queue depth/pending/workers_polling gauges sample the /work/stats view
 	// this process already serves. telemetry.Run installed the meter provider

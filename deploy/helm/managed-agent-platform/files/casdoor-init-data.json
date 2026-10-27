@@ -808,7 +808,7 @@
     {
       "owner": "map",
       "name": "map-viewer",
-      "displayName": "map-viewer",
+      "displayName": "Platform user",
       "email": "map-viewer@example.com",
       "type": "normal-user",
       "password": "$2b$12$aztc6c0xNOr0B7kB6FDckuEzq2ULlujWrQj0cx69R11vBBEtnrYS.",

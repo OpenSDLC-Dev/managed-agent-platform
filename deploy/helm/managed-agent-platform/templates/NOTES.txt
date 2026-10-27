@@ -36,8 +36,12 @@ treat the value as a bootstrap credential and change it here first.
 
 Then create your operators in the `map` organization and put each in one of the
 seeded groups — map/platform-admins, map/platform-devs, map/platform-read. Those
-names are what identity.roleMap keys on, and a human in none of them authenticates
-and holds no role, which every role-gated route answers 403.
+names are what the optional identity.roleMap keys on. First unmatched sign-in
+gets user, which reads nothing; readers need developer. Legacy viewer mappings
+now mean user. Without an admin-granting map, a never-bootstrapped install delivers
+a setup code through a restricted local file in each control-plane pod. Logs
+show only that replica's path and expiry; retrieve it privately and redeem it
+promptly. See docs/self-hosted-security.md section 9 for retrieval and recovery.
 
 The seed is re-applied on every restart (initDataNewOnly=false, which is what
 lets it own the admin account's password), so admin-UI edits to the entities it
