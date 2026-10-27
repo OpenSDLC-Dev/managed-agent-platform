@@ -1,0 +1,1 @@
+- **Automatic Claude Code Review** — Removed the pull-request workflow as a follow-up to #998. Local dual review and the independent verifier remain required before merge.
