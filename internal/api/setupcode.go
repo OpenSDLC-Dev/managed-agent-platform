@@ -86,9 +86,32 @@ func (s *server) redeemSetupCode(r *http.Request) (any, error) {
 	if s.setupMapGrantsAdmin {
 		return nil, errConflict("the identity provider's mapping supplies administrators")
 	}
-	// Read the client body before taking locks, but validate only after the
-	// in-transaction flag recheck: an admin may have appeared in the meantime.
 	obj, bodyErr := decodeObject(r)
+	var code string
+	if bodyErr == nil {
+		code, bodyErr = requiredString(obj, "code")
+	}
+	sum := sha256.Sum256([]byte(code))
+	hash := hex.EncodeToString(sum[:])
+	// Reject bad inputs without taking locks that block principal writers.
+	// Read both facts in one snapshot after the body: a completed bootstrap
+	// takes priority over body errors and codes spent while the client wrote.
+	// These prechecks only reject; promotion still needs every locked recheck.
+	var valid bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM install_bootstrap),
+		EXISTS (SELECT 1 FROM setup_codes WHERE code_hash = $1 AND expires_at > clock_timestamp())`,
+		hash).Scan(&bootstrapped, &valid); err != nil {
+		return nil, err
+	}
+	if bootstrapped {
+		return nil, errConflict("an admin already exists")
+	}
+	if bodyErr != nil {
+		return nil, bodyErr
+	}
+	if !valid {
+		return nil, errInvalid("invalid or expired setup code")
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
@@ -107,17 +130,8 @@ func (s *server) redeemSetupCode(r *http.Request) (any, error) {
 	if bootstrapped {
 		return nil, errConflict("an admin already exists")
 	}
-	if bodyErr != nil {
-		return nil, bodyErr
-	}
-	code, err := requiredString(obj, "code")
-	if err != nil {
-		return nil, err
-	}
-	sum := sha256.Sum256([]byte(code))
-	var valid bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM setup_codes
-		WHERE code_hash = $1 AND expires_at > clock_timestamp())`, hex.EncodeToString(sum[:])).Scan(&valid); err != nil {
+		WHERE code_hash = $1 AND expires_at > clock_timestamp())`, hash).Scan(&valid); err != nil {
 		return nil, err
 	}
 	if !valid {

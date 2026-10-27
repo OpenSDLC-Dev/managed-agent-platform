@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -123,6 +124,180 @@ func TestClosedSetupDoesNotBlockPrincipalWriters(t *testing.T) {
 	}
 	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Pragma") != "no-cache" {
 		t.Error("closed redemption lost its no-store headers")
+	}
+}
+
+func TestInvalidSetupCodeDoesNotWaitForPrincipalWriters(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, message string
+		expired             bool
+	}{
+		{"unknown code", `{"code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`, "invalid or expired setup code", false},
+		{"expired code", "", "invalid or expired setup code", true},
+		{"malformed body", `{"code":`, "request body must be a JSON object", false},
+		{"missing code", `{}`, "code is required", false},
+		{"empty code", `{"code":""}`, "code is required", false},
+		{"null code", `{"code":null}`, "code is required", false},
+		{"non-string code", `{"code":7}`, "code must be a string", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, code := setupCallerPool(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			body := tc.body
+			if tc.expired {
+				if _, err := pool.Exec(ctx, `UPDATE setup_codes SET expires_at = clock_timestamp() - interval '1 second'`); err != nil {
+					t.Fatal(err)
+				}
+				body = `{"code":"` + code + `"}`
+			}
+			writer, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = writer.Rollback(context.Background()) }()
+			// This unrelated sign-in holds ROW EXCLUSIVE. Rejected requests
+			// must finish without queuing a conflicting first-admin table lock.
+			if _, err := writer.Exec(ctx, `INSERT INTO principals (id, issuer, subject)
+				VALUES ('principal_busy', 'https://idp.example', 'busy')`); err != nil {
+				t.Fatal(err)
+			}
+			r := setupRequest(ctx, "")
+			r.Body = io.NopCloser(strings.NewReader(body))
+			w := httptest.NewRecorder()
+			s := &server{pool: pool}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				noStore(s.handle(identity.RoleUser, s.redeemSetupCode))(w, r)
+			}()
+			defer func() {
+				cancel()
+				_ = writer.Rollback(context.Background())
+				<-done
+			}()
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer tick.Stop()
+		wait:
+			for {
+				select {
+				case <-done:
+					break wait
+				case <-ctx.Done():
+					t.Fatalf("invalid setup request did not finish: %v", ctx.Err())
+				case <-tick.C:
+				}
+				var waiting bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks
+					WHERE database = (SELECT oid FROM pg_database WHERE datname = current_database())
+					AND relation = 'principals'::regclass AND NOT granted)`).Scan(&waiting); err != nil {
+					t.Fatal(err)
+				}
+				if waiting {
+					t.Fatal("invalid setup request queued a conflicting principals lock instead of returning 400")
+				}
+			}
+			if w.Code != 400 || !strings.Contains(w.Body.String(), tc.message) {
+				t.Fatalf("invalid redemption = %d / %s, want 400 / %q", w.Code, w.Body.String(), tc.message)
+			}
+			if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Pragma") != "no-cache" {
+				t.Error("invalid redemption lost its no-store headers")
+			}
+		})
+	}
+}
+
+func TestAnAdminAppearingWhileReadingTheSetupBodyTakesPriority(t *testing.T) {
+	for _, body := range []string{`{"code":"wrong"}`, `{"code":`, `{}`, `{"code":7}`} {
+		t.Run(body, func(t *testing.T) {
+			pool, _ := setupCallerPool(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			reader, writer := io.Pipe()
+			stop := context.AfterFunc(ctx, func() {
+				_ = reader.CloseWithError(ctx.Err())
+				_ = writer.CloseWithError(ctx.Err())
+			})
+			defer stop()
+			r := setupRequest(ctx, "")
+			r.Body = reader
+			w := httptest.NewRecorder()
+			s := &server{pool: pool}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				noStore(s.handle(identity.RoleUser, s.redeemSetupCode))(w, r)
+			}()
+			defer func() {
+				cancel()
+				_ = reader.Close()
+				_ = writer.Close()
+				<-done
+			}()
+			// Write returns only once the handler is reading the body, after
+			// its initial bootstrap check. Withhold EOF until the admin commits.
+			if _, err := writer.Write([]byte(body)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO principals (id, issuer, subject, role)
+				VALUES ('principal_first', 'https://idp.example', 'first', 'admin')`); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+			if w.Code != 409 || !strings.Contains(w.Body.String(), "an admin already exists") {
+				t.Fatalf("body validation overtook bootstrap: status=%d body=%s", w.Code, w.Body.String())
+			}
+			if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Pragma") != "no-cache" {
+				t.Error("closed redemption lost its no-store headers")
+			}
+		})
+	}
+}
+
+func TestSetupCodeRechecksValidityAfterWaitingForLocks(t *testing.T) {
+	for _, tc := range []struct{ name, change string }{
+		{"expiry", `UPDATE setup_codes SET expires_at = clock_timestamp() - interval '1 second'`},
+		{"changed hash", `UPDATE setup_codes SET code_hash = 'invalidated-' || code_hash`},
+		{"removed hash", `DELETE FROM setup_codes`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, code := setupCallerPool(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			writer, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = writer.Rollback(context.Background()) }()
+			if _, err := writer.Exec(ctx, `INSERT INTO principals (id, issuer, subject)
+				VALUES ('principal_busy', 'https://idp.example', 'busy')`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Exec(ctx, tc.change); err != nil {
+				t.Fatal(err)
+			}
+			// The unlocked read sees the old unexpired hash. Only the locked
+			// recheck can see the invalidation committed after this lock wait.
+			done := startSetupRedemption(ctx, pool, code)
+			waitSetupLock(t, ctx, pool, "principals", done)
+			if err := writer.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			result := <-done
+			var ae *apiError
+			if !errors.As(result.err, &ae) || ae.status != 400 || ae.message != "invalid or expired setup code" {
+				t.Fatalf("stale code redemption = %v / %v, want 400", result.value, result.err)
+			}
+			var role string
+			var bootstrapped bool
+			if err := pool.QueryRow(ctx, `SELECT role, EXISTS (SELECT 1 FROM install_bootstrap)
+				FROM principals WHERE id = 'principal_caller'`).Scan(&role, &bootstrapped); err != nil || role != "user" || bootstrapped {
+				t.Fatalf("invalid code promoted caller: role=%s bootstrapped=%v err=%v", role, bootstrapped, err)
+			}
+		})
 	}
 }
 
