@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1: stored roles and first-admin setup.
-**no release until plan 69 slice 7**. Final clock-test review and CI remain.
+**no release until plan 69 slice 7**. Final CI remains.
 Independent verifier: clock guard passed (`make verify`, 91.75% statement coverage).
 The [console companion #240](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/240) is merged.
 
@@ -21,4 +21,5 @@ The [console companion #240](https://github.com/OpenSDLC-Dev/managed-agent-conso
 - [x] Complete both local reviews of the baseline and hardening patch.
 - [x] Review setup precheck and CI cleanup; no open local findings.
 - [x] Deliver the console companion.
-- [ ] Complete final clock-test review and CI.
+- [x] Complete final clock-test review.
+- [ ] Complete CI.
