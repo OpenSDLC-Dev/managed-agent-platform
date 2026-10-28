@@ -679,10 +679,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   current W3C trace context; shared key refresh detaches cancellation, not values.
   Cookies read live principal authority without
   applying a mapping. Existing private routes retain legacy credentials beside
-  cookies, with legacy-header precedence. New session/logout and native identity
-  setup require actual cookie identity, not merely the old role annotation.
+  cookies, with legacy-header precedence. Session/logout, native identity setup,
+  members and service accounts require actual cookie identity, not merely the old
+  role annotation. Member and service-account mutations take the principal table
+  lock before rechecking the caller's session and current admin authority.
+  Manual demotion/removal protects the last active human admin; mapping is exempt.
   Public `/v1`, worker and gate paths never accept cookies. Gateway cookie
-  admission, the resource proxy, member management and owned keys remain later work.
+  admission, the resource proxy and owned keys remain later work.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

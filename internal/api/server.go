@@ -276,6 +276,24 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		})
 	}
 
+	// Plan 69's new administration surfaces never inherit legacy key/IdP lanes.
+	// Dispatch enforces cookie-only admission; each handler checks provenance too.
+	mux.HandleFunc("GET "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.listMembers)))
+	mux.HandleFunc("POST "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.createMember)))
+	mux.HandleFunc("GET "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.getMember)))
+	mux.HandleFunc("POST "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.updateMember)))
+	mux.HandleFunc("DELETE "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.removeMember)))
+	mux.HandleFunc("GET "+consoleServiceAccountsPath, noStore(s.handle(identity.RoleAdmin, s.listServiceAccounts)))
+	mux.HandleFunc("POST "+consoleServiceAccountsPath, noStore(s.handle(identity.RoleAdmin, s.createServiceAccount)))
+	mux.HandleFunc("GET "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.getServiceAccount)))
+	mux.HandleFunc("POST "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.updateServiceAccount)))
+	mux.HandleFunc("POST "+consoleServiceAccountArchivePath, noStore(s.handle(identity.RoleAdmin, s.archiveServiceAccount)))
+	for _, pattern := range []string{consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, errMethodNotAllowed)
+		})
+	}
+
 	mux.HandleFunc("GET /api/auth/config", noStore(s.handle(identity.RoleUser, s.authConfig)))
 	mux.HandleFunc("GET /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginStart)))
 	mux.HandleFunc("POST /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginPost)))

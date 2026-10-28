@@ -1212,8 +1212,9 @@ who only needs to read must get `developer`, which can also write. A first
 sign-in with no matching mapping gets `user`. No playground is built yet, so
 that role reaches authentication/session routes and setup redemption, not
 resources. The mapping rules are below. Native browser login is available
-when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account APIs and owned
-API keys remain later work. Existing management keys still work unchanged.
+when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account management
+requires a human admin cookie. Owned API keys remain later work.
+Existing management keys still work unchanged on their existing routes.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1297,6 +1298,27 @@ It retains the id, issuer and subject; never delete their tombstone. If a
 mapping matches them, first change it to grant admin or stop matching them,
 or the next request will overwrite this recovery role. Repair an unavailable
 IdP or lost local password separately: promotion does not bypass credential verification.
+
+#### Member and service-account management
+
+The private `/api/console/organizations/default/members` and
+`service_accounts` routes require a human admin cookie. API keys and Bearer
+credentials are refused, including beside a valid cookie. Unsafe methods
+require exact Origin and CSRF. A waiting mutation rechecks the caller's
+session, role and status inside its database transaction.
+
+Only active human admins count for the last-admin guard. Manual role changes
+and removals cannot eliminate the last one. An admin service account does
+not count. IdP mapping can still demote the last human admin; use the database
+recovery procedure above if that leaves no admin able to sign in.
+A mapping-owned member role cannot be changed here, but the member can be removed.
+
+Local accounts can be created only in development password mode. Names are
+immutable and never linked by email. Member removal and service-account archival
+are lasting deactivations. Tombstones preserve IDs and issuer/subject pairs;
+archival keeps the service-account name reserved. No restoration endpoint exists.
+These routes do not issue or archive API keys in slice 2; owned keys arrive in slice 3.
+Environment keys remain independent and require separate revocation.
 
 #### Native browser login
 
