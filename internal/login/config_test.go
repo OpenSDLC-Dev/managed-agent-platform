@@ -79,6 +79,36 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 	}
 }
 
+func TestBrowserLoginConfigurationDiagnosticFormatting(t *testing.T) {
+	const secret = "FIX1-SYNTHETIC-CONFIG-CLIENT-SECRET"
+	cfg := Config{Mode: ModeOIDC, PublicOrigin: "https://console.example", OIDCClientID: "console", OIDCClientSecret: secret}
+	for _, form := range []struct {
+		name  string
+		value any
+	}{
+		{"value", cfg}, {"pointer", &cfg},
+		{"nested value", struct{ Config Config }{cfg}},
+		{"nested pointer", struct{ Config *Config }{&cfg}},
+		{"slice", []any{cfg, &cfg}},
+		{"map", map[string]any{"config": cfg, "pointer": &cfg}},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			formats := []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X", "%t", "%f"}
+			if form.name == "pointer" {
+				formats = append(formats, "%p")
+			}
+			for _, format := range formats {
+				output := fmt.Sprintf(format, form.value)
+				for _, canary := range []string{secret, fmt.Sprintf("%x", secret), fmt.Sprintf("%X", secret)} {
+					if strings.Contains(output, canary) {
+						t.Errorf("%s of %s disclosed the synthetic client secret", format, form.name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestBrowserLoginConfigurationSecretBoundaries(t *testing.T) {
 	const secret = "fixture-client-secret-never-render"
 	env := map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_CLIENT_ID": "console", "IDENTITY_OIDC_AUDIENCE": "console", "IDENTITY_OIDC_CLIENT_SECRET": secret}

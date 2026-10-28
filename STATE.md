@@ -5,12 +5,14 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 2 is in progress.
-Task 1 prepares browser-session and local-credential primitives only.
+The current tasks prepare browser-session, local-credential and OIDC helpers only.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
 - [x] Browser sessions and local credentials: [session](./internal/login/session_test.go),
   [password](./internal/login/password_test.go) and [throttle](./internal/login/throttle_test.go) contracts.
-- [ ] Add the OIDC code flow, native login and setup, and management routes.
+- [x] OIDC code flow and browser-bound attempts: [RP](./internal/identity/oidc_test.go)
+  and [attempt](./internal/login/oidc_test.go) contracts.
+- [ ] Add native login, setup and management routes.
   No HTTP handler uses the new primitives yet.

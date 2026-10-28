@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -34,7 +35,7 @@ type Session struct {
 }
 
 // IssuedSession carries the bearer only as far as SetCookie. Serializers and
-// ordinary whole-value formatting must not disclose it.
+// method-interceptable fmt/log rendering exclude it; see Format for fmt's limits.
 type IssuedSession struct {
 	Session
 	Token string `json:"-" yaml:"-" xml:"-"`
@@ -43,6 +44,11 @@ type IssuedSession struct {
 func (s IssuedSession) String() string       { return fmt.Sprintf("%+v", s.Session) }
 func (s IssuedSession) GoString() string     { return s.String() }
 func (s IssuedSession) LogValue() slog.Value { return slog.AnyValue(s.Session) }
+
+// Format redacts method-interceptable fmt verbs on values and pointers. fmt
+// bypasses methods for %p on a struct value and for unexported nested value
+// fields; those paths are not covered. %p on a pointer prints only its address.
+func (s IssuedSession) Format(state fmt.State, _ rune) { io.WriteString(state, s.String()) }
 
 // Issue stores only SHA-256 of a fresh 32-byte bearer. The database starts the
 // absolute 12-hour lifetime. Issuance also prunes expired sessions and attempts.

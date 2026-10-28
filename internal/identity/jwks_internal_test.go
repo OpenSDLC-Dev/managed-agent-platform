@@ -574,13 +574,10 @@ func TestLeadFlightOutlivesTheLeadersCancellation(t *testing.T) {
 
 	k := newKeySet(srv.URL, client, defaultAlgorithms, time.Now)
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		k.mu.Lock()
-		k.leadFlight(ctx) // releases and re-acquires k.mu
-		k.mu.Unlock()
-	}()
+	k.mu.Lock()
+	k.leadFlight(ctx)
+	done := k.inflight.done
+	k.mu.Unlock()
 
 	<-started // the fetch is in flight and the handler is holding it open
 	cancel()
