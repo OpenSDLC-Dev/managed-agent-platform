@@ -18,6 +18,7 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // The tests below drive parseKeySet over hand-written JWK Set bytes rather than
@@ -564,7 +565,9 @@ func TestLeadFlightOutlivesTheLeadersCancellation(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	releaseOnce := sync.OnceFunc(func() { close(release) })
-	srv, client := fetchXServe(t, func(w http.ResponseWriter, _ *http.Request) {
+	observed := make(chan http.Header, 1)
+	srv, client := fetchXServe(t, func(w http.ResponseWriter, r *http.Request) {
+		observed <- r.Header.Clone()
 		close(started)
 		<-release
 		w.Header().Set("Content-Type", "application/json")
@@ -573,7 +576,15 @@ func TestLeadFlightOutlivesTheLeadersCancellation(t *testing.T) {
 	t.Cleanup(releaseOnce)
 
 	k := newKeySet(srv.URL, client, defaultAlgorithms, time.Now)
-	ctx, cancel := context.WithCancel(context.Background())
+	state, err := trace.ParseTraceState("provider=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:  trace.SpanID{17, 18, 19, 20, 21, 22, 23, 24}, TraceFlags: trace.FlagsSampled, TraceState: state,
+	})
+	ctx, cancel := context.WithCancel(trace.ContextWithSpanContext(context.Background(), spanContext))
 	k.mu.Lock()
 	k.leadFlight(ctx)
 	done := k.inflight.done
@@ -591,6 +602,10 @@ func TestLeadFlightOutlivesTheLeadersCancellation(t *testing.T) {
 	}
 	if k.fetchedAt.IsZero() {
 		t.Error("fetchedAt was never stamped, so the flight did not succeed")
+	}
+	headers := <-observed
+	if headers.Get("traceparent") != "00-0102030405060708090a0b0c0d0e0f10-1112131415161718-01" || headers.Get("tracestate") != "provider=shared" {
+		t.Errorf("shared fetch lost trace values: traceparent=%q tracestate=%q", headers.Get("traceparent"), headers.Get("tracestate"))
 	}
 }
 

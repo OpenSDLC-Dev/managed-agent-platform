@@ -137,10 +137,14 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	switch mode {
 	case "", ModeDisabled:
 		return Config{Mode: ModeDisabled}, nil
+	case ModePassword:
+		// internal/login validates development mode and public origin. This mode
+		// has no IdP settings, mapping or verifier.
+		return Config{Mode: ModePassword}, nil
 	case ModeOIDC, ModeTrustedProxy:
 	default:
-		return Config{}, fmt.Errorf("%s %q is not one of %s, %s, %s",
-			envMode, string(mode), ModeDisabled, ModeOIDC, ModeTrustedProxy)
+		return Config{}, fmt.Errorf("%s %q is not one of %s, %s, %s, %s",
+			envMode, string(mode), ModeDisabled, ModePassword, ModeOIDC, ModeTrustedProxy)
 	}
 
 	cfg := Config{Mode: mode}

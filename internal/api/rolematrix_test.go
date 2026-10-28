@@ -72,6 +72,12 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 				t.Errorf("server.go:%d: %s is on the %s lane and declares %q; it must declare RoleNone, which is what refuses a human who arrives by an encoded path",
 					reg.line, reg.pattern, lane, reg.role)
 			}
+		case laneAuth:
+			// These six named routes are covered by the native login/session
+			// contracts. This is not an exemption for private resource routes.
+			if reg.role != "RoleUser" {
+				t.Errorf("server.go:%d: %s must allow an authenticated user, got %q", reg.line, reg.pattern, reg.role)
+			}
 		case laneManagement, laneConsole:
 			switch reg.role {
 			case "":
@@ -99,8 +105,8 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 // user role: it signs in and does nothing else, because there is no read-only
 // role and the playground it is meant for does not exist yet. A route
 // registered at RoleUser would hand every first sign-in whatever that route
-// serves. The one exception is the setup-code redemption, which a signed-in
-// user must be able to reach before bootstrap to become the first admin.
+// serves. Setup redemption and the six named browser-auth routes are the only
+// exceptions. They expose no resource operations.
 //
 // It reads the source for the same reason the completeness test does: no
 // request-driven test can enumerate routes it was not told about. The
@@ -115,12 +121,32 @@ func TestNoRouteAdmitsUserExceptRedemption(t *testing.T) {
 	if len(regs) < 60 {
 		t.Fatalf("parsed %d registrations from server.go; the route table is far larger — the parser is broken, not the table", len(regs))
 	}
+	seen := map[string]bool{}
 	for _, reg := range regs {
-		if reg.role == "RoleUser" && reg.pattern != redemption {
-			t.Errorf("server.go:%d: %s is registered at RoleUser; only the setup-code redemption may admit a user, and a read needs RoleDeveloper",
+		if nativeAuthPatterns[reg.pattern] {
+			seen[reg.pattern] = true
+		}
+		if reg.role == "RoleUser" && reg.pattern != redemption && !nativeAuthPatterns[reg.pattern] {
+			t.Errorf("server.go:%d: %s is registered at RoleUser; only setup and the named browser-auth routes may admit a user",
 				reg.line, reg.pattern)
 		}
 	}
+	for pattern := range nativeAuthPatterns {
+		if !seen[pattern] {
+			t.Errorf("native HTTP contracts name %s but the route is absent", pattern)
+		}
+	}
+}
+
+// TestNativeLoginRouteMatrix plus the password, OIDC and IAP runtime tests cover
+// each entry. A new auth-subtree resource is not silently added to this set.
+var nativeAuthPatterns = map[string]bool{
+	"GET /api/auth/config":   true,
+	"GET /api/auth/login":    true,
+	"POST /api/auth/login":   true,
+	"GET /api/auth/callback": true,
+	"GET /api/auth/session":  true,
+	"POST /api/auth/logout":  true,
 }
 
 // TestTheMatrixCoversEveryAnnotatedRoute joins the two halves of the guard.
@@ -220,6 +246,7 @@ func roleValue(ident string) string {
 type lane string
 
 const (
+	laneAuth       lane = "browser auth"
 	laneManagement lane = "management"
 	laneConsole    lane = "console"
 	laneWork       lane = "work"
@@ -232,6 +259,9 @@ const (
 // rather than matching "work" anywhere: /v1/environments/{id} and
 // /v1/environments/{id}/archive are management routes.
 func laneOf(pattern string) lane {
+	if nativeAuthPatterns[pattern] {
+		return laneAuth
+	}
 	if strings.Contains(pattern, "gateconfig.Path") {
 		return laneGate
 	}

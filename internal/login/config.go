@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // Mode includes the development-only password lane without changing the existing
@@ -99,24 +101,64 @@ func SessionConfigFromEnv(getenv func(string) string) (Config, error) {
 // parseOrigin does not resolve a hostname or trust forwarded request headers.
 // Errors are constant: url.Parse's error could quote credentials from the input.
 func parseOrigin(value string, development bool) (*url.URL, error) {
-	invalid := errors.New("login: CONSOLE_PUBLIC_ORIGIN must be an exact HTTPS origin (loopback HTTP requires DEVELOPMENT_MODE=true)")
+	invalid := errors.New("login: CONSOLE_PUBLIC_ORIGIN must be a canonical HTTPS origin with a lowercase host and no default port (loopback HTTP requires DEVELOPMENT_MODE=true)")
 	u, err := url.Parse(value)
 	if err != nil || strings.TrimSpace(value) != value || strings.ContainsAny(value, "?#") ||
 		u.User != nil || u.Hostname() == "" || u.Path != "" || u.Opaque != "" || strings.ContainsAny(u.Host, "\\% \t\r\n") {
 		return nil, invalid
 	}
-	if port := u.Port(); port != "" {
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return nil, invalid
-		}
-	} else if strings.HasSuffix(u.Host, ":") {
+	host := u.Hostname()
+	if !canonicalOriginHost(host) {
 		return nil, invalid
 	}
-	if u.Scheme != "https" && !(development && loopbackHTTP(u)) {
+	authority := host
+	if strings.Contains(host, ":") {
+		authority = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) ||
+			(u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80) {
+			return nil, invalid
+		}
+		authority += ":" + port
+	}
+	if value != u.Scheme+"://"+authority || (u.Scheme != "https" && !(development && loopbackHTTP(u))) {
 		return nil, invalid
 	}
 	return u, nil
+}
+
+// Accept a strict browser-serialized host subset, never rewrite aliases. DNS
+// uses the existing IDNA profile only for validation. Mapped IPv6 is unsupported
+// because netip and browsers serialize its embedded IPv4 part differently.
+func canonicalOriginHost(host string) bool {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.Zone() == "" && !addr.Is4In6() && addr.String() == host
+	}
+	if len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range []byte(label) {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	// Browsers parse numeric final labels as IPv4, including hex and shortened
+	// spellings. Only netip's canonical dotted-decimal case above is supported.
+	last := labels[len(labels)-1]
+	if strings.Trim(last, "0123456789") == "" ||
+		(strings.HasPrefix(last, "0x") && strings.Trim(last[2:], "0123456789abcdef") == "") {
+		return false
+	}
+	ascii, err := idna.Lookup.ToASCII(host)
+	return err == nil && ascii == host
 }
 
 func loopbackHTTP(u *url.URL) bool {

@@ -108,6 +108,8 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	workItem404 := envKeyRoute{status: http.StatusNotFound, errType: "not_found_error"}
 	scopeRefused := envKeyRoute{status: http.StatusForbidden, errType: "permission_error", refused: true, refusal: skillsScopeMessage}
 	want := map[string]envKeyRoute{
+		// Anonymous platform configuration, not authority granted to the key.
+		"GET /api/auth/config": served,
 		// The work API: the reference's recorded answers on a cloud
 		// environment, and the work-item 404 on the item routes.
 		"GET /v1/environments/{id}/work":           {status: http.StatusNotFound, errType: "not_found_error"},

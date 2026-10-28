@@ -145,6 +145,7 @@ func (p *RelyingParty) Exchange(ctx context.Context, code, verifier, nonce strin
 	if p.clientSecret != "" && !p.secretInBody {
 		req.SetBasicAuth(url.QueryEscape(p.clientID), url.QueryEscape(p.clientSecret))
 	}
+	injectTrace(req)
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return Identity{}, reject("code exchange failed")

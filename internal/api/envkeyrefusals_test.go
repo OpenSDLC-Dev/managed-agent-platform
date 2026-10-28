@@ -91,10 +91,11 @@ func sendBounded(t *testing.T, s *tserver, method, path string, headers map[stri
 // download and the skill reads, ahead of their kind gates, and the management
 // lane and the console namespace too — plus GET /v1/models, the route the
 // reference was recorded answering it on outside every key lane, which this
-// platform does not serve. The one exception is the internal gate-config
-// endpoint: it is off the public wire, no reference route, and takes a gate
+// platform does not serve. The internal gate-config endpoint differs: it is
+// off the public wire, no reference route, and takes a gate
 // token and nothing else, so any other credential there is an invalid gate
-// token and is answered as one.
+// token and is answered as one. Native session/logout also require their own
+// cookie, while GET auth config is anonymous; each has an explicit check below.
 func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, _ := selfHostedWorker(t, s, "beside-the-revoked")
@@ -132,7 +133,16 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 			method, path, _ := strings.Cut(request, " ")
 			t.Run(kind+" "+request, func(t *testing.T) {
 				status, body := sendBounded(t, s, method, path, asBearer(key))
-				wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
+				switch request {
+				case "GET /api/auth/config":
+					if status != http.StatusOK || len(body) != 2 || body["mode"] != "disabled" || body["native_login"] != false {
+						t.Fatalf("anonymous auth config = %d %v", status, body)
+					}
+				case "GET /api/auth/session", "POST /api/auth/logout":
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
+				default:
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
+				}
 			})
 		}
 	}
