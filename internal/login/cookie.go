@@ -31,30 +31,38 @@ func (m *Manager) cookie(value string) *http.Cookie {
 // sessionToken examines raw pairs instead of Request.Cookie: that parser skips
 // malformed cookies, which could hide an offered duplicate from authentication.
 func sessionToken(r *http.Request) (string, error) {
+	return cookieToken(r, sessionCookieName)
+}
+
+func cookieToken(r *http.Request, cookieName string) (string, error) {
 	var token string
 	count := 0
 	for _, header := range r.Header.Values("Cookie") {
 		for _, part := range strings.Split(header, ";") {
 			part = strings.TrimLeft(part, " \t")
 			name, value, found := strings.Cut(part, "=")
-			if strings.TrimSpace(name) != sessionCookieName {
+			if strings.TrimSpace(name) != cookieName {
 				continue
 			}
 			count++
-			if !found || name != sessionCookieName {
+			if !found || name != cookieName {
 				return "", ErrUnauthenticated
 			}
 			token = value
 		}
 	}
-	if count != 1 || len(token) != 43 {
-		return "", ErrUnauthenticated
-	}
-	decoded, err := base64.RawURLEncoding.Strict().DecodeString(token)
-	if err != nil || len(decoded) != 32 || base64.RawURLEncoding.EncodeToString(decoded) != token {
+	if count != 1 || !canonicalToken(token) {
 		return "", ErrUnauthenticated
 	}
 	return token, nil
+}
+
+func canonicalToken(token string) bool {
+	if len(token) != 43 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(token)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == token
 }
 
 // CheckOrigin requires the configured origin verbatim and rejects cross-site

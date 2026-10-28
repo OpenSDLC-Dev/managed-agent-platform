@@ -178,6 +178,36 @@ func TestSessionsLocalSubjectAndSerialization(t *testing.T) {
 	}
 }
 
+func TestIssuedSessionDiagnosticFormatting(t *testing.T) {
+	const token = "FIX1-SYNTHETIC-BROWSER-SESSION-TOKEN"
+	issued := IssuedSession{Session: Session{ID: "user_fixture", SignedIn: true}, Token: token}
+	for _, form := range []struct {
+		name  string
+		value any
+	}{
+		{"value", issued}, {"pointer", &issued},
+		{"nested value", struct{ Issued IssuedSession }{issued}},
+		{"nested pointer", struct{ Issued *IssuedSession }{&issued}},
+		{"slice", []any{issued, &issued}},
+		{"map", map[string]any{"issued": issued, "pointer": &issued}},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			formats := []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X", "%t", "%f"}
+			if form.name == "pointer" {
+				formats = append(formats, "%p")
+			}
+			for _, format := range formats {
+				output := fmt.Sprintf(format, form.value)
+				for _, canary := range []string{token, fmt.Sprintf("%x", token), fmt.Sprintf("%X", token)} {
+					if strings.Contains(output, canary) {
+						t.Errorf("%s of %s disclosed the synthetic session token", format, form.name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestSessionRevocationAcrossManagers(t *testing.T) {
 	ctx := context.Background()
 	pool := loginPool(t)

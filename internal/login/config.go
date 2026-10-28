@@ -3,6 +3,7 @@ package login
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"net/url"
@@ -31,13 +32,18 @@ type Config struct {
 	OIDCClientSecret string `json:"-" yaml:"-" xml:"-"`
 }
 
-// String, GoString and LogValue exclude the client secret even when a caller
-// formats the whole config rather than its safe fields.
+// String, GoString and LogValue exclude the client secret. Format also covers
+// mismatched diagnostic verbs; its comment states fmt's interception limits.
 func (c Config) String() string {
 	return fmt.Sprintf("login.Config{Mode:%q, PublicOrigin:%q, Development:%t, OIDCClientID:%q}", c.Mode, c.PublicOrigin, c.Development, c.OIDCClientID)
 }
 func (c Config) GoString() string     { return c.String() }
 func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
+
+// Format redacts method-interceptable fmt verbs on values and pointers. fmt
+// bypasses methods for %p on a struct value and for unexported nested value
+// fields; those paths are not covered. %p on a pointer prints only its address.
+func (c Config) Format(state fmt.State, _ rune) { io.WriteString(state, c.String()) }
 
 // ConfigFromEnv parses control-plane login settings. It does not replace
 // identity.ConfigFromEnv: that parser still validates the IdP verification lane.

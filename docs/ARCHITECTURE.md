@@ -496,9 +496,9 @@ Layout order is by layer, as the repo is.
 | `vaultresolve/` | Credential resolution at read time: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree, plus a third lane resolving an MCP endpoint's bearer by URL. Current rows every time, so rotation needs no session restart. It also performs the **one write** in this area — the OAuth refresh grant reseals the rotated token onto the credential row under a compare-and-set. |
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
-| `identity/` | Verify a human's IdP credential and extract its mapped role. `RoleNone` means no mapping matched, not the resolved request's role; it also serves as a route minimum that admits no human. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
+| `identity/` | Verify IdP credentials and extract their mapped role. OIDC code-flow helpers add S256 PKCE and verified nonce checks without exposing HTTP routes. `RoleNone` means no mapping matched, not the resolved request's role; it also serves as a route minimum that admits no human. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
 | `principal/` | Resolve a verified person to their stored role, apply the optional IdP mapping, and refuse deactivated rows. Shared by the control plane and the gateway's operator-token lane. Private member/service-account aliases preserve stored principal IDs. |
-| `login/` | Durable browser-session, cookie/CSRF, local-password and shared-throttle primitives. No HTTP handler uses them yet. |
+| `login/` | Durable browser sessions, one-time browser-bound OIDC attempts, cookie/CSRF checks, local passwords and shared throttling. No HTTP handler uses them yet. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 | `apikey/` | The platform API key check — the stored hash, looked up active and unexpired by the database's clock — shared by the control plane and the model gateway, so a revoked key stops on both at once. |
 
@@ -671,8 +671,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   never re-created; the database rejects principal deletion and truncation.
   The gateway's operator-token lane shares this resolver. Route minimums fail
   closed: an unannotated route denies every human. `internal/login` provides
-  browser-session and password primitives, but no HTTP handler uses them yet.
-  Browser login, member management and owned API keys remain later work.
+  browser-session, password and OIDC-attempt primitives. `internal/identity` adds
+  the guarded code exchange and verified nonce checks. No HTTP handler uses these
+  login helpers yet. Browser login, member management and owned API keys remain later work.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.
