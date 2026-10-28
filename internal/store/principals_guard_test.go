@@ -72,18 +72,21 @@ func TestPrincipalsRefuseDeleteAndTruncate(t *testing.T) {
 		t.Fatalf("insert principal: %v", err)
 	}
 
-	for _, stmt := range []string{
-		`DELETE FROM principals WHERE last_seen_at < now() - interval '180 days'`,
-		`TRUNCATE principals`,
+	for _, tc := range []struct{ stmt, code string }{
+		{`DELETE FROM principals WHERE last_seen_at < now() - interval '180 days'`, pgRestrictViolation},
+		// The browser credential FKs now reject bare TRUNCATE before triggers
+		// run. CASCADE must still hit the permanent tombstone guard.
+		{`TRUNCATE principals`, "0A000"},
+		{`TRUNCATE principals CASCADE`, pgRestrictViolation},
 	} {
-		_, err := pool.Exec(ctx, stmt)
+		_, err := pool.Exec(ctx, tc.stmt)
 		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != pgRestrictViolation {
-			t.Errorf("%s => %v, want the refusal (SQLSTATE %s)", stmt, err, pgRestrictViolation)
+		if !errors.As(err, &pgErr) || pgErr.Code != tc.code {
+			t.Errorf("%s => %v, want the refusal (SQLSTATE %s)", tc.stmt, err, tc.code)
 			continue
 		}
-		if !strings.Contains(pgErr.Message, "docs/self-hosted-security.md") {
-			t.Errorf("%s refused with %q, which does not point at the scrub", stmt, pgErr.Message)
+		if tc.code == pgRestrictViolation && !strings.Contains(pgErr.Message, "docs/self-hosted-security.md") {
+			t.Errorf("%s refused with %q, which does not point at the scrub", tc.stmt, pgErr.Message)
 		}
 	}
 

@@ -6,7 +6,7 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
-Plan 69 slice 1 is in progress. Releases are held until slice 7; see
+Plan 69 slice 2 is in progress. Releases are held until slice 7; see
 [STATE.md](./STATE.md) for verification and review status.
 
 What runs today, end to end:

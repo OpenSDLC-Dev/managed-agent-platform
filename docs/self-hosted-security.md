@@ -1211,8 +1211,9 @@ Roles are `user`, `developer` and `admin`. There is no read-only role: someone
 who only needs to read must get `developer`, which can also write. A first
 sign-in with no matching mapping gets `user`. No playground is built yet, so
 that role reaches only setup-code redemption. The mapping rules are below.
-Cookies, platform passwords, member and service-account APIs, and owned API
-keys are later slices; the existing management keys still work unchanged.
+Browser-session and password storage primitives exist, but no HTTP handler
+uses them yet. Browser login, member and service-account APIs, and owned API
+keys remain later work. Existing management keys still work unchanged.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1287,6 +1288,23 @@ It retains the id, issuer and subject; never delete their tombstone. If a
 mapping matches them, first change it to grant admin or stop matching them,
 or the next request will overwrite this recovery role. Repair an unavailable
 IdP separately: promoting a row does not bypass credential verification.
+
+#### Browser credential primitives
+
+`internal/login` is not wired to HTTP yet. Its browser sessions store only
+SHA-256 token hashes and expire after 12 hours, measured by PostgreSQL.
+Lookup reads the current active human principal. It does not replay IdP role
+mappings or update profile and last-seen fields. Revocation deletes the shared
+session row, so another manager cannot accept that cookie.
+
+A local session displays the subject from issuer
+`urn:managed-agent-platform:local` as its login name. Email does not select
+the principal. Password hashes use fixed Argon2id
+parameters and at most eight concurrent derivations per process. PostgreSQL
+limits attempts by peer IP and normalized login name. Forwarded address
+headers cannot split the peer bucket. Origin and CSRF checks use the configured
+origin, not forwarded host or protocol headers. These are library boundaries,
+not new admission paths on `/v1` or the current private API.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 
