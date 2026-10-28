@@ -164,11 +164,11 @@ type Identity struct {
 // Mode is the deployment's identity mode.
 type Mode string
 
-// The three modes. ModeDisabled is the default and is byte-for-byte the platform
-// without this package: no lane exists, and x-api-key remains the only
-// management credential.
+// ModeDisabled is the default: no human lane exists. ModePassword is parsed
+// for native-login startup but has no JWT verifier; internal/login handles it.
 const (
 	ModeDisabled     Mode = "disabled"
+	ModePassword     Mode = "password"
 	ModeOIDC         Mode = "oidc"
 	ModeTrustedProxy Mode = "trusted_proxy"
 )

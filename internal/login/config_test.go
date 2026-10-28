@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -76,6 +77,73 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("loopback HTTP accepted without development opt-in")
+	}
+}
+
+// Accepted origins must already be in the form a browser sends. Requiring an
+// operator correction avoids silently broadening the exact-origin comparison.
+func TestCanonicalPublicOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"https://console.example", "https://console.example:8443", "https://xn--bcher-kva.example",
+		"http://localhost", "http://localhost:3000", "http://127.0.0.1", "http://127.0.0.1:8080", "http://[::1]", "http://[::1]:8080",
+		"https://192.0.2.1", "https://[2001:db8::1]", "https://[2001:db8::1]:8443", "https://[::c000:201]",
+	} {
+		t.Run("canonical "+origin, func(t *testing.T) {
+			cfg, err := ConfigFromEnv(func(k string) string {
+				return map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": origin}[k]
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(nil, cfg)
+			r := httptest.NewRequest("POST", "/api/auth/login", nil)
+			r.Header.Set("Origin", origin)
+			if !m.NativeEnabled() || m.CheckOrigin(r) != nil {
+				t.Fatal("canonical origin cannot log in")
+			}
+			r.Header.Set("Origin", "https://different.example")
+			if m.CheckOrigin(r) == nil {
+				t.Fatal("different origin was admitted")
+			}
+		})
+	}
+	for _, origin := range []string{
+		"http://localhost:80", "https://CONSOLE.example:443", "https://CONSOLE.example", "HTTPS://console.example", "https://console.example:443",
+		"http://localhost:080", "https://console.example:08443", "https://bücher.example", "https://127.1", "https://127.000.000.001", "https://0x7f000001", "https://2130706433",
+		"https://console.123", "https://example.0x1", "https://console.example.", "https://xn--a.example", "https://[2001:DB8::1]", "https://[0:0:0:0:0:0:0:1]", "https://[::ffff:192.0.2.1]", "https://[::ffff:c000:201]",
+		"https://" + strings.Repeat("a", 64) + ".example", "https://" + strings.Repeat("a.", 127) + "example",
+		"https://sensitive:secret@CONSOLE.example:443",
+	} {
+		t.Run("noncanonical "+origin, func(t *testing.T) {
+			_, err := ConfigFromEnv(func(k string) string {
+				return map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": origin}[k]
+			})
+			if err == nil {
+				t.Error("accepted an origin that is not supported browser serialization")
+			}
+			if err != nil && (strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "secret")) {
+				t.Fatal("validation error exposed credentials")
+			}
+			m := New(nil, Config{Mode: ModePassword, PublicOrigin: origin, Development: true})
+			r := httptest.NewRequest("POST", "/api/auth/login", nil)
+			r.Header.Set("Origin", origin)
+			if m.NativeEnabled() || m.CheckOrigin(r) == nil {
+				t.Error("direct Manager accepted unusable native origin")
+			}
+		})
+	}
+	for _, mode := range []string{"disabled", "oidc", "trusted_proxy"} {
+		t.Run("legacy "+mode, func(t *testing.T) {
+			cfg, err := ConfigFromEnv(func(k string) string {
+				if k == "IDENTITY_MODE" {
+					return mode
+				}
+				return ""
+			})
+			if err != nil || New(nil, cfg).NativeEnabled() {
+				t.Fatalf("verifier-only/disabled changed: %v", err)
+			}
+		})
 	}
 }
 

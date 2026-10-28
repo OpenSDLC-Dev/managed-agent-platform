@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -20,12 +21,16 @@ import (
 )
 
 type server struct {
-	pool   *pgxpool.Pool
-	log    *events.Log
-	broker *events.Broker
-	queue  *queue.Queue
-	blobs  blob.Store
-	cipher secrets.Cipher
+	pool     *pgxpool.Pool
+	log      *events.Log
+	broker   *events.Broker
+	queue    *queue.Queue
+	blobs    blob.Store
+	cipher   secrets.Cipher
+	login    *login.Manager
+	rp       *identity.RelyingParty
+	verifier *identity.Verifier
+	authMode login.Mode
 	// dreamRunner records that this process ticks a dream runner (plan 41
 	// §4.7). False is DREAM_TICK_INTERVAL="0", the one configuration in which
 	// a created dream would never reach a terminal state — the timeout is the
@@ -56,9 +61,19 @@ func newServer(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) *ser
 	return &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 }
 
-// Option is a handler setting with no collaborator behind it — variadic so a
-// deployment that wants none writes none.
+// Option is an optional handler setting or collaborator.
 type Option func(*server)
+
+// WithLogin installs native browser login. Existing private credentials remain
+// available until their planned removal; public /v1 never accepts a cookie.
+func WithLogin(manager *login.Manager, rp *identity.RelyingParty) Option {
+	return func(s *server) {
+		s.login, s.rp = manager, rp
+		if manager != nil {
+			s.authMode = manager.Mode()
+		}
+	}
+}
 
 // WithDreamRunner tells the handler that this process ticks a dream runner,
 // which is what lets POST /v1/dreams accept a create (plan 41 §4.7).
@@ -80,17 +95,20 @@ func WithObjectDeletes(q *ObjectDeleteQueue) Option {
 // secrets; nil deploys without one — vault metadata CRUD serves, while the
 // secret-bearing paths (credential create/update with secret fields, the
 // validate probe) answer with a configuration error (fails closed, plan 12 D1).
-// verifier authenticates humans; nil is IDENTITY_MODE=disabled, and the surface
-// is then what it was before plan 31 — no lane, no role check — on every
-// request shape but two, deliberately (see dispatchManagementAuth):
+// verifier authenticates IdP credentials; password mode has no JWT verifier.
+// WithLogin adds native browser sessions on private routes only. With neither,
+// management auth has no human lane or role check. Two existing request shapes
+// deliberately differ from pre-plan-31 behavior (see dispatchManagementAuth):
 // requireAPIKey refuses a repeated x-api-key field in every mode, and an
 // environment key offered as a Bearer on a management route is answered as the
 // reference answers one (answerEnvironmentKey), in every mode for a request
 // that offers no human credential beside it.
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier, opts ...Option) http.Handler {
 	s := newServer(pool, blobs, cipher)
+	s.verifier, s.authMode = verifier, login.ModeDisabled
 	if verifier != nil {
 		s.setupMapGrantsAdmin = verifier.RoleMapGrantsAdmin()
+		s.authMode = login.Mode(verifier.Mode())
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -258,7 +276,21 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		})
 	}
 
-	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(s.handle(identity.RoleUser, s.redeemSetupCode)))
+	mux.HandleFunc("GET /api/auth/config", noStore(s.handle(identity.RoleUser, s.authConfig)))
+	mux.HandleFunc("GET /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginStart)))
+	mux.HandleFunc("POST /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginPost)))
+	mux.HandleFunc("GET /api/auth/callback", noStore(roleGate(identity.RoleUser, s.loginCallback)))
+	mux.HandleFunc("GET /api/auth/session", noStore(s.handle(identity.RoleUser, s.authSession)))
+	mux.HandleFunc("POST /api/auth/logout", noStore(roleGate(identity.RoleUser, s.logout)))
+	for _, pattern := range []string{"/api/auth/config", "/api/auth/login", "/api/auth/callback", "/api/auth/session", "/api/auth/logout"} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+			writeError(w, r, errMethodNotAllowed)
+		})
+	}
+
+	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(roleGate(identity.RoleUser, s.redeemSetup)))
 	// The route completeness guard distinguishes fallback closures from typed
 	// handlers by their literal shape, so keep these headers in the closure.
 	mux.HandleFunc(consoleSetupCodePath, func(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +391,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		writeError(w, r, errUnknownPath(r))
 	})
 
-	return withRequestID(withTracing(dispatchAuth(pool, verifier, mux)))
+	return withRequestID(withTracing(s.dispatchLoginAuth(mux)))
 }
 
 // dispatchAuth picks the auth scheme by path and runs it before the router, so

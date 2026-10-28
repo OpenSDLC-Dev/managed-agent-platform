@@ -1210,10 +1210,10 @@ of the verifier's warming key fetch, never as a permissions message.
 Roles are `user`, `developer` and `admin`. There is no read-only role: someone
 who only needs to read must get `developer`, which can also write. A first
 sign-in with no matching mapping gets `user`. No playground is built yet, so
-that role reaches only setup-code redemption. The mapping rules are below.
-Browser-session and password storage primitives exist, but no HTTP handler
-uses them yet. Browser login, member and service-account APIs, and owned API
-keys remain later work. Existing management keys still work unchanged.
+that role reaches authentication/session routes and setup redemption, not
+resources. The mapping rules are below. Native browser login is available
+when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account APIs and owned
+API keys remain later work. Existing management keys still work unchanged.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1255,18 +1255,27 @@ kubectl -n "$NAMESPACE" exec "$CONTROLPLANE_POD" -c controlplane -- cat "$SETUP_
 
 Do not copy the value into shared logs, tickets or command arguments. Redeem
 it promptly as the JSON `code` field at
-`POST /api/console/organizations/default/setup_code/redeem`, authenticated
-through the configured IdP lane. A management key cannot redeem it. Only an
-active `kind=user` principal whose role source is not `idp` qualifies. Same-UID
-processes, root and other file readers can claim admin with such a sign-in;
-file permissions do not eliminate that privileged-local-reader risk. Log
-access alone does not reveal the code.
+`POST /api/console/organizations/default/setup_code/redeem`. Native OIDC and
+trusted-proxy installs require the browser cookie, exact Origin and CSRF token.
+Verifier-only installs without a public origin retain IdP-token admission.
+A management key cannot redeem it. Only an active `kind=user` principal whose
+role source is not `idp` qualifies for identity promotion. Same-UID processes,
+root and other file readers can claim admin with such a sign-in. File
+permissions do not eliminate that risk; log access alone does not reveal the code.
+
+Development password setup instead takes `{code,login_name,password}` without
+prior authentication. It requires exact Origin and JSON Content-Type. It creates
+a new local admin and session, and is throttled before hashing. It opens only
+when no active local human principal holds admin, regardless of bootstrap history.
+A missing password row does not reopen it. A deactivated principal does not count,
+but its login name remains reserved. Identity and password codes cannot cross modes.
 
 An open setup attempt locks principals before setup codes and rechecks
 eligibility inside the transaction. One concurrent redemption wins. Every
 first admin grant, including a mapped admin or SQL recovery, records a
-permanent bootstrap flag. Later demotion or deactivation never reopens setup.
-Once flagged, redemption returns 409 `invalid_request_error` without those
+permanent bootstrap flag. Later demotion or deactivation never reopens identity
+setup; development password setup has the local-admin exception above.
+Once flagged, identity redemption returns 409 `invalid_request_error` without those
 table locks, even with a spent or malformed code. A valid code also gets 409
 when the caller's role comes from the mapping. The exact response and error
 shapes are in [DIVERGENCES.md](./DIVERGENCES.md).
@@ -1287,24 +1296,62 @@ This promotes an active person or deliberately reactivates a removed one.
 It retains the id, issuer and subject; never delete their tombstone. If a
 mapping matches them, first change it to grant admin or stop matching them,
 or the next request will overwrite this recovery role. Repair an unavailable
-IdP separately: promoting a row does not bypass credential verification.
+IdP or lost local password separately: promotion does not bypass credential verification.
 
-#### Browser credential primitives
+#### Native browser login
 
-`internal/login` is not wired to HTTP yet. Its browser sessions store only
-SHA-256 token hashes and expire after 12 hours, measured by PostgreSQL.
-Lookup reads the current active human principal. It does not replay IdP role
-mappings or update profile and last-seen fields. Revocation deletes the shared
-session row, so another manager cannot accept that cookie.
+Set `CONSOLE_PUBLIC_ORIGIN` to a canonical browser-serialized HTTPS origin,
+with no path, query, fragment or userinfo. Scheme and DNS host must be lowercase;
+omit default ports. For example, use `https://console.example`, not
+`https://CONSOLE.example:443`. DNS hosts use ASCII labels or validated punycode.
+IP addresses use canonical IPv4 or compressed lowercase, non-mapped IPv6.
+Aliases and unsupported spellings fail startup; the server does not rewrite them.
+Literal loopback HTTP requires `DEVELOPMENT_MODE=true`. Use `http://localhost`,
+not `http://localhost:80`. Password mode also requires that flag, even with HTTPS. Without
+an origin, OIDC and trusted-proxy installs keep verifier-only admission.
+Native OIDC needs `IDENTITY_OIDC_CLIENT_ID` equal to `IDENTITY_OIDC_AUDIENCE`.
+Only the control plane reads the optional `IDENTITY_OIDC_CLIENT_SECRET`.
 
-A local session displays the subject from issuer
-`urn:managed-agent-platform:local` as its login name. Email does not select
-the principal. Password hashes use fixed Argon2id
-parameters and at most eight concurrent derivations per process. PostgreSQL
-limits attempts by peer IP and normalized login name. Forwarded address
-headers cannot split the peer bucket. Origin and CSRF checks use the configured
-origin, not forwarded host or protocol headers. These are library boundaries,
-not new admission paths on `/v1` or the current private API.
+The private `/api/auth/` routes expose mode configuration, login, callback,
+session and logout. Only the exact mode-specific login/start/callback routes
+and GET config admit anonymous requests; the subtree is not a bypass.
+OIDC uses browser-bound state, nonce and PKCE, then redirects only to `/`.
+With a valid browser binding, a parsed, unambiguous callback spends its attempt
+before code/provider validation.
+Query-parse and duplicate-parameter failures clear the pending cookie, but retain
+the server attempt. A client that restores its original binding can retry it.
+Discovery, JWKS and token requests propagate the current W3C trace context.
+Trusted-proxy login verifies the signed assertion. Password login takes JSON
+`{login_name,password}` with exact Origin. There is no OAuth authorization server.
+
+The host-only `map_session` cookie is HttpOnly, SameSite=Lax and Secure, except
+on declared loopback HTTP. PostgreSQL stores only its SHA-256 hash and imposes
+a fixed 12-hour absolute expiry. Lookup reads the current active human principal,
+without replaying IdP mappings or updating profile and last-seen fields.
+The session DTO returns a derived CSRF token, never the session bearer.
+Unsafe cookie-authenticated requests require exact Origin and `X-CSRF-Token`.
+Cross-site Fetch Metadata is refused. Session/logout reject API-key and
+Authorization headers, even beside a valid cookie. POST logout revokes the
+shared session and expires the cookie; it does not sign out of the IdP.
+Invalid sessions return 401 with `x-platform-signed-out: 1`; a recognized
+removed person gets 403 with that marker, including during native login.
+If authority disappears before session issuance, login returns 401 with the marker.
+Real database failures stay 500 without it. Bad credentials and role refusals do
+not sign anyone out.
+
+Existing private resource routes admit cookies beside their legacy credentials.
+An explicitly offered legacy credential keeps precedence and cannot fall back
+to a cookie when invalid. `/v1`, worker and gate routes never accept cookies.
+Key-management routes retain their admin floor. Gateway cookie admission and
+the private resource proxy are not wired yet.
+
+Local login names are immutable lowercase subjects in
+`urn:managed-agent-platform:local`, never selected or linked by email.
+Passwords must contain 12–1024 UTF-8 bytes and no NUL. Fixed Argon2id parameters
+allow at most eight concurrent derivations per process. PostgreSQL limits login
+and password setup to 20 attempts per peer and 5 per normalized name per five
+minutes. Forwarded address headers cannot split the peer bucket. A proxy shares
+that peer bucket. Origin checks never trust forwarded host or protocol headers.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 

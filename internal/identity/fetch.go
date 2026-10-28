@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 )
 
 // productionClient is the guarded client a Config with no HTTPClient selects —
@@ -59,6 +60,16 @@ var productionClient = &http.Client{
 	},
 }
 
+// These requests are owned here, so header mutation needs no transport wrapper.
+// Use the current span context, never a copied incoming trace header.
+func injectTrace(req *http.Request) {
+	carrier := map[string]string{}
+	telemetry.Inject(req.Context(), carrier)
+	for key, value := range carrier {
+		req.Header.Set(key, value)
+	}
+}
+
 // getJSON performs one bounded, deadlined GET and decodes the body into v.
 //
 // context.WithoutCancel then WithTimeout: the trace context rides along (values
@@ -78,6 +89,7 @@ func getJSON(ctx context.Context, c *http.Client, target string, timeout time.Du
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	injectTrace(req)
 
 	safe := redactURL(target)
 	resp, err := c.Do(req)

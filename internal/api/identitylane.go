@@ -11,10 +11,9 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 )
 
-// identityPrincipal is the verified human a request authenticated as: the
-// principals row that records them, and the role stored on it. The IdP's
-// mapping sets that role at each sign-in where it matches, and the console
-// otherwise (internal/principal's Resolve says how).
+// identityPrincipal is the authenticated human's stored audit ID and role.
+// IdP sign-in applies the mapping through principal.Resolve; a browser cookie
+// reads current authority without replaying that sign-in write.
 type identityPrincipal struct {
 	ID   string
 	Role identity.Role

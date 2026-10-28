@@ -214,10 +214,10 @@ func acceptedIssuers(issuer string) []string {
 // construction cmd/controlplane uses, so nothing else re-derives what
 // "configured" means.
 //
-// It returns (nil, nil) when IDENTITY_MODE is unset or disabled: identity is
-// optional exactly as the cipher and the blob store are, and the caller decides
-// what its absence means. The return type is the concrete *Verifier rather than
-// an interface precisely so that nil compares as nil at the consumer — an
+// It returns (nil, nil) when IDENTITY_MODE is unset, disabled or password.
+// Native password login has no JWT verifier; internal/login validates its config.
+// Otherwise identity is optional like the cipher and blob store. The return
+// type is concrete so nil compares as nil at the consumer — an
 // interface-typed nil would be a non-nil interface holding a nil pointer, and
 // disabled is the one state that must be byte-for-byte today's platform.
 func FromEnv(ctx context.Context) (*Verifier, error) {
@@ -225,7 +225,7 @@ func FromEnv(ctx context.Context) (*Verifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Mode == ModeDisabled {
+	if cfg.Mode == ModeDisabled || cfg.Mode == ModePassword {
 		return nil, nil
 	}
 	return New(ctx, cfg)
