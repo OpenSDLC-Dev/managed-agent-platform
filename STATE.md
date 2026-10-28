@@ -4,11 +4,13 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None. [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1 closes with
-[#1000](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1000) and
-[console #240](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/240).
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 2 is in progress.
+Task 1 prepares browser-session and local-credential primitives only.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
-None.
+- [x] Browser sessions and local credentials: [session](./internal/login/session_test.go),
+  [password](./internal/login/password_test.go) and [throttle](./internal/login/throttle_test.go) contracts.
+- [ ] Add the OIDC code flow, native login and setup, and management routes.
+  No HTTP handler uses the new primitives yet.
