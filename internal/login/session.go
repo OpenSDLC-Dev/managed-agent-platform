@@ -89,15 +89,40 @@ func (m *Manager) Issue(ctx context.Context, principalID string) (IssuedSession,
 // Authenticate is read-only. In particular it must never call principal.Resolve:
 // a cookie is not an IdP sign-in and cannot replay its mapping/profile writes.
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (Session, error) {
+	return authenticate(ctx, m.pool, r, "")
+}
+
+// AuthenticateInTx rechecks a browser session after a principal mutation's lock
+// wait. The caller locks principals first; the session row lock then keeps
+// logout from overtaking the authorized write. Neither path replays IdP claims.
+func (m *Manager) AuthenticateInTx(ctx context.Context, tx pgx.Tx, r *http.Request) (Session, error) {
+	session, err := authenticate(ctx, tx, r, " FOR SHARE OF s")
+	if err != nil {
+		return Session{}, err
+	}
+	// PostgreSQL can test expiry before waiting for the tuple lock. A lock-only
+	// holder does not force a predicate recheck, so sample database time again
+	// after acquiring the lock, which the caller retains through mutation commit.
+	var valid bool
+	if err := tx.QueryRow(ctx, `SELECT $1::timestamptz > clock_timestamp()`, session.ExpiresAt).Scan(&valid); err != nil {
+		return Session{}, err
+	}
+	if !valid {
+		return Session{}, ErrUnauthenticated
+	}
+	return session, nil
+}
+
+func authenticate(ctx context.Context, db principal.Querier, r *http.Request, lock string) (Session, error) {
 	token, err := sessionToken(r)
 	if err != nil {
 		return Session{}, err
 	}
-	session, err := scanSession(m.pool.QueryRow(ctx, `
+	session, err := scanSession(db.QueryRow(ctx, `
 		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,
 		       CASE WHEN p.issuer=$2 THEN p.subject ELSE '' END,s.expires_at
 		FROM browser_sessions s JOIN principals p ON p.id=s.principal_id
-		WHERE s.token_hash=$1 AND s.expires_at>clock_timestamp()`, hashCredential(token), LocalIssuer))
+		WHERE s.token_hash=$1 AND s.expires_at>clock_timestamp()`+lock, hashCredential(token), LocalIssuer))
 	if err != nil {
 		return Session{}, err
 	}

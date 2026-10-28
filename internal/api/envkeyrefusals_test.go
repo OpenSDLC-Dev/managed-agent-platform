@@ -95,7 +95,8 @@ func sendBounded(t *testing.T, s *tserver, method, path string, headers map[stri
 // off the public wire, no reference route, and takes a gate
 // token and nothing else, so any other credential there is an invalid gate
 // token and is answered as one. Native session/logout also require their own
-// cookie, while GET auth config is anonymous; each has an explicit check below.
+// cookie, as do members and service accounts, while GET auth config is anonymous.
+// Each has an explicit check below.
 func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, _ := selfHostedWorker(t, s, "beside-the-revoked")
@@ -133,12 +134,14 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 			method, path, _ := strings.Cut(request, " ")
 			t.Run(kind+" "+request, func(t *testing.T) {
 				status, body := sendBounded(t, s, method, path, asBearer(key))
-				switch request {
-				case "GET /api/auth/config":
+				switch {
+				case request == "GET /api/auth/config":
 					if status != http.StatusOK || len(body) != 2 || body["mode"] != "disabled" || body["native_login"] != false {
 						t.Fatalf("anonymous auth config = %d %v", status, body)
 					}
-				case "GET /api/auth/session", "POST /api/auth/logout":
+				case request == "GET /api/auth/session" || request == "POST /api/auth/logout" ||
+					path == membersPath || strings.HasPrefix(path, membersPath+"/") ||
+					path == serviceAccountsPath || strings.HasPrefix(path, serviceAccountsPath+"/"):
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
 				default:
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)

@@ -37,3 +37,31 @@ func TestNativeHandlerRequiresCookieIdentity(t *testing.T) {
 		}
 	}
 }
+
+// These handlers must refuse machine and IdP contexts even if a future dispatch
+// change accidentally reaches them. The old requireRole deliberately does not.
+func TestMembersHandlersRequireCookieProvenance(t *testing.T) {
+	s := &server{login: login.New(nil, login.Config{Mode: login.ModePassword, PublicOrigin: "https://console.example", Development: true})}
+	for name, handler := range map[string]func(*http.Request) (any, error){
+		"members-list": s.listMembers, "members-get": s.getMember,
+		"members-create": s.createMember, "members-update": s.updateMember, "members-remove": s.removeMember,
+		"sa-list": s.listServiceAccounts, "sa-get": s.getServiceAccount,
+		"sa-create": s.createServiceAccount, "sa-update": s.updateServiceAccount, "sa-archive": s.archiveServiceAccount,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, idp := range []bool{false, true} {
+				ctx := context.Background()
+				if idp {
+					ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: "principal_machine", Role: identity.RoleAdmin})
+				}
+				r := httptest.NewRequest("POST", "/api/console/organizations/default/members", strings.NewReader(`{}`)).WithContext(ctx)
+				r.SetPathValue("org", "default")
+				_, err := handler(r)
+				var ae *apiError
+				if !errors.As(err, &ae) || ae.status != 401 {
+					t.Fatalf("handler admitted non-cookie context: %v", err)
+				}
+			}
+		})
+	}
+}

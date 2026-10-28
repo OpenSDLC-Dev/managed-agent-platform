@@ -327,14 +327,19 @@ func envelopeMessage(body map[string]any) string {
 // requests them too. An unknown name fails the test rather than going
 // unrequested.
 var consoleRoutePaths = map[string]string{
-	"consoleTokensPath":    "/api/oauth/organizations/default/environments/{id}/tokens",
-	"consoleRevokePath":    "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
-	"consoleWorkspacePath": "/api/console/organizations/default/workspaces/default",
-	"consoleAPIKeysPath":   "/api/console/organizations/default/workspaces/default/api_keys",
-	"consoleAPIKeyPath":    "/api/console/organizations/default/workspaces/default/api_keys/{key_id}",
-	"consoleOrgAPIKeyPath": "/api/console/organizations/default/api_keys/{key_id}",
-	"consoleSetupCodePath": "/api/console/organizations/default/setup_code/redeem",
-	"gateconfig.Path":      gateconfig.Path,
+	"consoleTokensPath":                "/api/oauth/organizations/default/environments/{id}/tokens",
+	"consoleRevokePath":                "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
+	"consoleWorkspacePath":             "/api/console/organizations/default/workspaces/default",
+	"consoleAPIKeysPath":               "/api/console/organizations/default/workspaces/default/api_keys",
+	"consoleAPIKeyPath":                "/api/console/organizations/default/workspaces/default/api_keys/{key_id}",
+	"consoleOrgAPIKeyPath":             "/api/console/organizations/default/api_keys/{key_id}",
+	"consoleSetupCodePath":             "/api/console/organizations/default/setup_code/redeem",
+	"consoleMembersPath":               "/api/console/organizations/default/members",
+	"consoleMemberPath":                "/api/console/organizations/default/members/{member_id}",
+	"consoleServiceAccountsPath":       "/api/console/organizations/default/service_accounts",
+	"consoleServiceAccountPath":        "/api/console/organizations/default/service_accounts/{service_account_id}",
+	"consoleServiceAccountArchivePath": "/api/console/organizations/default/service_accounts/{service_account_id}/archive",
+	"gateconfig.Path":                  gateconfig.Path,
 }
 
 // resolveRoutePattern turns a rendered registration (`GET /v1/agents`, or

@@ -123,6 +123,16 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 		if s.nativeLogin() && strings.HasSuffix(pattern, " "+consoleSetupCodePath) && s.login.Mode() != login.ModePassword {
 			cookieOnly = true
 		}
+		// Use the matched mux pattern, including its method-less fallback, so
+		// encoded literal segments cannot route a key to new administration.
+		_, privatePattern, hasMethod := strings.Cut(pattern, " ")
+		if !hasMethod {
+			privatePattern = pattern
+		}
+		switch privatePattern {
+		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath:
+			cookieOnly = true
+		}
 		if cookieOnly {
 			cookie.ServeHTTP(w, r)
 			return
