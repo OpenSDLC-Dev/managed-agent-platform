@@ -275,7 +275,9 @@ func laneOf(pattern string) lane {
 	// right shape rather than a list of the constants that exist today, because a
 	// list would classify the next console route as a fallback closure, and
 	// fallback is the one lane exempt from the declares-a-role rule.
-	if strings.Contains(pattern, "+console") {
+	// The resource proxy's two method-less entry points are typed routes, not
+	// the fallback closures used by the other method-less registrations.
+	if strings.Contains(pattern, "+console") || pattern == "consoleProxyPath" || pattern == "consoleProxyRootPath" {
 		return laneConsole
 	}
 

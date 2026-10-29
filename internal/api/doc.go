@@ -1,8 +1,9 @@
 // Package api is the control plane's whole HTTP surface: every route the
 // platform serves, and the dispatcher deciding which credential may reach which
-// route. Five surfaces share one http.ServeMux, four credentials reach them, and
-// dispatchAuth (server.go) picks the credential by path and runs it before the
-// router — splitting the routes across nested muxes would let ServeMux's own
+// route. One http.ServeMux shares resource, private-browser and machine routes.
+// dispatchLoginAuth (loginauth.go) admits private cookies; dispatchAuth
+// (server.go) keeps legacy and machine lanes apart before the router.
+// Splitting the routes across nested muxes would let ServeMux's own
 // path-cleaning and subtree-slash redirects answer an unauthenticated request
 // before auth had run. Surfaces and credentials do not line up one to one, and
 // the exceptions are the part a reader has to carry: they are collected at the
@@ -17,17 +18,15 @@
 // The work API under /v1/environments/{id}/work is the second credential: a
 // BYOC worker presents an environment key as Authorization: Bearer, and
 // workScope asserts that key's environment against the path's, so one key
-// drives one queue and no other (envauth.go, workapi.go). The off-wire /api
-// console namespace mirrors the reference console's own private paths rather
-// than inventing a namespace (consoleapi.go, consoleapikeys.go); it is reached
-// by a verified human whose asserted role must clear the route's declared
-// minimum (identitylane.go), or by
-// the management key, which no dispatch can confine to the console: one
-// credential cannot distinguish its callers, so "console-only" means off the
-// wire and built for the console, nothing more (consoleapi.go). That human lane
-// is not confined to /api — it is the management arm's alternate credential
-// everywhere, tried only when no x-api-key is offered, which is why every route
-// declares its role beside its path in server.go. Fourth, the internal
+// drives one queue and no other (envauth.go, workapi.go). Existing private
+// key-management paths mirror the reference console (consoleapi.go,
+// consoleapikeys.go). They retain management keys and verified IdP credentials
+// beside native cookies during rollout; their human callers require admin.
+// A management key cannot distinguish the console from another caller. This
+// legacy admission is not a namespace-wide rule: new private browser routes
+// require their own cookie admission, as described below. The legacy IdP lane
+// still reaches management /v1 when no x-api-key is offered, with the route's
+// role floor. Fourth, the internal
 // gate-config endpoint, and with it the fourth credential: a session's egress
 // gate authenticates with its per-session gtk_ token and fetches the
 // networking policy and resolved credentials it needs (gateauth.go,
@@ -37,6 +36,14 @@
 // idle session, resuming a suspended turn, clearing a confirmation gate — which
 // is why sending events is a transaction holding the session row rather than a
 // bare append. Both sit in the dual-auth set below.
+//
+// Native browser cookies never authenticate /v1 or a machine lane. The private
+// /api/organizations/{org}/proxy/v1/... resource proxy is cookie-only, even
+// beside a legacy credential. It re-enters dispatchAuth with verified human
+// context only on the management arm, retaining the resource's role floor and
+// audit actor. It strips edge assertions rather than replaying an IdP sign-in.
+// Long-lived proxy requests recheck the session every 5s with a 5s lookup bound;
+// authority loss or a store failure cancels the request, not the resource.
 //
 // The exceptions, then, and they run one way: the environment key is not
 // confined to the work API. Every route a BYOC worker needs to set up and drive

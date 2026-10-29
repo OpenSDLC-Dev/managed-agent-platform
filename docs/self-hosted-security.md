@@ -1361,11 +1361,22 @@ If authority disappears before session issuance, login returns 401 with the mark
 Real database failures stay 500 without it. Bad credentials and role refusals do
 not sign anyone out.
 
-Existing private resource routes admit cookies beside their legacy credentials.
-An explicitly offered legacy credential keeps precedence and cannot fall back
-to a cookie when invalid. `/v1`, worker and gate routes never accept cookies.
-Key-management routes retain their admin floor. Gateway cookie admission and
-the private resource proxy are not wired yet.
+Existing private key-management routes and gateway administration retain legacy
+credentials beside cookies. An offered legacy credential keeps precedence and
+cannot fall back to a cookie when invalid. Gateway cookie reads require developer;
+writes require admin. Key-management routes retain their admin floor.
+
+The new `/api/organizations/{org}/proxy/v1/...` resource proxy takes cookies only.
+API-key and Authorization headers are refused, even beside a valid cookie.
+An incidental signed edge assertion cannot replace the cookie or replay a sign-in.
+The proxy retains each resource's role floor, audit actor and trace context.
+It cannot forward to worker, gate, internal or inference routes.
+Streams recheck the session every 5 seconds, with a 5-second lookup timeout.
+Revocation, expiry, deactivation, loss of developer authority or a store error
+cancels the stream within 15 seconds, without creating resource events.
+Cancellation can truncate the HTTP response; the next request determines sign-out status.
+Request completion cancels pending lookups and stops the watcher.
+Public `/v1`, worker, gate and gateway inference routes never accept cookies.
 
 Local login names are immutable lowercase subjects in
 `urn:managed-agent-platform:local`, never selected or linked by email.

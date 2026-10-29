@@ -130,7 +130,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			privatePattern = pattern
 		}
 		switch privatePattern {
-		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath:
+		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleProxyPath, consoleProxyRootPath:
 			cookieOnly = true
 		}
 		if cookieOnly {

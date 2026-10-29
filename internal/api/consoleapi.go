@@ -16,28 +16,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The console API: the off-wire surface the managed-agent-console drives, served
-// under /api/ rather than /v1/ so that nothing here can be mistaken for — or
-// collide with — the wire-compatible surface a real `ant` CLI and the Anthropic
-// SDKs speak. Its paths mirror the reference console's own private API
-// path-for-path rather than being invented here, so a second console-facing
-// endpoint has a convention to follow instead of a naming argument; the
-// divergences from what was observed are declared in docs/DIVERGENCES.md.
+// These environment-key management routes live under /api/, off the SDK and
+// CLI's /v1 wire. Their paths mirror the reference console's private API;
+// docs/DIVERGENCES.md records departures and the newer private extensions.
 //
-// Auth needs no dispatcher change, for a reason worth stating precisely, since
-// it is the whole argument for omitting an explicit /api/ arm: every non-
-// management predicate in dispatchAuth is either a /v1/ prefix or segment test
-// (the worker, session-events, skill-read and file-read lanes) or, in the gate's
-// single case, exact equality against the fixed path "/internal/v1/gate/config"
-// (isGateConfigPath, internal/api/gateauth.go) — which is not under /v1/ and is
-// not a prefix test at all. No /api/ path can satisfy either form, so it falls to
-// the management lane. A future off-/v1 lane must re-check this rather than
-// assume the prefix rule covers everything.
+// Human callers require admin. These existing routes retain management-key and
+// IdP credentials beside native cookies during rollout. dispatchLoginAuth picks
+// cookie admission before dispatchAuth's explicit console management arm. Their
+// paths never enter a worker or gate lane. New private routes must declare their
+// own admission policy rather than inherit these legacy credentials.
 //
-// The console's BFF holds that x-api-key server-side; it never reaches a
-// browser. There is no cryptographic way to confine the namespace to the console
-// with a single management credential — "console-only" means off the wire and
-// built for the console, and is documented as exactly that.
+// Legacy console installs hold the management key server-side. A single key
+// cannot distinguish the console from another caller; native cookies do not
+// remove that authority from these existing routes in this slice.
 
 // The two console-API path patterns, mirrored segment-for-segment from the
 // reference console's private API as observed on 2026-08-10 (docs/plan/30).

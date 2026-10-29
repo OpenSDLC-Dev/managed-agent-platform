@@ -20,8 +20,10 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
-// Assert required fields and native types against the actual pinned bundled spec,
-// not a second handwritten DTO. Member-only private extensions are allowed.
+// Assert required fields and native types against the pinned schemas:
+// checked against anthropic-sdk-go v1.70.1 — spec components.schemas.BetaUser;
+// checked against anthropic-sdk-go v1.70.1 — spec components.schemas.BetaServiceAccount.
+// Not a second handwritten DTO. Member-only private extensions are allowed.
 func assertNativeManagementSchema(t *testing.T, name string, raw []byte, exact bool) {
 	t.Helper()
 	dir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/anthropics/anthropic-sdk-go").Output()

@@ -1,5 +1,6 @@
 // Package login holds durable browser credentials and local-password primitives.
-// It exposes no HTTP routes. Browser sessions read the current principal without
+// It exposes no HTTP routes. Control-plane private routes and gateway
+// administration share its session reader. Browser sessions read the current principal without
 // replaying the IdP sign-in mapping or writing profile/last-seen fields.
 //
 // SQL stays here, its issuing package; store owns the schema. Argon2id comes

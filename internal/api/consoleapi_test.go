@@ -211,11 +211,10 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	}
 }
 
-// TestConsoleKeyRoutesRequireManagementAuth pins the namespace's auth lane. It
-// takes the management x-api-key and nothing else — in particular an environment
-// key, the very credential these routes mint, cannot mint or revoke another. That
-// falls out of dispatchAuth's default lane rather than an explicit /api/ arm, so
-// it is exactly the kind of property that would rot silently without a test.
+// TestConsoleKeyRoutesRequireManagementAuth checks a legacy key-only install.
+// An environment key cannot mint or revoke another key. The explicit console
+// management arm must not select a worker lane for credential management.
+// Native-cookie and IdP admission have separate login and role contracts.
 func TestConsoleKeyRoutesRequireManagementAuth(t *testing.T) {
 	s := newTestServer(t)
 	envID := selfHostedEnv(t, s, "auth")
