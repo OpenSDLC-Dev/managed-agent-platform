@@ -6,7 +6,11 @@
 // corresponds to it, so its shape is the platform's own, and
 // managed-agent-console is its client.
 //
-// Two credentials reach it. The bootstrap key — CONTROLPLANE_API_KEY, read
+// Native browser cookies and two legacy credentials reach it. A cookie reads
+// current active-human authority from the shared session database, without
+// replaying IdP mappings. Unsafe cookie requests require exact Origin and CSRF.
+// An explicitly offered legacy credential retains precedence and never falls
+// back to a cookie on failure. The bootstrap key — CONTROLPLANE_API_KEY, read
 // from the Secret the control plane reads it from — is compared in constant
 // time against what the request carries in x-api-key or as a Bearer, and may
 // do anything; a key an application issues under the name bootstrap is
@@ -85,6 +89,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
@@ -94,8 +99,9 @@ import (
 type Config struct {
 	Store        *store.Store
 	Cipher       secrets.Cipher     // seals credential keys
-	Verifier     *identity.Verifier // nil: no operator identity, the bootstrap key alone
+	Verifier     *identity.Verifier // nil: no legacy operator identity
 	Principals   principal.Querier  // stored roles; required with a Verifier
+	Login        *login.Manager     // shared-DB browser sessions; nil or non-native preserves legacy-only admission
 	BootstrapKey string             // CONTROLPLANE_API_KEY
 	Prober       Prober             // calls vendors for the check and test routes (modelgateway.NewProber)
 }
@@ -195,7 +201,7 @@ type roleKey struct{}
 // before routing too: every route needs the developer role at least, so a
 // caller who can call nothing, a user, learns nothing about which paths exist.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	role, err := h.authenticate(r)
+	role, err := h.authenticate(w, r)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -211,8 +217,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // authenticate returns the role that authorizes r. The bootstrap key is admin.
 // An operator token shares the control plane's identity lane rule (plan 69
 // decision 4): principal.Resolve applies the mapping and rejects removed
-// members. Authorization uses the resolved stored role.
-func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
+// members. A browser cookie instead reads current authority without a sign-in.
+// Offered legacy credentials retain precedence, including their failures.
+func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity.Role, error) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
 		return "", unauthenticated("a credential header is repeated")
@@ -251,6 +258,28 @@ func (h *handler) authenticate(r *http.Request) (identity.Role, error) {
 			}
 			return p.Role, nil
 		}
+	}
+	legacyOffered := len(r.Header.Values("Authorization")) > 0
+	if v := h.cfg.Verifier; v != nil && v.AssertionHeader() != "" && len(r.Header.Values(v.AssertionHeader())) > 0 {
+		legacyOffered = true
+	}
+	if m := h.cfg.Login; !legacyOffered && m != nil && m.NativeEnabled() {
+		session, err := m.Authenticate(r.Context(), r)
+		if err != nil {
+			switch {
+			case errors.Is(err, login.ErrUnauthenticated):
+				w.Header().Set("x-platform-signed-out", "1")
+				err = unauthenticated("invalid or expired browser session")
+			case errors.Is(err, principal.ErrDeactivated):
+				w.Header().Set("x-platform-signed-out", "1")
+				err = forbidden("this account has been removed from the organization")
+			}
+			return "", err
+		}
+		if err := m.CheckCSRF(r, session); err != nil {
+			return "", forbidden("invalid browser origin or CSRF token")
+		}
+		return session.Role, nil
 	}
 	return "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
 }

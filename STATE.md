@@ -6,7 +6,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 2 is in progress.
 Native HTTP login and first-admin setup are implemented.
-Member and service-account management is implemented; private resource access is next.
+Member and service-account management is implemented.
+Private resource access and gateway cookie admission are implemented; console integration is next.
 **no release until plan 69 slice 7**.
 
 ## Tasks
@@ -19,4 +20,6 @@ Member and service-account management is implemented; private resource access is
   [setup](./internal/api/passwordsetup_test.go) and [hardening](./internal/api/login_fix1_test.go) contracts.
 - [x] Member and service-account management: [members](./internal/api/members_test.go),
   [service accounts](./internal/api/serviceaccounts_test.go) and [concurrency](./internal/api/members_race_test.go) contracts.
-- [ ] Add private resource proxy and gateway cookie admission.
+- [x] Private resource proxy and gateway cookie admission: [proxy](./internal/api/consoleproxy_test.go),
+  [streams](./internal/api/consoleproxy_stream_test.go) and [gateway](./internal/modelgateway/admin/cookie_test.go) contracts.
+- [ ] Integrate the console's native login and member management.

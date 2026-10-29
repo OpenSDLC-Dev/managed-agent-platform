@@ -450,11 +450,11 @@ func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
 // to link a key to an identity, as far as the recordings reach. Its shape is
 // recorded: a `user_` or `svac_` id, anything else a 400 with
 // `{error_visibility}` (2026-09-05 batch5 `rec86.create.principal_id.bogus-string`).
-// What a well-formed one does is not, and needs an identity this platform
-// does not have — no users and no service accounts, its humans being
-// `principal_` rows that shape refuses — so a well-formed id names nothing
-// here and is the namespace's 404 for an id that names nothing. An absent or
-// null field is no principal, the only kind of key this platform issues.
+// Reference behavior for a well-formed id is not recorded. Principal-linked
+// key ownership is not implemented in plan 69 slice 2, so even an existing
+// private user/service-account alias receives the namespace's 404. An absent
+// or null field means no principal. This platform currently issues only
+// unowned keys.
 func apiKeyPrincipal(obj map[string]json.RawMessage) error {
 	raw, ok := obj["principal_id"]
 	if !ok || isNull(raw) {

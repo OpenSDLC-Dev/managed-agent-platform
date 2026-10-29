@@ -403,27 +403,17 @@ deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
 
-Not everything an operator needs is on that wire. The reference mints environment
-keys from its **console**, on a private backend no SDK or CLI route touches, so a
-self-hostable platform has to own that surface — and it lives under `/api/`,
-deliberately outside `/v1`, where nothing can be mistaken for or collide with what
-the real `ant` CLI speaks. The convention for such a surface is **mirror, don't
-invent**: its paths copy the reference console's own segment-for-segment
-(`/api/oauth/organizations/{organization_id}/environments/{environment_id}/tokens…`,
-observed live 2026-08-10), the observation is dated in the plan, and every
-departure from what was seen is registered in DIVERGENCES.md like any other. Auth
-is the management `x-api-key`, now through `dispatchAuth`'s own `/api/` arm —
-plan 30 reached the same lane by fallthrough (no other predicate can match an
-`/api/` path, since each is either a `/v1/` prefix test or the gate's exact
-equality against the fixed `/internal/v1/gate/config`) and asked that a future
-off-`/v1` lane re-check that rather than inherit it; plan 31 slice 2 was that
-lane and made the arm explicit. The namespace is off-wire and console-shaped,
-not a separate permission tier for a key-authenticated caller — with SSO
-configured it does become the first **role**-gated surface, at `admin`, which
-constrains humans and changes nothing about what a management key may do.
-Future console-facing endpoints follow the same rule rather than opening a
-naming argument — and must re-check that auth reasoning rather than assume a
-blanket `/v1/` prefix rule covers every lane.
+Private operator routes live under `/api/`, outside the SDK and CLI's `/v1` wire.
+Existing key-management paths mirror the reference console's recorded paths;
+[DIVERGENCES.md](./DIVERGENCES.md) registers their departures and our private extensions.
+
+Authentication is not a namespace-wide rule. Existing key-management routes retain
+legacy management-key and IdP credentials beside native cookies during rollout.
+Their human callers require admin. New member and service-account routes require
+human admin cookies; the resource proxy requires developer and preserves each
+resource's role floor. New private routes must declare their own admission policy,
+not inherit the legacy lane. [Security invariants](#security-invariants) describes
+native login, cookie-only boundaries and the credentials that remain on `/v1`.
 
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
@@ -465,7 +455,7 @@ Layout order is by layer, as the repo is.
 | Package | What it owns |
 |---|---|
 | `domain/` | The Anthropic-native types every other package speaks — ids and their wire prefixes, the event taxonomy, session, agent, environment, outcome. Stdlib only: no adk-go, no genai, no provider SDK, because the wire schema is authoritative here. |
-| `api/` | The control plane's whole HTTP surface, and the dispatcher deciding which of four credentials reaches which route. Five surfaces share one `ServeMux`; auth runs before the router, never inside it. |
+| `api/` | The control plane's HTTP surface and credential/route dispatch, with authentication before the shared `ServeMux`. See [Security invariants](#security-invariants) for native cookies, legacy credentials and machine lanes. |
 | `events/` | The append-only session event log — the single source of truth — plus per-session `seq` allocation, list queries, the Postgres LISTEN/NOTIFY broker behind SSE, the ephemeral preview frames, the `span.*` events emitted from the same instrumentation point as the OTel spans, and the thinking blocks a settlement keeps for replay beside the log (plan 60). |
 | `unknownkey/` | Which key a refusal of unknown keys names — the least in byte order, so a body carrying several names the same one every time — for the three packages that refuse them, `api`, `toolset` and `events`, which cannot import one another for it. Stdlib only, and not `domain/`, which holds the Anthropic-native types alone. |
 
@@ -498,7 +488,7 @@ Layout order is by layer, as the repo is.
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
 | `identity/` | Verify IdP credentials and extract their mapped role. OIDC code-flow helpers add S256 PKCE and verified nonce checks without exposing HTTP routes. `RoleNone` means no mapping matched, not the resolved request's role; it also serves as a route minimum that admits no human. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
 | `principal/` | Resolve a verified person to their stored role, apply the optional IdP mapping, and refuse deactivated rows. Shared by the control plane and the gateway's operator-token lane. Private member/service-account aliases preserve stored principal IDs. |
-| `login/` | Durable browser sessions, one-time browser-bound OIDC attempts, cookie/CSRF checks, local passwords and shared throttling. The control plane's private login/setup routes use these primitives. |
+| `login/` | Durable browser sessions, one-time browser-bound OIDC attempts, cookie/CSRF checks, local passwords and shared throttling. Control-plane private routes and gateway administration share the session reader. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 | `apikey/` | The platform API key check — the stored hash, looked up active and unexpired by the database's clock — shared by the control plane and the model gateway, so a revoked key stops on both at once. |
 
@@ -508,7 +498,7 @@ Served by `cmd/modelgateway`, which compose runs and the Helm chart runs unless 
 
 | Package | What it owns |
 |---|---|
-| `modelgateway/` | The inference surface: a platform API key checked by `apikey/` and held to its key policy (the bootstrap and brain keys need none), Anthropic Messages and OpenAI's Chat Completions, Embeddings and rerank (`chat.go`; `vectors.go` relays an embeddings or rerank answer as it arrives) each passed through to an upstream speaking the same protocol with `model` changed, its profile's edits applied (`edits.go`), and each signed thinking block sent back only to the deployment that produced it, which its returned signature names, up to the first unsigned block of an answer (`thinking.go`) — the answer relayed event by event, and every retry and fallback made before the caller's first byte. A Messages request reaching a credential the OpenAI protocol alone admits is converted instead (`converted.go`): `convert/` makes it Chat Completions, the conversion the brain's `provider/openai` shares, and the answer, whole or streamed, Messages again, its reasoning a thinking block that provenance returns to its deployment on that protocol alone. One reaching a credential the Gemini protocol alone admits goes to that deployment's `generateContent` instead (`gemini.go`, plan 62): `convert/` makes the request, the whole answer and the stream, the signature of the answer's first function call riding a leading thinking block that provenance returns to that deployment alone — in a stream, only when no text came before the call. A Responses request (`responses.go`) is converted to Messages by `convert/` and served as one, by passthrough or that conversion alike, the answer converted back, its thinking a reasoning item whose `encrypted_content` is the wrapped signature; nothing is stored, so a stored response's routes and the fields naming stored state are refused. `catalog/` orders the attempts — priority groups, then weighted deployments and credentials, hashed on a session id when one is sent — over the immutable configuration snapshot a replica reloads on each notification, on a tick, and on each resubscription; `upstream/` is the redirect-refusing client and the event reader; `profile/`, the compiled-in vendor profiles — hosts, the key's header, whether a connection is reused, and the edits each vendor's documentation, or the live tier, calls for; `store/`, the queries over the `modelgateway` schema, holding the invariants that span rows and announcing every configuration write on `modelgateway_config`; `admin/`, the `/admin/v1/` API, reached by the bootstrap key or an operator token and by no other platform key, whose credential check sends a vendor the headers and key an attempt sends, and whose deployment test is an attempt (`probes.go`). Each admitted request goes to the ledger once it is over, its caller gone or not (but not one a stopping replica's shutdown grace cuts off), with the tokens its upstream reported costed at the deployment's prices and rolled up per UTC day in the same statement (`usage.go`); a key's RPM and TPM are one-minute windows in Postgres, so the limit holds whatever the replica count. |
+| `modelgateway/` | The inference surface: a platform API key checked by `apikey/` and held to its key policy (the bootstrap and brain keys need none), Anthropic Messages and OpenAI's Chat Completions, Embeddings and rerank (`chat.go`; `vectors.go` relays an embeddings or rerank answer as it arrives) each passed through to an upstream speaking the same protocol with `model` changed, its profile's edits applied (`edits.go`), and each signed thinking block sent back only to the deployment that produced it, which its returned signature names, up to the first unsigned block of an answer (`thinking.go`) — the answer relayed event by event, and every retry and fallback made before the caller's first byte. A Messages request reaching a credential the OpenAI protocol alone admits is converted instead (`converted.go`): `convert/` makes it Chat Completions, the conversion the brain's `provider/openai` shares, and the answer, whole or streamed, Messages again, its reasoning a thinking block that provenance returns to its deployment on that protocol alone. One reaching a credential the Gemini protocol alone admits goes to that deployment's `generateContent` instead (`gemini.go`, plan 62): `convert/` makes the request, the whole answer and the stream, the signature of the answer's first function call riding a leading thinking block that provenance returns to that deployment alone — in a stream, only when no text came before the call. A Responses request (`responses.go`) is converted to Messages by `convert/` and served as one, by passthrough or that conversion alike, the answer converted back, its thinking a reasoning item whose `encrypted_content` is the wrapped signature; nothing is stored, so a stored response's routes and the fields naming stored state are refused. `catalog/` orders the attempts — priority groups, then weighted deployments and credentials, hashed on a session id when one is sent — over the immutable configuration snapshot a replica reloads on each notification, on a tick, and on each resubscription; `upstream/` is the redirect-refusing client and the event reader; `profile/`, the compiled-in vendor profiles — hosts, the key's header, whether a connection is reused, and the edits each vendor's documentation, or the live tier, calls for; `store/`, the queries over the `modelgateway` schema, holding the invariants that span rows and announcing every configuration write on `modelgateway_config`; `admin/`, the `/admin/v1/` API, reached by native browser sessions, the bootstrap key or an operator token, but no other platform key, whose credential check sends a vendor the headers and key an attempt sends, and whose deployment test is an attempt (`probes.go`). Each admitted request goes to the ledger once it is over, its caller gone or not (but not one a stopping replica's shutdown grace cuts off), with the tokens its upstream reported costed at the deployment's prices and rolled up per UTC day in the same statement (`usage.go`); a key's RPM and TPM are one-minute windows in Postgres, so the limit holds whatever the replica count. |
 
 ### Storage and shared infrastructure
 
@@ -684,8 +674,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   role annotation. Member and service-account mutations take the principal table
   lock before rechecking the caller's session and current admin authority.
   Manual demotion/removal protects the last active human admin; mapping is exempt.
-  Public `/v1`, worker and gate paths never accept cookies. Gateway cookie
-  admission, the resource proxy and owned keys remain later work.
+  The cookie-only resource proxy re-enters management dispatch with the same
+  role floors, audit actor and trace context. It cannot enter machine or inference
+  routes. Streams recheck every 5 seconds with a 5-second lookup deadline;
+  authority loss or store failure cancels them within 15 seconds.
+  Gateway administration accepts current-session developer reads and admin writes.
+  Its offered legacy credentials keep precedence; inference never gains cookie authority.
+  Public `/v1`, worker and gate paths never accept cookies. Owned keys remain later work.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

@@ -225,15 +225,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST /v1/dreams/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveDream))
 	mux.HandleFunc("POST /v1/dreams/{id}/cancel", s.handle(identity.RoleDeveloper, s.cancelDream))
 
-	// The console API — off the /v1 wire, mirroring the reference console's own
-	// private path so a console-facing endpoint has a convention rather than an
-	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
-	// dispatchAuth's default lane: no other lane's predicate can match an /api/
-	// path — they test a /v1/ prefix, or (the gate's) exact equality against
-	// "/internal/v1/gate/config". consoleapi.go states the reasoning in full.
-	// The role mechanism's first real use, and the only annotated routes in
-	// slice 2: issuing a worker credential is the credential surface the
-	// reference gates behind console roles, and the whole SECTION is gated —
+	// Existing environment-key management routes mirror the reference console's
+	// private paths. During rollout they retain management-key and IdP lanes
+	// beside native cookies (loginauth.go); this is not every private route's
+	// admission policy. Issuing a worker credential is the credential surface
+	// the reference gates behind console roles, and the whole SECTION is gated —
 	// list included — because knowing which hosts hold keys, and their names, is
 	// itself the inventory an attacker would want. `admin` rather than
 	// `developer` is a local judgment recorded as INFERRED in docs/DIVERGENCES.md:
@@ -275,6 +271,12 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 			writeError(w, r, errMethodNotAllowed)
 		})
 	}
+
+	// This new private surface is cookie-only. Its target re-enters dispatchAuth
+	// so worker/gate lanes are never bypassed by forwarding to the shared mux.
+	proxy := s.serveConsoleProxy(dispatchAuth(pool, s.verifier, mux))
+	mux.HandleFunc(consoleProxyPath, roleGate(identity.RoleDeveloper, proxy))
+	mux.HandleFunc(consoleProxyRootPath, roleGate(identity.RoleDeveloper, proxy))
 
 	// Plan 69's new administration surfaces never inherit legacy key/IdP lanes.
 	// Dispatch enforces cookie-only admission; each handler checks provenance too.
@@ -536,6 +538,14 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http
 		human = requireIdentity(pool, v, next)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the private proxy can bring verified cookie context back into
+		// this dispatcher. Its credentials were stripped before rewriting; this
+		// arm preserves the human actor and every resource's original role floor.
+		if session, ok := cookieSessionFrom(r.Context()); ok {
+			ctx := context.WithValue(r.Context(), ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.Role})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		if apiKeyOffered(r) {
 			mgmt.ServeHTTP(w, r)
 			return

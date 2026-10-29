@@ -919,9 +919,11 @@ func TestAPIKeyNameIsTheRecordedBound(t *testing.T) {
 // as the recordings reach. Its shape is recorded: a value that is not a `user_`
 // or `svac_` id is a 400 with `{error_visibility}` (2026-09-05 batch5
 // `rec86.create.principal_id.bogus-string`, idx 26), whose message names the
-// two families. What a well-formed one does — link the key to that user or
-// service account — is not, and this platform has neither, so one names
-// nothing here: the namespace's 404 with the same details, inferred. Nothing
+// two families. Reference behavior for a well-formed id is not recorded.
+// Principal-linked key ownership is not implemented in plan 69 slice 2, so
+// even an existing private user/service-account alias receives the namespace's
+// 404 with the same details, inferred. An absent or null field means no
+// principal. This platform currently issues only unowned keys. Nothing
 // refused mints a key.
 func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 	s := newTestServer(t)

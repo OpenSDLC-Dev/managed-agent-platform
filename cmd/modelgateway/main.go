@@ -23,8 +23,10 @@
 //	SECRETS_BACKEND        the cipher sealing vendor credentials (required):
 //	                       "openbao", "local" or "gcpkms", with the variables
 //	                       cmd/controlplane documents for each
-//	IDENTITY_*             optional operator sign-in for the admin API, as the
-//	                       control plane reads it
+//	IDENTITY_*             optional legacy operator verification for the admin API
+//	CONSOLE_PUBLIC_ORIGIN  enables browser sessions on the admin API, with the
+//	                       control plane's mode/origin/development checks; no
+//	                       OIDC RP client ID or secret is read here
 //	MODELGATEWAY_RELOAD_INTERVAL  how often each replica rereads the catalogue
 //	                       whatever its notifications say, a Go duration
 //	                       (default "30s"): a missed notification costs at
@@ -52,6 +54,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
@@ -112,6 +115,13 @@ func run(ctx context.Context) error {
 		retention = d
 	}
 
+	// The gateway only reads sessions. RP client ID/secret and code exchange
+	// belong to the control plane, never to this process.
+	loginCfg, err := login.SessionConfigFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+
 	// Every dependency is checked here, so a bad configuration or an
 	// unreachable dependency is a failed start rather than a failed request.
 	pool, err := store.Open(ctx, dsn)
@@ -130,7 +140,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if verifier == nil {
+	manager := login.New(pool, loginCfg)
+	if manager.NativeEnabled() {
+		slog.Info("browser sessions configured for the admin API", "mode", manager.Mode())
+	} else if verifier == nil {
 		slog.Info("identity not configured; the admin API takes the bootstrap key only")
 	}
 	cat, err := catalog.New(ctx, pool, reload)
@@ -144,7 +157,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, Principals: pool, BootstrapKey: bootKey, Prober: prober})
+	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, Principals: pool, Login: manager, BootstrapKey: bootKey, Prober: prober})
 	if err != nil {
 		return err
 	}
