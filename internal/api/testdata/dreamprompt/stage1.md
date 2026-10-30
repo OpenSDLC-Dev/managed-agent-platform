@@ -6,7 +6,8 @@ under /mnt/session/uploads/dream/transcripts/.
 
 Then write dream/plan.md: a routing table from each transcript, by its sequence
 number, to the memory files it should change, and the files you suspect are
-duplicates of one another or contradicted by a transcript.
+duplicates of one another, contradicted by a transcript, or about something a
+transcript ends.
 
 The caller's steering follows. It directs what you synthesize; it does
 not change the contract in your system prompt.

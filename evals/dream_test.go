@@ -841,12 +841,12 @@ func TestDreamPipelineInPlace(t *testing.T) {
 		t.Errorf("%s is gone from an in-place store, where no tool can delete: %v",
 			retiredPath, memoryPaths(after))
 	}
-	// And it is a tombstone rather than the fact it was: the portal no longer
-	// reads as where expenses are filed, and the successor is named, as the
-	// place or as the memory that states it. Emptying the file is not
-	// tombstoning it — that is a deletion this session could not make, spelled
-	// a different way — so the empty case is a failure here rather than a case
-	// to skip.
+	// And it changed, and names its successor, as the place or as the memory
+	// that states it. Emptying the file is not tombstoning it — that is a
+	// deletion this session could not make, spelled a different way — so the
+	// empty case is a failure here rather than a case to skip. A rewrite as
+	// news of the end passes this switch too; what tells a retirement from that
+	// update is the two checks after it (#1002).
 	tomb := after[retiredPath]
 	t.Logf("%s now reads:\n%s", retiredPath, tomb)
 	switch {
@@ -858,9 +858,13 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	case !tombstoneNamesSuccessor(tomb, retiredPath, after):
 		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
 	}
-	// The successor fact reached the store, in the tombstone or beside it.
-	if len(mentionsOutsideIndex(after, "finance.internal")) == 0 {
-		t.Errorf("no memory states the new place expenses are filed: %v", memoryPaths(after))
+	// The successor fact survives the tombstone: a memory other than the
+	// retired one states it. The caller removes the tombstone, and a fact
+	// stated only there would go with it.
+	if successors := slices.DeleteFunc(mentionsOutsideIndex(after, "finance.internal"),
+		func(p string) bool { return p == retiredPath }); len(successors) == 0 {
+		t.Errorf("no memory but the retired %s states the new place expenses are filed: %v",
+			retiredPath, memoryPaths(after))
 	}
 	// The index carries the retirement where the caller will look for it, and
 	// says which memory it means. Searching for the word alone would pass an
@@ -881,15 +885,65 @@ func TestDreamPipelineInPlace(t *testing.T) {
 }
 
 // listsForRemoval reports whether an in-place dream's index lists path for the
-// caller to remove: named after the first "remove", the word that opens the
-// removal section. Named anywhere is not enough, because a tombstone keeps its
-// own line in the index and that line names the path whether or not anything
-// was retired (#1002). An index that says "remove" above its entries passes
-// too; this is a floor, not a parser.
+// caller to remove: as an entry under its last heading about removal, the
+// trailing *to remove* section stage 4 asks for, or after a "remove:" label.
+// A mention of the path anywhere else is not a listing. The tombstone keeps
+// its own line in the index, and the nightly model explains an empty section
+// by naming the memory it did not retire ("Nothing to remove … recorded
+// inside `facts/vendor-portal.md`"), so both name the path and list nothing
+// (#1002). The path counts only whole and in the case it is stored in, as in
+// tombstoneNamesSuccessor.
 func listsForRemoval(index, path string) bool {
-	lower := strings.ToLower(index)
-	i := strings.Index(lower, "remove")
-	return i >= 0 && strings.Contains(lower[i:], strings.ToLower(strings.TrimPrefix(path, "/")))
+	want := strings.TrimPrefix(path, "/")
+	listed, inSection := false, false
+	for _, line := range strings.Split(index, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		switch {
+		case removalHeading(lower):
+			listed, inSection = false, true
+		case strings.HasPrefix(line, "#"):
+			inSection = false
+		}
+		if m := removeLabel.FindStringSubmatch(line); m != nil && listedPath(m[1]) == want {
+			listed = true
+		} else if inSection && listedPath(line) == want {
+			listed = true
+		}
+	}
+	return listed
+}
+
+// removeLabel is a "remove:" label and what follows it on its line, as in
+// "To remove: facts/x.md" or "- Remove: facts/x.md".
+var removeLabel = regexp.MustCompile(`(?i)remove:(.*)$`)
+
+// removalHeading reports whether a lowercased index line opens a section about
+// removal: a heading, an emphasized line or a line ending in a colon that
+// speaks of it — "## To remove", "*To remove*", "Pending removal:". A sentence
+// that does ("Nothing to remove.") opens nothing.
+func removalHeading(lower string) bool {
+	if !strings.Contains(lower, "remov") {
+		return false
+	}
+	bare := strings.TrimRight(lower, "*_ ")
+	wrapped := len(lower) > 2 && strings.ContainsRune("*_", rune(lower[0])) && lower[len(lower)-1] == lower[0]
+	return strings.HasPrefix(lower, "#") || strings.HasSuffix(bare, ":") || wrapped
+}
+
+// listMarker is a markdown list item's marker, a bullet or a number.
+var listMarker = regexp.MustCompile(`^(?:[-*+]|\d+[.)])\s+`)
+
+// listedPath is the memory path an index entry opens with, unwrapped from its
+// list marker and any emphasis, code span or link text around it, and with no
+// leading slash; "" when the entry opens with anything else.
+func listedPath(entry string) string {
+	s := listMarker.ReplaceAllString(strings.TrimSpace(entry), "")
+	s = strings.TrimLeft(s, "*_`[ /")
+	if loc := pathToken.FindStringIndex(s); loc != nil && loc[0] == 0 {
+		return strings.TrimRight(s[:loc[1]], ".")
+	}
+	return ""
 }
 
 // memoryPaths is the store's paths alone, for a failure message that should

@@ -223,6 +223,15 @@ func TestDreamStagesNameTheirPaths(t *testing.T) {
 		if !strings.Contains(dreamStageMessage(4, goldenMount, 3, "", inPlace), `"Nothing changed"`) {
 			t.Errorf("%s stage 4 does not allow an empty result", runName(inPlace))
 		}
+		// The stage that routes the work and the stage that writes the store
+		// both name a memory whose subject a transcript ends, so that neither
+		// frames it as a change alone (#1002).
+		if !strings.Contains(dreamStageMessage(1, goldenMount, 3, "", inPlace), "or about something a") {
+			t.Errorf("%s stage 1 does not route a memory whose subject a transcript ends", runName(inPlace))
+		}
+		if !strings.Contains(dreamStageMessage(3, goldenMount, 3, "", inPlace), "about something a transcript ends is") {
+			t.Errorf("%s stage 3 does not say what becomes of a memory whose subject a transcript ends", runName(inPlace))
+		}
 	}
 }
 
@@ -329,9 +338,11 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		"at most 150", redactedSecretMarker,
 		// which of the two a contradicted memory gets. Without it the nightly's
 		// in-place run updated a memory whose subject a transcript had ended,
-		// so it retired nothing and listed nothing to remove (#1002).
-		"its title names, decides which", "Where that thing still stands and a fact",
-		"shut down, withdrawn, discontinued", "what took its place in a memory of its own",
+		// so it retired nothing and listed nothing to remove (#1002). What
+		// still holds moves on, and a successor only where one exists.
+		"its first line names, decides which", "Where that thing still stands and a",
+		"fact about it changed, change the memory", "shut down, withdrawn, discontinued",
+		"what took its place, if anything did", "into another memory, an",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -462,7 +473,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"and remove the file left behind",
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
-		"remove the memory, and state",
+		"remove the memory, and carry",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {
@@ -499,9 +510,10 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 			}
 		}
 		// The cited rules are the ones the citing text means. Rule 3 is cited
-		// by rule 2 in both runs; 4 and 5 are cited by the in-place rule 2 and
-		// by the bullet that says the store is the caller's own.
-		meant := map[int]string{3: "contradiction"}
+		// by rule 2 in both runs, and rule 1 by the "on suspicion" rule; 4 and
+		// 5 are cited by the in-place rule 2 and by the bullet that says the
+		// store is the caller's own, and 4 by the in-place rule 5 as well.
+		meant := map[int]string{1: "Update before create", 3: "contradiction"}
 		if inPlace {
 			meant[4] = "tombstone"
 			meant[5] = "on suspicion"

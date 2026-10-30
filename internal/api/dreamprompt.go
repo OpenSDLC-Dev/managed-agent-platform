@@ -193,7 +193,7 @@ every line resolves. %[4]sreport.md %[12]s
 }
 
 // dreamMergeRules is the numbered list in the system prompt's merge section.
-// The two runs share seven rules word for word, and the list is assembled
+// The two runs share six rules word for word, and the list is assembled
 // rather than written out twice so no rule can be improved in one variant and
 // left stale in the other. What an in-place run changes is only where a rule
 // named a removal: with no shell the file tools create and change and nothing
@@ -221,10 +221,12 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    resolve is written down as an open contradiction, never silently decided.`,
 		`Nothing else is removed on suspicion: change or remove a memory only where a
    transcript positively contradicts it. What the memory is about, the thing
-   its title names, decides which. Where that thing still stands and a fact
-   about it changed, change the memory. Where a transcript ends the thing
-   itself — shut down, withdrawn, discontinued — remove the memory, and state
-   what took its place in a memory of its own.`,
+   its first line names, decides which. Where that thing still stands and a
+   fact about it changed, change the memory. Where a transcript ends the thing
+   itself — shut down, withdrawn, discontinued — remove the memory, and carry
+   what still holds — what took its place, if anything did, and anything the
+   transcript left standing — into another memory, an existing one first
+   (rule 1).`,
 		`Relative dates become absolute ones.`,
 		`The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.`,
@@ -242,10 +244,12 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    things are not duplicates — that is rule 3's contradiction, or two facts.`
 		rules[3] = `Nothing else is retired on suspicion: change or retire a memory only where
    a transcript positively contradicts it. What the memory is about, the thing
-   its title names, decides which. Where that thing still stands and a fact
-   about it changed, change the memory. Where a transcript ends the thing
+   its first line names, decides which. Where that thing still stands and a
+   fact about it changed, change the memory. Where a transcript ends the thing
    itself — shut down, withdrawn, discontinued — retire the memory under
-   rule 4, and state what took its place in a memory of its own.`
+   rule 4, and carry what still holds — what took its place, if anything did,
+   and anything the transcript left standing — into another memory, an
+   existing one first (rule 1).`
 		rules = slices.Insert(rules, 3, fmt.Sprintf(`Nothing here is deleted or renamed: no tool in this session removes a
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that
@@ -295,7 +299,8 @@ under %[4]s.
 
 Then write %[5]splan.md: a routing table from each transcript, by its sequence
 number, to the memory files it should change, and the files you suspect are
-duplicates of one another or contradicted by a transcript.`,
+duplicates of one another, contradicted by a transcript, or about something a
+transcript ends.`,
 			storeMount, mountedAt(dreamIndexPath), transcripts,
 			mountedAt(dreamTranscriptDir), dreamScratchDir)
 	case 2:
@@ -326,11 +331,15 @@ read it yourself. Write nothing else in this stage.`,
 		batches := dreamBatches(transcripts)
 		// The stage that would have deleted the duplicate it folded away.
 		duplicates := `Every duplicate is resolved in this stage,
-one file surviving it, and so is every contradiction a digest carries.`
+one file surviving it, and so is every contradiction a digest carries. A
+memory about something a transcript ends is removed, not rewritten as news of
+the end.`
 		if inPlace {
 			duplicates = `Every duplicate is resolved in this stage, one
 file holding the statement afterwards and the other left as a tombstone
-(merge rule 4), and so is every contradiction a digest carries.`
+(merge rule 4), and so is every contradiction a digest carries. A memory
+about something a transcript ends is left as a tombstone too, not rewritten
+as news of the end.`
 		}
 		fmt.Fprintf(&b, `Stage 3 of 4: merge. Check %[1]sdigests/ first: it holds one digest per
 batch, and the batches are %[3]s Rebuild a missing digest by reading that
