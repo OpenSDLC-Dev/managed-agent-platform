@@ -365,6 +365,8 @@ the index and the report to stage 4.`,
 			// One form for the listing, because the caller reads it to know
 			// what to remove, and so does the in-place eval (#1002).
 			tombstones = `
+A memory still about something a transcript ends is retired now, under
+merge rule 4, once what still holds has moved out of it.
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing section, so the caller can find what to
 remove: a "## To remove" heading, then one "- /<path>" line per tombstone,

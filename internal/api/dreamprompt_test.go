@@ -655,6 +655,8 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 			stage: 4,
 			inPlaceWants: []string{
 				"A tombstone is a memory like any other",
+				// the audit catches a memory merge left about an ended thing (#1002)
+				"still about something a transcript ends is retired now",
 				"listed again in a trailing section",
 				"*to remove* heading",
 				// the listing's one form, which the caller and the eval read
