@@ -900,8 +900,8 @@ func TestDreamPipelineInPlace(t *testing.T) {
 // remove, in the form stage 4 asks for: an entry "- /<path>" under a
 // "## To remove" heading, the path in a code span or ended by a space, either
 // way followed by any note. Spellings of that form that mean the same are
-// read as it: a "*" bullet, a closing "#" run or a colon on the heading, the
-// leading slash left off. The paths come back whole, in the case they were
+// read as it: a "*" bullet or a numbered item, a closing "#" run or a colon
+// on the heading, the leading slash left off. The paths come back whole, in the case they were
 // written in and with no leading slash, so a comparison is exact. Anything
 // else that names a path is not a listing. The tombstone keeps its own index
 // line, and the nightly model explained an empty section by naming the memory
@@ -921,6 +921,9 @@ func removalList(index string) []string {
 		entry, ok := strings.CutPrefix(line, "- ")
 		if !ok {
 			entry, ok = strings.CutPrefix(line, "* ")
+		}
+		if digits := strings.TrimLeft(line, "0123456789"); !ok && digits != line {
+			entry, ok = strings.CutPrefix(digits, ". ")
 		}
 		if !inSection || !ok {
 			continue

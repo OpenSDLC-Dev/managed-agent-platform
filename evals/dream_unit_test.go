@@ -85,6 +85,7 @@ func TestRemovalList(t *testing.T) {
 		{"lists it under a heading ended by a colon", entries + "## To remove:\n\n- `/facts/vendor-portal.md`\n", true},
 		{"lists it under a closed heading", entries + "## To remove ##\n\n- `/facts/vendor-portal.md`\n", true},
 		{"lists it with another bullet", entries + "## To remove\n\n* `/facts/vendor-portal.md`\n", true},
+		{"lists it as a numbered item", entries + "## To remove\n\n1. `/facts/vendor-portal.md`\n", true},
 		{"lists it after two spaces", entries + "## To remove\n\n-  `/facts/vendor-portal.md`\n", true},
 		{"lists it with a note after the section", entries +
 			"## To remove\n\n- `facts/vendor-portal.md`\n\n**The caller removes these through the memories API.**\n", true},
@@ -128,10 +129,11 @@ func TestRemovalList(t *testing.T) {
 		})
 	}
 
-	// Every entry comes back, so the successor check can tell a successor the
-	// caller keeps from one it removes along with the tombstone.
-	both := entries + "## To remove\n\n- `facts/vendor-portal.md`\n- facts/expenses.md\n"
-	if got, want := removalList(both), []string{"facts/vendor-portal.md", "facts/expenses.md"}; !slices.Equal(got, want) {
+	// Every entry comes back, bulleted or numbered, so the eval sees anything
+	// else listed, and the successor check can tell a successor the caller
+	// keeps from one it removes along with the tombstone.
+	both := entries + "## To remove\n\n- `facts/vendor-portal.md`\n- facts/expenses.md\n12. facts/build.md\n"
+	if got, want := removalList(both), []string{"facts/vendor-portal.md", "facts/expenses.md", "facts/build.md"}; !slices.Equal(got, want) {
 		t.Errorf("removalList(%q) = %q, want %q", both, got, want)
 	}
 }
