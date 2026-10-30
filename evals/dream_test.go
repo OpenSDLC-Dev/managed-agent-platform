@@ -47,9 +47,9 @@ const (
 	// its budget first and writes failed{timeout} with a message, where the
 	// poll reaching its deadline first would only produce a test failure
 	// saying the dream was still running. The seeded dream took 1m35s to
-	// 6m20s on the nightlies of 2026-10-20 to 10-29, and the hundred 18m56s on
-	// the run that measured #999's fix, so both budgets are slack, not a
-	// schedule.
+	// 6m20s on the nightlies of 2026-10-20 to 10-29, against 15, and the
+	// hundred 19 to 29 minutes on the three local runs that measured #999's
+	// fix, against 40. Both are budgets with room, not schedules.
 	dreamRunnerTimeout        = 15 * time.Minute
 	dreamRunnerTimeoutHundred = 40 * time.Minute
 	// dreamMaxInputBytes is cmd/controlplane's DREAM_MAX_INPUT_BYTES default,
