@@ -276,6 +276,10 @@ func childThreads(t *testing.T, s *stack, sessionID string) int {
 // measured spend of a real model tells them apart. The plan's first guess at
 // stage 1 was four turns; the first live run spent more than that on the
 // manifest alone.
+//
+// Like threadSpend, it never fails the test: every caller logs it before it
+// checks the dream's status, so an error is logged and the stages read so far
+// are returned.
 func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 	t.Helper()
 	rows, err := s.pool.Query(context.Background(), `
@@ -289,19 +293,21 @@ func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 		           AND e.seq > o.seq AND (o.next_seq IS NULL OR e.seq < o.next_seq))
 		  FROM openers o ORDER BY o.stage`, sessionID)
 	if err != nil {
-		t.Fatalf("read the stages' turn counts: %v", err)
+		t.Logf("stage spend: %v", err)
+		return nil
 	}
 	defer rows.Close()
 	var spend []int
 	for rows.Next() {
 		var turns int
 		if err := rows.Scan(&turns); err != nil {
-			t.Fatalf("scan a stage's turn count: %v", err)
+			t.Logf("stage spend: %v", err)
+			return spend
 		}
 		spend = append(spend, turns)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("read the stages' turn counts: %v", err)
+		t.Logf("stage spend: %v", err)
 	}
 	return spend
 }
