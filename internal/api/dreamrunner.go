@@ -98,8 +98,9 @@ const dreamStageCount = 4
 // with the coordinator's spawn wave and its waits — and the seeded run, which
 // spends ten there, cannot test it. The hundred-transcript run can, and logs
 // its stage spend since #999. On one model: 301, over the cap, while the
-// threads rewrote their digests to fit 4 KiB, then 75 to 112 on three runs
-// once the prompt made 4 KiB a target written in one pass.
+// threads rewrote their digests to fit 4 KiB, then 99, 75 and 112 on one run
+// each of three revisions that made 4 KiB a target, the last the one that
+// shipped.
 var dreamStageTurnCaps = [dreamStageCount + 1]int{0, 30, 300, 60, 30}
 
 // dreamLockWait is the lock_timeout every dream-row transaction sets: the
