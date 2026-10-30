@@ -859,23 +859,27 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	case !tombstoneNamesSuccessor(tomb, retiredPath, after):
 		t.Errorf("%s does not name its successor:\n%s", retiredPath, tomb)
 	}
-	// The successor fact survives the tombstone: a memory other than the
-	// retired one states it. The caller removes the tombstone, and a fact
-	// stated only there would go with it.
-	if successors := slices.DeleteFunc(mentionsOutsideIndex(after, "finance.internal"),
-		func(p string) bool { return p == retiredPath }); len(successors) == 0 {
-		t.Errorf("no memory but the retired %s states the new place expenses are filed: %v",
-			retiredPath, memoryPaths(after))
-	}
 	// The index carries the retirement where the caller will look for it, and
 	// says which memory it means. Searching for the word alone would pass an
 	// index whose removal section reads "nothing to remove", which is the one
 	// thing this run must not produce.
-	if index, ok := after["/MEMORY.md"]; !ok {
+	index, ok := after["/MEMORY.md"]
+	if !ok {
 		t.Errorf("the store has no /MEMORY.md index: %v", memoryPaths(after))
-	} else if !listsForRemoval(index, retiredPath) {
+	}
+	listed := removalList(index)
+	if ok && !slices.Contains(listed, strings.TrimPrefix(retiredPath, "/")) {
 		t.Errorf("/MEMORY.md does not list %s, the memory it retired, for the caller to remove:\n%s",
 			retiredPath, index)
+	}
+	// The successor fact survives the removals: a memory the caller keeps
+	// states it. A fact stated only in the tombstone, or in anything else the
+	// index lists for removal, goes when the caller removes them.
+	if successors := slices.DeleteFunc(mentionsOutsideIndex(after, "finance.internal"), func(p string) bool {
+		return p == retiredPath || slices.Contains(listed, strings.TrimPrefix(p, "/"))
+	}); len(successors) == 0 {
+		t.Errorf("no memory the caller keeps states the new place expenses are filed: %v (listed for removal: %v)",
+			memoryPaths(after), listed)
 	}
 	// The memory nothing spoke to is byte-identical, in place as much as in a
 	// clone.
@@ -885,17 +889,18 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	}
 }
 
-// listsForRemoval reports whether an in-place dream's index lists memPath for
-// the caller to remove, in the one form stage 4 asks for: an entry
-// "- <path from the store root>" under a "## To remove" heading, the path
-// optionally in a code span and followed by a note. Anything else that names
-// the path is not a listing. The tombstone keeps its own index line, and the
-// nightly model explained an empty section by naming the memory it had not
-// retired ("Nothing to remove … recorded inside `facts/vendor-portal.md`"),
-// so a looser reading passed the update #1002 is about. The path counts only
-// whole and in the case it is stored in.
-func listsForRemoval(index, memPath string) bool {
-	want := strings.TrimPrefix(memPath, "/")
+// removalList is what an in-place dream's index lists for the caller to
+// remove, in the one form stage 4 asks for: an entry "- <path from the store
+// root>" under a "## To remove" heading, the path in a code span or ended by a
+// space, either way followed by any note. The paths come back whole, in the
+// case they were written in and with no leading slash, so a comparison is
+// exact. Anything else that names a path is not a listing. The tombstone keeps
+// its own index line, and the nightly model explained an empty section by
+// naming the memory it had not retired ("Nothing to remove … recorded inside
+// `facts/vendor-portal.md`"), so a looser reading passed the update #1002 is
+// about.
+func removalList(index string) []string {
+	var listed []string
 	inSection := false
 	for _, line := range strings.Split(index, "\n") {
 		line = strings.TrimSpace(line)
@@ -907,13 +912,15 @@ func listsForRemoval(index, memPath string) bool {
 		if !inSection || !ok {
 			continue
 		}
-		entry = strings.TrimPrefix(strings.TrimPrefix(entry, "`"), "/")
-		if loc := pathToken.FindStringIndex(entry); loc != nil && loc[0] == 0 &&
-			strings.TrimRight(entry[:loc[1]], ".") == want {
-			return true
+		var field string
+		if quoted, ok := strings.CutPrefix(entry, "`"); ok {
+			field, _, _ = strings.Cut(quoted, "`")
+		} else {
+			field, _, _ = strings.Cut(entry, " ")
 		}
+		listed = append(listed, strings.TrimPrefix(field, "/"))
 	}
-	return false
+	return listed
 }
 
 // memoryPaths is the store's paths alone, for a failure message that should

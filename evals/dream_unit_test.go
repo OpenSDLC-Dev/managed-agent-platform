@@ -1,6 +1,10 @@
 package evals
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
 
 // The in-place dream's tombstone grader, on the tombstones nightly runs wrote
 // and on the ones it must still refuse (#951).
@@ -61,7 +65,7 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 // the "## To remove" heading stage 4 asks for; the tombstone's own line, an
 // empty section that explains itself by naming the path, and any other form
 // are not.
-func TestListsForRemoval(t *testing.T) {
+func TestRemovalList(t *testing.T) {
 	const retired = "/facts/vendor-portal.md"
 	const entries = "# Memory index\n\n" +
 		"- `facts/vendor-portal.md` — tombstone: superseded by facts/expenses.md.\n" +
@@ -74,6 +78,8 @@ func TestListsForRemoval(t *testing.T) {
 		{"lists it with a note", entries +
 			"## To remove\n\n- `facts/vendor-portal.md` — superseded by facts/expenses.md\n", true},
 		{"lists it without a code span", entries + "## To remove\n\n- facts/vendor-portal.md\n", true},
+		{"lists it without a code span, with a note", entries +
+			"## To remove\n\n- facts/vendor-portal.md — superseded by facts/expenses.md\n", true},
 		{"lists it from the store root", entries + "## To remove\n\n- `/facts/vendor-portal.md`\n", true},
 		{"lists it under a heading of another level and case", entries + "### to remove\n\n- `facts/vendor-portal.md`\n", true},
 		{"lists it with a note after the section", entries +
@@ -108,11 +114,20 @@ func TestListsForRemoval(t *testing.T) {
 		{"lists it under another directory", entries + "## To remove\n\n- `archive/facts/vendor-portal.md`\n", false},
 		{"lists it in another case", entries + "## To remove\n\n- `facts/Vendor-Portal.md`\n", false},
 		{"lists its base name", entries + "## To remove\n\n- `vendor-portal.md`\n", false},
+		{"lists it with an anchor", entries + "## To remove\n\n- `facts/vendor-portal.md#shutdown`\n", false},
+		{"lists it with a trailing dot", entries + "## To remove\n\n- facts/vendor-portal.md.\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := listsForRemoval(tc.index, retired); got != tc.want {
-				t.Errorf("listsForRemoval(%q) = %v, want %v", tc.index, got, tc.want)
+			if got := slices.Contains(removalList(tc.index), strings.TrimPrefix(retired, "/")); got != tc.want {
+				t.Errorf("removalList(%q) = %q, listing it %v, want %v", tc.index, removalList(tc.index), got, tc.want)
 			}
 		})
+	}
+
+	// Every entry comes back, so the successor check can tell a successor the
+	// caller keeps from one it removes along with the tombstone.
+	both := entries + "## To remove\n\n- `facts/vendor-portal.md`\n- facts/expenses.md\n"
+	if got, want := removalList(both), []string{"facts/vendor-portal.md", "facts/expenses.md"}; !slices.Equal(got, want) {
+		t.Errorf("removalList(%q) = %q, want %q", both, got, want)
 	}
 }

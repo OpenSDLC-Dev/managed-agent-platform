@@ -8,8 +8,8 @@ content — so that every memory has a line and every line resolves.
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing *to remove* section, so the caller can find
 what to remove: a "## To remove" heading, then one "- <path>" line per
-tombstone, the path from the store root as in the lines above. If you
-retired nothing, leave that section out.
+tombstone, the path from the store root as in the lines above. If the
+store holds no tombstone, leave that section out.
 
 Then write dream/report.md: the files you created and updated, the ones you
 retired as tombstones under a *to remove* heading, the

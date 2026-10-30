@@ -656,7 +656,9 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 				"*to remove* heading",
 				// the listing's one form, which the caller and the eval read
 				`a "## To remove" heading, then one "- <path>" line per`,
-				"leave that section out",
+				// a dream that retires nothing still lists the tombstones an
+				// earlier one left, which the caller has yet to remove
+				"store holds no tombstone, leave that section out",
 			},
 			createNewWants:     []string{"created, updated and removed"},
 			inPlaceForbidden:   []string{"created, updated and removed"},
