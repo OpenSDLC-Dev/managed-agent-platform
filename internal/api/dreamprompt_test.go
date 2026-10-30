@@ -314,8 +314,14 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		fmt.Sprintf("%q", dreamRosterAgent), toolset.ToolCreateAgent,
 		toolset.ToolWaitForAgents, toolset.ToolSubmitResult,
 		"batch N: M transcripts, K NO SIGNAL",
-		// the digest schema
-		"outcome: success", "outcome: uncertain", "NO SIGNAL", "4 KiB",
+		// the digest schema, and its size as a target written to once: read
+		// as a ceiling, it had the digest threads rewriting their digests a
+		// little shorter each time until stage 2 ran out of turns (#999). A
+		// fix to what a digest says is not such a rewrite, and the one bound
+		// left is a single rewrite of a draft past twice the target.
+		"outcome: success", "outcome: uncertain", "NO SIGNAL", "about 4 KiB",
+		"Write it in one pass", "only to shorten it", "gets wrong or leaves out",
+		"past 8 KiB", "leave its size alone",
 		"Preference signals", "Reusable knowledge",
 		"Failures and what to do differently", "References",
 		// what slice 2 already carried, unchanged in substance

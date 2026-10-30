@@ -96,9 +96,11 @@ const dreamStageCount = 4
 // Stage 2's 300 is the fan-out's arithmetic, left where the plan sized it —
 // thirteen digest threads reading eight transcripts each are about 170 turns
 // with the coordinator's spawn wave and its waits — and the seeded run, which
-// spends ten there, cannot test it. What it has is one observation rather than
-// a measurement: the hundred-transcript run completed, so stage 2 stayed under
-// 300 at the bound the number was sized for.
+// spends ten there, cannot test it. The hundred-transcript run can, and logs
+// its stage spend since #999. On one model: 301, over the cap, while the
+// threads rewrote their digests to fit 4 KiB, then 99, 75 and 112 on one run
+// each of three revisions that made 4 KiB a target, the last the one that
+// shipped.
 var dreamStageTurnCaps = [dreamStageCount + 1]int{0, 30, 300, 60, 30}
 
 // dreamLockWait is the lock_timeout every dream-row transaction sets: the

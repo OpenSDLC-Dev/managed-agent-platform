@@ -46,9 +46,10 @@ const (
 	// the ordering that makes a stuck dream report itself: the runner reaches
 	// its budget first and writes failed{timeout} with a message, where the
 	// poll reaching its deadline first would only produce a test failure
-	// saying the dream was still running. The seeded run finishes in about two
-	// minutes and the hundred in about eleven, so both budgets are slack, not
-	// a schedule.
+	// saying the dream was still running. The seeded dream took 1m35s to
+	// 6m20s on the nightlies of 2026-10-20 to 10-29, against 15, and the
+	// hundred 19 to 29 minutes on the three local runs that measured #999's
+	// fix, against 40. Both are budgets with room, not schedules.
 	dreamRunnerTimeout        = 15 * time.Minute
 	dreamRunnerTimeoutHundred = 40 * time.Minute
 	// dreamMaxInputBytes is cmd/controlplane's DREAM_MAX_INPUT_BYTES default,
@@ -275,6 +276,10 @@ func childThreads(t *testing.T, s *stack, sessionID string) int {
 // measured spend of a real model tells them apart. The plan's first guess at
 // stage 1 was four turns; the first live run spent more than that on the
 // manifest alone.
+//
+// Like threadSpend, it never fails the test: every caller logs it before it
+// checks the dream's status, so an error is logged and the stages read so far
+// are returned.
 func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 	t.Helper()
 	rows, err := s.pool.Query(context.Background(), `
@@ -288,21 +293,83 @@ func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 		           AND e.seq > o.seq AND (o.next_seq IS NULL OR e.seq < o.next_seq))
 		  FROM openers o ORDER BY o.stage`, sessionID)
 	if err != nil {
-		t.Fatalf("read the stages' turn counts: %v", err)
+		t.Logf("stage spend: %v", err)
+		return nil
 	}
 	defer rows.Close()
 	var spend []int
 	for rows.Next() {
 		var turns int
 		if err := rows.Scan(&turns); err != nil {
-			t.Fatalf("scan a stage's turn count: %v", err)
+			t.Logf("stage spend: %v", err)
+			return spend
 		}
 		spend = append(spend, turns)
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("read the stages' turn counts: %v", err)
+		t.Logf("stage spend: %v", err)
 	}
 	return spend
+}
+
+// threadSpend is stageSpend sliced the other way: one line per thread of the
+// pipeline session, the primary first, with its model turns, the failed ones
+// among them, its output tokens, the time from its first event to its last,
+// and its tool calls by name. That time is not how long the thread worked:
+// it includes waits behind the other threads' turns, and it stops at the last
+// event, so a request still outstanding when the dream ended is not in it.
+//
+// stageSpend says that stage 2 spent 300 turns; this says which threads spent
+// them and on what, which is what tells a stage that looped from one that
+// read slowly. The hundred-transcript run is the one that needs it, and it
+// runs in CI, where the database it would be read from is gone once the job
+// ends, so it is logged on every run rather than on demand (#999).
+//
+// It is diagnostics, so it never fails the test: an error is logged and the
+// lines read so far are returned. The caller logs it before it checks the
+// dream's status, and a Fatalf here would both hide that status and fail a
+// dream that completed.
+func threadSpend(t *testing.T, s *stack, sessionID string) []string {
+	t.Helper()
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT COALESCE(e.thread_id, 'primary'),
+		       count(*) FILTER (WHERE e.type = 'span.model_request_end'),
+		       count(*) FILTER (WHERE e.type = 'span.model_request_end' AND e.payload->>'is_error' = 'true'),
+		       COALESCE(sum((e.payload->'model_usage'->>'output_tokens')::bigint)
+		                FILTER (WHERE e.type = 'span.model_request_end'), 0),
+		       extract(epoch FROM max(e.created_at) - min(e.created_at))::float8,
+		       COALESCE((SELECT string_agg(c.name || ' ' || c.n, ', ' ORDER BY c.n DESC, c.name)
+		                   FROM (SELECT COALESCE(payload->>'name', '?') AS name, count(*) AS n
+		                           FROM events
+		                          WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM e.thread_id
+		                            AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.custom_tool_use')
+		                          GROUP BY 1) c), '')
+		  FROM events e
+		 WHERE e.session_id = $1
+		 GROUP BY e.thread_id ORDER BY min(e.seq)`, sessionID)
+	if err != nil {
+		t.Logf("thread spend: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var (
+			thread, calls      string
+			turns, failed, out int
+			secs               float64
+		)
+		if err := rows.Scan(&thread, &turns, &failed, &out, &secs, &calls); err != nil {
+			t.Logf("thread spend: %v", err)
+			return lines
+		}
+		lines = append(lines, fmt.Sprintf("%s: %d turns (%d failed), %d out, events over %s — %s",
+			thread, turns, failed, out, time.Duration(secs*float64(time.Second)).Round(time.Second), calls))
+	}
+	if err := rows.Err(); err != nil {
+		t.Logf("thread spend: %v", err)
+	}
+	return lines
 }
 
 // dreamUsage is the dream's four counters, for the log line and the
@@ -604,10 +671,13 @@ func TestDreamPipelineHundred(t *testing.T) {
 	// where content is graded.
 	storeID := s.createMemoryStore(t, &MemoryFixture{Name: "dream-eval-hundred"}, tr)
 
-	// One turn each, no tool call — so no session provisions a container and
-	// the hundred cost a model call apiece. Driven ten at a time: serial waves
-	// would spend a hundred turn round-trips end to end, and the brain and
-	// executor loops are already the concurrent pair a real deployment runs.
+	// One turn each, and nothing in the message asks for a tool. The model may
+	// run one all the same — saving the id with bash, say — and that session
+	// then provisions a container and its transcript carries the call. Left
+	// in on purpose: real transcripts carry tool calls. Driven ten at a time:
+	// serial waves would spend a hundred turn round-trips end to end, and the
+	// brain and executor loops are already the concurrent pair a real
+	// deployment runs.
 	const wave = 10
 	var (
 		mu       sync.Mutex
@@ -658,6 +728,12 @@ func TestDreamPipelineHundred(t *testing.T) {
 	}
 	t.Logf("dream %s over %d transcripts: status %v in %s — usage %.0f in / %.0f out, %d digest threads",
 		dreamID, transcripts, dream["status"], elapsed.Round(time.Second), in, out, threads)
+	if sessionID != "" {
+		t.Logf("stage spend (model turns, every thread's): %v", stageSpend(t, s, sessionID))
+		for _, line := range threadSpend(t, s, sessionID) {
+			t.Logf("thread spend: %s", line)
+		}
+	}
 
 	if dream["status"] != "completed" {
 		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
