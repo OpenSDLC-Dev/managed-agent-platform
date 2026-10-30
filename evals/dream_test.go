@@ -676,10 +676,13 @@ func TestDreamPipelineHundred(t *testing.T) {
 	// where content is graded.
 	storeID := s.createMemoryStore(t, &MemoryFixture{Name: "dream-eval-hundred"}, tr)
 
-	// One turn each, no tool call — so no session provisions a container and
-	// the hundred cost a model call apiece. Driven ten at a time: serial waves
-	// would spend a hundred turn round-trips end to end, and the brain and
-	// executor loops are already the concurrent pair a real deployment runs.
+	// One turn each, and nothing in the message asks for a tool. The model may
+	// run one all the same — saving the id with bash, say — and that session
+	// then provisions a container and its transcript carries the call. Left in on purpose: real transcripts carry tool calls, and
+	// those are what pushed the digests past their size (#999). Driven ten at
+	// a time: serial waves would spend a hundred turn round-trips end to end,
+	// and the brain and executor loops are already the concurrent pair a real
+	// deployment runs.
 	const wave = 10
 	var (
 		mu       sync.Mutex

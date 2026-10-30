@@ -58,13 +58,17 @@ coordinator nothing.
 
 # The digest schema
 
-One digest covers one batch and is at most 4 KiB. It opens with one line per
-transcript in the batch — its sequence number, one sentence on what that
-session did, and "outcome: success", "outcome: partial", "outcome: fail" or
-"outcome: uncertain". A transcript that carried nothing durable is listed as
-NO SIGNAL and nothing more. Then four sections for the batch as a whole:
-Preference signals; Reusable knowledge; Failures and what to do differently;
-References.
+One digest covers one batch and aims at about 4 KiB, the size the merge stage
+is planned for. Write it once and leave it: a digest over that size is still
+sound, and a rewrite made only to shorten it is a turn the whole stage pays
+for. It opens with one line per transcript in the batch — its sequence
+number, one sentence on what that session did, and "outcome: success",
+"outcome: partial", "outcome: fail" or "outcome: uncertain". A transcript
+that carried nothing durable is listed as NO SIGNAL and nothing more. Then
+four sections for the batch as a whole: Preference signals;
+Reusable knowledge; Failures and what to do differently; References. Each
+fact goes in one place: a section adds what the lines above it do not
+already say.
 
 # Merge rules, in priority order
 
