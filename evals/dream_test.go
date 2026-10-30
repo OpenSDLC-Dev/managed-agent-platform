@@ -46,9 +46,9 @@ const (
 	// the ordering that makes a stuck dream report itself: the runner reaches
 	// its budget first and writes failed{timeout} with a message, where the
 	// poll reaching its deadline first would only produce a test failure
-	// saying the dream was still running. The seeded run finishes in about two
-	// minutes and the hundred in about eleven, so both budgets are slack, not
-	// a schedule.
+	// saying the dream was still running. The seeded run finishes in two to
+	// six minutes, and the hundred took 19 on the run that measured #999's
+	// fix, so both budgets are slack, not a schedule.
 	dreamRunnerTimeout        = 15 * time.Minute
 	dreamRunnerTimeoutHundred = 40 * time.Minute
 	// dreamMaxInputBytes is cmd/controlplane's DREAM_MAX_INPUT_BYTES default,
