@@ -316,9 +316,10 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		"batch N: M transcripts, K NO SIGNAL",
 		// the digest schema, and its size as a target written to once: read
 		// as a ceiling, it had the digest threads rewriting their digests a
-		// little shorter each time until stage 2 ran out of turns (#999)
+		// little shorter each time until stage 2 ran out of turns (#999). The
+		// one bound left is a single rewrite of a draft past twice the target.
 		"outcome: success", "outcome: uncertain", "NO SIGNAL", "about 4 KiB",
-		"Write it once", "only to shorten it",
+		"Write it once", "only to shorten it", "past 8 KiB", "once, shorter",
 		"Preference signals", "Reusable knowledge",
 		"Failures and what to do differently", "References",
 		// what slice 2 already carried, unchanged in substance

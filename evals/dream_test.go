@@ -46,9 +46,10 @@ const (
 	// the ordering that makes a stuck dream report itself: the runner reaches
 	// its budget first and writes failed{timeout} with a message, where the
 	// poll reaching its deadline first would only produce a test failure
-	// saying the dream was still running. The seeded run finishes in two to
-	// six minutes, and the hundred took 19 on the run that measured #999's
-	// fix, so both budgets are slack, not a schedule.
+	// saying the dream was still running. The seeded dream took 1m35s to
+	// 6m20s on the nightlies of 2026-10-20 to 10-29, and the hundred 18m56s on
+	// the run that measured #999's fix, so both budgets are slack, not a
+	// schedule.
 	dreamRunnerTimeout        = 15 * time.Minute
 	dreamRunnerTimeoutHundred = 40 * time.Minute
 	// dreamMaxInputBytes is cmd/controlplane's DREAM_MAX_INPUT_BYTES default,
@@ -307,7 +308,10 @@ func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 
 // threadSpend is stageSpend sliced the other way: one line per thread of the
 // pipeline session, the primary first, with its model turns, the failed ones
-// among them, its output tokens, how long it ran, and its tool calls by name.
+// among them, its output tokens, the time from its first event to its last,
+// and its tool calls by name. That time is not how long the thread worked:
+// it includes waits behind the other threads' turns, and it stops at the last
+// event, so a request still outstanding when the dream ended is not in it.
 //
 // stageSpend says that stage 2 spent 300 turns; this says which threads spent
 // them and on what, which is what tells a stage that looped from one that
@@ -367,7 +371,7 @@ func threadSpend(t *testing.T, s *stack, sessionID string) []string {
 		if name == "" {
 			name = "primary"
 		}
-		lines = append(lines, fmt.Sprintf("%s: %d turns (%d failed), %d out, %s — %s",
+		lines = append(lines, fmt.Sprintf("%s: %d turns (%d failed), %d out, events over %s — %s",
 			name, turns, failed, out, time.Duration(secs*float64(time.Second)).Round(time.Second),
 			strings.Join(calls[thread], ", ")))
 	}
