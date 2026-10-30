@@ -113,6 +113,9 @@ func TestRemovalList(t *testing.T) {
 		{"lists it under an emphasized heading", entries + "*To remove*\n\n- `facts/vendor-portal.md`\n", false},
 		{"lists it after an inline label", entries + "To remove: `facts/vendor-portal.md`\n", false},
 		{"lists it as a link", entries + "## To remove\n\n- [Vendor portal](facts/vendor-portal.md)\n", false},
+		{"numbers its entries, with no removal section", "# Memory index\n\n" +
+			"1. `facts/vendor-portal.md` — tombstone: superseded by facts/expenses.md.\n" +
+			"2. `facts/expenses.md` — expenses are filed at finance.internal.\n", false},
 		// Paths that are not the memory.
 		{"lists another memory", entries + "## To remove\n\n- `facts/old.md`\n", false},
 		{"lists a longer path", entries + "## To remove\n\n- `facts/vendor-portal.md.bak`\n", false},
