@@ -153,10 +153,11 @@ coordinator nothing.
 # The digest schema
 
 One digest covers one batch and aims at about 4 KiB, the size the merge stage
-is planned for. Write it once and leave it: a digest over that size is still
-sound, and a rewrite made only to shorten it is a turn the whole stage pays
-for. The one exception is a draft past 8 KiB, twice the target: rewrite that
-one once, shorter, and then leave it. It opens with one line per transcript
+is planned for. Write it in one pass. A digest over that size is still sound,
+and a rewrite made only to shorten it is a turn the whole stage pays for; a
+fix to what a digest gets wrong or leaves out is not that. The one exception
+is a draft past 8 KiB, twice the target: rewrite that one once, to under
+8 KiB, and then leave its size alone. It opens with one line per transcript
 in the batch — its sequence number, one sentence on what that session did,
 and "outcome: success", "outcome: partial", "outcome: fail" or
 "outcome: uncertain". A transcript that carried nothing durable is listed

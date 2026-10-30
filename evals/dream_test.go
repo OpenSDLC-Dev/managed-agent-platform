@@ -316,67 +316,52 @@ func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 // stageSpend says that stage 2 spent 300 turns; this says which threads spent
 // them and on what, which is what tells a stage that looped from one that
 // read slowly. The hundred-transcript run is the one that needs it, and it
-// fails in CI where the database it would be read from is gone once the job
+// runs in CI, where the database it would be read from is gone once the job
 // ends, so it is logged on every run rather than on demand (#999).
+//
+// It is diagnostics, so it never fails the test: an error is logged and the
+// lines read so far are returned. The caller logs it before it checks the
+// dream's status, and a Fatalf here would both hide that status and fail a
+// dream that completed.
 func threadSpend(t *testing.T, s *stack, sessionID string) []string {
 	t.Helper()
-	ctx := context.Background()
-	calls := map[string][]string{}
-	rows, err := s.pool.Query(ctx, `
-		SELECT COALESCE(thread_id, ''), payload->>'name', count(*)
-		  FROM events
-		 WHERE session_id = $1 AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.custom_tool_use')
-		 GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2`, sessionID)
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT COALESCE(e.thread_id, 'primary'),
+		       count(*) FILTER (WHERE e.type = 'span.model_request_end'),
+		       count(*) FILTER (WHERE e.type = 'span.model_request_end' AND e.payload->>'is_error' = 'true'),
+		       COALESCE(sum((e.payload->'model_usage'->>'output_tokens')::bigint)
+		                FILTER (WHERE e.type = 'span.model_request_end'), 0),
+		       extract(epoch FROM max(e.created_at) - min(e.created_at))::float8,
+		       COALESCE((SELECT string_agg(c.name || ' ' || c.n, ', ' ORDER BY c.n DESC, c.name)
+		                   FROM (SELECT COALESCE(payload->>'name', '?') AS name, count(*) AS n
+		                           FROM events
+		                          WHERE session_id = $1 AND thread_id IS NOT DISTINCT FROM e.thread_id
+		                            AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.custom_tool_use')
+		                          GROUP BY 1) c), '')
+		  FROM events e
+		 WHERE e.session_id = $1
+		 GROUP BY e.thread_id ORDER BY min(e.seq)`, sessionID)
 	if err != nil {
-		t.Fatalf("read the threads' tool calls: %v", err)
-	}
-	for rows.Next() {
-		var thread, name string
-		var n int
-		if err := rows.Scan(&thread, &name, &n); err != nil {
-			t.Fatalf("scan a thread's tool calls: %v", err)
-		}
-		calls[thread] = append(calls[thread], fmt.Sprintf("%s %d", name, n))
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read the threads' tool calls: %v", err)
-	}
-
-	rows, err = s.pool.Query(ctx, `
-		SELECT COALESCE(thread_id, ''),
-		       count(*) FILTER (WHERE type = 'span.model_request_end'),
-		       count(*) FILTER (WHERE type = 'span.model_request_end' AND payload->>'is_error' = 'true'),
-		       COALESCE(sum((payload->'model_usage'->>'output_tokens')::bigint)
-		                FILTER (WHERE type = 'span.model_request_end'), 0),
-		       extract(epoch FROM max(created_at) - min(created_at))::float8
-		  FROM events
-		 WHERE session_id = $1
-		 GROUP BY 1 ORDER BY min(seq)`, sessionID)
-	if err != nil {
-		t.Fatalf("read the threads' turn counts: %v", err)
+		t.Logf("thread spend: %v", err)
+		return nil
 	}
 	defer rows.Close()
 	var lines []string
 	for rows.Next() {
 		var (
-			thread             string
+			thread, calls      string
 			turns, failed, out int
 			secs               float64
 		)
-		if err := rows.Scan(&thread, &turns, &failed, &out, &secs); err != nil {
-			t.Fatalf("scan a thread's turn count: %v", err)
-		}
-		name := thread
-		if name == "" {
-			name = "primary"
+		if err := rows.Scan(&thread, &turns, &failed, &out, &secs, &calls); err != nil {
+			t.Logf("thread spend: %v", err)
+			return lines
 		}
 		lines = append(lines, fmt.Sprintf("%s: %d turns (%d failed), %d out, events over %s — %s",
-			name, turns, failed, out, time.Duration(secs*float64(time.Second)).Round(time.Second),
-			strings.Join(calls[thread], ", ")))
+			thread, turns, failed, out, time.Duration(secs*float64(time.Second)).Round(time.Second), calls))
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("read the threads' turn counts: %v", err)
+		t.Logf("thread spend: %v", err)
 	}
 	return lines
 }
@@ -682,12 +667,11 @@ func TestDreamPipelineHundred(t *testing.T) {
 
 	// One turn each, and nothing in the message asks for a tool. The model may
 	// run one all the same — saving the id with bash, say — and that session
-	// then provisions a container and its transcript carries the call (16
-	// and 21 of the hundred on the two runs that measured #999). Left in on
-	// purpose: real transcripts carry tool calls. Driven ten at a time: serial
-	// waves would spend a hundred turn round-trips end to end, and the brain
-	// and executor loops are already the concurrent pair a real deployment
-	// runs.
+	// then provisions a container and its transcript carries the call. Left
+	// in on purpose: real transcripts carry tool calls. Driven ten at a time:
+	// serial waves would spend a hundred turn round-trips end to end, and the
+	// brain and executor loops are already the concurrent pair a real
+	// deployment runs.
 	const wave = 10
 	var (
 		mu       sync.Mutex

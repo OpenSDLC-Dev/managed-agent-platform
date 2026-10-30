@@ -87,8 +87,8 @@ const dreamStageCount = 4
 // and what a real stage spends is what the live eval logs on every run
 // (evals/dream_test.go's stageSpend).
 //
-// Three of the four are set from measurement; stage 2's is not, and the
-// difference is worth keeping straight. The plan's first guess was 4 / 300 / 30 / 10, and
+// Three of the four are measured; stage 2's is not, and the difference is
+// worth keeping straight. The plan's first guess was 4 / 300 / 30 / 10, and
 // the first live run refuted the first of those outright: a two-transcript
 // dream over a four-memory store spends 5 / 10 / 6 / 7, so stage 1's orient
 // failed on its cap every time, one turn short, before any of the work the
@@ -96,8 +96,8 @@ const dreamStageCount = 4
 // Stage 2's 300 is the fan-out's arithmetic, left where the plan sized it —
 // thirteen digest threads reading eight transcripts each are about 170 turns
 // with the coordinator's spawn wave and its waits — and the seeded run, which
-// spends ten there, cannot test it. The hundred-transcript eval can, and logs
-// it on every run since #999. One run either side of that fix, on one model:
+// spends ten there, cannot test it. The hundred-transcript run can, and logs
+// its stage spend since #999. One run either side of that fix, on one model:
 // 301, over the cap, while the threads rewrote their digests to fit 4 KiB,
 // and 99 once the prompt made 4 KiB a target written to once.
 var dreamStageTurnCaps = [dreamStageCount + 1]int{0, 30, 300, 60, 30}
