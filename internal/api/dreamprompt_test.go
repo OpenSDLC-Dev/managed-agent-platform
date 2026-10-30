@@ -516,7 +516,8 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 		// The cited rules are the ones the citing text means. Rule 3 is cited
 		// by rule 2 in both runs, and rule 1 by the "on suspicion" rule; 4 and
 		// 5 are cited by the in-place rule 2 and by the bullet that says the
-		// store is the caller's own, and 4 by the in-place rule 5 as well.
+		// store is the caller's own, and 4 by the in-place rule 5 as well;
+		// the end of this test checks that last citation by its text.
 		meant := map[int]string{1: "Update before create", 3: "contradiction"}
 		if inPlace {
 			meant[4] = "tombstone"
@@ -533,8 +534,8 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 		}
 	}
 
-	// Stage 3 cites the tombstone rule by number, which is a reference from
-	// one function's text into another's numbering — the one an insertion
+	// Stages 3 and 4 cite the tombstone rule by number, which is a reference
+	// from one function's text into another's numbering — the one an insertion
 	// would break silently.
 	rules := dreamMergeRuleBodies(t, dreamSystemPrompt(goldenMount, dreamUpdateExisting))
 	tombstone := 0
@@ -546,9 +547,18 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 	if tombstone == 0 {
 		t.Fatal("no merge rule defines the tombstone")
 	}
-	three := dreamStageMessage(3, goldenMount, goldenTranscripts, "", dreamUpdateExisting)
-	if cite := fmt.Sprintf("merge rule %d", tombstone); !strings.Contains(three, cite) {
-		t.Errorf("stage 3 does not cite the tombstone rule as %q:\n%s", cite, three)
+	// The in-place "on suspicion" rule sends a memory whose subject ended to
+	// the tombstone rule the same way (#1002).
+	for _, rule := range rules {
+		if cite := fmt.Sprintf("retire the memory under rule %d", tombstone); strings.Contains(rule, "on suspicion") && !strings.Contains(rule, cite) {
+			t.Errorf("the in-place \"on suspicion\" rule does not cite the tombstone rule as %q:\n%s", cite, rule)
+		}
+	}
+	for _, stage := range []int{3, 4} {
+		msg := dreamStageMessage(stage, goldenMount, goldenTranscripts, "", dreamUpdateExisting)
+		if cite := fmt.Sprintf("merge rule %d", tombstone); !strings.Contains(msg, cite) {
+			t.Errorf("stage %d does not cite the tombstone rule as %q:\n%s", stage, cite, msg)
+		}
 	}
 }
 
