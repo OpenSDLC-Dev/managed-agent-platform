@@ -342,8 +342,8 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		// still holds moves on, and a successor only where one exists.
 		"its title or first line names, decides which", "Where that thing still stands",
 		"and a fact about it changed, change the memory", "shut down, withdrawn, discontinued",
-		"still holds moves to the memory it belongs to", "naming what it replaced and when",
-		"is one (rule 1) and a new one where there is not", "place, if anything did",
+		"still holds moves out of it first, to the memory it belongs to", "naming what it replaced and when",
+		"one where there is one (rule 1), a new one where there is not", "took the thing's place, if anything",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -454,6 +454,8 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"section of " + goldenMount + "/MEMORY.md",
 		"removes the tombstones through the memories API",
 		"retire the memory under",
+		// what still holds never stays in the memory being retired (#1002)
+		"the memory you retire. That is",
 		// the store is the caller's own, which is the other half of §5.3
 		"It is the caller's own store",
 		"mounted in place rather than copied",
@@ -475,6 +477,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
 		"discontinued — remove the memory. What",
+		"the memory you remove. That is",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {

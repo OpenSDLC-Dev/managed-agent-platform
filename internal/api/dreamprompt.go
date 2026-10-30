@@ -215,16 +215,19 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
 	// the memory is about, because without that the nightly's in-place dream
 	// rewrote a memory whose subject had ended as news of the end (#1002). The
 	// successor names what it replaced, so the ended name and date stay
-	// greppable once the memory that held them goes.
+	// greppable once the memory that held them goes. It never lands in that
+	// memory: a live run retitled the ended memory as its own successor and
+	// listed it for removal, which would have removed the new fact with it.
 	const onSuspicion = `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
    transcript positively contradicts it. What the memory is about, the thing
    its title or first line names, decides which. Where that thing still stands
    and a fact about it changed, change the memory. Where a transcript ends the
    thing itself — shut down, withdrawn, discontinued — %[3]s. What
-   still holds moves to the memory it belongs to, an existing one where there
-   is one (rule 1) and a new one where there is not: what took the thing's
-   place, if anything did, naming what it replaced and when, and anything the
-   transcript left standing.`
+   still holds moves out of it first, to the memory it belongs to: an existing
+   one where there is one (rule 1), a new one where there is not, and never
+   the memory you %[2]s. That is what took the thing's place, if anything
+   did, naming what it replaced and when, and anything the transcript left
+   standing.`
 	rules := []string{
 		`Update before create: look for an existing memory before adding one.`,
 		`Two memories that state the same thing are one memory. Fold them into
