@@ -678,11 +678,12 @@ func TestDreamPipelineHundred(t *testing.T) {
 
 	// One turn each, and nothing in the message asks for a tool. The model may
 	// run one all the same — saving the id with bash, say — and that session
-	// then provisions a container and its transcript carries the call. Left in on purpose: real transcripts carry tool calls, and
-	// those are what pushed the digests past their size (#999). Driven ten at
-	// a time: serial waves would spend a hundred turn round-trips end to end,
-	// and the brain and executor loops are already the concurrent pair a real
-	// deployment runs.
+	// then provisions a container and its transcript carries the call (16
+	// and 21 of the hundred on the two runs that measured #999). Left in on
+	// purpose: real transcripts carry tool calls. Driven ten at a time: serial
+	// waves would spend a hundred turn round-trips end to end, and the brain
+	// and executor loops are already the concurrent pair a real deployment
+	// runs.
 	const wave = 10
 	var (
 		mu       sync.Mutex

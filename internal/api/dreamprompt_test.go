@@ -315,8 +315,8 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		toolset.ToolWaitForAgents, toolset.ToolSubmitResult,
 		"batch N: M transcripts, K NO SIGNAL",
 		// the digest schema, and its size as a target written to once: read
-		// as a ceiling, it had every digest thread rewriting its digest a
-		// hundred bytes at a time until stage 2 ran out of turns (#999)
+		// as a ceiling, it had the digest threads rewriting their digests a
+		// little shorter each time until stage 2 ran out of turns (#999)
 		"outcome: success", "outcome: uncertain", "NO SIGNAL", "about 4 KiB",
 		"Write it once", "only to shorten it",
 		"Preference signals", "Reusable knowledge",
