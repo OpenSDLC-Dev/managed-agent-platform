@@ -340,9 +340,10 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		// in-place run updated a memory whose subject a transcript had ended,
 		// so it retired nothing and listed nothing to remove (#1002). What
 		// still holds moves on, and a successor only where one exists.
-		"its first line names, decides which", "Where that thing still stands and a",
-		"fact about it changed, change the memory", "shut down, withdrawn, discontinued",
-		"what took its place, if anything did", "into another memory, an",
+		"its title or first line names, decides which", "Where that thing still stands",
+		"and a fact about it changed, change the memory", "shut down, withdrawn, discontinued",
+		"what took its place, if anything did", "into the memory about it",
+		"where there is one (rule 1), a new one where there is not",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -473,7 +474,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"and remove the file left behind",
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
-		"remove the memory, and carry",
+		"remove the memory, and",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {
@@ -653,10 +654,13 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 				"A tombstone is a memory like any other",
 				"trailing *to remove* section",
 				"*to remove* heading",
+				// the listing's one form, which the caller and the eval read
+				`a "## To remove" heading, then one "- <path>" line per`,
+				"leave that section out",
 			},
 			createNewWants:     []string{"created, updated and removed"},
 			inPlaceForbidden:   []string{"created, updated and removed"},
-			createNewForbidden: []string{"*to remove*", "tombstone"},
+			createNewForbidden: []string{"*to remove*", "tombstone", "## To remove"},
 		},
 	} {
 		inPlace := dreamStageMessage(tc.stage, goldenMount, goldenTranscripts, "", dreamUpdateExisting)

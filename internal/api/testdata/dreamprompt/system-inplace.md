@@ -90,14 +90,14 @@ above it do not already say.
    a *to remove* heading in dream/report.md and in a trailing *to remove*
    section of /mnt/memory/team-notes/MEMORY.md. The caller, who chose to consolidate in place,
    removes the tombstones through the memories API.
-5. Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it. What the memory is about, the thing
-   its first line names, decides which. Where that thing still stands and a
-   fact about it changed, change the memory. Where a transcript ends the thing
-   itself — shut down, withdrawn, discontinued — retire the memory under
-   rule 4, and carry what still holds — what took its place, if anything did,
-   and anything the transcript left standing — into another memory, an
-   existing one first (rule 1).
+5. Nothing else is retired on suspicion: change or retire a memory only where a
+   transcript positively contradicts it. What the memory is about, the thing
+   its title or first line names, decides which. Where that thing still stands
+   and a fact about it changed, change the memory. Where a transcript ends the
+   thing itself — shut down, withdrawn, discontinued — retire the memory under rule 4, and
+   carry what still holds — what took its place, if anything did, and anything
+   the transcript left standing — into the memory about it: an existing one
+   where there is one (rule 1), a new one where there is not.
 6. Relative dates become absolute ones.
 7. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.

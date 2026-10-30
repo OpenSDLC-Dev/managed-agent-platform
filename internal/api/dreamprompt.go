@@ -209,6 +209,18 @@ every line resolves. %[4]sreport.md %[12]s
 // 2's reference to rule 3 sits above the insertion and survives it, and a
 // reference written below it would not have.
 func dreamMergeRules(inPlace bool, storeMount string) string {
+	// The rule that decides between changing a memory and removing it, written
+	// once: the runs differ only in the verb a removal takes. It decides by what
+	// the memory is about, because without that the nightly's in-place dream
+	// rewrote a memory whose subject had ended as news of the end (#1002).
+	onSuspicion := `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
+   transcript positively contradicts it. What the memory is about, the thing
+   its title or first line names, decides which. Where that thing still stands
+   and a fact about it changed, change the memory. Where a transcript ends the
+   thing itself — shut down, withdrawn, discontinued — %[3]s, and
+   carry what still holds — what took its place, if anything did, and anything
+   the transcript left standing — into the memory about it: an existing one
+   where there is one (rule 1), a new one where there is not.`
 	rules := []string{
 		`Update before create: look for an existing memory before adding one.`,
 		`Two memories that state the same thing are one memory. Fold them into
@@ -219,14 +231,7 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    duplicates — that is rule 3's contradiction, or two facts.`,
 		`Newer validated evidence wins a contradiction. A contradiction you cannot
    resolve is written down as an open contradiction, never silently decided.`,
-		`Nothing else is removed on suspicion: change or remove a memory only where a
-   transcript positively contradicts it. What the memory is about, the thing
-   its first line names, decides which. Where that thing still stands and a
-   fact about it changed, change the memory. Where a transcript ends the thing
-   itself — shut down, withdrawn, discontinued — remove the memory, and carry
-   what still holds — what took its place, if anything did, and anything the
-   transcript left standing — into another memory, an existing one first
-   (rule 1).`,
+		fmt.Sprintf(onSuspicion, "removed", "remove", "remove the memory"),
 		`Relative dates become absolute ones.`,
 		`The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.`,
@@ -242,14 +247,7 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    the one retirement no transcript has to license: the statement survives,
    its second copy goes. Two memories about one subject that say different
    things are not duplicates — that is rule 3's contradiction, or two facts.`
-		rules[3] = `Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it. What the memory is about, the thing
-   its first line names, decides which. Where that thing still stands and a
-   fact about it changed, change the memory. Where a transcript ends the thing
-   itself — shut down, withdrawn, discontinued — retire the memory under
-   rule 4, and carry what still holds — what took its place, if anything did,
-   and anything the transcript left standing — into another memory, an
-   existing one first (rule 1).`
+		rules[3] = fmt.Sprintf(onSuspicion, "retired", "retire", "retire the memory under rule 4")
 		rules = slices.Insert(rules, 3, fmt.Sprintf(`Nothing here is deleted or renamed: no tool in this session removes a
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that
@@ -357,10 +355,14 @@ the index and the report to stage 4.`,
 		var tombstones string
 		reported := `created, updated and removed, the`
 		if inPlace {
+			// One form for the listing, because the caller reads it to know
+			// what to remove, and so does the in-place eval (#1002).
 			tombstones = `
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing *to remove* section, so the caller can find
-what to remove.`
+what to remove: a "## To remove" heading, then one "- <path>" line per
+tombstone, the path from the store root as in the lines above. If you
+retired nothing, leave that section out.`
 			reported = `created and updated, the ones you
 retired as tombstones under a *to remove* heading, the`
 		}

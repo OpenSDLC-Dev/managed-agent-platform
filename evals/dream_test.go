@@ -845,8 +845,9 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	// that states it. Emptying the file is not tombstoning it — that is a
 	// deletion this session could not make, spelled a different way — so the
 	// empty case is a failure here rather than a case to skip. A rewrite as
-	// news of the end passes this switch too; what tells a retirement from that
-	// update is the two checks after it (#1002).
+	// news of the end passes this switch too. What the caller depends on is the
+	// two checks after it: the index lists the memory for removal, and no fact
+	// goes with it when it is removed (#1002).
 	tomb := after[retiredPath]
 	t.Logf("%s now reads:\n%s", retiredPath, tomb)
 	switch {
@@ -884,66 +885,35 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	}
 }
 
-// listsForRemoval reports whether an in-place dream's index lists path for the
-// caller to remove: as an entry under its last heading about removal, the
-// trailing *to remove* section stage 4 asks for, or after a "remove:" label.
-// A mention of the path anywhere else is not a listing. The tombstone keeps
-// its own line in the index, and the nightly model explains an empty section
-// by naming the memory it did not retire ("Nothing to remove … recorded
-// inside `facts/vendor-portal.md`"), so both name the path and list nothing
-// (#1002). The path counts only whole and in the case it is stored in, as in
-// tombstoneNamesSuccessor.
-func listsForRemoval(index, path string) bool {
-	want := strings.TrimPrefix(path, "/")
-	listed, inSection := false, false
+// listsForRemoval reports whether an in-place dream's index lists memPath for
+// the caller to remove, in the one form stage 4 asks for: an entry
+// "- <path from the store root>" under a "## To remove" heading, the path
+// optionally in a code span and followed by a note. Anything else that names
+// the path is not a listing. The tombstone keeps its own index line, and the
+// nightly model explained an empty section by naming the memory it had not
+// retired ("Nothing to remove … recorded inside `facts/vendor-portal.md`"),
+// so a looser reading passed the update #1002 is about. The path counts only
+// whole and in the case it is stored in.
+func listsForRemoval(index, memPath string) bool {
+	want := strings.TrimPrefix(memPath, "/")
+	inSection := false
 	for _, line := range strings.Split(index, "\n") {
 		line = strings.TrimSpace(line)
-		lower := strings.ToLower(line)
-		switch {
-		case removalHeading(lower):
-			listed, inSection = false, true
-		case strings.HasPrefix(line, "#"):
-			inSection = false
+		if strings.HasPrefix(line, "#") {
+			inSection = strings.EqualFold(strings.TrimSpace(strings.TrimLeft(line, "#")), "to remove")
+			continue
 		}
-		if m := removeLabel.FindStringSubmatch(line); m != nil && listedPath(m[1]) == want {
-			listed = true
-		} else if inSection && listedPath(line) == want {
-			listed = true
+		entry, ok := strings.CutPrefix(line, "- ")
+		if !inSection || !ok {
+			continue
+		}
+		entry = strings.TrimPrefix(strings.TrimPrefix(entry, "`"), "/")
+		if loc := pathToken.FindStringIndex(entry); loc != nil && loc[0] == 0 &&
+			strings.TrimRight(entry[:loc[1]], ".") == want {
+			return true
 		}
 	}
-	return listed
-}
-
-// removeLabel is a "remove:" label and what follows it on its line, as in
-// "To remove: facts/x.md" or "- Remove: facts/x.md".
-var removeLabel = regexp.MustCompile(`(?i)remove:(.*)$`)
-
-// removalHeading reports whether a lowercased index line opens a section about
-// removal: a heading, an emphasized line or a line ending in a colon that
-// speaks of it — "## To remove", "*To remove*", "Pending removal:". A sentence
-// that does ("Nothing to remove.") opens nothing.
-func removalHeading(lower string) bool {
-	if !strings.Contains(lower, "remov") {
-		return false
-	}
-	bare := strings.TrimRight(lower, "*_ ")
-	wrapped := len(lower) > 2 && strings.ContainsRune("*_", rune(lower[0])) && lower[len(lower)-1] == lower[0]
-	return strings.HasPrefix(lower, "#") || strings.HasSuffix(bare, ":") || wrapped
-}
-
-// listMarker is a markdown list item's marker, a bullet or a number.
-var listMarker = regexp.MustCompile(`^(?:[-*+]|\d+[.)])\s+`)
-
-// listedPath is the memory path an index entry opens with, unwrapped from its
-// list marker and any emphasis, code span or link text around it, and with no
-// leading slash; "" when the entry opens with anything else.
-func listedPath(entry string) string {
-	s := listMarker.ReplaceAllString(strings.TrimSpace(entry), "")
-	s = strings.TrimLeft(s, "*_`[ /")
-	if loc := pathToken.FindStringIndex(s); loc != nil && loc[0] == 0 {
-		return strings.TrimRight(s[:loc[1]], ".")
-	}
-	return ""
+	return false
 }
 
 // memoryPaths is the store's paths alone, for a failure message that should
