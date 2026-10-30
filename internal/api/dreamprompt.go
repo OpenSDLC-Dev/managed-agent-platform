@@ -204,23 +204,27 @@ every line resolves. %[4]sreport.md %[12]s
 //
 // It is inserted at 4: after the two rules that retire a memory and before
 // "nothing else is retired on suspicion", so that every rule under it already
-// reads in its terms. That pushes the four rules after it down one number,
+// reads in its terms. That pushes the five rules after it down one number,
 // which is the reason the numbers are generated here instead of typed — rule
-// 2's reference to rule 3 sits above the insertion and survives it, and a
-// reference written below it would not have.
+// 2's reference to rule 3 sits above the insertion and survives it. A
+// reference typed into a rule below it has to count the inserted rule, as the
+// in-place "on suspicion" rule's "rule 4" does.
 func dreamMergeRules(inPlace bool, storeMount string) string {
 	// The rule that decides between changing a memory and removing it, written
 	// once: the runs differ only in the verb a removal takes. It decides by what
 	// the memory is about, because without that the nightly's in-place dream
-	// rewrote a memory whose subject had ended as news of the end (#1002).
-	onSuspicion := `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
+	// rewrote a memory whose subject had ended as news of the end (#1002). The
+	// successor names what it replaced, so the ended name and date stay
+	// greppable once the memory that held them goes.
+	const onSuspicion = `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
    transcript positively contradicts it. What the memory is about, the thing
    its title or first line names, decides which. Where that thing still stands
    and a fact about it changed, change the memory. Where a transcript ends the
-   thing itself — shut down, withdrawn, discontinued — %[3]s, and
-   carry what still holds — what took its place, if anything did, and anything
-   the transcript left standing — into the memory about it: an existing one
-   where there is one (rule 1), a new one where there is not.`
+   thing itself — shut down, withdrawn, discontinued — %[3]s. What
+   still holds moves to the memory it belongs to, an existing one where there
+   is one (rule 1) and a new one where there is not: what took the thing's
+   place, if anything did, naming what it replaced and when, and anything the
+   transcript left standing.`
 	rules := []string{
 		`Update before create: look for an existing memory before adding one.`,
 		`Two memories that state the same thing are one memory. Fold them into
@@ -252,7 +256,7 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that
    supersedes it — or, where none does, why it was retired — and listed under
-   a *to remove* heading in %[1]sreport.md and in a trailing *to remove*
+   a *to remove* heading in %[1]sreport.md and in a trailing "## To remove"
    section of %[2]s/MEMORY.md. The caller, who chose to consolidate in place,
    removes the tombstones through the memories API.`, dreamScratchDir, storeMount))
 	}
@@ -330,14 +334,14 @@ read it yourself. Write nothing else in this stage.`,
 		// The stage that would have deleted the duplicate it folded away.
 		duplicates := `Every duplicate is resolved in this stage,
 one file surviving it, and so is every contradiction a digest carries. A
-memory about something a transcript ends is removed, not rewritten as news of
-the end.`
+memory about something a transcript ends is removed, not kept as a memory
+that reports the end.`
 		if inPlace {
 			duplicates = `Every duplicate is resolved in this stage, one
 file holding the statement afterwards and the other left as a tombstone
 (merge rule 4), and so is every contradiction a digest carries. A memory
-about something a transcript ends is left as a tombstone too, not rewritten
-as news of the end.`
+about something a transcript ends is retired as a tombstone too, not kept
+as a memory that reports the end.`
 		}
 		fmt.Fprintf(&b, `Stage 3 of 4: merge. Check %[1]sdigests/ first: it holds one digest per
 batch, and the batches are %[3]s Rebuild a missing digest by reading that
@@ -359,10 +363,10 @@ the index and the report to stage 4.`,
 			// what to remove, and so does the in-place eval (#1002).
 			tombstones = `
 A tombstone is a memory like any other and keeps its line; the tombstones
-are listed again in a trailing *to remove* section, so the caller can find
-what to remove: a "## To remove" heading, then one "- <path>" line per
-tombstone, the path from the store root as in the lines above. If the
-store holds no tombstone, leave that section out.`
+are listed again in a trailing section, so the caller can find what to
+remove: a "## To remove" heading, then one "- /<path>" line per tombstone,
+the path as the memories API names it, from the store root with its leading
+slash. If the store holds no tombstone, leave that section out.`
 			reported = `created and updated, the ones you
 retired as tombstones under a *to remove* heading, the`
 		}

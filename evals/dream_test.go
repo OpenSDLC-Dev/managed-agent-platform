@@ -872,6 +872,13 @@ func TestDreamPipelineInPlace(t *testing.T) {
 		t.Errorf("/MEMORY.md does not list %s, the memory it retired, for the caller to remove:\n%s",
 			retiredPath, index)
 	}
+	// And nothing else: the caller deletes what the listing names, and this
+	// transcript ended one memory.
+	if extra := slices.DeleteFunc(slices.Clone(listed), func(p string) bool {
+		return p == strings.TrimPrefix(retiredPath, "/")
+	}); len(extra) > 0 {
+		t.Errorf("/MEMORY.md lists %v for removal too, which the caller would delete:\n%s", extra, index)
+	}
 	// The successor fact survives the removals: a memory the caller keeps
 	// states it. A fact stated only in the tombstone, or in anything else the
 	// index lists for removal, goes when the caller removes them.
@@ -890,13 +897,15 @@ func TestDreamPipelineInPlace(t *testing.T) {
 }
 
 // removalList is what an in-place dream's index lists for the caller to
-// remove, in the one form stage 4 asks for: an entry "- <path from the store
-// root>" under a "## To remove" heading, the path in a code span or ended by a
-// space, either way followed by any note. The paths come back whole, in the
-// case they were written in and with no leading slash, so a comparison is
-// exact. Anything else that names a path is not a listing. The tombstone keeps
-// its own index line, and the nightly model explained an empty section by
-// naming the memory it had not retired ("Nothing to remove … recorded inside
+// remove, in the form stage 4 asks for: an entry "- /<path>" under a
+// "## To remove" heading, the path in a code span or ended by a space, either
+// way followed by any note. Spellings of that form that mean the same are
+// read as it: a "*" bullet, a closing "#" run or a colon on the heading, the
+// leading slash left off. The paths come back whole, in the case they were
+// written in and with no leading slash, so a comparison is exact. Anything
+// else that names a path is not a listing. The tombstone keeps its own index
+// line, and the nightly model explained an empty section by naming the memory
+// it had not retired ("Nothing to remove … recorded inside
 // `facts/vendor-portal.md`"), so a looser reading passed the update #1002 is
 // about.
 func removalList(index string) []string {
@@ -905,13 +914,18 @@ func removalList(index string) []string {
 	for _, line := range strings.Split(index, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") {
-			inSection = strings.EqualFold(strings.TrimSpace(strings.TrimLeft(line, "#")), "to remove")
+			heading := strings.TrimSpace(strings.Trim(line, "#"))
+			inSection = strings.EqualFold(strings.TrimSuffix(heading, ":"), "to remove")
 			continue
 		}
 		entry, ok := strings.CutPrefix(line, "- ")
+		if !ok {
+			entry, ok = strings.CutPrefix(line, "* ")
+		}
 		if !inSection || !ok {
 			continue
 		}
+		entry = strings.TrimSpace(entry)
 		var field string
 		if quoted, ok := strings.CutPrefix(entry, "`"); ok {
 			field, _, _ = strings.Cut(quoted, "`")

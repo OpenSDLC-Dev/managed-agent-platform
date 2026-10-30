@@ -82,6 +82,10 @@ func TestRemovalList(t *testing.T) {
 			"## To remove\n\n- facts/vendor-portal.md — superseded by facts/expenses.md\n", true},
 		{"lists it from the store root", entries + "## To remove\n\n- `/facts/vendor-portal.md`\n", true},
 		{"lists it under a heading of another level and case", entries + "### to remove\n\n- `facts/vendor-portal.md`\n", true},
+		{"lists it under a heading ended by a colon", entries + "## To remove:\n\n- `/facts/vendor-portal.md`\n", true},
+		{"lists it under a closed heading", entries + "## To remove ##\n\n- `/facts/vendor-portal.md`\n", true},
+		{"lists it with another bullet", entries + "## To remove\n\n* `/facts/vendor-portal.md`\n", true},
+		{"lists it after two spaces", entries + "## To remove\n\n-  `/facts/vendor-portal.md`\n", true},
 		{"lists it with a note after the section", entries +
 			"## To remove\n\n- `facts/vendor-portal.md`\n\n**The caller removes these through the memories API.**\n", true},
 		// The 2026-10-30 nightly's index: the memory was updated, not retired.
@@ -96,7 +100,7 @@ func TestRemovalList(t *testing.T) {
 			"recorded as a fact inside `facts/vendor-portal.md` rather than as a tombstone.\n", false},
 		{"lists none, naming it", entries + "## to remove\n\n- None — no tombstone files were created. " +
 			"The one retired statement was retired inside `facts/vendor-portal.md`.\n", false},
-		{"lists none in parentheses", entries + "*to remove*\n\n" +
+		{"lists none in parentheses", entries + "## To remove\n\n" +
 			"- (none — the superseded vendor-portal fact was replaced in place.)\n", false},
 		{"says nothing to remove, with a colon", entries +
 			"## To remove\n\nNothing to remove: `facts/vendor-portal.md` was updated in place.\n", false},

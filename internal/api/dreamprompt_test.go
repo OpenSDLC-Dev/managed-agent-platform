@@ -342,8 +342,8 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		// still holds moves on, and a successor only where one exists.
 		"its title or first line names, decides which", "Where that thing still stands",
 		"and a fact about it changed, change the memory", "shut down, withdrawn, discontinued",
-		"what took its place, if anything did", "into the memory about it",
-		"where there is one (rule 1), a new one where there is not",
+		"still holds moves to the memory it belongs to", "naming what it replaced and when",
+		"is one (rule 1) and a new one where there is not", "place, if anything did",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -474,7 +474,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"and remove the file left behind",
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
-		"remove the memory, and",
+		"discontinued — remove the memory. What",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {
@@ -652,10 +652,11 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 			stage: 4,
 			inPlaceWants: []string{
 				"A tombstone is a memory like any other",
-				"trailing *to remove* section",
+				"listed again in a trailing section",
 				"*to remove* heading",
 				// the listing's one form, which the caller and the eval read
-				`a "## To remove" heading, then one "- <path>" line per`,
+				`a "## To remove" heading, then one "- /<path>" line per tombstone`,
+				"from the store root with its leading",
 				// a dream that retires nothing still lists the tombstones an
 				// earlier one left, which the caller has yet to remove
 				"store holds no tombstone, leave that section out",
