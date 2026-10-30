@@ -305,6 +305,78 @@ func stageSpend(t *testing.T, s *stack, sessionID string) []int {
 	return spend
 }
 
+// threadSpend is stageSpend sliced the other way: one line per thread of the
+// pipeline session, the primary first, with its model turns, the failed ones
+// among them, its output tokens, how long it ran, and its tool calls by name.
+//
+// stageSpend says that stage 2 spent 300 turns; this says which threads spent
+// them and on what, which is what tells a stage that looped from one that
+// read slowly. The hundred-transcript run is the one that needs it, and it
+// fails in CI where the database it would be read from is gone once the job
+// ends, so it is logged on every run rather than on demand (#999).
+func threadSpend(t *testing.T, s *stack, sessionID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	calls := map[string][]string{}
+	rows, err := s.pool.Query(ctx, `
+		SELECT COALESCE(thread_id, ''), payload->>'name', count(*)
+		  FROM events
+		 WHERE session_id = $1 AND type IN ('agent.tool_use', 'agent.mcp_tool_use', 'agent.custom_tool_use')
+		 GROUP BY 1, 2 ORDER BY 1, 3 DESC, 2`, sessionID)
+	if err != nil {
+		t.Fatalf("read the threads' tool calls: %v", err)
+	}
+	for rows.Next() {
+		var thread, name string
+		var n int
+		if err := rows.Scan(&thread, &name, &n); err != nil {
+			t.Fatalf("scan a thread's tool calls: %v", err)
+		}
+		calls[thread] = append(calls[thread], fmt.Sprintf("%s %d", name, n))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the threads' tool calls: %v", err)
+	}
+
+	rows, err = s.pool.Query(ctx, `
+		SELECT COALESCE(thread_id, ''),
+		       count(*) FILTER (WHERE type = 'span.model_request_end'),
+		       count(*) FILTER (WHERE type = 'span.model_request_end' AND payload->>'is_error' = 'true'),
+		       COALESCE(sum((payload->'model_usage'->>'output_tokens')::bigint)
+		                FILTER (WHERE type = 'span.model_request_end'), 0),
+		       extract(epoch FROM max(created_at) - min(created_at))::float8
+		  FROM events
+		 WHERE session_id = $1
+		 GROUP BY 1 ORDER BY min(seq)`, sessionID)
+	if err != nil {
+		t.Fatalf("read the threads' turn counts: %v", err)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var (
+			thread             string
+			turns, failed, out int
+			secs               float64
+		)
+		if err := rows.Scan(&thread, &turns, &failed, &out, &secs); err != nil {
+			t.Fatalf("scan a thread's turn count: %v", err)
+		}
+		name := thread
+		if name == "" {
+			name = "primary"
+		}
+		lines = append(lines, fmt.Sprintf("%s: %d turns (%d failed), %d out, %s — %s",
+			name, turns, failed, out, time.Duration(secs*float64(time.Second)).Round(time.Second),
+			strings.Join(calls[thread], ", ")))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the threads' turn counts: %v", err)
+	}
+	return lines
+}
+
 // dreamUsage is the dream's four counters, for the log line and the
 // non-zero assertion.
 func dreamUsage(t *testing.T, dream map[string]any) (input, output float64) {
@@ -658,6 +730,12 @@ func TestDreamPipelineHundred(t *testing.T) {
 	}
 	t.Logf("dream %s over %d transcripts: status %v in %s — usage %.0f in / %.0f out, %d digest threads",
 		dreamID, transcripts, dream["status"], elapsed.Round(time.Second), in, out, threads)
+	if sessionID != "" {
+		t.Logf("stage spend (model turns, every thread's): %v", stageSpend(t, s, sessionID))
+		for _, line := range threadSpend(t, s, sessionID) {
+			t.Logf("thread spend: %s", line)
+		}
+	}
 
 	if dream["status"] != "completed" {
 		t.Fatalf("dream %s ended %v: %v (pipeline session %v)",
