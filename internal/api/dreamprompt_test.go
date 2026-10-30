@@ -223,6 +223,15 @@ func TestDreamStagesNameTheirPaths(t *testing.T) {
 		if !strings.Contains(dreamStageMessage(4, goldenMount, 3, "", inPlace), `"Nothing changed"`) {
 			t.Errorf("%s stage 4 does not allow an empty result", runName(inPlace))
 		}
+		// The stage that routes the work and the stage that writes the store
+		// both name a memory whose subject a transcript ends, so that neither
+		// frames it as a change alone (#1002).
+		if !strings.Contains(dreamStageMessage(1, goldenMount, 3, "", inPlace), "or about something a") {
+			t.Errorf("%s stage 1 does not route a memory whose subject a transcript ends", runName(inPlace))
+		}
+		if !strings.Contains(dreamStageMessage(3, goldenMount, 3, "", inPlace), "about something a transcript ends is") {
+			t.Errorf("%s stage 3 does not say what becomes of a memory whose subject a transcript ends", runName(inPlace))
+		}
 	}
 }
 
@@ -327,6 +336,14 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		// what slice 2 already carried, unchanged in substance
 		"# Merge rules, in priority order", "Update before create",
 		"at most 150", redactedSecretMarker,
+		// which of the two a contradicted memory gets. Without it the nightly's
+		// in-place run updated a memory whose subject a transcript had ended,
+		// so it retired nothing and listed nothing to remove (#1002). What
+		// still holds moves on, and a successor only where one exists.
+		"its title or first line names, decides which", "Where that thing still stands",
+		"and a fact about it changed, change the memory", "shut down, withdrawn, discontinued",
+		"still holds moves out of it first, to the memory it belongs to", "naming what it replaced and when",
+		"one where there is one (rule 1), a new one where there is not", "took the thing's place, if anything",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -436,6 +453,9 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"*to remove* heading in " + dreamScratchDir + "report.md",
 		"section of " + goldenMount + "/MEMORY.md",
 		"removes the tombstones through the memories API",
+		"retire the memory under",
+		// what still holds never stays in the memory being retired (#1002)
+		"the memory you retire. That is",
 		// the store is the caller's own, which is the other half of §5.3
 		"It is the caller's own store",
 		"mounted in place rather than copied",
@@ -456,6 +476,8 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"and remove the file left behind",
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
+		"discontinued — remove the memory. What",
+		"the memory you remove. That is",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {
@@ -492,9 +514,11 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 			}
 		}
 		// The cited rules are the ones the citing text means. Rule 3 is cited
-		// by rule 2 in both runs; 4 and 5 are cited by the in-place rule 2 and
-		// by the bullet that says the store is the caller's own.
-		meant := map[int]string{3: "contradiction"}
+		// by rule 2 in both runs, and rule 1 by the "on suspicion" rule; 4 and
+		// 5 are cited by the in-place rule 2 and by the bullet that says the
+		// store is the caller's own, and 4 by the in-place rule 5 as well;
+		// the end of this test checks that last citation by its text.
+		meant := map[int]string{1: "Update before create", 3: "contradiction"}
 		if inPlace {
 			meant[4] = "tombstone"
 			meant[5] = "on suspicion"
@@ -510,8 +534,8 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 		}
 	}
 
-	// Stage 3 cites the tombstone rule by number, which is a reference from
-	// one function's text into another's numbering — the one an insertion
+	// Stages 3 and 4 cite the tombstone rule by number, which is a reference
+	// from one function's text into another's numbering — the one an insertion
 	// would break silently.
 	rules := dreamMergeRuleBodies(t, dreamSystemPrompt(goldenMount, dreamUpdateExisting))
 	tombstone := 0
@@ -523,9 +547,18 @@ func TestDreamMergeRuleNumbersResolve(t *testing.T) {
 	if tombstone == 0 {
 		t.Fatal("no merge rule defines the tombstone")
 	}
-	three := dreamStageMessage(3, goldenMount, goldenTranscripts, "", dreamUpdateExisting)
-	if cite := fmt.Sprintf("merge rule %d", tombstone); !strings.Contains(three, cite) {
-		t.Errorf("stage 3 does not cite the tombstone rule as %q:\n%s", cite, three)
+	// The in-place "on suspicion" rule sends a memory whose subject ended to
+	// the tombstone rule the same way (#1002).
+	for _, rule := range rules {
+		if cite := fmt.Sprintf("retire the memory under rule %d", tombstone); strings.Contains(rule, "on suspicion") && !strings.Contains(rule, cite) {
+			t.Errorf("the in-place \"on suspicion\" rule does not cite the tombstone rule as %q:\n%s", cite, rule)
+		}
+	}
+	for _, stage := range []int{3, 4} {
+		msg := dreamStageMessage(stage, goldenMount, goldenTranscripts, "", dreamUpdateExisting)
+		if cite := fmt.Sprintf("merge rule %d", tombstone); !strings.Contains(msg, cite) {
+			t.Errorf("stage %d does not cite the tombstone rule as %q:\n%s", stage, cite, msg)
+		}
 	}
 }
 
@@ -632,12 +665,20 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 			stage: 4,
 			inPlaceWants: []string{
 				"A tombstone is a memory like any other",
-				"trailing *to remove* section",
+				// the audit catches a memory merge left about an ended thing (#1002)
+				"still about something a transcript ends is retired now",
+				"listed again in a trailing section",
 				"*to remove* heading",
+				// the listing's one form, which the caller and the eval read
+				`a "## To remove" heading, then one "- /<path>" line per tombstone`,
+				"from the store root with its leading",
+				// a dream that retires nothing still lists the tombstones an
+				// earlier one left, which the caller has yet to remove
+				"store holds no tombstone, leave that section out",
 			},
 			createNewWants:     []string{"created, updated and removed"},
 			inPlaceForbidden:   []string{"created, updated and removed"},
-			createNewForbidden: []string{"*to remove*", "tombstone"},
+			createNewForbidden: []string{"*to remove*", "tombstone", "## To remove"},
 		},
 	} {
 		inPlace := dreamStageMessage(tc.stage, goldenMount, goldenTranscripts, "", dreamUpdateExisting)

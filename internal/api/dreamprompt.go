@@ -193,7 +193,7 @@ every line resolves. %[4]sreport.md %[12]s
 }
 
 // dreamMergeRules is the numbered list in the system prompt's merge section.
-// The two runs share seven rules word for word, and the list is assembled
+// The two runs share six rules word for word, and the list is assembled
 // rather than written out twice so no rule can be improved in one variant and
 // left stale in the other. What an in-place run changes is only where a rule
 // named a removal: with no shell the file tools create and change and nothing
@@ -204,11 +204,30 @@ every line resolves. %[4]sreport.md %[12]s
 //
 // It is inserted at 4: after the two rules that retire a memory and before
 // "nothing else is retired on suspicion", so that every rule under it already
-// reads in its terms. That pushes the four rules after it down one number,
+// reads in its terms. That pushes the five rules after it down one number,
 // which is the reason the numbers are generated here instead of typed — rule
-// 2's reference to rule 3 sits above the insertion and survives it, and a
-// reference written below it would not have.
+// 2's reference to rule 3 sits above the insertion and survives it. A
+// reference typed into a rule below it has to count the inserted rule, as the
+// in-place "on suspicion" rule's "rule 4" does.
 func dreamMergeRules(inPlace bool, storeMount string) string {
+	// The rule that decides between changing a memory and removing it, written
+	// once: the runs differ only in the verb a removal takes. It decides by what
+	// the memory is about, because without that the nightly's in-place dream
+	// rewrote a memory whose subject had ended as news of the end (#1002). The
+	// successor names what it replaced, so the ended name and date stay
+	// greppable once the memory that held them goes. It never lands in that
+	// memory: a live run retitled the ended memory as its own successor and
+	// listed it for removal, which would have removed the new fact with it.
+	const onSuspicion = `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
+   transcript positively contradicts it. What the memory is about, the thing
+   its title or first line names, decides which. Where that thing still stands
+   and a fact about it changed, change the memory. Where a transcript ends the
+   thing itself — shut down, withdrawn, discontinued — %[3]s. What
+   still holds moves out of it first, to the memory it belongs to: an existing
+   one where there is one (rule 1), a new one where there is not, and never
+   the memory you %[2]s. That is what took the thing's place, if anything
+   did, naming what it replaced and when, and anything the transcript left
+   standing.`
 	rules := []string{
 		`Update before create: look for an existing memory before adding one.`,
 		`Two memories that state the same thing are one memory. Fold them into
@@ -219,8 +238,7 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    duplicates — that is rule 3's contradiction, or two facts.`,
 		`Newer validated evidence wins a contradiction. A contradiction you cannot
    resolve is written down as an open contradiction, never silently decided.`,
-		`Nothing else is removed on suspicion: change or remove a memory only where a
-   transcript positively contradicts it.`,
+		fmt.Sprintf(onSuspicion, "removed", "remove", "remove the memory"),
 		`Relative dates become absolute ones.`,
 		`The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.`,
@@ -236,13 +254,12 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    the one retirement no transcript has to license: the statement survives,
    its second copy goes. Two memories about one subject that say different
    things are not duplicates — that is rule 3's contradiction, or two facts.`
-		rules[3] = `Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it.`
+		rules[3] = fmt.Sprintf(onSuspicion, "retired", "retire", "retire the memory under rule 4")
 		rules = slices.Insert(rules, 3, fmt.Sprintf(`Nothing here is deleted or renamed: no tool in this session removes a
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that
    supersedes it — or, where none does, why it was retired — and listed under
-   a *to remove* heading in %[1]sreport.md and in a trailing *to remove*
+   a *to remove* heading in %[1]sreport.md and in a trailing "## To remove"
    section of %[2]s/MEMORY.md. The caller, who chose to consolidate in place,
    removes the tombstones through the memories API.`, dreamScratchDir, storeMount))
 	}
@@ -287,7 +304,8 @@ under %[4]s.
 
 Then write %[5]splan.md: a routing table from each transcript, by its sequence
 number, to the memory files it should change, and the files you suspect are
-duplicates of one another or contradicted by a transcript.`,
+duplicates of one another, contradicted by a transcript, or about something a
+transcript ends.`,
 			storeMount, mountedAt(dreamIndexPath), transcripts,
 			mountedAt(dreamTranscriptDir), dreamScratchDir)
 	case 2:
@@ -318,11 +336,15 @@ read it yourself. Write nothing else in this stage.`,
 		batches := dreamBatches(transcripts)
 		// The stage that would have deleted the duplicate it folded away.
 		duplicates := `Every duplicate is resolved in this stage,
-one file surviving it, and so is every contradiction a digest carries.`
+one file surviving it, and so is every contradiction a digest carries. A
+memory about something a transcript ends is removed, not kept as a memory
+that reports the end.`
 		if inPlace {
 			duplicates = `Every duplicate is resolved in this stage, one
 file holding the statement afterwards and the other left as a tombstone
-(merge rule 4), and so is every contradiction a digest carries.`
+(merge rule 4), and so is every contradiction a digest carries. A memory
+about something a transcript ends is retired as a tombstone too, not kept
+as a memory that reports the end.`
 		}
 		fmt.Fprintf(&b, `Stage 3 of 4: merge. Check %[1]sdigests/ first: it holds one digest per
 batch, and the batches are %[3]s Rebuild a missing digest by reading that
@@ -340,10 +362,16 @@ the index and the report to stage 4.`,
 		var tombstones string
 		reported := `created, updated and removed, the`
 		if inPlace {
+			// One form for the listing, because the caller reads it to know
+			// what to remove, and so does the in-place eval (#1002).
 			tombstones = `
+A memory still about something a transcript ends is retired now, under
+merge rule 4, once what still holds has moved out of it.
 A tombstone is a memory like any other and keeps its line; the tombstones
-are listed again in a trailing *to remove* section, so the caller can find
-what to remove.`
+are listed again in a trailing section, so the caller can find what to
+remove: a "## To remove" heading, then one "- /<path>" line per tombstone,
+the path as the memories API names it, from the store root with its leading
+slash. If the store holds no tombstone, leave that section out.`
 			reported = `created and updated, the ones you
 retired as tombstones under a *to remove* heading, the`
 		}

@@ -1,6 +1,10 @@
 package evals
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+)
 
 // The in-place dream's tombstone grader, on the tombstones nightly runs wrote
 // and on the ones it must still refuse (#951).
@@ -53,5 +57,86 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 				t.Errorf("tombstoneNamesSuccessor(%q) = %v, want %v", tc.tomb, got, tc.want)
 			}
 		})
+	}
+}
+
+// The in-place dream's index grader, on indexes nightly and local runs wrote
+// and on the shapes the reviews of #1002 found. A listing is an entry under
+// the "## To remove" heading stage 4 asks for; the tombstone's own line, an
+// empty section that explains itself by naming the path, and any other form
+// are not.
+func TestRemovalList(t *testing.T) {
+	const retired = "/facts/vendor-portal.md"
+	const entries = "# Memory index\n\n" +
+		"- `facts/vendor-portal.md` — tombstone: superseded by facts/expenses.md.\n" +
+		"- `facts/expenses.md` — expenses are filed at finance.internal.\n\n"
+	for _, tc := range []struct {
+		name, index string
+		want        bool
+	}{
+		{"lists it", entries + "## To remove\n\n- `facts/vendor-portal.md`\n", true},
+		{"lists it with a note", entries +
+			"## To remove\n\n- `facts/vendor-portal.md` — superseded by facts/expenses.md\n", true},
+		{"lists it without a code span", entries + "## To remove\n\n- facts/vendor-portal.md\n", true},
+		{"lists it without a code span, with a note", entries +
+			"## To remove\n\n- facts/vendor-portal.md — superseded by facts/expenses.md\n", true},
+		{"lists it from the store root", entries + "## To remove\n\n- `/facts/vendor-portal.md`\n", true},
+		{"lists it under a heading of another level and case", entries + "### to remove\n\n- `facts/vendor-portal.md`\n", true},
+		{"lists it under a heading ended by a colon", entries + "## To remove:\n\n- `/facts/vendor-portal.md`\n", true},
+		{"lists it under a closed heading", entries + "## To remove ##\n\n- `/facts/vendor-portal.md`\n", true},
+		{"lists it with another bullet", entries + "## To remove\n\n* `/facts/vendor-portal.md`\n", true},
+		{"lists it as a numbered item", entries + "## To remove\n\n1. `/facts/vendor-portal.md`\n", true},
+		{"lists it after two spaces", entries + "## To remove\n\n-  `/facts/vendor-portal.md`\n", true},
+		{"lists it with a note after the section", entries +
+			"## To remove\n\n- `facts/vendor-portal.md`\n\n**The caller removes these through the memories API.**\n", true},
+		// The 2026-10-30 nightly's index: the memory was updated, not retired.
+		{"has no removal section", "# Memory index\n\n" +
+			"- `facts/build.md` — the build command `make verify` and how long it takes.\n" +
+			"- `facts/vendor-portal.md` — the 2026-09-01 shutdown of vendor.example.com; " +
+			"expenses now filed at finance.internal.\n", false},
+		// Local runs on main: the section says nothing was retired, and names
+		// the memory to say so.
+		{"explains an empty section by naming it", entries + "## to remove\n\n" +
+			"Nothing to remove. No memory was retired or superseded; the vendor portal's end was " +
+			"recorded as a fact inside `facts/vendor-portal.md` rather than as a tombstone.\n", false},
+		{"lists none, naming it", entries + "## to remove\n\n- None — no tombstone files were created. " +
+			"The one retired statement was retired inside `facts/vendor-portal.md`.\n", false},
+		{"lists none in parentheses", entries + "## To remove\n\n" +
+			"- (none — the superseded vendor-portal fact was replaced in place.)\n", false},
+		{"says nothing to remove, with a colon", entries +
+			"## To remove\n\nNothing to remove: `facts/vendor-portal.md` was updated in place.\n", false},
+		{"opens a section that is not about removal", entries +
+			"## Updated, not removed\n\n- `facts/vendor-portal.md`\n", false},
+		{"lists it under a later heading", entries +
+			"## To remove\n\n- `facts/old.md`\n\n## Kept\n\n- `facts/vendor-portal.md`\n", false},
+		// Forms other than the one stage 4 asks for.
+		{"lists it under an emphasized heading", entries + "*To remove*\n\n- `facts/vendor-portal.md`\n", false},
+		{"lists it after an inline label", entries + "To remove: `facts/vendor-portal.md`\n", false},
+		{"lists it as a link", entries + "## To remove\n\n- [Vendor portal](facts/vendor-portal.md)\n", false},
+		{"numbers its entries, with no removal section", "# Memory index\n\n" +
+			"1. `facts/vendor-portal.md` — tombstone: superseded by facts/expenses.md.\n" +
+			"2. `facts/expenses.md` — expenses are filed at finance.internal.\n", false},
+		// Paths that are not the memory.
+		{"lists another memory", entries + "## To remove\n\n- `facts/old.md`\n", false},
+		{"lists a longer path", entries + "## To remove\n\n- `facts/vendor-portal.md.bak`\n", false},
+		{"lists it under another directory", entries + "## To remove\n\n- `archive/facts/vendor-portal.md`\n", false},
+		{"lists it in another case", entries + "## To remove\n\n- `facts/Vendor-Portal.md`\n", false},
+		{"lists its base name", entries + "## To remove\n\n- `vendor-portal.md`\n", false},
+		{"lists it with an anchor", entries + "## To remove\n\n- `facts/vendor-portal.md#shutdown`\n", false},
+		{"lists it with a trailing dot", entries + "## To remove\n\n- facts/vendor-portal.md.\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := slices.Contains(removalList(tc.index), strings.TrimPrefix(retired, "/")); got != tc.want {
+				t.Errorf("removalList(%q) = %q, listing it %v, want %v", tc.index, removalList(tc.index), got, tc.want)
+			}
+		})
+	}
+
+	// Every entry comes back, bulleted or numbered, so the eval sees anything
+	// else listed, and the successor check can tell a successor the caller
+	// keeps from one it removes along with the tombstone.
+	both := entries + "## To remove\n\n- `facts/vendor-portal.md`\n- facts/expenses.md\n12. facts/build.md\n"
+	if got, want := removalList(both), []string{"facts/vendor-portal.md", "facts/expenses.md", "facts/build.md"}; !slices.Equal(got, want) {
+		t.Errorf("removalList(%q) = %q, want %q", both, got, want)
 	}
 }

@@ -87,11 +87,19 @@ above it do not already say.
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that
    supersedes it — or, where none does, why it was retired — and listed under
-   a *to remove* heading in dream/report.md and in a trailing *to remove*
+   a *to remove* heading in dream/report.md and in a trailing "## To remove"
    section of /mnt/memory/team-notes/MEMORY.md. The caller, who chose to consolidate in place,
    removes the tombstones through the memories API.
-5. Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it.
+5. Nothing else is retired on suspicion: change or retire a memory only where a
+   transcript positively contradicts it. What the memory is about, the thing
+   its title or first line names, decides which. Where that thing still stands
+   and a fact about it changed, change the memory. Where a transcript ends the
+   thing itself — shut down, withdrawn, discontinued — retire the memory under rule 4. What
+   still holds moves out of it first, to the memory it belongs to: an existing
+   one where there is one (rule 1), a new one where there is not, and never
+   the memory you retire. That is what took the thing's place, if anything
+   did, naming what it replaced and when, and anything the transcript left
+   standing.
 6. Relative dates become absolute ones.
 7. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.
