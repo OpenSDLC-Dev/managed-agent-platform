@@ -220,7 +220,11 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
 		`Newer validated evidence wins a contradiction. A contradiction you cannot
    resolve is written down as an open contradiction, never silently decided.`,
 		`Nothing else is removed on suspicion: change or remove a memory only where a
-   transcript positively contradicts it.`,
+   transcript positively contradicts it. What the memory is about, the thing
+   its title names, decides which. Where that thing still stands and a fact
+   about it changed, change the memory. Where a transcript ends the thing
+   itself — shut down, withdrawn, discontinued — remove the memory, and state
+   what took its place in a memory of its own.`,
 		`Relative dates become absolute ones.`,
 		`The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.`,
@@ -237,7 +241,11 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    its second copy goes. Two memories about one subject that say different
    things are not duplicates — that is rule 3's contradiction, or two facts.`
 		rules[3] = `Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it.`
+   a transcript positively contradicts it. What the memory is about, the thing
+   its title names, decides which. Where that thing still stands and a fact
+   about it changed, change the memory. Where a transcript ends the thing
+   itself — shut down, withdrawn, discontinued — retire the memory under
+   rule 4, and state what took its place in a memory of its own.`
 		rules = slices.Insert(rules, 3, fmt.Sprintf(`Nothing here is deleted or renamed: no tool in this session removes a
    file, and the memories are the caller's own. A memory you retire is
    rewritten instead as a one-line tombstone naming the memory that

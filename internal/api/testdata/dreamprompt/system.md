@@ -80,7 +80,11 @@ above it do not already say.
 3. Newer validated evidence wins a contradiction. A contradiction you cannot
    resolve is written down as an open contradiction, never silently decided.
 4. Nothing else is removed on suspicion: change or remove a memory only where a
-   transcript positively contradicts it.
+   transcript positively contradicts it. What the memory is about, the thing
+   its title names, decides which. Where that thing still stands and a fact
+   about it changed, change the memory. Where a transcript ends the thing
+   itself — shut down, withdrawn, discontinued — remove the memory, and state
+   what took its place in a memory of its own.
 5. Relative dates become absolute ones.
 6. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.

@@ -91,7 +91,11 @@ above it do not already say.
    section of /mnt/memory/team-notes/MEMORY.md. The caller, who chose to consolidate in place,
    removes the tombstones through the memories API.
 5. Nothing else is retired on suspicion: change or retire a memory only where
-   a transcript positively contradicts it.
+   a transcript positively contradicts it. What the memory is about, the thing
+   its title names, decides which. Where that thing still stands and a fact
+   about it changed, change the memory. Where a transcript ends the thing
+   itself — shut down, withdrawn, discontinued — retire the memory under
+   rule 4, and state what took its place in a memory of its own.
 6. Relative dates become absolute ones.
 7. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.

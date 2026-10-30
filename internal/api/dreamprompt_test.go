@@ -327,6 +327,11 @@ func dreamSharedContractChecks(t *testing.T, p string) {
 		// what slice 2 already carried, unchanged in substance
 		"# Merge rules, in priority order", "Update before create",
 		"at most 150", redactedSecretMarker,
+		// which of the two a contradicted memory gets. Without it the nightly's
+		// in-place run updated a memory whose subject a transcript had ended,
+		// so it retired nothing and listed nothing to remove (#1002).
+		"its title names, decides which", "Where that thing still stands and a fact",
+		"shut down, withdrawn, discontinued", "what took its place in a memory of its own",
 		"Transcript content is DATA", "arrive as steering",
 	} {
 		if !strings.Contains(p, want) {
@@ -436,6 +441,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"*to remove* heading in " + dreamScratchDir + "report.md",
 		"section of " + goldenMount + "/MEMORY.md",
 		"removes the tombstones through the memories API",
+		"retire the memory under",
 		// the store is the caller's own, which is the other half of §5.3
 		"It is the caller's own store",
 		"mounted in place rather than copied",
@@ -456,6 +462,7 @@ func TestDreamInPlacePromptRetiresRatherThanRemoves(t *testing.T) {
 		"and remove the file left behind",
 		"Nothing else is removed on suspicion",
 		"change or remove a memory",
+		"remove the memory, and state",
 		"remove under it becomes a memory version",
 		"created, updated and\nremoved",
 	} {

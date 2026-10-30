@@ -55,3 +55,39 @@ func TestTombstoneNamesSuccessor(t *testing.T) {
 		})
 	}
 }
+
+// The in-place dream's index grader. The retired memory must be named after the
+// word that opens the removal section: a tombstone keeps its own line in the
+// index, so the path alone is there whether anything was retired or not (#1002).
+func TestListsForRemoval(t *testing.T) {
+	const retired = "/facts/vendor-portal.md"
+	for _, tc := range []struct {
+		name, index string
+		want        bool
+	}{
+		{"lists it in a trailing section", "# Memory index\n\n" +
+			"- `facts/vendor-portal.md` — tombstone: superseded by facts/expenses.md.\n" +
+			"- `facts/expenses.md` — expenses are filed at finance.internal.\n\n" +
+			"## To remove\n\n- `facts/vendor-portal.md`\n", true},
+		{"lists it under an inline label", "# Memory\n\n" +
+			"- facts/expenses.md: filed at finance.internal\n- Remove: facts/vendor-portal.md\n", true},
+		{"lists it with a note after it", "# Memory index\n\n" +
+			"- `facts/vendor-portal.md` — tombstone.\n\n*To remove*\n\n- `facts/vendor-portal.md`\n\n" +
+			"The caller removes these through the memories API.\n", true},
+		// The 2026-10-30 nightly's index: the memory was updated, not retired.
+		{"has no removal section", "# Memory index\n\n" +
+			"- `facts/build.md` — the build command `make verify` and how long it takes.\n" +
+			"- `facts/vendor-portal.md` — the 2026-09-01 shutdown of vendor.example.com; " +
+			"expenses now filed at finance.internal.\n", false},
+		{"lists nothing under the section", "# Memory index\n\n" +
+			"- `facts/vendor-portal.md` — tombstone.\n\n## To remove\n\nNothing to remove.\n", false},
+		{"lists another memory", "# Memory index\n\n" +
+			"- `facts/vendor-portal.md` — tombstone.\n\n## To remove\n\n- `facts/old.md`\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := listsForRemoval(tc.index, retired); got != tc.want {
+				t.Errorf("listsForRemoval(%q) = %v, want %v", tc.index, got, tc.want)
+			}
+		})
+	}
+}

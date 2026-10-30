@@ -848,6 +848,7 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	// a different way — so the empty case is a failure here rather than a case
 	// to skip.
 	tomb := after[retiredPath]
+	t.Logf("%s now reads:\n%s", retiredPath, tomb)
 	switch {
 	case strings.TrimSpace(tomb) == "":
 		t.Errorf("%s was emptied rather than tombstoned", retiredPath)
@@ -867,14 +868,9 @@ func TestDreamPipelineInPlace(t *testing.T) {
 	// thing this run must not produce.
 	if index, ok := after["/MEMORY.md"]; !ok {
 		t.Errorf("the store has no /MEMORY.md index: %v", memoryPaths(after))
-	} else {
-		lower := strings.ToLower(index)
-		if !strings.Contains(lower, "remove") {
-			t.Errorf("/MEMORY.md has no section listing what the caller should remove:\n%s", index)
-		}
-		if !strings.Contains(lower, strings.TrimPrefix(retiredPath, "/")) {
-			t.Errorf("/MEMORY.md does not name %s, the memory it retired:\n%s", retiredPath, index)
-		}
+	} else if !listsForRemoval(index, retiredPath) {
+		t.Errorf("/MEMORY.md does not list %s, the memory it retired, for the caller to remove:\n%s",
+			retiredPath, index)
 	}
 	// The memory nothing spoke to is byte-identical, in place as much as in a
 	// clone.
@@ -882,6 +878,18 @@ func TestDreamPipelineInPlace(t *testing.T) {
 		t.Errorf("the untouched memory changed:\n before: %q\n  after: %q",
 			before[untouchedPath], after[untouchedPath])
 	}
+}
+
+// listsForRemoval reports whether an in-place dream's index lists path for the
+// caller to remove: named after the first "remove", the word that opens the
+// removal section. Named anywhere is not enough, because a tombstone keeps its
+// own line in the index and that line names the path whether or not anything
+// was retired (#1002). An index that says "remove" above its entries passes
+// too; this is a floor, not a parser.
+func listsForRemoval(index, path string) bool {
+	lower := strings.ToLower(index)
+	i := strings.Index(lower, "remove")
+	return i >= 0 && strings.Contains(lower[i:], strings.ToLower(strings.TrimPrefix(path, "/")))
 }
 
 // memoryPaths is the store's paths alone, for a failure message that should
