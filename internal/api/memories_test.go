@@ -939,11 +939,11 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
 	}
 
-	// A full depth=1 page carries a cursor even when nothing follows it, and
-	// that cursor leads to an empty page without one, as the reference was
-	// recorded answering (2026-10-22 memory-list-order idx 25–28
-	// `pages.depth.1`–`pages.depth.4`; #979). Without a depth a full last page
-	// carries none, which was not recorded (docs/DIVERGENCES.md).
+	// A full depth=1 page that ends in a prefix carries a cursor even when
+	// nothing follows it, and that cursor leads to an empty page without one, as
+	// the reference was recorded answering (2026-10-22 memory-list-order idx
+	// 25–28 `pages.depth.1`–`pages.depth.4`; #979). Without a depth a full last
+	// page carries none, which was not recorded (docs/DIVERGENCES.md).
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F", nil)
 	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 2 {
 		t.Fatalf("a full depth=1 page: status %d, %v", status, got)
@@ -951,6 +951,18 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F&page="+wantCursor(t, body), nil)
 	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 0 || nextPage(t, body) != "" {
 		t.Errorf("the page after a full last depth=1 page: status %d, %v, next_page %q, want none of either",
+			status, got, nextPage(t, body))
+	}
+	// One that ends in a memory carries a cursor only when a row follows it
+	// (2026-10-24 tool-name-page-tokens idx 43 and 52, `page.third.memories`).
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2Fdeep%2F", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 2 || nextPage(t, body) != "" {
+		t.Errorf("a full last depth=1 page ending in a memory: status %d, %v, next_page %q, want 2 rows and none",
+			status, got, nextPage(t, body))
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=1&path_prefix=%2Fnotes%2F", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, []string{"/notes/a.md"}) || nextPage(t, body) == "" {
+		t.Errorf("a full depth=1 page ending in a memory, a prefix after it: status %d, %v, next_page %q, want a cursor",
 			status, got, nextPage(t, body))
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=9", nil)

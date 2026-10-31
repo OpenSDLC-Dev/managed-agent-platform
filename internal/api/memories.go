@@ -857,6 +857,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 
 	var data []any
 	var lastKey string
+	var lastIsPrefix bool
 	var last memoryRow
 	fetched := 0
 	for rows.Next() {
@@ -875,7 +876,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		} else {
 			data = append(data, renderMemory(storeID, row, view == viewFull))
 		}
-		lastKey, last = key, row
+		lastKey, lastIsPrefix, last = key, isPrefix, row
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -884,11 +885,13 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if out.Data == nil {
 		out.Data = []any{}
 	}
-	// A full depth=1 page carries a cursor whether or not a row follows it, as
-	// the reference was recorded answering (2026-10-22 memory-list-order
-	// `pages.depth.3`; #979). Without a depth a full last page was not
-	// recorded, and carries none.
-	if fetched > page.limit || depth == 1 && fetched == page.limit {
+	// A full depth=1 page that ends in a prefix carries a cursor whether or not a
+	// row follows it, as the reference was recorded answering (2026-10-22
+	// memory-list-order `pages.depth.3`; #979). One that ends in a memory
+	// carries one only when a row follows, as recorded (2026-10-24
+	// tool-name-page-tokens idx 43 and 52). Without a depth a full last page was
+	// not recorded, and carries none.
+	if fetched > page.limit || depth == 1 && fetched == page.limit && lastIsPrefix {
 		var c string
 		if depth == 0 {
 			c = encodeTimeCursor(dirNext, last.createdAt, last.id)
