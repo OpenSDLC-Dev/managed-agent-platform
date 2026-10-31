@@ -140,30 +140,31 @@ func TestPageTokenRefusalWords(t *testing.T) {
 		mismatch      = "page token does not match this request's parameters or API version; restart pagination from the first page"
 	)
 
-	// A token that does not decode: idx 27–30 and 46–48, each `page=bogus`.
-	for _, c := range []struct{ list, want string }{
-		{"/v1/agents?", cursorWords},
-		{"/v1/sessions?", cursorWords},
-		{events + "?", cursorWords},
-		{"/v1/memory_stores?", tokenWords},
-		{memories + "?", tokenWords},
-		{memories + "?depth=1&", tokenWords},
-		{"/v1/skills?", "page is not a valid page token."},
+	// A token that does not decode: idx 27–30 and 46–48, each `page=bogus`. A
+	// bad limit beside it is still the limit's refusal, which tells the two
+	// apart on the lists that reword the token's.
+	const badLimit = "limit must be an integer between 1 and 100"
+	for _, c := range []struct{ name, list, want string }{
+		{"agents", "/v1/agents?", cursorWords},
+		{"sessions", "/v1/sessions?", cursorWords},
+		{"events", events + "?", cursorWords},
+		{"memory_stores", "/v1/memory_stores?", tokenWords},
+		{"memories", memories + "?", tokenWords},
+		{"memories_depth", memories + "?depth=1&", tokenWords},
+		{"skills", "/v1/skills?", "page is not a valid page token."},
+		{"memory_stores_bad_limit", "/v1/memory_stores?limit=0&", badLimit},
+		{"memories_bad_limit", memories + "?limit=0&", badLimit},
 	} {
-		t.Run("bogus_"+listLabel(c.list), func(t *testing.T) {
+		t.Run("bogus_"+c.name, func(t *testing.T) {
 			status, res := s.do(http.MethodGet, c.list+"page=bogus", nil)
 			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.want)
 		})
 	}
-	// A bad limit beside a bad token is still the limit's refusal.
-	status, res := s.do(http.MethodGet, "/v1/memory_stores?limit=0&page=bogus", nil)
-	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		"limit must be an integer between 1 and 100")
 
 	// Another list's token. Idx 55 sent the agents list's forward token to a
 	// session's events, which page by sequence, so here it is the recorded probe
 	// itself.
-	status, res = s.do(http.MethodGet, "/v1/agents?limit=1", nil)
+	status, res := s.do(http.MethodGet, "/v1/agents?limit=1", nil)
 	if status != http.StatusOK {
 		t.Fatalf("agents list: status %d (%v)", status, res)
 	}
@@ -181,19 +182,19 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	// does not mint. A backwards time cursor is the sessions list's own, so
 	// only the unidirectional lists refuse it.
 	for _, c := range []struct {
-		list, want string
-		curs       map[string]string
+		name, list, want string
+		curs             map[string]string
 	}{
-		{"/v1/agents?", emptyCursor, foreignCursors},         // idx 54
-		{"/v1/memory_stores?", mismatch, foreignCursors},     // idx 42
-		{"/v1/sessions?", otherEndpoint, foreignKindCursors}, // idx 41
-		{"/v1/sessions?order=asc&", otherEndpoint, foreignKindCursors},
-		{events + "?", otherEndpoint, map[string]string{
+		{"agents", "/v1/agents?", emptyCursor, foreignCursors},            // idx 54
+		{"memory_stores", "/v1/memory_stores?", mismatch, foreignCursors}, // idx 42
+		{"sessions", "/v1/sessions?", otherEndpoint, foreignKindCursors},  // idx 41
+		{"sessions_asc", "/v1/sessions?order=asc&", otherEndpoint, foreignKindCursors},
+		{"events", events + "?", otherEndpoint, map[string]string{
 			"version": foreignCursors["version"], "path": foreignCursors["path"], "prev time": foreignCursors["prev time"],
 		}}, // idx 55
 	} {
 		for name, cur := range c.curs {
-			t.Run("foreign_"+listLabel(c.list)+"_"+name, func(t *testing.T) {
+			t.Run("foreign_"+c.name+"_"+name, func(t *testing.T) {
 				status, res := s.do(http.MethodGet, c.list+"page="+url.QueryEscape(cur), nil)
 				wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.want)
 			})
