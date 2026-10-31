@@ -1469,8 +1469,10 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	}
 	orderDir, reversed := sortDir, false
 	if page.cur != nil {
+		// Another list's cursor, in the reference's words for one (2026-10-24
+		// tool-name-page-tokens idx 41).
 		if page.cur.foreignToTime() {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errInvalid(pageTokenOtherEndpoint)
 		}
 		var clause string
 		clause, orderDir, reversed = keysetClause(sortDir, page.cur, len(args))

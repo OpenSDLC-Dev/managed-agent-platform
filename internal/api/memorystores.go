@@ -331,6 +331,9 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		return nil, err
 	}
 	page, err := parsePage(q)
+	if errors.Is(err, errPageCursor) {
+		return nil, errInvalid(pageTokenInvalid)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -365,9 +368,11 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
 	if page.cur != nil {
-		// Unidirectional list: only forward time cursors are valid here.
+		// Unidirectional list: only forward time cursors are valid here. Any
+		// other is another list's, which the reference words as the memories
+		// list words its other depth's (2026-10-24 tool-name-page-tokens idx 42).
 		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errInvalid(memoryCursorMismatch)
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))

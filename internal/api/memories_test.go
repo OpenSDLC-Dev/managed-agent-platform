@@ -796,8 +796,9 @@ func TestMemoryList(t *testing.T) {
 		"depth=2":    "depth must be 0 or 1 when provided", "depth=all": "depth must be 0 or 1 when provided",
 		"depth=0": depthZero, "depth=-1": depthZero, "depth=-99999999999999999999": depthZero,
 		"depth=99999999999999999999": "depth must be 0 or 1 when provided",
-		// A token that does not decode keeps this platform's words (#983).
-		"page=@@@":                "invalid page cursor",
+		// A token that does not decode takes the reference's words
+		// (2026-10-24 tool-name-page-tokens idx 47–48; #983).
+		"page=@@@":                "invalid page token",
 		"path_prefix=%2F&depth=0": depthZero, "path_prefix=%2Fx%2F&depth=0": depthZero,
 		"path_prefix=%2F&depth=-1": depthZero, "path_prefix=%2Fx%2F&depth=-1": depthZero,
 		"path_prefix=": emptyPrefix, "path_prefix=&depth=0": emptyPrefix,
@@ -938,11 +939,11 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		t.Errorf("the paged depth=1 walk = %v", seen)
 	}
 
-	// A full depth=1 page carries a cursor even when nothing follows it, and
-	// that cursor leads to an empty page without one, as the reference was
-	// recorded answering (2026-10-22 memory-list-order idx 25–28
-	// `pages.depth.1`–`pages.depth.4`; #979). Without a depth a full last page
-	// carries none, which was not recorded (docs/DIVERGENCES.md).
+	// A full depth=1 page that ends in a prefix carries a cursor even when
+	// nothing follows it, and that cursor leads to an empty page without one, as
+	// the reference was recorded answering (2026-10-22 memory-list-order idx
+	// 25–28 `pages.depth.1`–`pages.depth.4`; #979). Without a depth a full last
+	// page carries none, which was not recorded (docs/DIVERGENCES.md).
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F", nil)
 	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 2 {
 		t.Fatalf("a full depth=1 page: status %d, %v", status, got)
@@ -950,6 +951,18 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2F&page="+wantCursor(t, body), nil)
 	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 0 || nextPage(t, body) != "" {
 		t.Errorf("the page after a full last depth=1 page: status %d, %v, next_page %q, want none of either",
+			status, got, nextPage(t, body))
+	}
+	// One that ends in a memory carries a cursor only when a row follows it
+	// (2026-10-24 tool-name-page-tokens idx 43 and 52, `page.third.memories`).
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&path_prefix=%2Fnotes%2Fdeep%2F", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || len(got) != 2 || nextPage(t, body) != "" {
+		t.Errorf("a full last depth=1 page ending in a memory: status %d, %v, next_page %q, want 2 rows and none",
+			status, got, nextPage(t, body))
+	}
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=1&path_prefix=%2Fnotes%2F", nil)
+	if got := memoryPaths(t, body); status != http.StatusOK || !slices.Equal(got, []string{"/notes/a.md"}) || nextPage(t, body) == "" {
+		t.Errorf("a full depth=1 page ending in a memory, a prefix after it: status %d, %v, next_page %q, want a cursor",
 			status, got, nextPage(t, body))
 	}
 	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?limit=9", nil)
@@ -976,6 +989,23 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?"+q, nil)
 		wantInvalidRequest(t, q, status, body,
 			"page token does not match this request's parameters or API version; restart pagination from the first page")
+	}
+
+	// A depth=1 cursor is not bound to limit, view or path_prefix: the
+	// reference accepted one resent with each changed (2026-10-24
+	// tool-name-page-tokens idx 43–45). Under another limit the walk goes on.
+	// Under another path_prefix the reference answered an empty page and this
+	// list serves the rows after the cursor, which #78 tracks.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=3&page="+pathCursor, nil)
+	if got := memoryPaths(t, body); status != http.StatusOK ||
+		!slices.Equal(got, []string{"prefix:/a_b/", "prefix:/acb/", "prefix:/notes-archive/"}) {
+		t.Errorf("a depth=1 cursor under another limit: status %d, %v", status, got)
+	}
+	for _, q := range []string{"view=full", "path_prefix=%2Fnotes%2F"} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&"+q+"&page="+pathCursor, nil)
+		if status != http.StatusOK {
+			t.Errorf("a depth=1 cursor under %s: status %d (%v)", q, status, body)
+		}
 	}
 }
 

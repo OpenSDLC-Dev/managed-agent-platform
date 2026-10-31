@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/base64"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -90,7 +91,8 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 	}
 
 	// The memories list words all four as the reference words a cursor from
-	// its other depth (#979); the others keep `invalid page cursor` (#983).
+	// its other depth (#979). TestPageTokenRefusalWords pins the other lists
+	// that have recorded words.
 	for name, cur := range foreignCursors {
 		t.Run("memories_words_"+name, func(t *testing.T) {
 			status, res := s.do(http.MethodGet, "/v1/memory_stores/"+storeID+"/memories?page="+url.QueryEscape(cur), nil)
@@ -110,6 +112,106 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 				status, res := s.do(http.MethodGet,
 					"/v1/sessions?order="+order+"&page="+url.QueryEscape(cur), nil)
 				wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+			})
+		}
+	}
+}
+
+// TestPageTokenRefusalWords pins the words the reference was recorded giving,
+// list by list, for a page token the list cannot use (2026-10-24
+// tool-name-page-tokens setup.json; #983). It words two cases apart: a token
+// that does not decode, and a token another list minted. This platform can
+// tell the second only when the other list's cursor is of another kind, so
+// those cases send the kinds a list never mints. A same-kind token from another
+// list still answers 200 here (#1004).
+func TestPageTokenRefusalWords(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	createAgent(t, s, map[string]any{"name": "second", "model": "claude-opus-4-8"})
+	sessionID := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	storeID := createMemoryStore(t, s, "token-words")
+	events := "/v1/sessions/" + sessionID + "/events"
+	threadEvents := "/v1/sessions/" + sessionID + "/threads/" + domain.PrimaryThreadID(domain.ID(sessionID)).String() + "/events"
+	memories := "/v1/memory_stores/" + storeID + "/memories"
+
+	const (
+		cursorWords   = "invalid page cursor"
+		tokenWords    = "invalid page token"
+		otherEndpoint = "page token is not valid for this endpoint"
+		emptyCursor   = "page token contains empty cursor"
+		mismatch      = "page token does not match this request's parameters or API version; restart pagination from the first page"
+	)
+
+	// A token that does not decode: idx 27–30 and 46–48, each `page=bogus`. A
+	// bad limit beside it is still the limit's refusal, which tells the two
+	// apart on the lists that reword the token's.
+	const badLimit = "limit must be an integer between 1 and 100"
+	for _, c := range []struct{ name, list, want string }{
+		{"agents", "/v1/agents?", cursorWords},
+		{"sessions", "/v1/sessions?", cursorWords},
+		{"events", events + "?", cursorWords},
+		{"memory_stores", "/v1/memory_stores?", tokenWords},
+		{"memories", memories + "?", tokenWords},
+		{"memories_depth", memories + "?depth=1&", tokenWords},
+		{"skills", "/v1/skills?", "page is not a valid page token."},
+		{"memory_stores_bad_limit", "/v1/memory_stores?limit=0&", badLimit},
+		{"memories_bad_limit", memories + "?limit=0&", badLimit},
+	} {
+		t.Run("bogus_"+c.name, func(t *testing.T) {
+			status, res := s.do(http.MethodGet, c.list+"page=bogus", nil)
+			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.want)
+		})
+	}
+	// A time cursor whose id no row could hold is refused while the page is
+	// parsed too, so it takes the same words (#135).
+	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|1|a\x00b")))
+	for _, list := range []string{"/v1/memory_stores", memories} {
+		status, res := s.do(http.MethodGet, list+"?page="+unstorable, nil)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tokenWords)
+	}
+	// No list mints a backwards sequence cursor, so the events lists take one
+	// as a token that does not decode.
+	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|p|s|a|1")))
+	for _, list := range []string{events, threadEvents} {
+		status, res := s.do(http.MethodGet, list+"?page="+backwardsSeq, nil)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
+	}
+
+	// Another list's token. Idx 55 sent the agents list's forward token to a
+	// session's events, which page by sequence, so here it is the recorded probe
+	// itself.
+	status, res := s.do(http.MethodGet, "/v1/agents?limit=1", nil)
+	if status != http.StatusOK {
+		t.Fatalf("agents list: status %d (%v)", status, res)
+	}
+	agentsToken := wantCursor(t, res)
+	status, res = s.do(http.MethodGet, events+"?limit=1&page="+url.QueryEscape(agentsToken), nil)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", otherEndpoint)
+	// The thread events list shares the handler but was not recorded, so it
+	// keeps this platform's words.
+	status, res = s.do(http.MethodGet, threadEvents+"?page="+url.QueryEscape(agentsToken), nil)
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
+
+	// Idx 41, 42 and 54 sent a time token between two time-keyed lists, which
+	// is #1004. Each of those lists gives its recorded words to every kind it
+	// does not mint. A backwards time cursor is the sessions list's own, so
+	// only the unidirectional lists refuse it.
+	for _, c := range []struct {
+		name, list, want string
+		curs             map[string]string
+	}{
+		{"agents", "/v1/agents?", emptyCursor, foreignCursors},            // idx 54
+		{"memory_stores", "/v1/memory_stores?", mismatch, foreignCursors}, // idx 42
+		{"sessions", "/v1/sessions?", otherEndpoint, foreignKindCursors},  // idx 41
+		{"sessions_asc", "/v1/sessions?order=asc&", otherEndpoint, foreignKindCursors},
+		{"events", events + "?", otherEndpoint, map[string]string{
+			"version": foreignCursors["version"], "path": foreignCursors["path"], "prev time": foreignCursors["prev time"],
+		}}, // idx 55
+	} {
+		for name, cur := range c.curs {
+			t.Run("foreign_"+c.name+"_"+name, func(t *testing.T) {
+				status, res := s.do(http.MethodGet, c.list+"page="+url.QueryEscape(cur), nil)
+				wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.want)
 			})
 		}
 	}

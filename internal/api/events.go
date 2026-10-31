@@ -1624,9 +1624,19 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 	if page.cur != nil {
 		// A thread list mints only ascending cursors; a descending one came
 		// from the session list and would walk the thread backwards past
-		// the order refusal above.
+		// the order refusal above. The session list answers another list's
+		// cursor in the reference's words for one (2026-10-24
+		// tool-name-page-tokens idx 55); the thread lists were not recorded.
 		if !page.cur.seqKeyed || (!filters && page.cur.seqDesc) {
+			if filters {
+				return nil, errInvalid(pageTokenOtherEndpoint)
+			}
 			return nil, errInvalid("invalid page cursor")
+		}
+		// No list mints a backwards sequence cursor, so this one was never
+		// issued: it takes the words for a token that does not decode.
+		if page.cur.dir != dirNext {
+			return nil, errPageCursor
 		}
 		// The cursor binds the direction it was minted under, so a
 		// follow-up that omits ?order= keeps walking the same way — and
