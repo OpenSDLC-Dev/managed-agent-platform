@@ -131,6 +131,7 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	sessionID := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
 	storeID := createMemoryStore(t, s, "token-words")
 	events := "/v1/sessions/" + sessionID + "/events"
+	threadEvents := "/v1/sessions/" + sessionID + "/threads/" + domain.PrimaryThreadID(domain.ID(sessionID)).String() + "/events"
 	memories := "/v1/memory_stores/" + storeID + "/memories"
 
 	const (
@@ -168,6 +169,13 @@ func TestPageTokenRefusalWords(t *testing.T) {
 		status, res := s.do(http.MethodGet, list+"?page="+unstorable, nil)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tokenWords)
 	}
+	// No list mints a backwards sequence cursor, so the events lists take one
+	// as a token that does not decode.
+	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|p|s|a|1")))
+	for _, list := range []string{events, threadEvents} {
+		status, res := s.do(http.MethodGet, list+"?page="+backwardsSeq, nil)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
+	}
 
 	// Another list's token. Idx 55 sent the agents list's forward token to a
 	// session's events, which page by sequence, so here it is the recorded probe
@@ -181,8 +189,7 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", otherEndpoint)
 	// The thread events list shares the handler but was not recorded, so it
 	// keeps this platform's words.
-	status, res = s.do(http.MethodGet,
-		"/v1/sessions/"+sessionID+"/threads/"+domain.PrimaryThreadID(domain.ID(sessionID)).String()+"/events?page="+url.QueryEscape(agentsToken), nil)
+	status, res = s.do(http.MethodGet, threadEvents+"?page="+url.QueryEscape(agentsToken), nil)
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
 
 	// Idx 41, 42 and 54 sent a time token between two time-keyed lists, which

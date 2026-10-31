@@ -1633,6 +1633,11 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 			}
 			return nil, errInvalid("invalid page cursor")
 		}
+		// No list mints a backwards sequence cursor, so this one was never
+		// issued: it takes the words for a token that does not decode.
+		if page.cur.dir != dirNext {
+			return nil, errPageCursor
+		}
 		// The cursor binds the direction it was minted under, so a
 		// follow-up that omits ?order= keeps walking the same way — and
 		// one that contradicts it is an error, not a silent restart.

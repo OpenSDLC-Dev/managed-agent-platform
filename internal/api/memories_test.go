@@ -990,6 +990,23 @@ func TestMemoryListPrefixAndDepth(t *testing.T) {
 		wantInvalidRequest(t, q, status, body,
 			"page token does not match this request's parameters or API version; restart pagination from the first page")
 	}
+
+	// A depth=1 cursor is not bound to limit, view or path_prefix: the
+	// reference accepted one resent with each changed (2026-10-24
+	// tool-name-page-tokens idx 43–45). Under another limit the walk goes on.
+	// Under another path_prefix the reference answered an empty page and this
+	// list serves the rows after the cursor, which #78 tracks.
+	status, body = s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=3&page="+pathCursor, nil)
+	if got := memoryPaths(t, body); status != http.StatusOK ||
+		!slices.Equal(got, []string{"prefix:/a_b/", "prefix:/acb/", "prefix:/notes-archive/"}) {
+		t.Errorf("a depth=1 cursor under another limit: status %d, %v", status, got)
+	}
+	for _, q := range []string{"view=full", "path_prefix=%2Fnotes%2F"} {
+		status, body := s.do(http.MethodGet, "/v1/memory_stores/"+store+"/memories?depth=1&limit=2&"+q+"&page="+pathCursor, nil)
+		if status != http.StatusOK {
+			t.Errorf("a depth=1 cursor under %s: status %d (%v)", q, status, body)
+		}
+	}
 }
 
 // Rows that share a created_at are ordered by id, newest first, as the

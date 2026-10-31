@@ -41,16 +41,19 @@ const (
 	maxRunLimit = 1000
 )
 
-// errPageCursor refuses a page token that does not decode. It is one value so a
-// list the reference words differently can tell it from parsePage's limit
-// refusal (errors.Is) and answer in its own words.
+// errPageCursor refuses a page token this platform cannot read as a position:
+// one that does not decode, or a time cursor naming an id no row could hold
+// (#135). It is one value so a list the reference words differently can tell
+// it from parsePage's limit refusal (errors.Is) and answer in its own words.
 var errPageCursor = errInvalid("invalid page cursor")
 
 // The reference words a page token a list cannot use list by list, and the
 // words follow no rule (2026-10-24 tool-name-page-tokens setup.json; #983). A
 // list recorded with its words for a token it decodes but cannot use gives them
-// to every cursor this platform can tell is not its own. The skills list's words
-// are errSkillsPageToken; a list not recorded keeps `invalid page cursor`.
+// to every cursor of a kind or direction it does not mint itself, but for a
+// backwards sequence cursor: no list mints one, so the events lists take it as
+// a token that does not decode. The skills list's words are errSkillsPageToken;
+// a list not recorded keeps `invalid page cursor`.
 const (
 	// The memory stores and memories lists, for a token that does not decode.
 	pageTokenInvalid = "invalid page token"
