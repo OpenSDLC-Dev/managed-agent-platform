@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -130,10 +131,20 @@ func TestCustomToolNameBound(t *testing.T) {
 		"my.tool":                          "tools.0.custom.name: " + class,
 		"tööl":                             "tools.0.custom.name: " + class,
 		strings.Repeat("ö", 128):           "tools.0.custom.name: " + class,
+		"mcp__marker":                      `tools.0.custom.name: custom tool name "mcp__marker" uses reserved MCP tool prefix`,
 	} {
 		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(tools(name)))
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
 	}
+	// The path names the tool's own index. The required fields are checked
+	// before the name, an order of ours.
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"tools": []any{customTool("ok"), customTool(long)}}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "tools.1.name: maximum string length is 128")
+	status, res = s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"tools": []any{map[string]any{"type": "custom", "name": long}}}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"custom tools require name, description, and input_schema")
 
 	// Agent update: idx 9 recorded the length without the update's "agent."
 	// path. The class takes that path, as the reserved prefix does on update.
@@ -179,12 +190,41 @@ func TestCustomToolNameBound(t *testing.T) {
 		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"agent": tools(name)})
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
 	}
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"agent": map[string]any{
+		"tools": []any{customTool("ok"), customTool("my tool")}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"session.agent.config.tools.1.custom.name: "+class)
 	if _, now := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); !reflect.DeepEqual(now["agent"], stored["agent"]) {
 		t.Errorf("refused session updates changed its agent: %v, was %v", now["agent"], stored["agent"])
 	}
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
 		map[string]any{"agent": tools(strings.Repeat("t", 128))}); status != http.StatusOK {
 		t.Errorf("a 128-character name on an idle session's update: status %d (%v), want 200", status, res)
+	}
+
+	// A stored tools[] is never parsed again: an agent stored over the bound
+	// before #987, in its agent row and its version rows, starts a session
+	// that keeps the names and takes an update that leaves its tools alone.
+	legacy := createAgent(t, s, agentBody(nil))["id"].(string)
+	planted, err := json.Marshal([]any{customTool("my tool"), customTool(strings.Repeat("t", 200))})
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	for _, q := range []string{
+		`UPDATE agents SET spec = jsonb_set(spec, '{tools}', $2::jsonb) WHERE id = $1`,
+		`UPDATE agent_versions SET spec = jsonb_set(spec, '{tools}', $2::jsonb) WHERE agent_id = $1`,
+	} {
+		if _, err := s.pool.Exec(context.Background(), q, legacy, string(planted)); err != nil {
+			t.Fatalf("plant a pre-#987 spec: %v", err)
+		}
+	}
+	snapshot := createSession(t, s, map[string]any{"environment_id": envID, "agent": legacy})["agent"].(map[string]any)
+	if got := snapshot["tools"].([]any)[0].(map[string]any)["name"]; got != "my tool" {
+		t.Errorf("session snapshot's first tool name = %v, want the stored %q", got, "my tool")
+	}
+	if status, res := s.do(http.MethodPost, "/v1/agents/"+legacy,
+		map[string]any{"version": 1, "name": "renamed"}); status != http.StatusOK {
+		t.Errorf("rename of an agent stored over the bound: status %d (%v), want 200", status, res)
 	}
 }
 
