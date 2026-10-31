@@ -48,11 +48,16 @@ var errPageCursor = errInvalid("invalid page cursor")
 
 // The reference words a page token a list cannot use list by list, and the
 // words follow no rule (2026-10-24 tool-name-page-tokens setup.json; #983). A
-// list recorded with its own words for another list's token gives them to every
-// cursor kind it does not mint; a list not recorded keeps `invalid page cursor`.
+// list recorded with its words for a token it decodes but cannot use gives them
+// to every cursor this platform can tell is not its own. The skills list's words
+// are errSkillsPageToken; a list not recorded keeps `invalid page cursor`.
 const (
 	// The memory stores and memories lists, for a token that does not decode.
 	pageTokenInvalid = "invalid page token"
+	// The memories list, for a cursor from its other depth (2026-10-22
+	// memory-list-order `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979),
+	// and the memory stores list, for another list's token (idx 42).
+	memoryCursorMismatch = "page token does not match this request's parameters or API version; restart pagination from the first page"
 	// The sessions list and a session's events list, for another list's token.
 	pageTokenOtherEndpoint = "page token is not valid for this endpoint"
 	// The agents list, for another list's token.

@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"encoding/base64"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -159,6 +160,13 @@ func TestPageTokenRefusalWords(t *testing.T) {
 			status, res := s.do(http.MethodGet, c.list+"page=bogus", nil)
 			wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", c.want)
 		})
+	}
+	// A time cursor whose id no row could hold is refused while the page is
+	// parsed too, so it takes the same words (#135).
+	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|1|a\x00b")))
+	for _, list := range []string{"/v1/memory_stores", memories} {
+		status, res := s.do(http.MethodGet, list+"?page="+unstorable, nil)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tokenWords)
 	}
 
 	// Another list's token. Idx 55 sent the agents list's forward token to a
