@@ -102,6 +102,78 @@ func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any
 	}
 }
 
+// A custom tool's name is held to its documented 1-128 characters and class,
+// in the words the reference was recorded giving on each route
+// (managed-agents-wire-recordings 2026-10-24-tool-name-page-tokens setup.json
+// idx 1–15; #987). Agent create and update answer the length at
+// tools.N.name, ahead of the class and the reserved prefix; the session routes
+// answer it under their own path, in their own words.
+func TestCustomToolNameBound(t *testing.T) {
+	s := newTestServer(t)
+	const class = "does not match regex pattern `^[a-zA-Z0-9_-]{1,128}$`"
+	const tooLong = "tools.0.name: maximum string length is 128"
+	long := strings.Repeat("t", 129)
+	tools := func(name string) map[string]any { return map[string]any{"tools": []any{customTool(name)}} }
+
+	// Agent create: idx 1–8, 14 and 15. A leading digit or dash is in the
+	// class (#985). The length counts characters: 128 two-byte letters are
+	// within it and outside the class.
+	for _, name := range []string{strings.Repeat("t", 128), "1tool", "-tool"} {
+		createAgent(t, s, agentBody(tools(name)))
+	}
+	for name, msg := range map[string]string{
+		long:                               tooLong,
+		"mcp__" + strings.Repeat("t", 124): tooLong,
+		"":                                 "tools.0.name: minimum string length is 1",
+		"my tool":                          "tools.0.custom.name: " + class,
+		"my.tool":                          "tools.0.custom.name: " + class,
+		"tööl":                             "tools.0.custom.name: " + class,
+		strings.Repeat("ö", 128):           "tools.0.custom.name: " + class,
+	} {
+		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(tools(name)))
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+	}
+
+	// Agent update: idx 9 recorded the length without the update's "agent."
+	// path. The class takes that path, as the reserved prefix does on update.
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	wantUpdateRejected(t, s, id, tools(long), tooLong)
+	wantUpdateRejected(t, s, id, tools(""), "tools.0.name: minimum string length is 1")
+	wantUpdateRejected(t, s, id, tools("my tool"), "agent.tools.0.custom.name: "+class)
+
+	// A session create's override (idx 10–11) and an idle session's
+	// agent.tools update (idx 13). An empty name fails the class there.
+	agentID, envID := fixture(t, s)
+	override := func(name string) map[string]any {
+		return map[string]any{"environment_id": envID, "agent": map[string]any{
+			"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool(name)}}}
+	}
+	createSession(t, s, override(strings.Repeat("t", 128)))
+	const overridePath = "agent.agent_with_overrides.config.tools.0.custom.name: "
+	for name, msg := range map[string]string{
+		long:      overridePath + "must be at most 128 characters",
+		"my tool": overridePath + class,
+		"":        overridePath + class,
+	} {
+		status, res := s.do(http.MethodPost, "/v1/sessions", override(name))
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+	}
+	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
+	const updatePath = "session.agent.config.tools.0.custom.name: "
+	for name, msg := range map[string]string{
+		long:      updatePath + "must be at most 128 characters",
+		"my tool": updatePath + class,
+		"":        updatePath + class,
+	} {
+		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"agent": tools(name)})
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": tools(strings.Repeat("t", 128))}); status != http.StatusOK {
+		t.Errorf("a 128-character name on an idle session's update: status %d (%v), want 200", status, res)
+	}
+}
+
 func TestAgentSystemCap(t *testing.T) {
 	s := newTestServer(t)
 	// Recorded 2026-09-02: agent create refused 100,001 ASCII characters with

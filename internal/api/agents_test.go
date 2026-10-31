@@ -256,9 +256,11 @@ func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
 	}
 
 	// Both session routes take tools[] from the request too, so both refuse,
-	// each path opened as that route opens it (unrecorded; docs/
-	// DIVERGENCES.md): a create's tool override and a mid-session agent.tools
-	// update. The refused update leaves the session's agent as it was.
+	// each path opened as that route was recorded opening a custom tool's name
+	// (2026-10-24 tool-name-page-tokens idx 10 and 13; this refusal itself is
+	// unrecorded there, docs/DIVERGENCES.md): a create's tool override and a
+	// mid-session agent.tools update. The refused update leaves the session's
+	// agent as it was.
 	agentID, envID := fixture(t, s)
 	status, res = s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
 		"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool("mcp__docs__search")}}})
@@ -269,7 +271,7 @@ func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"tools": []any{customTool("mine"), customTool("mcp__docs__fetch")}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		`agent.tools.1.custom.name: custom tool name "mcp__docs__fetch" uses reserved MCP tool prefix`)
+		`session.agent.config.tools.1.custom.name: custom tool name "mcp__docs__fetch" uses reserved MCP tool prefix`)
 	if _, after := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); !reflect.DeepEqual(after["agent"], before["agent"]) {
 		t.Errorf("refused update changed the session's agent: %v, was %v", after["agent"], before["agent"])
 	}

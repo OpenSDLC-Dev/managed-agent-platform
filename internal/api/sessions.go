@@ -1225,7 +1225,10 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		for key, val := range patch {
 			switch key {
 			case "tools":
-				items, err := parseTools(val, "agent.") // the field's path in this body
+				// The path the reference was recorded naming a custom tool's
+				// name under on this route (2026-10-24 tool-name-page-tokens
+				// idx 13; #987).
+				items, err := parseTools(val, "session.agent.config.")
 				if err != nil {
 					return nil, err
 				}

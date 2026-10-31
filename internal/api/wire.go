@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -514,8 +515,8 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 // handed on for storage unchanged, so what an update merges against is what the
 // client sent; the response is rendered from them rather than being them, since
 // renderAgent resolves the toolset configuration first (toolset.Materialize).
-// prefix opens the path a reserved custom tool name is refused under, as the
-// session route names it.
+// prefix opens the path a custom tool's name is refused under, as the session
+// route names it (checkCustomToolName).
 func parseTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 	return parseToolsWith(raw, false, prefix)
 }
@@ -539,7 +540,7 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 	for i, item := range items {
 		var probe struct {
 			Type          string          `json:"type"`
-			Name          string          `json:"name"`
+			Name          *string         `json:"name"`
 			Description   string          `json:"description"`
 			MCPServerName string          `json:"mcp_server_name"`
 			InputSchema   json.RawMessage `json:"input_schema"`
@@ -560,7 +561,15 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 				return nil, errInvalid("%s", err)
 			}
 		case "custom":
-			if probe.Name == "" || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
+			// A name sent is held to its bound first: the reference refused a
+			// reserved name past the bound for its length (2026-10-24
+			// tool-name-page-tokens idx 14; #987).
+			if probe.Name != nil {
+				if err := checkCustomToolName(*probe.Name, i, agentRoute, prefix); err != nil {
+					return nil, err
+				}
+			}
+			if probe.Name == nil || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
 				return nil, errInvalid("custom tools require name, description, and input_schema")
 			}
 			// The frame an MCP tool's model-facing name is composed in is
@@ -573,9 +582,9 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 			// custom tool the name over any MCP tool (resolveTools). A stored
 			// tools[] is never parsed again, so an agent stored before this
 			// check still resolves.
-			if strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
+			if strings.HasPrefix(*probe.Name, domain.MCPModelNamePrefix) {
 				return nil, errInvalid("%stools.%d.custom.name: custom tool name %q uses reserved MCP tool prefix",
-					prefix, i, probe.Name)
+					prefix, i, *probe.Name)
 			}
 		case "mcp_toolset":
 			if probe.MCPServerName == "" {
@@ -594,6 +603,47 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 		}
 	}
 	return items, nil
+}
+
+// A custom tool's name is "1-128 characters; letters, digits, underscores, and
+// hyphens" (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsCustomToolParams.Name), the Messages tool-name pattern, which
+// the reference quotes when it refuses one (2026-10-24 tool-name-page-tokens
+// idx 3; #987).
+const (
+	customToolNamePattern  = `^[a-zA-Z0-9_-]{1,128}$`
+	maxCustomToolNameRunes = 128
+)
+
+var customToolNameRE = regexp.MustCompile(customToolNamePattern)
+
+// checkCustomToolName holds a request's custom tool name to its bound, in the
+// words each route was recorded giving (2026-10-24 tool-name-page-tokens idx
+// 1–15; #987). Agent create and update answer the length and an empty name at
+// tools.N.name, without the update's "agent." (idx 9), and the class under
+// prefix, as the reserved prefix is. The session routes answer the length in
+// their override words under prefix (idx 10, 13); there an empty name fails
+// the class, which needs one character. The class and the empty name are
+// recorded on agent create alone. The length counts characters, as capRunes
+// does. A stored tools[] is never parsed again, so an agent stored over the
+// bound before #987 still resolves.
+func checkCustomToolName(name string, i int, agentRoute bool, prefix string) error {
+	path := fmt.Sprintf("%stools.%d.custom.name", prefix, i)
+	if agentRoute {
+		bare := fmt.Sprintf("tools.%d.name", i)
+		if err := capRunes(bare, name, maxCustomToolNameRunes); err != nil {
+			return err
+		}
+		if name == "" {
+			return errInvalid("%s: minimum string length is 1", bare)
+		}
+	} else if err := capOverrideRunes(path, name, maxCustomToolNameRunes); err != nil {
+		return err
+	}
+	if !customToolNameRE.MatchString(name) {
+		return errInvalid("%s: does not match regex pattern `%s`", path, customToolNamePattern)
+	}
+	return nil
 }
 
 // parseMCPServers validates mcp_servers[]: only {type:"url", name, url}, the
