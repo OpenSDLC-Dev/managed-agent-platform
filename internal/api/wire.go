@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -514,8 +515,8 @@ func rawList(raw json.RawMessage, key string) ([]json.RawMessage, error) {
 // handed on for storage unchanged, so what an update merges against is what the
 // client sent; the response is rendered from them rather than being them, since
 // renderAgent resolves the toolset configuration first (toolset.Materialize).
-// prefix opens the path a reserved custom tool name is refused under, as the
-// session route names it.
+// prefix opens the path a custom tool's name is refused under, as the session
+// route names it (checkCustomToolName).
 func parseTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 	return parseToolsWith(raw, false, prefix)
 }
@@ -525,8 +526,8 @@ func parseTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 // refusing (toolset.ConfigError) in its words, the path opened by prefix — as
 // agentUpdatePath does on update — and the entry's tools[] index (2026-09-02
 // batch2 `agent.create.config-unknown-key`, `.config-type-only`,
-// `.config-name-type-mismatch`, #540). A session override's tools keep
-// parseTools' sentences, the reference's being unrecorded there.
+// `.config-name-type-mismatch`, #540). A session override's configs[] entry
+// keeps parseTools' sentence, the reference's being unrecorded there.
 func parseAgentTools(raw json.RawMessage, prefix string) ([]json.RawMessage, error) {
 	return parseToolsWith(raw, true, prefix)
 }
@@ -539,7 +540,7 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 	for i, item := range items {
 		var probe struct {
 			Type          string          `json:"type"`
-			Name          string          `json:"name"`
+			Name          *string         `json:"name"`
 			Description   string          `json:"description"`
 			MCPServerName string          `json:"mcp_server_name"`
 			InputSchema   json.RawMessage `json:"input_schema"`
@@ -560,8 +561,15 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 				return nil, errInvalid("%s", err)
 			}
 		case "custom":
-			if probe.Name == "" || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
+			if probe.Name == nil || probe.Description == "" || len(probe.InputSchema) == 0 || isNull(probe.InputSchema) {
 				return nil, errInvalid("custom tools require name, description, and input_schema")
+			}
+			// The name's bound comes before the reserved prefix, as the
+			// reference was recorded putting it (2026-10-24
+			// tool-name-page-tokens idx 14; #987), and after the required
+			// fields, an order of ours.
+			if err := checkCustomToolName(*probe.Name, i, agentRoute, prefix); err != nil {
+				return nil, err
 			}
 			// The frame an MCP tool's model-facing name is composed in is
 			// reserved, in the reference's words (2026-09-03 batch2
@@ -573,9 +581,9 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 			// custom tool the name over any MCP tool (resolveTools). A stored
 			// tools[] is never parsed again, so an agent stored before this
 			// check still resolves.
-			if strings.HasPrefix(probe.Name, domain.MCPModelNamePrefix) {
+			if strings.HasPrefix(*probe.Name, domain.MCPModelNamePrefix) {
 				return nil, errInvalid("%stools.%d.custom.name: custom tool name %q uses reserved MCP tool prefix",
-					prefix, i, probe.Name)
+					prefix, i, *probe.Name)
 			}
 		case "mcp_toolset":
 			if probe.MCPServerName == "" {
@@ -594,6 +602,47 @@ func parseToolsWith(raw json.RawMessage, agentRoute bool, prefix string) ([]json
 		}
 	}
 	return items, nil
+}
+
+// A custom tool's name is "1-128 characters; letters, digits, underscores, and
+// hyphens" (checked against anthropic-sdk-go v1.70.1 — betaagent.go
+// BetaManagedAgentsCustomToolParams.Name), the Messages tool-name pattern, which
+// the reference quotes when it refuses one (2026-10-24 tool-name-page-tokens
+// idx 3; #987).
+const (
+	customToolNamePattern  = `^[a-zA-Z0-9_-]{1,128}$`
+	maxCustomToolNameRunes = 128
+)
+
+var customToolNameRE = regexp.MustCompile(customToolNamePattern)
+
+// checkCustomToolName holds a request's custom tool name to its bound, the
+// length refused first (2026-10-24 tool-name-page-tokens idx 1–15; #987).
+// Agent create and update answer the length and an empty name at the bare
+// tools.N.name (idx 2, 8, 9), and the class under prefix, as the reserved
+// prefix is. The session routes answer the length in their override words
+// under prefix (idx 10, 13); there an empty name fails the class, which needs
+// one character. The class and the empty name are recorded on agent create
+// alone. The length counts characters, as capRunes does. A stored tools[] is
+// never parsed again, so an agent stored over the bound before #987 still
+// resolves.
+func checkCustomToolName(name string, i int, agentRoute bool, prefix string) error {
+	if customToolNameRE.MatchString(name) {
+		return nil
+	}
+	path := fmt.Sprintf("%stools.%d.custom.name", prefix, i)
+	if agentRoute {
+		bare := fmt.Sprintf("tools.%d.name", i)
+		if err := capRunes(bare, name, maxCustomToolNameRunes); err != nil {
+			return err
+		}
+		if name == "" {
+			return errInvalid("%s: minimum string length is 1", bare)
+		}
+	} else if err := capOverrideRunes(path, name, maxCustomToolNameRunes); err != nil {
+		return err
+	}
+	return errInvalid("%s: does not match regex pattern `%s`", path, customToolNamePattern)
 }
 
 // parseMCPServers validates mcp_servers[]: only {type:"url", name, url}, the
@@ -627,9 +676,11 @@ func parseMCPServers(raw json.RawMessage, prefix string, capName func(path, val 
 // (checked against anthropic-sdk-go v1.70.1 — betaagent.go
 // BetaManagedAgentsURLMCPServerParams.Name), refused past it on agent create
 // in capRunes' words (2026-10-22 mcp-name-ceiling `server256.agent.create`;
-// #980). The other routes are not recorded: a session create's override takes
-// capOverrideRunes' words, the ones its validator was recorded answering a
-// length in, and the two update routes take the create words. Like the
+// #980). The other routes are not recorded for it, so each answers as it was
+// recorded answering a custom tool name's length (2026-10-24
+// tool-name-page-tokens idx 9, 10, 13; #987): agent update in the create
+// words, bare, and the two session routes in capOverrideRunes' words under
+// their own path. Like the
 // agent's other string bounds it binds what a request supplies, never a
 // stored spec.
 const maxMCPServerNameRunes = 255
@@ -671,8 +722,9 @@ const (
 
 // capRunes refuses a request-supplied string of more than limit code points,
 // in the reference's words (2026-09-02 batch2 `agent.create.system-100001-ascii`,
-// #540). path is the field's path as the route names it: the bare key on
-// create, opened by agentUpdatePath on update.
+// #540). path is the field's bare path on create and update alike: the
+// reference's update route was recorded giving this sentence without its
+// "agent." (2026-10-24 tool-name-page-tokens idx 9; #987).
 func capRunes(path, val string, limit int) error {
 	if utf8.RuneCountInString(val) > limit {
 		return errInvalid("%s: maximum string length is %d", path, limit)

@@ -1225,13 +1225,19 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		for key, val := range patch {
 			switch key {
 			case "tools":
-				items, err := parseTools(val, "agent.") // the field's path in this body
+				// The path the reference was recorded naming a custom tool's
+				// name under on this route (2026-10-24 tool-name-page-tokens
+				// idx 13; #987).
+				items, err := parseTools(val, "session.agent.config.")
 				if err != nil {
 					return nil, err
 				}
 				agent.Tools = items
 			case "mcp_servers":
-				items, err := parseMCPServers(val, "agent.", capRunes)
+				// The path and words this route was recorded refusing a
+				// custom tool name's length in (idx 13 above); for the
+				// server name an inference (#987).
+				items, err := parseMCPServers(val, "session.agent.config.", capOverrideRunes)
 				if err != nil {
 					return nil, err
 				}

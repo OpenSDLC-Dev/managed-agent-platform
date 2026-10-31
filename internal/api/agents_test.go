@@ -195,8 +195,9 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 // accepted, 256 refused in these words (managed-agents-wire-recordings
 // 2026-10-22-mcp-name-ceiling/setup.json idx 5 `server255.agent.create`, idx 58
 // `server256.agent.create`; #980). Every route that takes mcp_servers[] from a
-// request refuses it, each path opened as that route opens it (unrecorded;
-// docs/DIVERGENCES.md).
+// request refuses it, in the words and path that route was recorded refusing a
+// custom tool name's length in (2026-10-24-tool-name-page-tokens setup.json
+// idx 9, 10, 13; #987) — for the server name an inference (docs/DIVERGENCES.md).
 func TestAgentMCPServerNameIsCapped(t *testing.T) {
 	s := newTestServer(t)
 	server := func(name string) map[string]any {
@@ -213,7 +214,7 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 
 	id := createAgent(t, s, agentBody(nil))["id"].(string)
 	wantUpdateRejected(t, s, id, map[string]any{"mcp_servers": []any{server("docs"), long}},
-		"agent.mcp_servers.1.name: maximum string length is 255")
+		"mcp_servers.1.name: maximum string length is 255")
 
 	agentID, envID := fixture(t, s)
 	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
@@ -224,7 +225,7 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"mcp_servers": []any{long}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		"agent.mcp_servers.0.name: maximum string length is 255")
+		"session.agent.config.mcp_servers.0.name: must be at most 255 characters")
 }
 
 // A custom tool cannot take a name in the frame an MCP tool is offered under,
@@ -256,9 +257,11 @@ func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
 	}
 
 	// Both session routes take tools[] from the request too, so both refuse,
-	// each path opened as that route opens it (unrecorded; docs/
-	// DIVERGENCES.md): a create's tool override and a mid-session agent.tools
-	// update. The refused update leaves the session's agent as it was.
+	// each path opened as that route was recorded opening a custom tool's name
+	// (2026-10-24 tool-name-page-tokens idx 10 and 13; this refusal itself is
+	// unrecorded there, docs/DIVERGENCES.md): a create's tool override and a
+	// mid-session agent.tools update. The refused update leaves the session's
+	// agent as it was.
 	agentID, envID := fixture(t, s)
 	status, res = s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
 		"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool("mcp__docs__search")}}})
@@ -269,7 +272,7 @@ func TestAgentCustomToolMCPPrefixIsReserved(t *testing.T) {
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"tools": []any{customTool("mine"), customTool("mcp__docs__fetch")}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		`agent.tools.1.custom.name: custom tool name "mcp__docs__fetch" uses reserved MCP tool prefix`)
+		`session.agent.config.tools.1.custom.name: custom tool name "mcp__docs__fetch" uses reserved MCP tool prefix`)
 	if _, after := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); !reflect.DeepEqual(after["agent"], before["agent"]) {
 		t.Errorf("refused update changed the session's agent: %v, was %v", after["agent"], before["agent"])
 	}
