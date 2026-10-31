@@ -41,6 +41,24 @@ const (
 	maxRunLimit = 1000
 )
 
+// errPageCursor refuses a page token that does not decode. It is one value so a
+// list the reference words differently can tell it from parsePage's limit
+// refusal (errors.Is) and answer in its own words.
+var errPageCursor = errInvalid("invalid page cursor")
+
+// The reference words a page token a list cannot use list by list, and the
+// words follow no rule (2026-10-24 tool-name-page-tokens setup.json; #983). A
+// list recorded with its own words for another list's token gives them to every
+// cursor kind it does not mint; a list not recorded keeps `invalid page cursor`.
+const (
+	// The memory stores and memories lists, for a token that does not decode.
+	pageTokenInvalid = "invalid page token"
+	// The sessions list and a session's events list, for another list's token.
+	pageTokenOtherEndpoint = "page token is not valid for this endpoint"
+	// The agents list, for another list's token.
+	pageTokenEmptyCursor = "page token contains empty cursor"
+)
+
 // cursor directions: fetch rows after the position (next) or before it (prev).
 const (
 	dirNext = "n"
@@ -129,7 +147,7 @@ func parsePageWith(q url.Values, def, max int) (pageParams, error) {
 		// ("xlsx"), not prefixed ids, and #135's actual invariant is that no
 		// unstorable byte reaches a bind parameter.
 		if c.id != "" && !domain.ID(c.id).Valid() && !storableText(c.id) {
-			return p, errInvalid("invalid page cursor")
+			return p, errPageCursor
 		}
 		p.cur = c
 	}
@@ -166,54 +184,54 @@ func encodeSeqCursor(desc bool, seq int64) string {
 func decodeCursor(s string) (*cursor, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return nil, errInvalid("invalid page cursor")
+		return nil, errPageCursor
 	}
 	parts := strings.Split(string(raw), "|")
 	if len(parts) < 4 || parts[0] != "k1" || (parts[1] != dirNext && parts[1] != dirPrev) {
-		return nil, errInvalid("invalid page cursor")
+		return nil, errPageCursor
 	}
 	switch parts[2] {
 	case "t":
 		if len(parts) != 5 {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		nanos, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil || parts[4] == "" {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		return &cursor{dir: parts[1], t: time.Unix(0, nanos).UTC(), id: parts[4]}, nil
 	case "v":
 		if len(parts) != 4 {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		version, err := strconv.ParseInt(parts[3], 10, 64)
 		if err != nil || version < 1 {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		return &cursor{dir: parts[1], versioned: true, version: version}, nil
 	case "m":
 		if len(parts) != 4 {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		path, err := base64.RawURLEncoding.DecodeString(parts[3])
 		// storableText here rather than in parsePageWith, which guards the id
 		// field: a crafted cursor carrying an unstorable byte would otherwise
 		// bind into the keyset comparison as a 500 (#135).
 		if err != nil || len(path) == 0 || !storableText(string(path)) {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		return &cursor{dir: parts[1], pathKeyed: true, path: string(path)}, nil
 	case "s":
 		if len(parts) != 5 || (parts[3] != "a" && parts[3] != "d") {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		seq, err := strconv.ParseInt(parts[4], 10, 64)
 		if err != nil || seq < 1 {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errPageCursor
 		}
 		return &cursor{dir: parts[1], seqKeyed: true, seqDesc: parts[3] == "d", seq: seq}, nil
 	default:
-		return nil, errInvalid("invalid page cursor")
+		return nil, errPageCursor
 	}
 }
 

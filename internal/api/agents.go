@@ -544,9 +544,11 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
 	if page.cur != nil {
-		// Unidirectional list: only forward time cursors are valid here.
+		// Unidirectional list: only forward time cursors are valid here. Any
+		// other is another list's, in the reference's words for one (2026-10-24
+		// tool-name-page-tokens idx 54).
 		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+			return nil, errInvalid(pageTokenEmptyCursor)
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))

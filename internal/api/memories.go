@@ -695,9 +695,9 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 
 // memoryCursorMismatch is the reference's answer to a cursor from the
 // memories list's other depth (2026-10-22 memory-list-order
-// `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979). Here every token the
-// list decodes but cannot use takes it; one that does not decode keeps
-// parsePage's words, and the other lists keep theirs (#983).
+// `cursor.depth-to-flat`, `cursor.flat-to-depth`; #979), and the memory stores
+// list's to another list's token (2026-10-24 tool-name-page-tokens idx 42;
+// #983). Here every token either list decodes but cannot use takes it.
 const memoryCursorMismatch = "page token does not match this request's parameters or API version; restart pagination from the first page"
 
 func (s *server) listMemories(r *http.Request) (any, error) {
@@ -725,6 +725,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		}
 	}
 	page, err := parsePage(q)
+	if errors.Is(err, errPageCursor) {
+		return nil, errInvalid(pageTokenInvalid)
+	}
 	if err != nil {
 		return nil, err
 	}

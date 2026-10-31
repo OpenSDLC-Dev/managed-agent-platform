@@ -796,8 +796,9 @@ func TestMemoryList(t *testing.T) {
 		"depth=2":    "depth must be 0 or 1 when provided", "depth=all": "depth must be 0 or 1 when provided",
 		"depth=0": depthZero, "depth=-1": depthZero, "depth=-99999999999999999999": depthZero,
 		"depth=99999999999999999999": "depth must be 0 or 1 when provided",
-		// A token that does not decode keeps this platform's words (#983).
-		"page=@@@":                "invalid page cursor",
+		// A token that does not decode takes the reference's words
+		// (2026-10-24 tool-name-page-tokens idx 47–48; #983).
+		"page=@@@":                "invalid page token",
 		"path_prefix=%2F&depth=0": depthZero, "path_prefix=%2Fx%2F&depth=0": depthZero,
 		"path_prefix=%2F&depth=-1": depthZero, "path_prefix=%2Fx%2F&depth=-1": depthZero,
 		"path_prefix=": emptyPrefix, "path_prefix=&depth=0": emptyPrefix,
