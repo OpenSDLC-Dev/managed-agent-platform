@@ -57,16 +57,19 @@ func renderAgent(id, name string, version int64, spec agentSpec, metadata map[st
 // ("Failed to parse request: agent.model.effort: …", 2026-09-12 batch1
 // `rec91.model.update.effort-bogus`; "… agent.tools[0].configs[0]…",
 // `rec91.web.config.fetch-empty`) and its schema layer ("agent.tools.0.…",
-// `rec91.web.config.fetch-65`). Its semantic layer ("Agent has invalid
-// configuration: …", "invalid metadata: …", "`inference_geo`: …") names no path
-// on either route (#540).
+// `rec91.web.config.fetch-65`). Its length sentence ("tools.0.name: maximum
+// string length is 128", 2026-10-24 tool-name-page-tokens idx 9; #987) names
+// the bare path on both routes, so capRunes takes no prefix. Its semantic layer
+// ("Agent has invalid configuration: …", "invalid metadata: …",
+// "`inference_geo`: …") names no path on either route (#540).
 const agentUpdatePath = "agent."
 
 // parseAgentSpecFields reads the spec-shaped fields shared by create and
 // update bodies into spec, tracking which keys were present. `multiagent` is
 // not read here: its resolution needs the write transaction (resolveRoster),
 // so create/update handle it beside their INSERT/UPDATE. prefix opens every
-// field path a refusal names: "" on create, agentUpdatePath on update.
+// field path a refusal names but a length's (capRunes): "" on create,
+// agentUpdatePath on update.
 func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefix string) error {
 	if raw, ok := obj["model"]; ok {
 		if isNull(raw) {
@@ -106,7 +109,7 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefi
 		if set {
 			if null {
 				val = ""
-			} else if err := capRunes(prefix+f.key, val, f.limit); err != nil {
+			} else if err := capRunes(f.key, val, f.limit); err != nil {
 				return err
 			}
 			*f.dst = val
@@ -120,7 +123,7 @@ func parseAgentSpecFields(obj map[string]json.RawMessage, spec *agentSpec, prefi
 		spec.Tools = items
 	}
 	if raw, ok := obj["mcp_servers"]; ok {
-		items, err := parseMCPServers(raw, prefix, capRunes)
+		items, err := parseMCPServers(raw, "", capRunes)
 		if err != nil {
 			return err
 		}
@@ -446,7 +449,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		if null || newName == "" {
 			return nil, errInvalid("name cannot be cleared")
 		}
-		if err := capRunes(agentUpdatePath+"name", newName, maxAgentNameRunes); err != nil {
+		if err := capRunes("name", newName, maxAgentNameRunes); err != nil {
 			return nil, err
 		}
 		name = newName

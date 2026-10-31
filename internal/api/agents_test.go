@@ -195,8 +195,9 @@ func TestAgentToolConfigRefusalsAreTheReferences(t *testing.T) {
 // accepted, 256 refused in these words (managed-agents-wire-recordings
 // 2026-10-22-mcp-name-ceiling/setup.json idx 5 `server255.agent.create`, idx 58
 // `server256.agent.create`; #980). Every route that takes mcp_servers[] from a
-// request refuses it, each path opened as that route opens it (unrecorded;
-// docs/DIVERGENCES.md).
+// request refuses it, in the words and path that route was recorded refusing a
+// custom tool name's length in (2026-10-24-tool-name-page-tokens setup.json
+// idx 9, 10, 13; #987) — for the server name an inference (docs/DIVERGENCES.md).
 func TestAgentMCPServerNameIsCapped(t *testing.T) {
 	s := newTestServer(t)
 	server := func(name string) map[string]any {
@@ -213,7 +214,7 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 
 	id := createAgent(t, s, agentBody(nil))["id"].(string)
 	wantUpdateRejected(t, s, id, map[string]any{"mcp_servers": []any{server("docs"), long}},
-		"agent.mcp_servers.1.name: maximum string length is 255")
+		"mcp_servers.1.name: maximum string length is 255")
 
 	agentID, envID := fixture(t, s)
 	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
@@ -224,7 +225,7 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"mcp_servers": []any{long}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		"agent.mcp_servers.0.name: maximum string length is 255")
+		"session.agent.config.mcp_servers.0.name: must be at most 255 characters")
 }
 
 // A custom tool cannot take a name in the frame an MCP tool is offered under,

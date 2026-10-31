@@ -1234,7 +1234,10 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 				}
 				agent.Tools = items
 			case "mcp_servers":
-				items, err := parseMCPServers(val, "agent.", capRunes)
+				// The path and words this route was recorded refusing a
+				// custom tool name's length in (idx 13 above); for the
+				// server name an inference (#987).
+				items, err := parseMCPServers(val, "session.agent.config.", capOverrideRunes)
 				if err != nil {
 					return nil, err
 				}

@@ -107,7 +107,8 @@ func wantUpdateRejected(t *testing.T, s *tserver, id string, body map[string]any
 // (managed-agents-wire-recordings 2026-10-24-tool-name-page-tokens setup.json
 // idx 1–15; #987). Agent create and update answer the length at
 // tools.N.name, ahead of the class and the reserved prefix; the session routes
-// answer it under their own path, in their own words.
+// answer it under their own path, in their own words. The words not recorded
+// on a route are docs/DIVERGENCES.md's inferences.
 func TestCustomToolNameBound(t *testing.T) {
 	s := newTestServer(t)
 	const class = "does not match regex pattern `^[a-zA-Z0-9_-]{1,128}$`"
@@ -142,31 +143,44 @@ func TestCustomToolNameBound(t *testing.T) {
 	wantUpdateRejected(t, s, id, tools("my tool"), "agent.tools.0.custom.name: "+class)
 
 	// A session create's override (idx 10–11) and an idle session's
-	// agent.tools update (idx 13). An empty name fails the class there.
+	// agent.tools update (idx 13). An empty name fails the class there. A
+	// refused create adds no session, and a refused update leaves the
+	// session's agent as it was.
 	agentID, envID := fixture(t, s)
 	override := func(name string) map[string]any {
 		return map[string]any{"environment_id": envID, "agent": map[string]any{
 			"type": "agent_with_overrides", "id": agentID, "tools": []any{customTool(name)}}}
 	}
 	createSession(t, s, override(strings.Repeat("t", 128)))
-	const overridePath = "agent.agent_with_overrides.config.tools.0.custom.name: "
-	for name, msg := range map[string]string{
-		long:      overridePath + "must be at most 128 characters",
-		"my tool": overridePath + class,
-		"":        overridePath + class,
-	} {
+	sessions := func() int {
+		_, res := s.do(http.MethodGet, "/v1/sessions", nil)
+		return len(res["data"].([]any))
+	}
+	refused := func(path string) map[string]string {
+		return map[string]string{
+			long:      path + "must be at most 128 characters",
+			"my tool": path + class,
+			"my.tool": path + class,
+			"tööl":    path + class,
+			"":        path + class,
+		}
+	}
+	before := sessions()
+	for name, msg := range refused("agent.agent_with_overrides.config.tools.0.custom.name: ") {
 		status, res := s.do(http.MethodPost, "/v1/sessions", override(name))
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
 	}
+	if after := sessions(); after != before {
+		t.Errorf("refused session creates: %d sessions, want %d", after, before)
+	}
 	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
-	const updatePath = "session.agent.config.tools.0.custom.name: "
-	for name, msg := range map[string]string{
-		long:      updatePath + "must be at most 128 characters",
-		"my tool": updatePath + class,
-		"":        updatePath + class,
-	} {
+	_, stored := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	for name, msg := range refused("session.agent.config.tools.0.custom.name: ") {
 		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"agent": tools(name)})
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+	}
+	if _, now := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); !reflect.DeepEqual(now["agent"], stored["agent"]) {
+		t.Errorf("refused session updates changed its agent: %v, was %v", now["agent"], stored["agent"])
 	}
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
 		map[string]any{"agent": tools(strings.Repeat("t", 128))}); status != http.StatusOK {
@@ -195,11 +209,11 @@ func TestAgentSystemCap(t *testing.T) {
 	createAgent(t, s, agentBody(map[string]any{"system": strings.Repeat("😀", 50_001)}))
 
 	// Update is bound on the system it supplies — the spec's maxLength; the
-	// reference's update was not probed, so its sentence is create's, the path
-	// opened by the "agent." its update paths were recorded carrying
-	// (2026-09-12/batch1.json idx 7 rec91.model.update.effort-bogus).
+	// reference's update was not probed for it, so its sentence is the one
+	// that route was recorded refusing a custom tool name's length in, bare
+	// (2026-10-24-tool-name-page-tokens setup.json idx 9; #987).
 	wantUpdateRejected(t, s, id, map[string]any{"system": strings.Repeat("a", 100_001)},
-		"agent.system: maximum string length is 100000")
+		"system: maximum string length is 100000")
 	if status, body := s.do(http.MethodPost, "/v1/agents/"+id,
 		map[string]any{"system": strings.Repeat("b", 100_000)}); status != http.StatusOK {
 		t.Fatalf("update at the cap: status %d (body %v)", status, body)
@@ -220,7 +234,7 @@ func TestAgentFieldCapsNameOneFieldEveryTime(t *testing.T) {
 	for range 20 {
 		status, res := s.do(http.MethodPost, "/v1/agents", agentBody(both))
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", "description: maximum string length is 2048")
-		wantUpdateRejected(t, s, id, both, "agent.description: maximum string length is 2048")
+		wantUpdateRejected(t, s, id, both, "description: maximum string length is 2048")
 	}
 }
 
@@ -235,9 +249,9 @@ func TestAgentNameAndDescriptionCaps(t *testing.T) {
 		"name": strings.Repeat("界", 256), "description": strings.Repeat("界", 2048)}))["id"].(string)
 
 	wantUpdateRejected(t, s, id, map[string]any{"name": strings.Repeat("n", 257)},
-		"agent.name: maximum string length is 256")
+		"name: maximum string length is 256")
 	wantUpdateRejected(t, s, id, map[string]any{"description": strings.Repeat("d", 2049)},
-		"agent.description: maximum string length is 2048")
+		"description: maximum string length is 2048")
 }
 
 // An agent stored over all three string bounds — written before #665 enforced
@@ -335,9 +349,9 @@ func TestStoredOverCapAgentGrandfathered(t *testing.T) {
 	// ...while one that supplies an over-bound value is refused, even the very
 	// value stored — and leaves the planted values, asserted just above, whole.
 	for field, msg := range map[string]string{
-		"name":        "agent.name: maximum string length is 256",
-		"description": "agent.description: maximum string length is 2048",
-		"system":      "agent.system: maximum string length is 100000",
+		"name":        "name: maximum string length is 256",
+		"description": "description: maximum string length is 2048",
+		"system":      "system: maximum string length is 100000",
 	} {
 		wantUpdateRejected(t, s, legacy, map[string]any{field: planted[field]}, msg)
 	}
