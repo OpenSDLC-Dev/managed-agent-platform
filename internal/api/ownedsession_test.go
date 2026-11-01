@@ -53,6 +53,22 @@ func wantDreamHold(t *testing.T, status int, body map[string]any, dreamID string
 	}
 }
 
+// The running refusal advises an interrupt, and a session a dream owns refuses
+// that too, so the hold answers first (#312).
+func TestDreamHoldAnswersAnAgentPatchOnARunningSession(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	dreamID := openDream(t, s, sid)
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET status = 'running' WHERE id = $1`, sid); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": map[string]any{"tools": []any{}}})
+	wantDreamHold(t, status, body, dreamID)
+}
+
 func TestDreamOwnedSessionIsReadOnly(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)

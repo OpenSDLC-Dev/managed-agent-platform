@@ -1444,10 +1444,13 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 // metadata (2026-10-18-session-update-running); rescheduling takes all four
 // (2026-10-31-mcp-listing); an unarchived terminated session refuses all four
 // (2026-10-18-session-update-terminal). Each refusal is the reference's status
-// and words, and changes nothing.
+// and words, and changes nothing. Rescheduling and terminated are forged rows:
+// nothing leaves a session row at either across a commit today.
 func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 	s := newTestServer(t)
-	agentID, envID := fixture(t, s)
+	// The toolset gives a refused patch something to change, so the comparison
+	// in refuses can see one that slipped through.
+	agentID, envID := readableFixture(t, s)
 	inStatus := func(status string) string {
 		t.Helper()
 		id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
@@ -1462,6 +1465,10 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		// Refused on presence: the fixture declares no servers, so this
 		// patch would change nothing, and the reference refuses it anyway.
 		{"agent": map[string]any{"mcp_servers": []any{}}},
+		{"agent": map[string]any{
+			"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
+			"mcp_servers": []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}},
+		}},
 	}
 	const title = "renamed"
 	propertyPatches := []map[string]any{
@@ -1482,7 +1489,8 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 			}
 		}
 	}
-	accepts := func(id string, patches []map[string]any) {
+	// applies sends each patch and answers the session they leave behind.
+	applies := func(id string, patches []map[string]any) map[string]any {
 		t.Helper()
 		for _, p := range patches {
 			if status, body := s.do(http.MethodPost, "/v1/sessions/"+id, p); status != http.StatusOK {
@@ -1496,15 +1504,17 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		if md, _ := got["metadata"].(map[string]any); md["probe"] != "accepted" {
 			t.Errorf("metadata = %v, want probe=accepted", got["metadata"])
 		}
+		return got
 	}
+	all := append(slices.Clone(agentPatches), propertyPatches...)
 
 	const whileRunning = "Cannot update agent while session is running. Send a `user.interrupt` event first."
 	running := inStatus(string(domain.SessionRunning))
 	refuses(running, agentPatches, whileRunning)
-	// Past the recordings, which sent only these two patches, each alone: any
-	// other agent value is an agent update too, refused before its own checks
-	// run, and it takes the fields beside it down with it (docs/DIVERGENCES.md,
-	// the session-update edges under INFERRED).
+	// Past the recordings, which sent each of these fields alone: any other
+	// agent value is an agent update too, refused before its own checks run, and
+	// it takes the fields beside it down with it (docs/DIVERGENCES.md, the
+	// session-update edges under INFERRED).
 	refuses(running, []map[string]any{
 		{"agent": map[string]any{}},
 		{"agent": "raw"},
@@ -1512,22 +1522,38 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		{"title": title, "agent": map[string]any{"tools": []any{}}},
 	}, whileRunning)
 	// JSON null is no patch at all, here as on an idle session.
-	accepts(running, append([]map[string]any{{"agent": nil}}, propertyPatches...))
-
-	accepts(inStatus(string(domain.SessionRescheduling)), append(agentPatches, propertyPatches...))
-	accepts(inStatus(string(domain.SessionIdle)), append(agentPatches, propertyPatches...))
-
-	refuses(inStatus(string(domain.SessionTerminated)), append(agentPatches, propertyPatches...),
-		"Cannot modify archived session")
-
-	// An archived session keeps this platform's own words: it renders
-	// terminated, but its stored status is whatever it settled at, and no
-	// recording updates one.
-	archived := inStatus(string(domain.SessionIdle))
-	if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
-		t.Fatalf("archive: %d %v", status, body)
+	_, before := s.do(http.MethodGet, "/v1/sessions/"+running, nil)
+	got := applies(running, append([]map[string]any{{"agent": nil}}, propertyPatches...))
+	if !reflect.DeepEqual(got["agent"], before["agent"]) {
+		t.Errorf("agent after title and metadata = %v, want %v", got["agent"], before["agent"])
 	}
-	refuses(archived, append(agentPatches, propertyPatches...), "session "+archived+" is archived")
+
+	for _, status := range []domain.SessionStatus{domain.SessionRescheduling, domain.SessionIdle} {
+		a, _ := applies(inStatus(string(status)), all)["agent"].(map[string]any)
+		if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got, []string{"mcp_toolset"}) {
+			t.Errorf("%s: agent.tools = %v, want the patched mcp_toolset", status, a["tools"])
+		}
+		servers, _ := a["mcp_servers"].([]any)
+		if len(servers) != 1 || servers[0].(map[string]any)["name"] != "docs" {
+			t.Errorf("%s: agent.mcp_servers = %v, want the patched server", status, a["mcp_servers"])
+		}
+	}
+
+	// Past the recordings again: a terminated session refuses a body that would
+	// change nothing as well.
+	const ended = "Cannot modify archived session"
+	refuses(inStatus(string(domain.SessionTerminated)),
+		append(slices.Clone(all), map[string]any{}, map[string]any{"agent": nil}), ended)
+
+	// An archived session renders terminated, so it answers the same whatever its
+	// stored status is. No recording updates one.
+	for _, stored := range []domain.SessionStatus{domain.SessionIdle, domain.SessionTerminated} {
+		archived := inStatus(string(stored))
+		if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
+			t.Fatalf("archive: %d %v", status, body)
+		}
+		refuses(archived, all, ended)
+	}
 }
 
 // The guard's row lock is what closes the check-then-act window: a flip to

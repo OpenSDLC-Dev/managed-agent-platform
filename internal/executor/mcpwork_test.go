@@ -700,8 +700,9 @@ func TestASchemaCarryingNULCostsItsToolAndNotTheListing(t *testing.T) {
 
 // TestSettlementSkipsAServerTheAgentNoLongerDeclares pins the settlement's own
 // re-read. The dials happen outside the session row lock, so a mid-session
-// agent patch can land while they are in flight — and `mcp_servers` is one of
-// only two agent fields a running session may patch. A patch that removes or
+// agent patch can land while they are in flight: a running session refuses one
+// (#312), but a thread-scoped interrupt idles it with this item still live, and
+// a redirect runs it again before the pass ends. A patch that removes or
 // repoints a server finds no row to invalidate yet, so without this check the
 // pass would write one behind it for a server the agent no longer declares,
 // which nothing revisits: discovery only ever walks the declared array.

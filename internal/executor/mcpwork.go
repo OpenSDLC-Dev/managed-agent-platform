@@ -946,12 +946,14 @@ func egressRefusal(cfg domain.EnvironmentConfig, host string) string {
 //
 // It settles under the session row lock, and re-reads what the agent declares
 // from inside it, because a mid-session agent patch can land while the dials
-// are in flight. Not while the session runs, which refuses one (#312) — but an
-// interrupt settles the session idle on receipt, with this pass still
-// dialling, and a rescheduling session takes the patch too. Without the lock, a
-// patch that removes a server between the pass's read and this write finds no
-// row to invalidate and then has one written behind it, for a server the agent
-// no longer declares and that nothing will ever revisit.
+// are in flight. A running session refuses one (#312), and a session-wide
+// interrupt that idles it first also stops this item, so its settlement fails on
+// the lost lease. A thread-scoped interrupt leaves the item live
+// (queue.CancelThread), so the session can settle idle, take the patch, and be
+// running again before this pass ends. Without the lock, a patch that removes a
+// server between the pass's read and this write finds no row to invalidate and
+// then has one written behind it, for a server the agent no longer declares and
+// that nothing will ever revisit.
 // With it, both orders are correct: a patch that commits first is reflected in
 // what is read here, and one that commits after runs its own delete over what
 // this wrote.

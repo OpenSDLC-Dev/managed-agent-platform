@@ -1182,26 +1182,30 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if row.archivedAt != nil {
-		return nil, errInvalid("session %s is archived", id)
-	}
-	// What else the session's status allows is the reference's recorded rule,
-	// field by field, rather than the "must be idle" its guide states (#312):
-	// an unarchived terminated session takes no update at all, in the archived
-	// words it was recorded answering with (2026-10-18-session-update-terminal),
-	// and a running one refuses an agent patch — on presence, a no-op one too —
-	// while still taking title and metadata (2026-10-18-session-update-running).
-	// Rescheduling takes all four (2026-10-31-mcp-listing). No settlement stores
-	// terminated on a session row today; #577's failed model request is the one
-	// that will. The row lock taken above holds the status still until commit.
-	if row.status == string(domain.SessionTerminated) {
+	// What an update may do follows the session's status, by the rule the
+	// reference was recorded applying rather than the "must be idle" its guide
+	// states (#312). The row lock taken above holds the status still until
+	// commit.
+	//
+	// A terminated session takes no update, in the words it was recorded
+	// answering with although it was not archived
+	// (2026-10-18-session-update-terminal). An archived session renders
+	// terminated, so it answers the same; no recording updates one. No settlement
+	// stores terminated on a session row today; #577's failed model request is
+	// the one that will.
+	if row.archivedAt != nil || row.status == string(domain.SessionTerminated) {
 		return nil, errInvalid("Cannot modify archived session")
-	}
-	if raw, ok := obj["agent"]; ok && !isNull(raw) && row.status == string(domain.SessionRunning) {
-		return nil, errInvalid("Cannot update agent while session is running. Send a `user.interrupt` event first.")
 	}
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
+	}
+	// A running session refuses an agent patch — on presence, a no-op one too —
+	// and still takes title and metadata (2026-10-18-session-update-running).
+	// After the dream hold, because this sentence advises an interrupt, which a
+	// session a dream owns refuses as well. Rescheduling takes all four
+	// (2026-10-31-mcp-listing), so it has no arm here.
+	if raw, ok := obj["agent"]; ok && !isNull(raw) && row.status == string(domain.SessionRunning) {
+		return nil, errInvalid("Cannot update agent while session is running. Send a `user.interrupt` event first.")
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
