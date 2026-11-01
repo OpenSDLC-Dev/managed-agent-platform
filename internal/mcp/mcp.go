@@ -17,8 +17,12 @@
 // `server/discover` round trip (two, where the SDK retries it after an
 // unsupported-version answer), and against an older one that discover plus the
 // legacy `initialize` and `notifications/initialized`, three requests, before
-// Connect returns. What per-work-item connections cost is that handshake; what
-// they buy is a client with no state to lose.
+// Connect returns. A server that hosts only the deprecated HTTP+SSE transport
+// costs most: those first two POSTs refused, then a GET whose stream carries
+// the legacy `initialize` and `notifications/initialized` — on every
+// connection, since nothing here remembers that a server needed the fallback.
+// What per-work-item connections cost is that handshake; what they buy is a
+// client with no state to lose.
 //
 // The SDK is a dependency of this package alone. Its types do not appear in the
 // wrapper's surface — the platform's domain model is Anthropic-native
@@ -387,12 +391,15 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
 	})
-	if connErr != nil && legacy.fallback() {
+	// Not on a context that has already ended: the fallback would fail on that
+	// alone, and joining the context's error to a server's real refusal would
+	// make the refusal read as the caller running out of time.
+	if legacy.settle() && connErr != nil && ctx.Err() == nil {
 		var legacyErr error
-		session, legacyErr = connectOver(ctx, client, &sdk.SSEClientTransport{
+		session, legacyErr = connectOver(ctx, client, legacyTransport{&sdk.SSEClientTransport{
 			Endpoint:   cfg.URL,
 			HTTPClient: withSameOrigin(httpClient, endpoint),
-		})
+		}})
 		if legacyErr == nil {
 			connErr = nil
 		} else {
@@ -1215,6 +1222,14 @@ func sameHost(a, b string) bool {
 	return egress.CanonicalHost(ah) == egress.CanonicalHost(bh)
 }
 
+// sameOrigin reports whether u is on the origin a scheme and a host name: the
+// scheme as written, the host by sameHost. bearerTransport scopes a credential
+// with it, and originTransport the deprecated transport's messages, so the two
+// cannot drift apart.
+func sameOrigin(u *url.URL, scheme, host string) bool {
+	return u.Scheme == scheme && sameHost(u.Host, host)
+}
+
 // splitPort separates an authority's port from its host, leaving a host that
 // carries no port — a bare name, or a bracketed or scoped IPv6 literal — whole.
 // IDNA refuses a string holding a colon, so the split has to happen before the
@@ -1241,11 +1256,12 @@ type bearerTransport struct {
 }
 
 // RoundTrip needs no nil-base fallback, unlike limitedTransport's: withBearer is
-// only ever applied to the client withResponseLimit has just returned, whose
-// Transport is the limitedTransport it set. A nil base here would be a
-// construction this package does not make.
+// only ever applied on top of the client withResponseLimit returned, whose
+// Transport this package set, and the wrappers Connect stacks between them each
+// keep a base. A nil base here would be a construction this package does not
+// make.
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme != t.scheme || !sameHost(req.URL.Host, t.host) {
+	if !sameOrigin(req.URL, t.scheme, t.host) {
 		return t.base.RoundTrip(req)
 	}
 	// RoundTrippers must not modify the request they are given.

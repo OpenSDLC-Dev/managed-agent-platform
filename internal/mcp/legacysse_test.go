@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/mcp"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -35,8 +36,9 @@ type legacyRequest struct {
 // The transport is the SDK's own handler, but the SDK's server is a modern one
 // and would answer `server/discover` on the stream, which a 2024-11-05 server
 // does not know. So the fixture refuses that method as one would, with "method
-// not found", and the handshake goes through `initialize` as it did in the
-// recording.
+// not found". The client never sends it there, and the suite asserts as much;
+// refusing it keeps the fixture a faithful 2024-11-05 server for a client that
+// would.
 //
 // probe decides how the server answers the modern client's first POSTs — the
 // ones carrying no sessionid. Nil leaves them to the SDK handler, which answers
@@ -115,6 +117,18 @@ func TestConnectFallsBackToTheDeprecatedSSETransport(t *testing.T) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			_, _ = w.Write([]byte(`{"error":"method not allowed"}`))
 		}},
+		// Two shapes a web framework's own error page takes, each a JSON-RPC
+		// error but for one field: no version, and no code.
+		{name: "404 with an error object but no JSON-RPC version", probe: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":404,"message":"Not Found"}}`))
+		}},
+		{name: "400 with a JSON-RPC error that has no code", probe: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":null,"error":{"message":"no route"}}`))
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
@@ -161,9 +175,9 @@ func TestConnectFallsBackToTheDeprecatedSSETransport(t *testing.T) {
 			if gets != 1 {
 				t.Errorf("server saw %d GET streams, want the one the fallback opens: %+v", gets, got)
 			}
-			// The handshake on the stream: the SDK's discovery probe, refused
-			// as a 2024-11-05 server refuses it, then the legacy initialize.
-			want := []string{"server/discover", "initialize", "notifications/initialized", "tools/list", "tools/call"}
+			// The stream opens with initialize, as the reference's did: the
+			// SDK's server/discover probe is never sent over it.
+			want := []string{"initialize", "notifications/initialized", "tools/list", "tools/call"}
 			if strings.Join(stream, ",") != strings.Join(want, ",") {
 				t.Errorf("messages on the stream = %v, want %v", stream, want)
 			}
@@ -241,11 +255,11 @@ func TestConnectDoesNotFallBackOnAModernJSONRPCError(t *testing.T) {
 	}
 }
 
-// A JSON-RPC error is one whatever its id. JSON-RPC 2.0 answers a request whose
-// id could not be read with `"id": null`, and the spec lets a refused POST carry
-// an error response with no id at all — the shape a server rejecting a header
-// before it reads the body produces.
-func TestAJSONRPCErrorWithoutAnIDIsStillOne(t *testing.T) {
+// A JSON-RPC error is one whatever its id, and however its code is written.
+// JSON-RPC 2.0 answers a request whose id could not be read with `"id": null`,
+// and the spec lets a refused POST carry an error response with no id at all —
+// the shape a server rejecting a header before it reads the body produces.
+func TestALooselyShapedJSONRPCErrorIsStillOne(t *testing.T) {
 	t.Parallel()
 	for _, row := range []struct {
 		name   string
@@ -255,6 +269,7 @@ func TestAJSONRPCErrorWithoutAnIDIsStillOne(t *testing.T) {
 		{"400, null id", http.StatusBadRequest, `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"bad header"}}`},
 		{"400, no id", http.StatusBadRequest, `{"jsonrpc":"2.0","error":{"code":-32600,"message":"bad header"}}`},
 		{"404, null id", http.StatusNotFound, `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`},
+		{"405, code written as a float", http.StatusMethodNotAllowed, `{"jsonrpc":"2.0","id":null,"error":{"code":-32600.0,"message":"bad header"}}`},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
@@ -273,10 +288,12 @@ func TestAJSONRPCErrorWithoutAnIDIsStillOne(t *testing.T) {
 	}
 }
 
-// A JSON-RPC error is one whatever its length. A modern server may carry a long
+// A body too long to judge is not the signal. A modern server may carry a long
 // `data` field, and a decision made on a prefix of it would read the truncated,
-// undecodable bytes as the signal.
-func TestALongJSONRPCErrorIsStillOne(t *testing.T) {
+// undecodable bytes as the signal; one made on the whole of it would hold a
+// body the size of the response budget in memory twice, once here and once in
+// the go-sdk.
+func TestALongJSONRPCErrorIsNotTheSignal(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("x", 100<<10)
 	url, gets := serveCountingStatus(t, http.StatusBadRequest, func(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +357,91 @@ func TestARefusalAfterASuccessfulPOSTDoesNotSignal(t *testing.T) {
 	}
 	if n := gets.Load(); n != 0 {
 		t.Errorf("a refusal after a successful initialize opened %d GET streams, want none: %v", n, err)
+	}
+}
+
+// Once a connection is open the watch reads nothing. A 404 is how a Streamable
+// server ends a session, and the go-sdk reports one without reading its body; a
+// watch still judging would first read that body to its end — here, never.
+func TestAnOpenConnectionsRefusalIsNotRead(t *testing.T) {
+	t.Parallel()
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "modern-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var rpc struct{ Method string }
+		_ = json.Unmarshal(body, &rpc)
+		if rpc.Method != "tools/list" {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, "session gone")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	conn := connect(t, ts.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := conn.ListTools(ctx)
+	if err == nil {
+		t.Fatal("ListTools succeeded on a listing the server refused")
+	}
+	if !errors.Is(err, sdk.ErrSessionMissing) {
+		t.Errorf("err = %v, want the go-sdk's ErrSessionMissing for the 404", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("a refused listing took %v; its body was read", d)
+	}
+}
+
+// cancelOnPOST cancels a context once the nth POST has been answered.
+type cancelOnPOST struct {
+	base   http.RoundTripper
+	n      int32
+	posts  atomic.Int32
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnPOST) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(req)
+	if req.Method == http.MethodPost && c.posts.Add(1) == c.n {
+		c.cancel()
+	}
+	return resp, err
+}
+
+// A context that ended during the handshake gets no fallback. It would fail on
+// the context alone, and the context's error joined to the server's refusal
+// would make the refusal read as the caller running out of time — which the
+// executor reports differently.
+func TestAnEndedContextGetsNoFallback(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}))
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := loopbackClient()
+	client.Transport = &cancelOnPOST{base: client.Transport, n: 2, cancel: cancel}
+
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: client})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("Connect succeeded against a server that refused every request")
+	}
+	if strings.Contains(err.Error(), "HTTP+SSE") {
+		t.Errorf("the fallback ran on a context that had ended: %v", err)
 	}
 }
 
