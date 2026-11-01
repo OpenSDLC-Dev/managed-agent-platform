@@ -27,8 +27,9 @@ import (
 //
 // Replay mapping, v1:
 //   - user.message           → user text/blocks
-//   - system.message         → appended to the system prompt (documented
-//     assumption; the Messages API has one system slot)
+//   - system.message         → appended to the system prompt, on every
+//     model (the reference sends a mid-conversation role:"system" message,
+//     which only some models accept; docs/DIVERGENCES.md)
 //   - agent.message          → assistant text blocks
 //   - agent.thread_message_received → user text block naming the sender
 //   - agent.*tool_use        → assistant tool_use block, id = the EVENT id
