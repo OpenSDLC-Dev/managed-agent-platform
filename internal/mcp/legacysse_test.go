@@ -533,6 +533,39 @@ func TestARefusedLegacyStreamIsARefusedCredential(t *testing.T) {
 	}
 }
 
+// nilBodyRefusal answers every request 405 with a nil Body, as a supplied
+// RoundTripper may: net/http's client reads a nil Body as an empty one.
+type nilBodyRefusal struct{ gets atomic.Int32 }
+
+func (n *nilBodyRefusal) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if req.Method == http.MethodGet {
+		n.gets.Add(1)
+	}
+	return &http.Response{StatusCode: http.StatusMethodNotAllowed, Header: http.Header{}, Request: req}, nil
+}
+
+// A refusal with no body at all is an empty one, which the spec names as the
+// signal: "If the body is empty or is not a recognized modern JSON-RPC error,
+// fall back".
+func TestARefusalWithANilBodyIsAnEmptyOne(t *testing.T) {
+	t.Parallel()
+	rt := &nilBodyRefusal{}
+	conn, err := mcp.Connect(context.Background(), mcp.Config{
+		URL:        "http://legacy.invalid/mcp",
+		HTTPClient: &http.Client{Transport: rt},
+	})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("Connect succeeded against a server that refused every request")
+	}
+	if got := rt.gets.Load(); got != 1 {
+		t.Errorf("GETs = %d, want the one fallback GET an empty refusal signals", got)
+	}
+}
+
 // A refusal whose body never arrives whole is a failure to report, not a reason
 // to make another request: what it would have said is unknown.
 func TestARefusalWhoseBodyCannotBeReadDoesNotSignal(t *testing.T) {

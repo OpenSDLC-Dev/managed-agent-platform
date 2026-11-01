@@ -104,7 +104,9 @@ func (w *legacyWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 // budget refusing it, or the connection dropping, is a failure to report, not a
 // reason to make another request. Nor does one longer than legacySniffBytes.
 // An empty body is the spec's own case for falling back: "If the body is empty
-// or is not a recognized modern JSON-RPC error, fall back".
+// or is not a recognized modern JSON-RPC error, fall back". So is a nil one,
+// which a supplied RoundTripper may return and net/http's client reads as empty
+// (limitedTransport passes it through for the same reason).
 //
 // An error response is recognized by its version and its error code alone,
 // whatever its id. The go-sdk's own decoder will not do here: it refuses a
@@ -114,6 +116,9 @@ func (w *legacyWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 // refused POST carry "a JSON-RPC *error response* that has no `id`" (spec
 // 2026-07-28, transports/streamable-http).
 func notJSONRPCError(resp *http.Response) bool {
+	if resp.Body == nil {
+		return true
+	}
 	head, err := io.ReadAll(io.LimitReader(resp.Body, legacySniffBytes+1))
 	resp.Body = struct {
 		io.Reader
