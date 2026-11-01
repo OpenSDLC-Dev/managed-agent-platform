@@ -387,7 +387,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
 	})
-	if connErr != nil && legacy.signal.Load() {
+	if connErr != nil && legacy.fallback() {
 		var legacyErr error
 		session, legacyErr = connectOver(ctx, client, &sdk.SSEClientTransport{
 			Endpoint:   cfg.URL,

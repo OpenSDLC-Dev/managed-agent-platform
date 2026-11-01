@@ -241,6 +241,76 @@ func TestConnectDoesNotFallBackOnAModernJSONRPCError(t *testing.T) {
 	}
 }
 
+// A JSON-RPC error is one whatever its length. A modern server may carry a long
+// `data` field, and a decision made on a prefix of it would read the truncated,
+// undecodable bytes as the signal.
+func TestALongJSONRPCErrorIsStillOne(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 100<<10)
+	url, gets := serveCountingStatus(t, http.StatusBadRequest, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.ID) == 0 {
+			req.ID = json.RawMessage("null")
+		}
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"unsupported","data":%q}}`, req.ID, long)
+	})
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("Connect succeeded against a server that refused every request")
+	}
+	if n := gets.Load(); n != 0 {
+		t.Errorf("a 100 KiB JSON-RPC error opened %d GET streams, want none", n)
+	}
+}
+
+// A POST answered 2xx settles the question for the connection: the server
+// speaks Streamable HTTP, so a refusal after it — here the initialized
+// notification that follows a successful initialize, refused the way a legacy
+// server refuses a POST — is that server failing, not the signal.
+func TestARefusalAfterASuccessfulPOSTDoesNotSignal(t *testing.T) {
+	t.Parallel()
+	var gets atomic.Int32
+	inner := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "modern-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets.Add(1)
+			http.Error(w, "no stream here", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read", http.StatusInternalServerError)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var rpc struct{ Method string }
+		_ = json.Unmarshal(body, &rpc)
+		switch rpc.Method {
+		case "server/discover":
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		case "notifications/initialized":
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		default:
+			inner.ServeHTTP(w, r)
+		}
+	}))
+	defer ts.Close()
+	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("Connect succeeded against a server that refused the initialized notification")
+	}
+	if n := gets.Load(); n != 0 {
+		t.Errorf("a refusal after a successful initialize opened %d GET streams, want none: %v", n, err)
+	}
+}
+
 // Only the latest POST signals. A refused server/discover is how an older
 // server that hosts the modern endpoint answers too, so when the initialize
 // after it fails for some other reason, that reason is the answer — here a
@@ -359,12 +429,16 @@ func TestARefusalWhoseBodyCannotBeReadDoesNotSignal(t *testing.T) {
 	}
 }
 
-// When both transports fail, the error says so: an operator reading "Not
-// Found" alone would not know the deprecated transport was tried too. It still
-// names the server by scheme and host and nothing more.
+// When both transports fail, the error says so, and carries both failures: an
+// operator reading the stream's refusal alone would not know the POST was
+// refused first. It still names the server by scheme and host and nothing more.
 func TestAFailedFallbackReportsBothAttempts(t *testing.T) {
 	t.Parallel()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Error(w, "no stream for you", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "no MCP here", http.StatusNotFound)
 	}))
 	defer ts.Close()
@@ -379,6 +453,14 @@ func TestAFailedFallbackReportsBothAttempts(t *testing.T) {
 	}
 	if !strings.Contains(msg, "HTTP+SSE") {
 		t.Errorf("the error does not say the deprecated transport was tried: %v", err)
+	}
+	// The go-sdk turns the POST's 404 into ErrSessionMissing, and the GET's
+	// 403 into "Forbidden": one from each attempt.
+	if !errors.Is(err, sdk.ErrSessionMissing) {
+		t.Errorf("the Streamable HTTP attempt's failure was dropped: %v", err)
+	}
+	if !strings.Contains(msg, "Forbidden") {
+		t.Errorf("the HTTP+SSE attempt's failure was dropped: %v", err)
 	}
 	if strings.Contains(msg, "SECRET-QUERY") {
 		t.Errorf("the error quotes the endpoint's query: %v", err)

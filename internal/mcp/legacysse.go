@@ -33,18 +33,27 @@ import (
 //
 // It sits above the response limit, so what it reads is charged to the
 // connection's budget like any other body, and it hands the SDK the same bytes
-// it read. Only a POST's answer counts, and the latest one replaces the one
-// before it: a refused `server/discover` that the legacy `initialize` then gets
-// past is a modern server, not a signal.
+// it read. The whole body is read rather than a prefix: a prefix of a long
+// JSON-RPC error does not decode, and would read as the signal.
+//
+// Only a POST's answer counts, and the latest one replaces the one before it: a
+// refused `server/discover` followed by an `initialize` refused for another
+// reason is not the signal. And a POST answered 2xx ends the question for the
+// connection — "If it succeeds, the client can assume this is a server
+// supporting the new Streamable HTTP transport" — so a POST refused after one,
+// such as the `notifications/initialized` that follows a successful
+// `initialize`, is that server failing, not a sign of the old transport.
 type legacyWatch struct {
-	base   http.RoundTripper
-	signal atomic.Bool
+	base     http.RoundTripper
+	signal   atomic.Bool
+	answered atomic.Bool
 }
 
-// legacySniffBytes bounds how much of a refused POST's body is read to decide
-// whether it is a JSON-RPC error. A modern server's error is a few hundred
-// bytes; a longer body does not decode, so it reads as not one.
-const legacySniffBytes = 64 << 10
+// fallback reports whether the connection's failure is the signal: its latest
+// POST was refused that way, and no POST before it was answered.
+func (w *legacyWatch) fallback() bool {
+	return w.signal.Load() && !w.answered.Load()
+}
 
 // withLegacyWatch returns a shallow copy of client whose transport records the
 // signal, and the watch to read it back from.
@@ -65,8 +74,11 @@ func (w *legacyWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	signal := false
 	if err == nil {
-		switch resp.StatusCode {
-		case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
+		switch {
+		case resp.StatusCode >= 200 && resp.StatusCode < 300:
+			w.answered.Store(true)
+		case resp.StatusCode == http.StatusBadRequest, resp.StatusCode == http.StatusNotFound,
+			resp.StatusCode == http.StatusMethodNotAllowed:
 			signal = notJSONRPCError(resp)
 		}
 	}
@@ -74,21 +86,21 @@ func (w *legacyWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// notJSONRPCError reads the head of resp's body, puts it back in front of the
-// rest, and reports whether it was read cleanly and is not a JSON-RPC error
-// response. A body that could not be read signals nothing: the budget refusing
-// it, or the connection dropping, is a failure to report, not a reason to make
-// another request.
+// notJSONRPCError reads resp's body, puts the bytes back in front of whatever
+// is left of it, and reports whether it was read cleanly and is not a JSON-RPC
+// error response. A body that could not be read signals nothing: the budget
+// refusing it, or the connection dropping, is a failure to report, not a reason
+// to make another request.
 func notJSONRPCError(resp *http.Response) bool {
-	head, err := io.ReadAll(io.LimitReader(resp.Body, legacySniffBytes))
+	body, err := io.ReadAll(resp.Body)
 	resp.Body = struct {
 		io.Reader
 		io.Closer
-	}{io.MultiReader(bytes.NewReader(head), resp.Body), resp.Body}
+	}{io.MultiReader(bytes.NewReader(body), resp.Body), resp.Body}
 	if err != nil {
 		return false
 	}
-	msg, err := jsonrpc.DecodeMessage(head)
+	msg, err := jsonrpc.DecodeMessage(body)
 	if err != nil {
 		return true
 	}
