@@ -1185,6 +1185,21 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if row.archivedAt != nil {
 		return nil, errInvalid("session %s is archived", id)
 	}
+	// What else the session's status allows is the reference's recorded rule,
+	// field by field, rather than the "must be idle" its guide states (#312):
+	// an unarchived terminated session takes no update at all, in the archived
+	// words it was recorded answering with (2026-10-18-session-update-terminal),
+	// and a running one refuses an agent patch — on presence, a no-op one too —
+	// while still taking title and metadata (2026-10-18-session-update-running).
+	// Rescheduling takes all four (2026-10-31-mcp-listing). No settlement stores
+	// terminated on a session row today; #577's failed model request is the one
+	// that will. The row lock taken above holds the status still until commit.
+	if row.status == string(domain.SessionTerminated) {
+		return nil, errInvalid("Cannot modify archived session")
+	}
+	if raw, ok := obj["agent"]; ok && !isNull(raw) && row.status == string(domain.SessionRunning) {
+		return nil, errInvalid("Cannot update agent while session is running. Send a `user.interrupt` event first.")
+	}
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}

@@ -1438,6 +1438,98 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	}
 }
 
+// #312: what an update may change depends on the session's status, field by
+// field — the rule the reference was recorded applying, not the "must be idle"
+// its guide states. Running refuses an agent patch and takes title and
+// metadata (2026-10-18-session-update-running); rescheduling takes all four
+// (2026-10-31-mcp-listing); an unarchived terminated session refuses all four
+// (2026-10-18-session-update-terminal). Each refusal is the reference's status
+// and words, and changes nothing.
+func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	inStatus := func(status string) string {
+		t.Helper()
+		id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = $2 WHERE id = $1`, id, status); err != nil {
+			t.Fatalf("set %s: %v", status, err)
+		}
+		return id
+	}
+	agentPatches := []map[string]any{
+		{"agent": map[string]any{"tools": []any{}}},
+		// Refused on presence: the fixture declares no servers, so this
+		// patch would change nothing, and the reference refuses it anyway.
+		{"agent": map[string]any{"mcp_servers": []any{}}},
+	}
+	const title = "renamed"
+	propertyPatches := []map[string]any{
+		{"title": title},
+		{"metadata": map[string]any{"probe": "accepted"}},
+	}
+	refuses := func(id string, patches []map[string]any, msg string) {
+		t.Helper()
+		_, before := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		for _, p := range patches {
+			status, body := s.do(http.MethodPost, "/v1/sessions/"+id, p)
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", msg)
+		}
+		_, after := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		for _, k := range []string{"agent", "title", "metadata", "updated_at"} {
+			if !reflect.DeepEqual(after[k], before[k]) {
+				t.Errorf("%s after refused updates = %v, want %v", k, after[k], before[k])
+			}
+		}
+	}
+	accepts := func(id string, patches []map[string]any) {
+		t.Helper()
+		for _, p := range patches {
+			if status, body := s.do(http.MethodPost, "/v1/sessions/"+id, p); status != http.StatusOK {
+				t.Errorf("update %v: %d %v", p, status, body)
+			}
+		}
+		_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		if got["title"] != title {
+			t.Errorf("title = %v, want %q", got["title"], title)
+		}
+		if md, _ := got["metadata"].(map[string]any); md["probe"] != "accepted" {
+			t.Errorf("metadata = %v, want probe=accepted", got["metadata"])
+		}
+	}
+
+	const whileRunning = "Cannot update agent while session is running. Send a `user.interrupt` event first."
+	running := inStatus(string(domain.SessionRunning))
+	refuses(running, agentPatches, whileRunning)
+	// Past the recordings, which sent only these two patches, each alone: any
+	// other agent value is an agent update too, refused before its own checks
+	// run, and it takes the fields beside it down with it (docs/DIVERGENCES.md,
+	// the session-update edges under INFERRED).
+	refuses(running, []map[string]any{
+		{"agent": map[string]any{}},
+		{"agent": "raw"},
+		{"agent": map[string]any{"system": "sneaky"}},
+		{"title": title, "agent": map[string]any{"tools": []any{}}},
+	}, whileRunning)
+	// JSON null is no patch at all, here as on an idle session.
+	accepts(running, append([]map[string]any{{"agent": nil}}, propertyPatches...))
+
+	accepts(inStatus(string(domain.SessionRescheduling)), append(agentPatches, propertyPatches...))
+	accepts(inStatus(string(domain.SessionIdle)), append(agentPatches, propertyPatches...))
+
+	refuses(inStatus(string(domain.SessionTerminated)), append(agentPatches, propertyPatches...),
+		"Cannot modify archived session")
+
+	// An archived session keeps this platform's own words: it renders
+	// terminated, but its stored status is whatever it settled at, and no
+	// recording updates one.
+	archived := inStatus(string(domain.SessionIdle))
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
+	refuses(archived, append(agentPatches, propertyPatches...), "session "+archived+" is archived")
+}
+
 // The guard's row lock is what closes the check-then-act window: a flip to
 // running committed while the archive is in flight must be observed, not
 // raced past. The concurrent writer here holds the session row exclusively
