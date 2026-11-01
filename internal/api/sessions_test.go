@@ -1460,16 +1460,19 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		}
 		return id
 	}
-	agentPatches := []map[string]any{
-		{"agent": map[string]any{"tools": []any{}}},
-		// Refused on presence: the fixture declares no servers, so this
-		// patch would change nothing, and the reference refuses it anyway.
-		{"agent": map[string]any{"mcp_servers": []any{}}},
-		{"agent": map[string]any{
-			"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
-			"mcp_servers": []any{map[string]any{"type": "url", "name": "docs", "url": "https://mcp.example.com"}},
-		}},
+	const docsURL, movedURL = "https://mcp.example.com", "https://moved.example.com"
+	server := func(url string) []any {
+		return []any{map[string]any{"type": "url", "name": "docs", "url": url}}
 	}
+	clearTools := map[string]any{"agent": map[string]any{"tools": []any{}}}
+	// Refused on presence: the fixture declares no servers, so this patch would
+	// change nothing, and the reference refuses it anyway.
+	clearServers := map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}
+	addServer := map[string]any{"agent": map[string]any{
+		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
+		"mcp_servers": server(docsURL),
+	}}
+	agentPatches := []map[string]any{clearTools, clearServers, addServer}
 	const title = "renamed"
 	propertyPatches := []map[string]any{
 		{"title": title},
@@ -1529,14 +1532,38 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 	}
 
 	for _, status := range []domain.SessionStatus{domain.SessionRescheduling, domain.SessionIdle} {
-		a, _ := applies(inStatus(string(status)), all)["agent"].(map[string]any)
-		if got := toolTypes(t, a["tools"]); !reflect.DeepEqual(got, []string{"mcp_toolset"}) {
-			t.Errorf("%s: agent.tools = %v, want the patched mcp_toolset", status, a["tools"])
+		id := inStatus(string(status))
+		// Each patch is read back as it lands, because the next one overwrites
+		// what it wrote, so a handler that drops one field alone cannot hide.
+		for _, step := range []struct {
+			patch map[string]any
+			tools []string
+			urls  []string
+		}{
+			{clearTools, nil, nil},
+			{clearServers, nil, nil},
+			{addServer, []string{"mcp_toolset"}, []string{docsURL}},
+			{map[string]any{"agent": map[string]any{"mcp_servers": server(movedURL)}},
+				[]string{"mcp_toolset"}, []string{movedURL}},
+		} {
+			if code, body := s.do(http.MethodPost, "/v1/sessions/"+id, step.patch); code != http.StatusOK {
+				t.Fatalf("%s: update %v: %d %v", status, step.patch, code, body)
+			}
+			_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+			a, _ := got["agent"].(map[string]any)
+			if types := toolTypes(t, a["tools"]); !slices.Equal(types, step.tools) {
+				t.Errorf("%s: after %v agent.tools = %v, want %v", status, step.patch, types, step.tools)
+			}
+			var urls []string
+			servers, _ := a["mcp_servers"].([]any)
+			for _, srv := range servers {
+				urls = append(urls, srv.(map[string]any)["url"].(string))
+			}
+			if !slices.Equal(urls, step.urls) {
+				t.Errorf("%s: after %v server urls = %v, want %v", status, step.patch, urls, step.urls)
+			}
 		}
-		servers, _ := a["mcp_servers"].([]any)
-		if len(servers) != 1 || servers[0].(map[string]any)["name"] != "docs" {
-			t.Errorf("%s: agent.mcp_servers = %v, want the patched server", status, a["mcp_servers"])
-		}
+		applies(id, propertyPatches)
 	}
 
 	// Past the recordings again: a terminated session refuses a body that would
