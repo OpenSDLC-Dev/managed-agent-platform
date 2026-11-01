@@ -288,31 +288,45 @@ func TestALooselyShapedJSONRPCErrorIsStillOne(t *testing.T) {
 	}
 }
 
-// A body too long to judge is not the signal. A modern server may carry a long
-// `data` field, and a decision made on a prefix of it would read the truncated,
-// undecodable bytes as the signal; one made on the whole of it would hold a
-// body the size of the response budget in memory twice, once here and once in
-// the go-sdk.
-func TestALongJSONRPCErrorIsNotTheSignal(t *testing.T) {
+// A body too long to judge is not the signal, whatever it holds. A modern
+// server may carry a long `data` field, and a decision made on a prefix of it
+// would read the truncated, undecodable bytes as the signal; one made on the
+// whole of it would hold a body the size of the response budget in memory
+// twice, once here and once in the go-sdk. So a long page that is no JSON-RPC
+// error at all gets no fallback either: that is the price of not judging.
+func TestARefusalTooLongToJudgeIsNotTheSignal(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("x", 100<<10)
-	url, gets := serveCountingStatus(t, http.StatusBadRequest, func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID json.RawMessage `json:"id"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if len(req.ID) == 0 {
-			req.ID = json.RawMessage("null")
-		}
-		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"unsupported","data":%q}}`, req.ID, long)
-	})
-	conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
-	if err == nil {
-		_ = conn.Close()
-		t.Fatal("Connect succeeded against a server that refused every request")
-	}
-	if n := gets.Load(); n != 0 {
-		t.Errorf("a 100 KiB JSON-RPC error opened %d GET streams, want none", n)
+	for _, row := range []struct {
+		name string
+		body func(w http.ResponseWriter, r *http.Request)
+	}{
+		{"a 100 KiB JSON-RPC error", func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				ID json.RawMessage `json:"id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if len(req.ID) == 0 {
+				req.ID = json.RawMessage("null")
+			}
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"unsupported","data":%q}}`, req.ID, long)
+		}},
+		{"a 100 KiB page", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "<html><body>"+long+"</body></html>")
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			url, gets := serveCountingStatus(t, http.StatusNotFound, row.body)
+			conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("Connect succeeded against a server that refused every request")
+			}
+			if n := gets.Load(); n != 0 {
+				t.Errorf("%s opened %d GET streams, want none", row.name, n)
+			}
+		})
 	}
 }
 
@@ -533,9 +547,12 @@ func TestARefusedLegacyStreamIsARefusedCredential(t *testing.T) {
 	}
 }
 
-// nilBodyRefusal answers every request 405 with a nil Body, as a supplied
-// RoundTripper may: net/http's client reads a nil Body as an empty one.
-type nilBodyRefusal struct{ gets atomic.Int32 }
+// nilBodyRefusal answers every request 405 with a nil Body and the given
+// length, as a supplied RoundTripper may.
+type nilBodyRefusal struct {
+	length int64
+	gets   atomic.Int32
+}
 
 func (n *nilBodyRefusal) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
@@ -544,25 +561,73 @@ func (n *nilBodyRefusal) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Method == http.MethodGet {
 		n.gets.Add(1)
 	}
-	return &http.Response{StatusCode: http.StatusMethodNotAllowed, Header: http.Header{}, Request: req}, nil
+	return &http.Response{StatusCode: http.StatusMethodNotAllowed, ContentLength: n.length, Header: http.Header{}, Request: req}, nil
 }
 
 // A refusal with no body at all is an empty one, which the spec names as the
 // signal: "If the body is empty or is not a recognized modern JSON-RPC error,
-// fall back".
+// fall back". net/http's client reads a nil Body that way unless the response
+// declares a length; then it refuses the response, and nothing here signals.
 func TestARefusalWithANilBodyIsAnEmptyOne(t *testing.T) {
 	t.Parallel()
-	rt := &nilBodyRefusal{}
-	conn, err := mcp.Connect(context.Background(), mcp.Config{
-		URL:        "http://legacy.invalid/mcp",
-		HTTPClient: &http.Client{Transport: rt},
-	})
+	for _, row := range []struct {
+		length int64
+		gets   int32
+	}{{length: 0, gets: 1}, {length: -1, gets: 1}, {length: 10, gets: 0}} {
+		t.Run(fmt.Sprint(row.length), func(t *testing.T) {
+			t.Parallel()
+			rt := &nilBodyRefusal{length: row.length}
+			conn, err := mcp.Connect(context.Background(), mcp.Config{
+				URL:        "http://legacy.invalid/mcp",
+				HTTPClient: &http.Client{Transport: rt},
+			})
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("Connect succeeded against a server that refused every request")
+			}
+			if got := rt.gets.Load(); got != row.gets {
+				t.Errorf("GETs = %d, want %d", got, row.gets)
+			}
+		})
+	}
+}
+
+// The end of the Streamable HTTP attempt settles the watch, so the fallback's
+// own POSTs are not judged. The SDK's SSE transport closes a refused POST's body
+// unread; a watch still judging would first read it — here, never to its end.
+func TestAFallbackRefusalIsNotRead(t *testing.T) {
+	t.Parallel()
+	inner := sdk.NewSSEHandler(func(*http.Request) *sdk.Server {
+		return sdk.NewServer(&sdk.Implementation{Name: "legacy-server", Version: "1"}, nil)
+	}, nil)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method != http.MethodPost:
+			inner.ServeHTTP(w, r)
+		case r.URL.Query().Get("sessionid") == "":
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "session gone")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	conn, err := mcp.Connect(ctx, mcp.Config{URL: ts.URL, HTTPClient: loopbackClient()})
 	if err == nil {
 		_ = conn.Close()
-		t.Fatal("Connect succeeded against a server that refused every request")
+		t.Fatal("Connect succeeded against a server that refused the stream's initialize")
 	}
-	if got := rt.gets.Load(); got != 1 {
-		t.Errorf("GETs = %d, want the one fallback GET an empty refusal signals", got)
+	if !strings.Contains(err.Error(), "HTTP+SSE") {
+		t.Errorf("err = %v, want the fallback attempt's failure", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("a refused initialize took %v; its body was read", d)
 	}
 }
 
