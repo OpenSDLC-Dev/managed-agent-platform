@@ -241,6 +241,38 @@ func TestConnectDoesNotFallBackOnAModernJSONRPCError(t *testing.T) {
 	}
 }
 
+// A JSON-RPC error is one whatever its id. JSON-RPC 2.0 answers a request whose
+// id could not be read with `"id": null`, and the spec lets a refused POST carry
+// an error response with no id at all — the shape a server rejecting a header
+// before it reads the body produces.
+func TestAJSONRPCErrorWithoutAnIDIsStillOne(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"400, null id", http.StatusBadRequest, `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"bad header"}}`},
+		{"400, no id", http.StatusBadRequest, `{"jsonrpc":"2.0","error":{"code":-32600,"message":"bad header"}}`},
+		{"404, null id", http.StatusNotFound, `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			url, gets := serveCountingStatus(t, row.status, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, row.body)
+			})
+			conn, err := mcp.Connect(context.Background(), mcp.Config{URL: url, HTTPClient: loopbackClient()})
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("Connect succeeded against a server that refused every request")
+			}
+			if n := gets.Load(); n != 0 {
+				t.Errorf("%s opened %d GET streams, want none", row.body, n)
+			}
+		})
+	}
+}
+
 // A JSON-RPC error is one whatever its length. A modern server may carry a long
 // `data` field, and a decision made on a prefix of it would read the truncated,
 // undecodable bytes as the signal.

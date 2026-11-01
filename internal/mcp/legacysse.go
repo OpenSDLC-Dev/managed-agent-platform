@@ -2,13 +2,12 @@ package mcp
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"sync/atomic"
-
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
 // legacyWatch decides whether a failed Streamable HTTP handshake is the signal
@@ -91,6 +90,14 @@ func (w *legacyWatch) RoundTrip(req *http.Request) (*http.Response, error) {
 // error response. A body that could not be read signals nothing: the budget
 // refusing it, or the connection dropping, is a failure to report, not a reason
 // to make another request.
+//
+// An error response is recognized by its version and its error code alone,
+// whatever its id. The go-sdk's own decoder will not do here: it refuses a
+// response without a valid id (checked against go-sdk v1.7.0 —
+// internal/jsonrpc2/messages.go DecodeMessage), while JSON-RPC 2.0 answers a
+// request whose id could not be read with `"id": null`, and the spec lets a
+// refused POST carry "a JSON-RPC *error response* that has no `id`" (spec
+// 2026-07-28, transports/streamable-http).
 func notJSONRPCError(resp *http.Response) bool {
 	body, err := io.ReadAll(resp.Body)
 	resp.Body = struct {
@@ -100,12 +107,16 @@ func notJSONRPCError(resp *http.Response) bool {
 	if err != nil {
 		return false
 	}
-	msg, err := jsonrpc.DecodeMessage(body)
-	if err != nil {
+	var answer struct {
+		JSONRPC string `json:"jsonrpc"`
+		Error   *struct {
+			Code *int64 `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &answer) != nil {
 		return true
 	}
-	answer, ok := msg.(*jsonrpc.Response)
-	return !ok || answer.Error == nil
+	return answer.JSONRPC != "2.0" || answer.Error == nil || answer.Error.Code == nil
 }
 
 // errForeignOrigin is the refusal of a request the deprecated transport would
