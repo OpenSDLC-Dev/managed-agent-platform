@@ -124,10 +124,33 @@ func BearerAttachesForTest(endpoint, target string) bool {
 	return spy.auth != ""
 }
 
-type headerSpy struct{ auth string }
+// LegacyRequestAllowedForTest reports whether the deprecated transport's client,
+// pinned to endpoint, would send a request for target. Like
+// BearerAttachesForTest it drives the real wiring and reads back what reached
+// the transport underneath, rather than re-deciding.
+func LegacyRequestAllowedForTest(endpoint, target string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		panic(err)
+	}
+	spy := &headerSpy{}
+	client := withSameOrigin(&http.Client{Transport: spy}, u)
+	req, err := http.NewRequest(http.MethodPost, target, nil)
+	if err != nil {
+		panic(err)
+	}
+	_, err = client.Transport.RoundTrip(req)
+	return err == nil && spy.reached
+}
+
+type headerSpy struct {
+	auth    string
+	reached bool
+}
 
 func (s *headerSpy) RoundTrip(req *http.Request) (*http.Response, error) {
 	s.auth = req.Header.Get("Authorization")
+	s.reached = true
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
 

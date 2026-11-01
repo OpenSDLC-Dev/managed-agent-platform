@@ -290,14 +290,21 @@ const maxHeaderBytesPerResponse = 64 << 10
 // value, so they would assert nothing about net/http.
 const http2HeaderListOverhead = 320
 
-// Connect opens a connection to one MCP server over Streamable HTTP.
+// Connect opens a connection to one MCP server over Streamable HTTP, falling
+// back to the deprecated HTTP+SSE transport of 2024-11-05 on the signal the
+// spec documents for a server that hosts only that one.
 //
-// Only Streamable HTTP is spoken. The SDK negotiates every protocol version
-// from 2024-11-05 up over it, so an older server is reached as long as it hosts
-// the modern endpoint; the separate HTTP+SSE transport of 2024-11-05 is
-// deprecated ("New implementations SHOULD NOT adopt it" — spec 2026-07-28,
-// transports/streamable-http) and a client-side fallback to it is deliberately
-// not wired here.
+// Streamable HTTP is tried first and is what nearly every server gets. The SDK
+// negotiates every protocol version from 2024-11-05 up over it, so an older
+// server is reached that way as long as it hosts the modern endpoint. The
+// deprecated transport is spoken only after a POST is refused the way legacyWatch
+// describes, and it costs what that transport is: one GET that stays open for
+// the whole connection and carries every answer. So whatever bounds that one
+// request bounds the whole connection: the client's per-request cap — thirty
+// seconds on [DefaultClient] — and Connect's context, or [DialTimeout]'s
+// fallback deadline where that context has none. The spec says "New
+// implementations SHOULD NOT adopt it"; the reference documents the fallback
+// anyway, and wire compatibility is the reason this client has one.
 //
 // The standalone SSE stream is disabled. It is how a server pushed unsolicited
 // notifications in revisions 2025-03-26 through 2025-11-25; 2026-07-28 removed
@@ -347,6 +354,7 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	// anywhere above the limit would be a 401 the limit can swallow.
 	httpClient, auth := withAuthWatch(httpClient)
 	httpClient = withResponseLimit(httpClient)
+	httpClient, legacy := withLegacyWatch(httpClient)
 	httpClient = withTraceContext(httpClient)
 	if cfg.BearerToken != "" {
 		httpClient = withBearer(httpClient, cfg.BearerToken, endpoint)
@@ -374,16 +382,24 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 	// of a legacy negotiation (checked against go-sdk v1.7.0 —
 	// mcp/streamable.go streamableClientConn.setMCPHeaders). Since a legacy
 	// negotiation is what this client mostly gets, the wrapper stays transparent.
-	transport := &capturingTransport{inner: &sdk.StreamableClientTransport{
+	session, connErr := connectOver(ctx, client, &sdk.StreamableClientTransport{
 		Endpoint:             cfg.URL,
 		HTTPClient:           httpClient,
 		DisableStandaloneSSE: true,
-	}}
-	session, connErr := client.Connect(ctx, transport, nil)
-	if connErr != nil {
-		if conn := transport.conn; conn != nil {
-			_ = conn.Close()
+	})
+	if connErr != nil && legacy.signal.Load() {
+		var legacyErr error
+		session, legacyErr = connectOver(ctx, client, &sdk.SSEClientTransport{
+			Endpoint:   cfg.URL,
+			HTTPClient: withSameOrigin(httpClient, endpoint),
+		})
+		if legacyErr == nil {
+			connErr = nil
+		} else {
+			connErr = fmt.Errorf("%w; over the deprecated HTTP+SSE transport: %w", connErr, legacyErr)
 		}
+	}
+	if connErr != nil {
 		// Scheme and host, not the URL: an mcp_servers URL may carry a
 		// credential in three places and this error is a stored column by the
 		// time the executor's discovery pass is done with it. url.URL.Redacted
@@ -397,6 +413,18 @@ func Connect(ctx context.Context, cfg Config) (*Conn, error) {
 			fmt.Errorf("mcp: connect to %s://%s: %w", endpoint.Scheme, endpoint.Host, connErr))
 	}
 	return &Conn{session: session, auth: auth}, nil
+}
+
+// connectOver runs the SDK's handshake over one transport and closes the
+// connection that transport produced when the handshake fails — see
+// capturingTransport for why the SDK cannot be trusted to.
+func connectOver(ctx context.Context, client *sdk.Client, inner sdk.Transport) (*sdk.ClientSession, error) {
+	transport := &capturingTransport{inner: inner}
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil && transport.conn != nil {
+		_ = transport.conn.Close()
+	}
+	return session, err
 }
 
 // capturingTransport keeps the Connection its inner transport produced so a
@@ -853,12 +881,17 @@ func newLimitedTransport(base http.RoundTripper, limit int64) *limitedTransport 
 // from being corrupted; what it does not do is make the *policy* concurrency-safe,
 // and the difference is worth naming. A body draws before it reads and refunds
 // what it did not use, so two bodies read at once could see a transient zero and
-// latch themselves refused over a budget that was only borrowed. Nothing here
-// produces that: one connection belongs to one work item and one goroutine (see
-// [Conn]), the standalone SSE stream is disabled, and the SDK reads each response
-// to completion before issuing the next. The reserve-then-refund order is kept
-// because its failure direction under a concurrency this package does not have is
-// an over-refusal rather than an over-delivery.
+// latch themselves refused over a budget that was only borrowed. Streamable HTTP
+// never produces that: one connection belongs to one work item and one goroutine
+// (see [Conn]), the standalone SSE stream is disabled, and the SDK reads each
+// response to completion before issuing the next. The deprecated HTTP+SSE
+// transport Connect falls back to does: an SDK goroutine reads its one stream
+// while the POSTs that stream answers are sent, and a stream read waiting for
+// the server's next event holds its reservation — one read buffer — while it
+// waits. So within a buffer of the end of the budget, a POST's header charge can
+// be refused over bytes nothing has read. That is why the reserve-then-refund
+// order is kept: under concurrency its failure is an over-refusal rather than an
+// over-delivery.
 type limitedTransport struct {
 	base  http.RoundTripper
 	limit int64 // what the budget started as, for the error text
