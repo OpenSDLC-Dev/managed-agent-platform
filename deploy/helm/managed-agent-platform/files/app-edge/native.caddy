@@ -1,0 +1,8 @@
+@platform path /api/auth /api/auth/* /api/console /api/console/* /api/oauth /api/oauth/* /api/organizations /api/organizations/* /v1 /v1/*
+reverse_proxy @platform {$CONTROLPLANE_UPSTREAM:controlplane:8080} {
+	# Zero flush delay preserves the upstream's SSE frames. Caddy's default
+	# transport has no response/read timeout and cancels on client disconnect.
+	flush_interval 0
+}
+import /etc/caddy/admin-{$APP_EDGE_ADMIN}.caddy
+reverse_proxy {$CONSOLE_UPSTREAM:console:3000}

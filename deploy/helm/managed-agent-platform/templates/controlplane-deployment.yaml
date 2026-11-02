@@ -16,6 +16,10 @@ spec:
         # Roll the pods when the chart-managed Secret (API key, DSN, providers)
         # changes on upgrade. Inert when existingSecret is set (no Secret is rendered).
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
+        {{- if and .Values.casdoor.enabled (eq .Values.console.authMode "platform") (eq .Values.identity.mode "oidc") }}
+        # RP env must rotate with the bundled client's seed Secret, including existingSecret installs.
+        checksum/oidc-client: {{ include (print $.Template.BasePath "/casdoor-init-data-secret.yaml") . | sha256sum | quote }}
+        {{- end }}
       labels:
         {{- include "map.labels" . | nindent 8 }}
         app.kubernetes.io/component: controlplane
@@ -65,6 +69,14 @@ spec:
             {{- include "map.blobEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
             {{- include "map.identityEnv" . | nindent 12 }}
+            {{- include "map.sessionEnv" . | nindent 12 }}
+            {{- include "map.rpEnv" . | nindent 12 }}
+          {{- if .Values.identity.caSecret }}
+          volumeMounts:
+            - name: identity-ca
+              mountPath: /etc/identity-ca
+              readOnly: true
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: http
@@ -79,6 +91,15 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.identity.caSecret }}
+      volumes:
+        - name: identity-ca
+          secret:
+            secretName: {{ .Values.identity.caSecret | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
       {{- with .Values.controlplane.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

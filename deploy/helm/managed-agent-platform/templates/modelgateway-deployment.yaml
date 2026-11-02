@@ -69,6 +69,13 @@ spec:
             {{- include "map.commonEnv" . | nindent 12 }}
             {{- include "map.secretsEnv" . | nindent 12 }}
             {{- include "map.identityEnv" . | nindent 12 }}
+            {{- include "map.sessionEnv" . | nindent 12 }}
+          {{- if .Values.identity.caSecret }}
+          volumeMounts:
+            - name: identity-ca
+              mountPath: /etc/identity-ca
+              readOnly: true
+          {{- end }}
           readinessProbe:
             tcpSocket:
               port: http
@@ -83,6 +90,15 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.identity.caSecret }}
+      volumes:
+        - name: identity-ca
+          secret:
+            secretName: {{ .Values.identity.caSecret | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}
       {{- with .Values.modelgateway.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

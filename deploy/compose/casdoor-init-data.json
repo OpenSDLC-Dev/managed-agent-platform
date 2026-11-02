@@ -514,7 +514,7 @@
       "clientId": "map-console-dev",
       "clientSecret": "map-console-dev-secret",
       "redirectUris": [
-        "http://localhost:5173/callback"
+        "http://localhost:3000/api/auth/callback"
       ],
       "grantTypes": [
         "authorization_code",

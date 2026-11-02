@@ -1334,6 +1334,24 @@ an origin, OIDC and trusted-proxy installs keep verifier-only admission.
 Native OIDC needs `IDENTITY_OIDC_CLIENT_ID` equal to `IDENTITY_OIDC_AUDIENCE`.
 Only the control plane reads the optional `IDENTITY_OIDC_CLIENT_SECRET`.
 
+Compose's `console` profile and Helm's `console.enabled` add the published Console
+and a Caddy application edge. Native routing is an explicit selection:
+`CONSOLE_AUTH_MODE=platform` in Compose, or `console.authMode=platform` in Helm.
+The edge sends native login/private paths to CP, admin paths to the gateway,
+and pages/assets/health to Console. Empty mode preserves legacy BFF routing.
+Default identity remains disabled; no staging identity or hostname changes.
+Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional) or
+[the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
+for RP secrets, CA trust and the CP-owned `/api/auth/callback` registration.
+
+With IAP, protect human pages, `/api/auth/*`, private `/api/console/*`,
+`/api/organizations/*`, `/api/oauth/*` and gateway `/admin/v1/*` before the edge.
+Only required infrastructure health may be anonymous. Give SDK `/v1/*` a separate
+IAP-bypass route or listener; it still requires platform API authentication.
+Gateway inference retains its own authenticated listener. Do not put a whole-host
+IAP rule in front of the only SDK endpoint. Signed assertions must reach CP unchanged.
+No chart object here takes ownership of an existing staging IAP deployment.
+
 The private `/api/auth/` routes expose mode configuration, login, callback,
 session and logout. Only the exact mode-specific login/start/callback routes
 and GET config admit anonymous requests; the subtree is not a bypass.

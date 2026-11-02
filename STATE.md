@@ -7,7 +7,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 2 is in progress.
 Native HTTP login and first-admin setup are implemented.
 Member and service-account management is implemented.
-Private resource access and gateway cookie admission are implemented; console integration is next.
+Private resource access and gateway cookie admission are implemented.
+One-origin contracts and local runtime are verified; integration and review are pending.
 **no release until plan 69 slice 7**.
 
 ## Tasks
@@ -22,4 +23,7 @@ Private resource access and gateway cookie admission are implemented; console in
   [service accounts](./internal/api/serviceaccounts_test.go) and [concurrency](./internal/api/members_race_test.go) contracts.
 - [x] Private resource proxy and gateway cookie admission: [proxy](./internal/api/consoleproxy_test.go),
   [streams](./internal/api/consoleproxy_stream_test.go) and [gateway](./internal/modelgateway/admin/cookie_test.go) contracts.
-- [ ] Integrate the console's native login and member management.
+- [x] Console native UI merged and published: [Console #246](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/246).
+- [x] One-origin contracts and local runtime: [Helm](./deploy/helm/managed-agent-platform/ci/native_test.py)
+  and [edge](./deploy/compose/app_edge_test.py) contracts.
+- [ ] Finish slice 2 integration, committed reviews and CI.

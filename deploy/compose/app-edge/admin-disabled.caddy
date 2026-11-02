@@ -1,0 +1,2 @@
+@admin path /admin/v1 /admin/v1/*
+respond @admin "gateway unavailable" 503

@@ -30,7 +30,7 @@ Public API and worker credentials keep their existing lanes with or without huma
 
 The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Native platform login uses private routes when `CONSOLE_PUBLIC_ORIGIN` is configured. Without native login, OIDC and trusted-proxy installs retain verifier-only IdP admission. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
 
-Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
+Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Both offer an opt-in published Console and one-origin edge. Native login is explicit; default identity and legacy SDK listeners are unchanged. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
 
 ## Why
 

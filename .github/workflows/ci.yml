@@ -57,6 +57,8 @@ jobs:
         run: helm lint "$CHART" -f "$VALUES"
       - name: helm lint (identity lane + bundled IdP)
         run: helm lint "$CHART" -f "$VALUES" -f "$IAM_VALUES"
+      - name: one-origin native and legacy deployment matrix
+        run: python3 -I "$CHART/ci/native_test.py"
       - name: helm template renders (smoke)
         run: helm template t "$CHART" -f "$VALUES" > /dev/null
       - name: brain model-providers file is the JSON array the loader requires, gateway on and off
@@ -899,7 +901,7 @@ jobs:
           # supported order, so an unconfigured lane must not fail that render.
           helm template t "$CHART" -f "$VALUES" --set casdoor.enabled=true \
             --set casdoor.adminPassword=x --set casdoor.console.clientSecret=y \
-            --set 'casdoor.console.redirectURIs[0]=https://console.example/callback' \
+            --set 'casdoor.console.redirectURIs[0]=https://console.example/api/auth/callback' \
             --set casdoor.ingress.host=idp.example > /dev/null \
             || { echo "casdoor.enabled with identity.mode empty must render" >&2; exit 1; }
           echo "ok: the IdP's refusals and its single entrance"
@@ -1105,7 +1107,7 @@ jobs:
           helm template t "$CHART" -f "$VALUES" | grep -i 'casdoor' > /dev/null \
             && { echo "default values must not deploy the bundled IdP" >&2; exit 1; }
           idp=(--set casdoor.enabled=true --set casdoor.ingress.host=idp.example.test
-               --set 'casdoor.console.redirectURIs[0]=https://console.example/callback')
+               --set 'casdoor.console.redirectURIs[0]=https://console.example/api/auth/callback')
           # The three values the chart refuses to invent. adminPassword is the one
           # that matters most: Casdoor creates a GLOBAL administrator on the
           # publicly documented password `123` before it reads the seed, so a
@@ -1627,6 +1629,11 @@ jobs:
       - name: the openbao bootstrap scripts behave
         working-directory: .
         run: make openbao-init-test
+      - name: the application edge routes native and legacy requests
+        working-directory: .
+        run: |
+          python3 -I deploy/compose/native_config_test.py
+          APP_EDGE_EVIDENCE="$RUNNER_TEMP/app-edge" python3 -I deploy/compose/app_edge_test.py
       - name: build the images
         # controlplane covers the shared server stage; gate-image keeps the
         # gate Docker stage regression-guarded (the executor itself stays out

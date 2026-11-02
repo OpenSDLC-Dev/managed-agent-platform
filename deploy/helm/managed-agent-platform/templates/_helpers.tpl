@@ -240,6 +240,105 @@ the binary rather than being restated here in a second place they could drift.
 {{- end }}
 {{- end -}}
 
+{{/* Validate independently of Secret generation, including existingSecret renders. */}}
+{{- define "map.validateConsole" -}}
+{{- $console := .Values.console -}}
+{{- $identity := .Values.identity -}}
+{{- if or (not (kindIs "bool" $console.enabled)) (not (kindIs "bool" .Values.developmentMode)) -}}
+{{- fail "console.enabled and developmentMode must be booleans, not quoted strings" -}}
+{{- end -}}
+{{- if not (has $console.authMode (list "" "platform")) -}}
+{{- fail "console.authMode must be empty (legacy) or platform" -}}
+{{- end -}}
+{{- if not (has $identity.mode (list "" "disabled" "password" "oidc" "trusted_proxy")) -}}
+{{- fail "identity.mode must be disabled, password, oidc or trusted_proxy" -}}
+{{- end -}}
+{{- if eq $console.authMode "platform" -}}
+{{- if or (not $console.enabled) (not $console.publicOrigin) (not (has $identity.mode (list "password" "oidc" "trusted_proxy"))) -}}
+{{- fail "platform Console requires console.enabled, console.publicOrigin and an enabled native identity.mode" -}}
+{{- end -}}
+{{- if $console.legacySecret -}}{{- fail "native Console must not receive console.legacySecret" -}}{{- end -}}
+{{- else if $console.publicOrigin -}}
+{{- fail "console.publicOrigin requires console.authMode=platform; legacy routing cannot own native login" -}}
+{{- end -}}
+{{- if and (eq $identity.mode "password") (or (not .Values.developmentMode) (not $console.publicOrigin)) -}}
+{{- fail "password mode requires developmentMode=true and console.publicOrigin" -}}
+{{- end -}}
+{{- with $console.publicOrigin -}}
+{{- if not (kindIs "string" .) -}}{{- fail "console.publicOrigin must be a quoted origin string" -}}{{- end -}}
+{{- /* Shape checks here; login.ConfigFromEnv remains the canonical host/IP parser. */ -}}
+{{- $https := regexMatch "^https://([a-z0-9]([a-z0-9.-]*[a-z0-9])?|\\[[0-9a-f:]+\\])(:[1-9][0-9]{0,4})?$" . -}}
+{{- $http := and $.Values.developmentMode (regexMatch "^http://(localhost|127\\.([0-9]{1,3}\\.){2}[0-9]{1,3}|\\[::1\\])(:[1-9][0-9]{0,4})?$" .) -}}
+{{- $port := regexFind ":[0-9]+$" . -}}
+{{- if or (not (or $https $http)) (and $https (eq $port ":443")) (and $http (eq $port ":80")) (and $port (gt (atoi (trimPrefix ":" $port)) 65535)) -}}
+{{- fail "console.publicOrigin must be a canonical HTTPS origin; literal-loopback HTTP requires developmentMode=true" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq $identity.mode "oidc") $console.publicOrigin -}}
+{{- if or (not $identity.oidc.clientId) (ne $identity.oidc.clientId $identity.oidc.audience) -}}
+{{- fail "native OIDC requires identity.oidc.clientId equal to identity.oidc.audience" -}}
+{{- end -}}
+{{- if not (kindIs "string" $identity.oidc.clientSecret) -}}
+{{- fail "identity.oidc.clientSecret must be a quoted string" -}}
+{{- end -}}
+{{- if and .Values.existingSecret $identity.oidc.clientSecret -}}
+{{- fail "existingSecret writes no RP secret: use identity.oidc.clientSecretKey in that Secret, not clientSecret" -}}
+{{- end -}}
+{{- if and $identity.oidc.clientSecretKey (not .Values.existingSecret) -}}
+{{- fail "identity.oidc.clientSecretKey requires existingSecret" -}}
+{{- end -}}
+{{- if .Values.casdoor.enabled -}}
+{{- if or (ne $identity.oidc.clientId .Values.casdoor.console.clientId) (and $identity.oidc.clientSecret (ne $identity.oidc.clientSecret .Values.casdoor.console.clientSecret)) $identity.oidc.clientSecretKey -}}
+{{- fail "bundled Casdoor native RP client ID and secret must match casdoor.console; clientSecretKey is not used" -}}
+{{- end -}}
+{{- if ne (toJson .Values.casdoor.console.redirectURIs) (toJson (list (printf "%s/api/auth/callback" $console.publicOrigin))) -}}
+{{- fail "native Casdoor redirectURIs must contain only <console.publicOrigin>/api/auth/callback (control-plane RP)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $console.enabled (not (regexMatch "@sha256:[a-f0-9]{64}$" $console.image)) -}}
+{{- fail "console.image must be an independent immutable digest reference" -}}
+{{- end -}}
+{{- if and $console.enabled (not (regexMatch "@sha256:[a-f0-9]{64}$" .Values.appEdge.image)) -}}
+{{- fail "appEdge.image must be an immutable digest reference" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Session readers share origin/development only, never RP credentials. */}}
+{{- define "map.sessionEnv" -}}
+{{- if .Values.console.publicOrigin }}
+- name: CONSOLE_PUBLIC_ORIGIN
+  value: {{ .Values.console.publicOrigin | quote }}
+- name: DEVELOPMENT_MODE
+  value: {{ .Values.developmentMode | quote }}
+{{- end }}
+{{- if .Values.identity.caSecret }}
+- name: SSL_CERT_FILE
+  value: /etc/identity-ca/ca.crt
+{{- end }}
+{{- end -}}
+
+{{/* CP alone is the relying party. Bundled Casdoor and CP read one Secret. */}}
+{{- define "map.rpEnv" -}}
+{{- if and (eq .Values.identity.mode "oidc") .Values.console.publicOrigin }}
+- name: IDENTITY_OIDC_CLIENT_ID
+  value: {{ .Values.identity.oidc.clientId | quote }}
+{{- if or .Values.casdoor.enabled .Values.identity.oidc.clientSecret .Values.identity.oidc.clientSecretKey }}
+- name: IDENTITY_OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      {{- if .Values.casdoor.enabled }}
+      name: {{ include "map.fullname" . }}-casdoor-init-data
+      key: client-secret
+      {{- else }}
+      name: {{ include "map.secretName" . }}
+      key: {{ default "identity-oidc-client-secret" .Values.identity.oidc.clientSecretKey | quote }}
+      {{- end }}
+      optional: false
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{/*
 The bundled IdP's external URL: `https://` + the ingress host, and nothing else.
 

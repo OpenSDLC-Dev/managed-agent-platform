@@ -1,0 +1,18 @@
+{
+	admin off
+	auto_https off
+}
+
+# This listener is HTTP behind an operator-owned TLS/IAP ingress, or loopback
+# HTTP in development. Never cache, compress or buffer event streams here.
+:8080 {
+	route {
+		# Refuse ambiguous path spellings before any upstream sees them. Match the
+		# original URI, not Caddy's cleaned path; query escaping remains allowed.
+		@ambiguous expression `{http.request.orig_uri}.matches('(?i)^[^?]*(%25|%2e|%2f|%5c|\\\\|//|/\\.{1,2}(/|[?]|$))')`
+		respond @ambiguous "not found" 404
+		@internal path /internal /internal/*
+		respond @internal "not found" 404
+		import /etc/caddy/{$APP_EDGE_MODE}.caddy
+	}
+}

@@ -403,6 +403,14 @@ deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
 
+An opt-in application Caddy edge serves the published Console at the same origin
+as private CP routes and gateway administration. Explicit native mode sends login,
+management, OAuth and resource-proxy paths to CP. Pages, assets and shallow health
+remain Console-owned. Legacy mode retains the BFF. Raw `/v1` goes to CP; gateway
+inference stays on its separate listener. The edge rejects internal paths before
+proxying and preserves SSE cancellation. Compose loopback ports and release-qualified
+Helm resources do not adopt the separately deployed staging Console or IAP.
+
 Private operator routes live under `/api/`, outside the SDK and CLI's `/v1` wire.
 Existing key-management paths mirror the reference console's recorded paths;
 [DIVERGENCES.md](./DIVERGENCES.md) registers their departures and our private extensions.

@@ -1,0 +1,7 @@
+@public path /v1 /v1/*
+reverse_proxy @public {$CONTROLPLANE_UPSTREAM:controlplane:8080}
+# Legacy browsers use the Console BFF. Direct gateway SDK/admin access stays
+# on its separate listener; do not fall through to a Console HTML response.
+@admin path /admin/v1 /admin/v1/*
+respond @admin "not found" 404
+reverse_proxy {$CONSOLE_UPSTREAM:console:3000}
