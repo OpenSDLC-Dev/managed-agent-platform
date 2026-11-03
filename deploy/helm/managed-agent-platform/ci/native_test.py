@@ -54,6 +54,25 @@ class NativeRender(unittest.TestCase):
         self.assertIn("controlplane-api-key", section(legacy, "console.yaml"))
         self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", legacy)
 
+    def test_console_numeric_non_root_user(self):
+        for mode, values in [("native", native()), ("legacy", {"console": {"enabled": True}})]:
+            with self.subTest(mode=mode):
+                body = section(render(values), "console.yaml")
+                deployments = re.findall(r"(?ms)^kind: Deployment\n(.*?)(?=^apiVersion:|\Z)", body)
+                self.assertEqual(len(deployments), 1)
+                containers = re.findall(r"(?ms)^        - name: console\n(.*?)(?=^        - name:|\Z)", deployments[0])
+                self.assertEqual(len(containers), 1)
+                contexts = re.findall(r"(?ms)^          securityContext:\n(.*?)(?=^          \S|\Z)", containers[0])
+                self.assertEqual(len(contexts), 1)
+                context = contexts[0]
+                self.assertRegex(context, r"(?m)^            runAsUser: 1000$",
+                                 "Console container must use numeric UID 1000")
+                self.assertRegex(context, r"(?m)^            runAsGroup: 1000$",
+                                 "Console container must use numeric GID 1000")
+                self.assertRegex(context, r"(?m)^            runAsNonRoot: true$")
+                self.assertRegex(context, r"(?m)^            allowPrivilegeEscalation: false$")
+                self.assertRegex(context, r"(?m)^            capabilities:\n              drop: \[ALL\]$")
+
     def test_password_and_env_isolation(self):
         text = render(native())
         for name in ["controlplane-deployment.yaml", "modelgateway-deployment.yaml"]:

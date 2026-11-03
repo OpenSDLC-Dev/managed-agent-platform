@@ -1140,9 +1140,9 @@ restore-ordering constraint you own:
 
 ### 8. Principal retention
 
-Human sign-in stores a `principals` row with the person's issuer, subject,
-profile, role, role source and status (plan 69 slice 1). No token is stored.
-Deactivation lasts: a later sign-in is refused, not provisioned afresh.
+Human identities have a `principals` row with the person's issuer, subject,
+profile, role, role source and status. Deactivation lasts: a later sign-in is
+refused, not provisioned afresh.
 
 **Upgrade: replace the old retention DELETE with a scrub.** The database now
 refuses every `DELETE` and `TRUNCATE` on `principals`, even a DELETE matching no
@@ -1151,26 +1151,35 @@ No retention timer ships; choose a schedule for your audit and erasure duties:
 
 ```sql
 -- Scrub only deactivated principals. Pick your own retention interval.
-UPDATE principals
-SET email = '', display_name = '', description = ''
-WHERE status = 'deactivated'
-  AND last_seen_at < now() - interval '180 days';
+WITH scrubbed AS (
+    UPDATE principals
+    SET email = '', display_name = '', description = ''
+    WHERE status = 'deactivated'
+      AND last_seen_at < now() - interval '180 days'
+    RETURNING id
+)
+DELETE FROM local_accounts
+USING scrubbed
+WHERE local_accounts.principal_id = scrubbed.id;
 ```
 
-An erasure request instead scrubs the principal it names. An active person's
-next verified request refreshes profile fields from the IdP. The scheduled job
-must not scrub active members or service accounts merely because they use
-keys rather than sign in. Slice 1 has no member-management API; deactivation
-is a database operation until slice 2.
+Only the same qualifying principals lose their `local_accounts` credential row.
+The local login name stays on `principals` as the subject under its local issuer;
+removing the credential row erases the stored password hash.
+
+An erasure request instead targets the principal it names, clearing the same
+profile fields and removing its local credential row, if present. It need not
+wait for the scheduled job's deactivation or age criteria. An active person's
+next IdP sign-in can restore profile fields; ordinary cookie reads do not.
+The scheduled job must not scrub active members or service accounts merely
+because they use keys rather than sign in.
 
 A scrub keeps the id, role, role source, deactivation status, issuer and subject.
 The last two prevent a removed person from returning as a new active principal.
 They can themselves identify someone, so this is not complete anonymization.
 The stable id preserves the link from `created_by` to the initiator, though
 cleared profile fields no longer supply a name. `sessions.created_by` remains
-plain text, not a foreign key; scrubbing changes no session history. Local
-accounts arrive in slice 2: their scrub must keep the login name and clear the
-password. Those fields do not exist in slice 1.
+plain text, not a foreign key; scrubbing changes no session history.
 
 ### 9. Single sign-on and the bundled identity provider
 

@@ -79,6 +79,9 @@ spec:
               port: http
             initialDelaySeconds: 15
           securityContext:
+            # The pinned image names node; kubelet needs its numeric UID for runAsNonRoot.
+            runAsUser: 1000
+            runAsGroup: 1000
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities:
