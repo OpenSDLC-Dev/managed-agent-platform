@@ -1571,8 +1571,16 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 	// Past the recordings again: a terminated session refuses a body that would
 	// change nothing as well.
 	const ended = "Cannot modify archived session"
-	refuses(inStatus(string(domain.SessionTerminated)),
-		append(slices.Clone(all), map[string]any{}, map[string]any{"agent": nil}), ended)
+	terminated := inStatus(string(domain.SessionTerminated))
+	refuses(terminated, append(slices.Clone(all), map[string]any{}, map[string]any{"agent": nil}), ended)
+
+	// The checks that read no row answer ahead of both status refusals.
+	for _, id := range []string{running, terminated} {
+		refuses(id, []map[string]any{{"vault_ids": []any{}, "agent": clearTools["agent"]}},
+			"vault_ids updates are not yet supported")
+		refuses(id, []map[string]any{{"nonsense": 1, "agent": clearTools["agent"]}},
+			`Failed to parse request body: unknown field "nonsense"`)
+	}
 
 	// An archived session renders terminated, so it answers the same whatever its
 	// stored status is. No recording updates one.
@@ -1581,6 +1589,13 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		t.Fatalf("archive: %d %v", status, body)
 	}
 	refuses(archived, all, ended)
+	// Archiving refuses a running session, so this row is forged.
+	archivedRunning := inStatus(string(domain.SessionRunning))
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, archivedRunning); err != nil {
+		t.Fatalf("archive the running row: %v", err)
+	}
+	refuses(archivedRunning, all, ended)
 }
 
 // The refusal's own advice, on a session that really runs: its title still

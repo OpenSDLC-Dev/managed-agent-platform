@@ -55,16 +55,17 @@ func wantDreamHold(t *testing.T, status int, body map[string]any, dreamID string
 
 // The hold answers an update before either status refusal (#312): the running
 // sentence advises an interrupt, which a session a dream owns refuses too, and
-// the dream's runner still has a terminated session to settle.
+// the dream's runner still has a terminated session to settle. An archived row
+// renders terminated, so it answers the hold as well.
 func TestDreamHoldAnswersBeforeTheStatusRefusals(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
-	for _, stored := range []domain.SessionStatus{domain.SessionRunning, domain.SessionTerminated} {
+	for _, set := range []string{"status = 'running'", "status = 'terminated'", "archived_at = now()"} {
 		sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
 		dreamID := openDream(t, s, sid)
 		if _, err := s.pool.Exec(context.Background(),
-			`UPDATE sessions SET status = $2 WHERE id = $1`, sid, string(stored)); err != nil {
-			t.Fatalf("set %s: %v", stored, err)
+			`UPDATE sessions SET `+set+` WHERE id = $1`, sid); err != nil {
+			t.Fatalf("set %s: %v", set, err)
 		}
 		status, body := s.do(http.MethodPost, "/v1/sessions/"+sid,
 			map[string]any{"agent": map[string]any{"tools": []any{}}})
