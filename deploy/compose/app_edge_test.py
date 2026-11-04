@@ -324,6 +324,8 @@ class AliasNameRouting(unittest.TestCase):
                 with self.defer_interrupts():
                     output = self.settle_child(process, entry, acquire, output)
         self.raise_interrupt()
+        if process.pid in self.active:
+            raise RuntimeError(f"owned child {process.pid} still active after command settlement")
         stdout, stderr = output
         if check and process.returncode:
             raise AssertionError(stderr or stdout)
@@ -462,6 +464,9 @@ class AliasNameRouting(unittest.TestCase):
         self.receipt.update(containerRemovalObserved=False, volumeRemovalObserved=False, networkRemovalObserved=False)
 
         def attempt(*args):
+            if self.active and (args[0] == "rm" or args[:2] == ("network", "rm")):
+                errors.append("owned children still active; resource cleanup withheld")
+                return
             try:
                 result = self.command(*args, check=False)
                 if not result.returncode:
@@ -925,6 +930,95 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assert_unrelated_untouched(transport)
         receipt = self.assert_partial_receipt(fixture, transport)
         self.assertTrue(receipt["cleanupErrors"], "cleanup failure vanished from the partial receipt")
+
+    def test_cleanup_group_failure_blocks_subsequent_resource_deletion(self):
+        for stage in ("logs", "rm"):
+            for fault in ("successful-output", "communicate-timeout"):
+                with self.subTest(stage=stage, fault=fault):
+                    injected, context = [], {}
+
+                    def configure(transport):
+                        original_popen = transport.popen
+
+                        def popen(args, **kwargs):
+                            process = original_popen(args, **kwargs)
+                            communicate = process.communicate
+
+                            def fail_during_cleanup(*args, **kwargs):
+                                output = communicate(*args, **kwargs)
+                                if transport.fixture.cleaning and process.args[1] == stage and not injected:
+                                    injected.append(process)
+                                    context.update(cleaning=transport.fixture.cleaning, args=process.args[1:],
+                                                   activeBefore=[pid for pid in transport.fixture.active if pid != process.pid],
+                                                   leaderReturncode=process.returncode)
+                                    process.helper_live = process.group_alive = process.group_stop_error = True
+                                    if fault == "communicate-timeout":
+                                        raise subprocess.TimeoutExpired(process.args, kwargs.get("timeout"))
+                                return output
+
+                            process.communicate = fail_during_cleanup
+                            return process
+
+                        transport.popen = popen
+
+                    fixture, transport, result, interrupted = self.run_fixture("requests-error", configure=configure)
+                    receipt = transport.persisted()
+                    (self.directory / ("cleanup-" + stage + "-" + fault + ".json")).write_text(json.dumps({
+                        "injection": context, "active": list(fixture.active), "commands": receipt["commands"],
+                        "cleanupErrors": receipt["cleanupErrors"], "removals": transport.cleanup_observations,
+                        "remainingContainers": sorted(transport.containers), "remainingVolumes": sorted(transport.volumes),
+                        "remainingNetworks": sorted(transport.networks), "groupCalls": transport.group_calls,
+                        "observations": {key: receipt[key] for key in
+                                         ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved")}}, indent=2))
+                    self.assertFalse(interrupted)
+                    self.assertEqual(len(injected), 1, "fault must occur inside a cleanup command")
+                    self.assertTrue(context["cleaning"])
+                    self.assertEqual(context["activeBefore"], [], "cleanup must begin without a failed group")
+                    self.assertEqual(context["args"], ["logs", "original-container-1"] if stage == "logs" else
+                                     ["rm", "-f", "-v", "original-container-1"])
+                    self.assertEqual(context["leaderReturncode"], 0)
+                    self.assertEqual(len(result.errors), 1)
+                    self.assertIn("after three completed fake requests", result.errors[0][1])
+                    self.assert_partial_receipt(fixture, transport)
+                    self.assert_unrelated_untouched(transport)
+                    helper = injected[0]
+                    entry = next(item for item in receipt["commands"] if item["pid"] == helper.pid)
+                    with self.subTest(contract="retained-group-and-errors"):
+                        self.assertIn(helper.pid, fixture.active)
+                        self.assertTrue(helper.group_alive and helper.helper_live)
+                        self.assertEqual(entry["returncode"], 0)
+                        self.assertIn("fake owned group could not be signalled", entry.get("reapError", ""))
+                        self.assertTrue(receipt["cleanupErrors"], "cleanup settlement failure must not return success")
+                        if fault == "communicate-timeout":
+                            self.assertIn("TimeoutExpired", entry.get("error", ""), "preserve the original timeout")
+                            self.assertIn("timed out", " ".join(receipt["cleanupErrors"]))
+                        else:
+                            self.assertIn("still active", " ".join(receipt["cleanupErrors"]))
+                    with self.subTest(contract="no-later-destructive-admission"):
+                        expected = [] if stage == "logs" else [["rm", "-f", "-v", "original-container-1"]]
+                        self.assertEqual([args for args in transport.calls if args[0] == "rm" or args[:2] == ["network", "rm"]],
+                                         expected, "a group failure during cleanup forbids later removals")
+                        self.assertEqual([item["target"] for item in transport.cleanup_observations],
+                                         [] if stage == "logs" else ["original-container-1"])
+                        self.assertTrue(all(item["owned"] and not item["active"] for item in transport.cleanup_observations))
+                    with self.subTest(contract="preserved-resources-and-histories"):
+                        remaining = {"unrelated-container", "original-container-2"}
+                        volumes = {"unrelated-volume", "owned-volume-original-container-2"}
+                        if stage == "logs":
+                            remaining.add("original-container-1")
+                            volumes.add("owned-volume-original-container-1")
+                            self.assertFalse((fixture.directory / "origin.log").exists(), "failed logs command cannot be used as success")
+                        else:
+                            self.assertEqual(receipt["seen"], transport.seen, "preserve logs collected before the failed removal")
+                        self.assertEqual(set(transport.containers), remaining)
+                        self.assertEqual(transport.volumes, volumes)
+                        self.assertEqual(transport.networks, {"unrelated-network", "original-network-id"})
+                        self.assertEqual(receipt["commands"], fixture.receipt["commands"])
+                        self.assertEqual(receipt["expectedForwarded"], fixture.forwarded)
+                        self.assertEqual(receipt["expectedRefused"], fixture.refused)
+                    for key in ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"):
+                        with self.subTest(observation=key):
+                            self.assertFalse(receipt[key], "a retained cleanup group forbids an absence claim")
 
     def test_cleanup_lists_are_parsed_once_and_failures_remain_unobserved(self):
         for failed_listing in (None, "containers", "volumes", "networks"):
