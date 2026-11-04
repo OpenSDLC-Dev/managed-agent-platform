@@ -1438,6 +1438,210 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 	}
 }
 
+// #312: what an update may change depends on the session's status, field by
+// field — the rule the reference was recorded applying, not the "must be idle"
+// its guide states. Running refuses an agent patch and takes title and
+// metadata (2026-10-18-session-update-running); rescheduling takes all four
+// (2026-10-31-mcp-listing); an unarchived terminated session refuses all four
+// (2026-10-18-session-update-terminal). Each refusal is the reference's status
+// and words, and changes nothing. Every status here is forged on the row, so
+// that each is tested alone; nothing leaves a session row at rescheduling or
+// terminated across a commit today. TestAnInterruptLetsARefusedAgentPatchThrough
+// runs the path a real running session takes.
+func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
+	s := newTestServer(t)
+	// The toolset gives a refused patch something to change, so the comparison
+	// in refuses can see one that slipped through.
+	agentID, envID := readableFixture(t, s)
+	inStatus := func(status string) string {
+		t.Helper()
+		id := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = $2 WHERE id = $1`, id, status); err != nil {
+			t.Fatalf("set %s: %v", status, err)
+		}
+		return id
+	}
+	const docsURL, movedURL = "https://mcp.example.com", "https://moved.example.com"
+	server := func(url string) []any {
+		return []any{map[string]any{"type": "url", "name": "docs", "url": url}}
+	}
+	clearTools := map[string]any{"agent": map[string]any{"tools": []any{}}}
+	// The fixture declares no servers, so this patch would change nothing, and
+	// the reference refuses it anyway.
+	clearServers := map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}
+	addServer := map[string]any{"agent": map[string]any{
+		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
+		"mcp_servers": server(docsURL),
+	}}
+	agentPatches := []map[string]any{clearTools, clearServers, addServer}
+	const title = "renamed"
+	propertyPatches := []map[string]any{
+		{"title": title},
+		{"metadata": map[string]any{"probe": "accepted"}},
+	}
+	refuses := func(id string, patches []map[string]any, msg string) {
+		t.Helper()
+		_, before := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		for _, p := range patches {
+			status, body := s.do(http.MethodPost, "/v1/sessions/"+id, p)
+			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", msg)
+		}
+		_, after := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		for _, k := range []string{"agent", "title", "metadata", "updated_at"} {
+			if !reflect.DeepEqual(after[k], before[k]) {
+				t.Errorf("%s after refused updates = %v, want %v", k, after[k], before[k])
+			}
+		}
+	}
+	// applies sends each patch and answers the session they leave behind.
+	applies := func(id string, patches []map[string]any) map[string]any {
+		t.Helper()
+		for _, p := range patches {
+			if status, body := s.do(http.MethodPost, "/v1/sessions/"+id, p); status != http.StatusOK {
+				t.Errorf("update %v: %d %v", p, status, body)
+			}
+		}
+		_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+		if got["title"] != title {
+			t.Errorf("title = %v, want %q", got["title"], title)
+		}
+		if md, _ := got["metadata"].(map[string]any); md["probe"] != "accepted" {
+			t.Errorf("metadata = %v, want probe=accepted", got["metadata"])
+		}
+		return got
+	}
+	all := append(slices.Clone(agentPatches), propertyPatches...)
+
+	const whileRunning = "Cannot update agent while session is running. Send a `user.interrupt` event first."
+	running := inStatus(string(domain.SessionRunning))
+	refuses(running, agentPatches, whileRunning)
+	// Past the recordings, which sent each of these fields alone: any other
+	// agent value is an agent update too, refused before its own checks run, and
+	// it takes the fields beside it down with it (docs/DIVERGENCES.md, the
+	// session-update edges under INFERRED).
+	refuses(running, []map[string]any{
+		{"agent": map[string]any{}},
+		{"agent": "raw"},
+		{"agent": map[string]any{"system": "sneaky"}},
+		{"title": title, "agent": map[string]any{"tools": []any{}}},
+	}, whileRunning)
+	// JSON null is no patch at all, here as on an idle session.
+	_, before := s.do(http.MethodGet, "/v1/sessions/"+running, nil)
+	got := applies(running, append([]map[string]any{{"agent": nil}}, propertyPatches...))
+	if !reflect.DeepEqual(got["agent"], before["agent"]) {
+		t.Errorf("agent after title and metadata = %v, want %v", got["agent"], before["agent"])
+	}
+
+	for _, status := range []domain.SessionStatus{domain.SessionRescheduling, domain.SessionIdle} {
+		id := inStatus(string(status))
+		// Each patch is read back as it lands, because the next one overwrites
+		// what it wrote, so a handler that drops one field alone cannot hide.
+		for _, step := range []struct {
+			patch map[string]any
+			tools []string
+			urls  []string
+		}{
+			{clearTools, nil, nil},
+			{clearServers, nil, nil},
+			{addServer, []string{"mcp_toolset"}, []string{docsURL}},
+			{map[string]any{"agent": map[string]any{"mcp_servers": server(movedURL)}},
+				[]string{"mcp_toolset"}, []string{movedURL}},
+		} {
+			if code, body := s.do(http.MethodPost, "/v1/sessions/"+id, step.patch); code != http.StatusOK {
+				t.Fatalf("%s: update %v: %d %v", status, step.patch, code, body)
+			}
+			_, got := s.do(http.MethodGet, "/v1/sessions/"+id, nil)
+			a, _ := got["agent"].(map[string]any)
+			if types := toolTypes(t, a["tools"]); !slices.Equal(types, step.tools) {
+				t.Errorf("%s: after %v agent.tools = %v, want %v", status, step.patch, types, step.tools)
+			}
+			var urls []string
+			servers, _ := a["mcp_servers"].([]any)
+			for _, srv := range servers {
+				urls = append(urls, srv.(map[string]any)["url"].(string))
+			}
+			if !slices.Equal(urls, step.urls) {
+				t.Errorf("%s: after %v server urls = %v, want %v", status, step.patch, urls, step.urls)
+			}
+		}
+		applies(id, propertyPatches)
+	}
+
+	// Past the recordings again: a terminated session refuses a body that would
+	// change nothing as well.
+	const ended = "Cannot modify archived session"
+	terminated := inStatus(string(domain.SessionTerminated))
+	refuses(terminated, append(slices.Clone(all), map[string]any{}, map[string]any{"agent": nil}), ended)
+
+	// The checks that read no row answer ahead of both status refusals.
+	for _, id := range []string{running, terminated} {
+		refuses(id, []map[string]any{{"vault_ids": []any{}, "agent": clearTools["agent"]}},
+			"vault_ids updates are not yet supported")
+		refuses(id, []map[string]any{{"nonsense": 1, "agent": clearTools["agent"]}},
+			`Failed to parse request body: unknown field "nonsense"`)
+	}
+
+	// An archived session renders terminated, so it answers the same whatever its
+	// stored status is. No recording updates one.
+	archived := inStatus(string(domain.SessionIdle))
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
+	refuses(archived, all, ended)
+	// Archiving refuses a running session, so this row is forged.
+	archivedRunning := inStatus(string(domain.SessionRunning))
+	if _, err := s.pool.Exec(context.Background(),
+		`UPDATE sessions SET archived_at = now() WHERE id = $1`, archivedRunning); err != nil {
+		t.Fatalf("archive the running row: %v", err)
+	}
+	refuses(archivedRunning, all, ended)
+}
+
+// The refusal's own advice, on a session that really runs: its title still
+// updates and is announced, and the interrupt it names settles the session so
+// that the same patch applies (#312).
+func TestAnInterruptLetsARefusedAgentPatchThrough(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := readableFixture(t, s)
+	created := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID,
+		"initial_events": []any{userMessage("go")}})
+	sid := created["id"].(string)
+	if created["status"] != "running" {
+		t.Fatalf("session status = %v, want running", created["status"])
+	}
+	clearTools := map[string]any{"agent": map[string]any{"tools": []any{}}}
+
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid, clearTools)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Cannot update agent while session is running. Send a `user.interrupt` event first.")
+
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"title": "renamed"}); status != http.StatusOK {
+		t.Fatalf("title while running: %d %v", status, body)
+	}
+	_, list := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	announced := false
+	for _, ev := range listData(t, list) {
+		announced = announced || (ev["type"] == "session.updated" && ev["title"] == "renamed")
+	}
+	if !announced {
+		t.Errorf("no session.updated carries the new title: %v", list)
+	}
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	if _, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); got["status"] != "idle" {
+		t.Fatalf("status after the interrupt = %v, want idle", got["status"])
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+sid, clearTools)
+	if status != http.StatusOK {
+		t.Fatalf("the refused patch after the interrupt: %d %v", status, body)
+	}
+	a, _ := body["agent"].(map[string]any)
+	if got := toolTypes(t, a["tools"]); len(got) != 0 {
+		t.Errorf("agent.tools after the patch = %v, want none", got)
+	}
+}
+
 // The guard's row lock is what closes the check-then-act window: a flip to
 // running committed while the archive is in flight must be observed, not
 // raced past. The concurrent writer here holds the session row exclusively
@@ -1446,6 +1650,23 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 // without FOR UPDATE the guard's plain SELECT reads the pre-flip snapshot,
 // sails past, and the archive lands on a running session.
 func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
+	status, body := postDuringRunningFlip(t, "/archive", "")
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The update reads the status under the same lock (#312), so an agent patch
+// raced against the flip is refused rather than written onto a running session.
+func TestAgentPatchObservesConcurrentRunningFlip(t *testing.T) {
+	status, body := postDuringRunningFlip(t, "", `{"agent":{"tools":[]}}`)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Cannot update agent while session is running. Send a `user.interrupt` event first.")
+}
+
+// postDuringRunningFlip posts to the session's route plus suffix while another
+// transaction holds the row with a flip to running, commits that flip once the
+// request is waiting on the lock, and returns the answer.
+func postDuringRunningFlip(t *testing.T, suffix, payload string) (int, map[string]any) {
+	t.Helper()
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
@@ -1471,7 +1692,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	}
 	ch := make(chan resp, 1)
 	go func() {
-		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+"/archive", nil)
+		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+suffix, strings.NewReader(payload))
 		if err != nil {
 			ch <- resp{err: err}
 			return
@@ -1506,7 +1727,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		select {
 		case r := <-ch:
-			t.Fatalf("archive answered (%d, err %v) before the running flip committed", r.status, r.err)
+			t.Fatalf("request answered (%d, err %v) before the running flip committed", r.status, r.err)
 		default:
 		}
 		var waiting bool
@@ -1526,7 +1747,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	}
 	r := <-ch
 	if r.err != nil {
-		t.Fatalf("archive request: %v", r.err)
+		t.Fatalf("request: %v", r.err)
 	}
-	wantErr(t, r.status, r.body, http.StatusBadRequest, "invalid_request_error")
+	return r.status, r.body
 }

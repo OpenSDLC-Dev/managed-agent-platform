@@ -90,6 +90,15 @@ type sessionRow struct {
 	archivedAt           *time.Time
 }
 
+// wireStatus is the status the wire reports for this row, which renderSession
+// argues: an archived session reads terminated whatever the stored column holds.
+func (r sessionRow) wireStatus() string {
+	if r.archivedAt != nil {
+		return string(domain.SessionTerminated)
+	}
+	return r.status
+}
+
 // sessionStatusExpr is renderSession's archive projection expressed in SQL, for
 // the one place that cannot go through it: the list's statuses[] filter, which
 // selects rows before any of them is rendered. The two have to agree —
@@ -218,10 +227,7 @@ func renderSession(r sessionRow) (sessionJSON, error) {
 	// the reaper, the dream arms — still sees what a settlement wrote, and a
 	// producer of a real terminated (#577's failed model request) would reach
 	// them rather than being masked by this.
-	status := r.status
-	if r.archivedAt != nil {
-		status = string(domain.SessionTerminated)
-	}
+	status := r.wireStatus()
 	// The running time counts the open interval up to this read, so a session
 	// that runs reports time as it spends it (plan 68 decision 6) — but only
 	// while the stored status says running: an interval whose close a binary
@@ -1182,11 +1188,31 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if row.archivedAt != nil {
-		return nil, errInvalid("session %s is archived", id)
-	}
+	// The dream hold answers first, whatever the status: the running sentence
+	// below advises an interrupt, which a session a dream owns refuses as well.
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
+	}
+	// What an update may do follows the session's status, by the rule the
+	// reference was recorded applying rather than the "must be idle" its guide
+	// states (#312). The row lock taken above holds the status still until
+	// commit.
+	//
+	// A terminated session takes no update, in the words it was recorded
+	// answering with although it was not archived
+	// (2026-10-18-session-update-terminal). An archived session renders
+	// terminated, so it answers the same; no recording updates one. No settlement
+	// stores terminated on a session row today; #577's failed model request is
+	// the one that will.
+	if row.wireStatus() == string(domain.SessionTerminated) {
+		return nil, errInvalid("Cannot modify archived session")
+	}
+	// A running session refuses any non-null agent, one that would change nothing
+	// too, and still takes title and metadata
+	// (2026-10-18-session-update-running). Rescheduling takes all four
+	// (2026-10-31-mcp-listing), so it has no arm here.
+	if present(obj["agent"]) && row.status == string(domain.SessionRunning) {
+		return nil, errInvalid("Cannot update agent while session is running. Send a `user.interrupt` event first.")
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {

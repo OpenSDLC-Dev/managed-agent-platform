@@ -970,8 +970,8 @@ admits a declared server's host only if the flag is set (or the host is in
 The same check runs at session create on the session's own agent, where a
 server a `limited` policy does not admit refuses the session with a 400. The
 dial stays the enforcement point: a coordinator's roster members are not
-checked at create, an agent patch can add a server to a running session, and
-the environment's policy can change after the session exists.
+checked at create, an agent patch can add a server to a live session between
+its turns, and the environment's policy can change after the session exists.
 Read the asymmetry deliberately — a `self_hosted` environment carries no
 networking block at all by construction, so on that kind the dial is not
 policy-restricted here in the first place. What the platform guarantees
