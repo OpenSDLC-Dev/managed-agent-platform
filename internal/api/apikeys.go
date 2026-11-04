@@ -56,11 +56,8 @@ type ManagementKey struct {
 // managementKeyColumns is the single spelling of a key's projection, shared by
 // every read so the derived status cannot drift between them.
 //
-// The `expired` derivation is the exact complement of the one in authenticate
-// (`expires_at IS NULL OR expires_at > now()`): a key reads `expired` precisely
-// when that query would refuse it for having lapsed. Both run on the database's
-// clock, so a listing can never show `active` for a key the very next request is
-// about to reject.
+// Expiry is compared against the database clock, as in authenticate. A projection
+// describes that instant only: a key can lapse before the next request.
 //
 // The precedence is archived > expired > the stored status, and both halves were
 // measured on the reference (#389, 2026-08-13). A key disabled while live and
@@ -70,11 +67,10 @@ type ManagementKey struct {
 // `archived`, not `expired` — retirement is the more final fact, and it is the
 // one an operator acted on.
 //
-// The expiry half stays the exact complement of the comparison in authenticate
-// (`expires_at IS NULL OR expires_at > now()`), on the database's clock, so a
-// listing can never show a live status for a key the next request will refuse.
+// Use clock_timestamp(), not transaction-start now(): an authority-lock wait can
+// outlast the key's expiry before INSERT RETURNING projects it.
 const managementKeyColumns = `id, name,
-	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= now()
+	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= clock_timestamp()
 	     THEN 'expired' ELSE status END,
 	partial_key_hint, created_at, created_by, expires_at`
 

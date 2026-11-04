@@ -318,11 +318,10 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 
 	var createdBy *string
 	var current string
-	var lapsed bool
 	var rowName string
 	err = tx.QueryRow(ctx,
-		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now()), name
-		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed, &rowName)
+		`SELECT created_by, status, name
+		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &rowName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -385,6 +384,14 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// reference's "deleted", on the argument that an operator could act on it.
 	if current == KeyStatusArchived {
 		return nil, errInvalid("Archived API keys cannot be updated.")
+	}
+	// Sample the database clock after FOR UPDATE returns: its SELECT expressions
+	// may run before a row-lock wait. now() would retain the transaction's start.
+	var lapsed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT expires_at IS NOT NULL AND expires_at <= clock_timestamp()
+		 FROM api_keys WHERE id = $1`, keyID).Scan(&lapsed); err != nil {
+		return nil, err
 	}
 	// A lapsed key admits exactly one operation: archiving it. The reference states
 	// the rule in the refusal itself — "Expired API keys can only be deleted, not

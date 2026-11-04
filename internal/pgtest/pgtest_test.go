@@ -15,7 +15,8 @@ import (
 func TestContainerDiagWithFakeDocker(t *testing.T) {
 	fakeDir := t.TempDir()
 	fake := `#!/bin/sh
-if [ "$PGTEST_DIAG_SCENARIO" = unavailable ]; then
+printf '%s\n' "$1" >> "$PGTEST_DIAG_CALL_FILE"
+if [ "$PGTEST_DIAG_SCENARIO" = unavailable ] && [ "$1" != exec ]; then
 	printf '%s unavailable\n' "$1" >&2
 	exit 2
 fi
@@ -79,6 +80,48 @@ logs)
 		exit 64
 	fi
 	;;
+exec)
+	[ "$#" -eq 5 ] && [ "$2" = pgtest-unit-owned ] && [ "$3" = sh ] && [ "$4" = -c ] && [ "$5" = "date -u '+sampled_at=%Y-%m-%dT%H:%M:%SZ' && postgres --version && df -Pk /dev/shm" ] || { printf 'unexpected exec arguments\n' >&2; exit 64; }
+	if [ "$PGTEST_DIAG_SCENARIO" = unavailable ]; then
+		printf 'exec unavailable\n' >&2
+		exit 2
+	fi
+	printf 'sampled_at=2094-07-16T12:34:56Z\n'
+	case "$PGTEST_DIAG_SCENARIO" in
+	snapshot-version-unavailable)
+		printf 'postgres: synthetic version unavailable\n' >&2
+		exit 7
+		;;
+	snapshot-timeout)
+		printf '%s\n' "$$" > "$PGTEST_DIAG_PID_FILE"
+		printf 'snapshot-budget-exhaustion\n'
+		exec /bin/sleep 12
+		;;
+	snapshot-inherited-pipes)
+		/bin/sleep 3 &
+		printf '%s %s\n' "$$" "$!" > "$PGTEST_DIAG_PID_FILE"
+		printf 'snapshot-inherited-pipe\n'
+		exit 0
+		;;
+	esac
+	printf 'postgres (PostgreSQL) 16.73-pgtest-synthetic\n'
+	if [ "$PGTEST_DIAG_SCENARIO" = snapshot-space-unavailable ]; then
+		printf 'df: synthetic /dev/shm unavailable\n' >&2
+		exit 9
+	elif [ "$PGTEST_DIAG_SCENARIO" = snapshot-oversized ]; then
+		printf 'snapshot-discarded-prefix\n'
+		chunk=0123456789abcdef
+		for n in 1 2 3 4 5 6; do chunk="$chunk$chunk"; done
+		i=0
+		while [ "$i" -lt 128 ]; do
+			printf '%s\n' "$chunk"
+			i=$((i + 1))
+		done
+		printf 'recent-snapshot-tail-end\n'
+	else
+		printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\npgtest-synthetic-shm 98317 54321 43996 56%% /dev/shm\n'
+	fi
+	;;
 *) printf 'unexpected Docker operation\n' >&2; exit 64 ;;
 esac
 `
@@ -87,6 +130,10 @@ esac
 	}
 	// No inherited PATH: an absent fake cannot resolve to the host's Docker.
 	t.Setenv("PATH", fakeDir)
+	if path, err := exec.LookPath("docker"); err != nil || path != filepath.Join(fakeDir, "docker") {
+		t.Fatalf("fake Docker selection = %q, %v", path, err)
+	}
+	t.Logf("fake-only Docker=%s; PATH=%s", filepath.Join(fakeDir, "docker"), os.Getenv("PATH"))
 	for _, tc := range []struct {
 		name, scenario string
 		want           []string
@@ -94,18 +141,35 @@ esac
 		{"image-ipc-metadata", "metadata", []string{"image=pgtest.invalid/synthetic-postgres:projection-only", "image_id=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "shm_size=100663297", "ipc_mode=shareable"}},
 		{"exited-oom", "exited", []string{"status=exited", "running=false", "exit_code=137", "oom_killed=true", "started_at=2026-11-01T00:00:00Z", "finished_at=2026-11-01T00:01:00Z", "error=\"\"", "server process was terminated by signal 9", "database system is in recovery mode"}},
 		{"running-recovery", "recovery", []string{"status=running", "running=true", "exit_code=0", "oom_killed=false", "server process was terminated by signal 9", "database system is in recovery mode"}},
-		{"unavailable", "unavailable", []string{"inspect unavailable", "logs unavailable", "exit status 2"}},
+		{"unavailable", "unavailable", []string{"inspect unavailable", "logs unavailable", "exit status 2", "exec unavailable"}},
+		{"post-failure-snapshot", "snapshot", []string{"post-failure sample (not incident-time usage", "sampled_at=2094-07-16T12:34:56Z", "postgres (PostgreSQL) 16.73-pgtest-synthetic", "Filesystem 1024-blocks Used Available Capacity Mounted on\npgtest-synthetic-shm 98317 54321 43996 56% /dev/shm"}},
+		{"snapshot-version-unavailable-keeps-history", "snapshot-version-unavailable", []string{"status=exited", "server process was terminated by signal 9", "sampled_at=2094-07-16T12:34:56Z", "postgres: synthetic version unavailable", "exit status 7"}},
+		{"snapshot-space-unavailable-keeps-history", "snapshot-space-unavailable", []string{"status=exited", "server process was terminated by signal 9", "postgres (PostgreSQL) 16.73-pgtest-synthetic", "df: synthetic /dev/shm unavailable", "exit status 9"}},
+		{"snapshot-bounded-tail-keeps-history", "snapshot-oversized", []string{"status=exited", "server process was terminated by signal 9", "recent-snapshot-tail-end"}},
+		{"snapshot-inherited-pipe-drain-keeps-history", "snapshot-inherited-pipes", []string{"status=exited", "server process was terminated by signal 9", "snapshot-inherited-pipe", exec.ErrWaitDelay.Error()}},
+		{"snapshot-timeout-keeps-history", "snapshot-timeout", []string{"status=exited", "server process was terminated by signal 9", "snapshot-budget-exhaustion", "signal: killed"}},
 		{"bounded-tail", "oversized", []string{"status=exited", "recent-log-tail-end"}},
 		{"inherited-pipe-drain", "inherited-pipes", []string{"inherited-pipe-state", exec.ErrWaitDelay.Error(), "server process was terminated by signal 9"}},
-		{"inspect-timeout-keeps-logs", "inspect-timeout", []string{"inspect-budget-exhaustion", "signal: killed", "2026-11-01T00:00:58Z useful-history-after-inspect-timeout"}},
+		{"inspect-timeout-keeps-logs", "inspect-timeout", []string{"inspect-budget-exhaustion", "signal: killed", "2026-11-01T00:00:58Z useful-history-after-inspect-timeout", "sampled_at=2094-07-16T12:34:56Z", "postgres (PostgreSQL) 16.73-pgtest-synthetic", "pgtest-synthetic-shm 98317 54321 43996 56% /dev/shm"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PGTEST_DIAG_SCENARIO", tc.scenario)
+			callFile := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("PGTEST_DIAG_CALL_FILE", callFile)
+			started := time.Now()
 			var got string
-			if tc.scenario == "inherited-pipes" || tc.scenario == "inspect-timeout" {
+			if tc.scenario == "inherited-pipes" || tc.scenario == "inspect-timeout" || tc.scenario == "snapshot-inherited-pipes" || tc.scenario == "snapshot-timeout" {
 				got = containerDiagWithOwnedDelay(t, tc.scenario)
 			} else {
 				got = containerDiag("pgtest-unit-owned")
+			}
+			t.Logf("capture sequence elapsed=%s", time.Since(started))
+			calls, err := os.ReadFile(callFile)
+			if err != nil || string(calls) != "inspect\nlogs\nexec\n" {
+				t.Errorf("diagnostic capture order = %q, %v; want inspect, logs, exec", calls, err)
+			}
+			if strings.Contains(got, "unexpected") || strings.Contains(got, "exit status 64") {
+				t.Errorf("fake rejected diagnostic command: %.2000s", got)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(got, want) {
@@ -117,11 +181,21 @@ esac
 					t.Errorf("diagnostic did not retain a bounded recent tail: bytes=%d", len(got))
 				}
 			}
+			if tc.scenario == "snapshot-oversized" {
+				if len(got) > 66*1024 || strings.Contains(got, "snapshot-discarded-prefix") {
+					t.Errorf("diagnostic did not retain a bounded recent snapshot tail: bytes=%d", len(got))
+				}
+				_, sample, ok := strings.Cut(got, "\npost-failure sample (not incident-time usage, up to 65536 bytes):\n")
+				if !ok || len(sample) > 64*1024 {
+					t.Errorf("snapshot tail bytes=%d, label found=%t; want at most 65536 bytes", len(sample), ok)
+				}
+				t.Logf("bounded snapshot tail bytes=%d (limit=65536)", len(sample))
+			}
 		})
 	}
 }
 
-// Both delays are finite even without either production guard. The pipe holder
+// All delay scenarios are finite without either production guard. The pipe holder
 // exits naturally; the timeout fake execs sleep so cancellation leaves no child.
 func containerDiagWithOwnedDelay(t *testing.T, scenario string) string {
 	t.Helper()
@@ -171,7 +245,7 @@ func containerDiagWithOwnedDelay(t *testing.T, scenario string) string {
 		}
 	})
 	wantPIDs := 1
-	if scenario == "inherited-pipes" {
+	if scenario == "inherited-pipes" || scenario == "snapshot-inherited-pipes" {
 		wantPIDs = 2
 	}
 	deadline := time.Now().Add(5 * time.Second)

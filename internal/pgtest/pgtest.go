@@ -153,8 +153,10 @@ func (tail *diagnosticTail) Write(p []byte) (int, error) {
 
 // containerDiag captures state, image and IPC fields, not Config.Env. Retain
 // recent server history before recovery refusals hide it, with time and byte bounds.
-// Each capture gets 10s plus 1s to drain inherited pipes (22s across both).
-// An inspect timeout must not spend the logs capture's budget.
+// Each capture gets 10s plus 1s to drain inherited pipes (33s across three).
+// A timed-out capture must not spend the next capture's budget.
+// The post-failure sample is not incident-time usage. A Docker CLI timeout does
+// not prove the in-container exec stopped; exact fixture teardown owns that exec.
 func containerDiag(containerID string) string {
 	capture := func(args ...string) string {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -172,7 +174,8 @@ func containerDiag(containerID string) string {
 	}
 	state := capture("inspect", "-f", "status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}} image={{.Config.Image}} image_id={{.Image}} shm_size={{.HostConfig.ShmSize}} ipc_mode={{.HostConfig.IpcMode}}", containerID)
 	logs := capture("logs", "--timestamps", "--tail", "200", containerID)
-	return fmt.Sprintf("container %s state %s; last 200 log lines (up to %d bytes):\n%s", containerID, state, diagnosticByteLimit, logs)
+	sample := capture("exec", containerID, "sh", "-c", "date -u '+sampled_at=%Y-%m-%dT%H:%M:%SZ' && postgres --version && df -Pk /dev/shm")
+	return fmt.Sprintf("container %s state %s; last 200 log lines (up to %d bytes):\n%s\npost-failure sample (not incident-time usage, up to %d bytes):\n%s", containerID, state, diagnosticByteLimit, logs, diagnosticByteLimit, sample)
 }
 
 func hostPort(containerID string) (string, error) {
