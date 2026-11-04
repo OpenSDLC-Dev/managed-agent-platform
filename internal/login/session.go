@@ -71,10 +71,7 @@ func (m *Manager) issue(ctx context.Context, principalID string, passwordLogin b
 		return IssuedSession{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM browser_sessions WHERE expires_at <= statement_timestamp();
-		DELETE FROM browser_login_attempts WHERE expires_at <= statement_timestamp()`); err != nil {
-		return IssuedSession{}, err
-	}
+	// Match principal mutations: lock principals before browser sessions.
 	if passwordLogin {
 		tag, err := tx.Exec(ctx, `UPDATE principals SET last_seen_at=clock_timestamp()
 			WHERE id=$1 AND issuer=$2 AND kind='user' AND status='active'`, principalID, LocalIssuer)
@@ -84,6 +81,10 @@ func (m *Manager) issue(ctx context.Context, principalID string, passwordLogin b
 		if tag.RowsAffected() != 1 {
 			return IssuedSession{}, ErrUnauthenticated
 		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM browser_sessions WHERE expires_at <= statement_timestamp();
+		DELETE FROM browser_login_attempts WHERE expires_at <= statement_timestamp()`); err != nil {
+		return IssuedSession{}, err
 	}
 	session, err := scanSession(tx.QueryRow(ctx, `
 		WITH stamp AS MATERIALIZED (SELECT clock_timestamp() AS at), issued AS (

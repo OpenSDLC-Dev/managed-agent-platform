@@ -422,9 +422,15 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // is the router itself, typed as one because the management lane asks it which
 // route a request reaches (answerEnvironmentKey).
 func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
+	return dispatchAuthWithLogin(pool, v, nil, next)
+}
+
+// dispatchAuthWithLogin applies native origin policy on the selected human lane,
+// while sharing legacy credential precedence with dispatchAuth's callers.
+func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	workToken := requireWorkToken(pool, next)
-	mgmt := dispatchManagementAuth(pool, v, next)
+	mgmt := dispatchManagementAuth(pool, v, manager, next)
 	gate := requireGateToken(pool, next)
 	// Built once and shared by every lane that can reach a human: the verifier
 	// is safe for concurrent use and the middleware holds no per-request state.
@@ -432,9 +438,9 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 	// below collapse to exactly its previous behaviour.
 	var human http.Handler
 	if v != nil {
-		human = requireIdentity(pool, v, next)
+		human = requireIdentity(pool, v, manager, next)
 	}
-	sessionEvents := dispatchSessionEventsAuth(pool, v, human, next)
+	sessionEvents := dispatchSessionEventsAuth(pool, v, manager, human, next)
 	skillReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
 	fileReads := dualAuth(v, requireSelfHostedEnvironmentKey(pool, next), human, mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -531,11 +537,11 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 // recorded route each in its recorded words: a machine credential's answer,
 // which has nothing to do with whether humans can sign in, so a request that
 // offers no human credential beside the key draws it in every mode.
-func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
+func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	var human http.Handler
 	if v != nil {
-		human = requireIdentity(pool, v, next)
+		human = requireIdentity(pool, v, manager, next)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the private proxy can bring verified cookie context back into
@@ -621,9 +627,9 @@ func dualAuth(v *identity.Verifier, env, human, mgmt http.Handler) http.Handler 
 // on the environment lane, which still validates the key and scopes it to its own
 // environment. Mutating session CRUD (create/update/delete/archive/list) is not
 // routed here, so the environment key never reaches it.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, human http.Handler, next *http.ServeMux) http.Handler {
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, human http.Handler, next *http.ServeMux) http.Handler {
 	return dualAuth(v, requireEnvironmentKeyForSession(pool, next), human,
-		dispatchManagementAuth(pool, v, next))
+		dispatchManagementAuth(pool, v, manager, next))
 }
 
 // apiKeyOffered reports whether the request carries a usable management key —

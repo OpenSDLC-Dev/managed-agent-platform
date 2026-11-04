@@ -152,17 +152,18 @@ func TestNativeDeactivatedLoginMarker(t *testing.T) {
 	}
 }
 
-// The barrier is the real session-table lock. The test observes Issue waiting
-// before deactivating, rather than racing a sleep against Argon2 or HTTP.
+// Observe the actual issuance lock wait before deactivating. Password login
+// uses the principal boundary; OIDC/proxy retain their session-table barrier.
 func TestNativeLoginIssuanceDeactivationRace(t *testing.T) {
 	for _, mode := range []login.Mode{login.ModePassword, login.ModeOIDC, login.ModeTrustedProxy} {
 		t.Run(string(mode), func(t *testing.T) {
+			if mode == login.ModePassword {
+				testPasswordIssuanceDeactivationAtPrincipalBoundary(t)
+				return
+			}
 			s := newNativeServer(t, mode)
 			method, path, body, h := "POST", "/api/auth/login", "", nativeHeaders("", "")
-			if mode == login.ModePassword {
-				s.seedLocal("raced", "user", "active")
-				body = fmt.Sprintf(`{"login_name":"raced","password":%q}`, localPassword)
-			} else if mode == login.ModeOIDC {
+			if mode == login.ModeOIDC {
 				method = "GET"
 				path, h = nativeCallbackFixture(t, s, nil)
 			} else {

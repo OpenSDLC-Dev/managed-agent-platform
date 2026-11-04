@@ -94,7 +94,7 @@ func (s *server) requireCookie(next http.Handler) http.Handler {
 // Only the named method+path exceptions are anonymous. Neither a subtree nor
 // the mux's cleaned redirect target is an authentication exception.
 func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
-	legacy := dispatchAuth(s.pool, s.verifier, next)
+	legacy := dispatchAuthWithLogin(s.pool, s.verifier, s.login, next)
 	cookie := s.requireCookie(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := next.Handler(r)
@@ -143,14 +143,6 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 		if s.nativeLogin() && privateCookiePath(r) && !legacyLoginCredentialOffered(r, s.verifier) {
 			cookie.ServeHTTP(w, r)
 			return
-		}
-		// Match management dispatch's machine-first selection. A proxy assertion
-		// may be ambient browser authority even without a platform session cookie.
-		if s.nativeLogin() && privateCookiePath(r) && !apiKeyOffered(r) && s.verifier != nil && s.verifier.AssertionHeader() != "" {
-			if _, selected := s.verifier.Credential(r); selected && s.login.CheckProxyOrigin(r) != nil {
-				writeError(w, r, errForbidden("invalid browser origin"))
-				return
-			}
 		}
 		legacy.ServeHTTP(w, r)
 	})

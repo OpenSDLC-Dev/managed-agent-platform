@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // identityPrincipal is the authenticated human's stored audit ID and role.
@@ -37,11 +38,17 @@ func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 // route sees them. A database failure here is a 500 rather than a 401 — the
 // credential was good, and reporting an outage as an auth failure sends an
 // operator hunting the IdP.
-func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, next http.Handler) http.Handler {
+func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := v.Credential(r)
 		if !ok {
 			writeError(w, r, errAuth("missing credential"))
+			return
+		}
+		// Dispatch has selected the human lane. An accompanying worker Bearer
+		// cannot exempt its ambient assertion, even on a public management route.
+		if manager != nil && manager.NativeEnabled() && v.Mode() == identity.ModeTrustedProxy && manager.CheckProxyOrigin(r) != nil {
+			writeError(w, r, errForbidden("invalid browser origin"))
 			return
 		}
 		id, err := v.Verify(r.Context(), token)
