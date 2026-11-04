@@ -77,12 +77,26 @@ func privateStream(t *testing.T, s *nativeServer, path, cookie string) (*sseStre
 
 func observePrivateSQL(t *testing.T, s *nativeServer, ctx context.Context, wantWaiters int, wantListener bool) (int, bool) {
 	t.Helper()
+	// Observation must not compete with the blocked queries for pool slots.
+	connectCtx, connectCancel := context.WithTimeout(ctx, 5*time.Second)
+	conn, err := pgx.ConnectConfig(connectCtx, s.pool.Config().ConnConfig.Copy())
+	connectCancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		if err := conn.Close(closeCtx); err != nil {
+			t.Errorf("close private SQL observer: %v", err)
+		}
+	}()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		var waiters int
 		var listener bool
-		err := s.pool.QueryRow(ctx, `SELECT
+		err := conn.QueryRow(ctx, `SELECT
 			(SELECT count(*) FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database())
 			 AND relation='browser_sessions'::regclass AND mode='AccessShareLock' AND NOT granted),
 			EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN %')`).Scan(&waiters, &listener)

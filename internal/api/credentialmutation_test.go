@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,6 +308,9 @@ func TestNativeCredentialMutationDelayedBody(t *testing.T) {
 					t.Errorf("post-body authority: status=%d marker=%q want=%d/%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), want, marker, rr.Body.String())
 				}
 				target.assertState(t, ctx, s, h, rr, withdrawal == "unchanged", caller)
+				if withdrawal == "unchanged" && !t.Failed() {
+					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
+				}
 			})
 		}
 	}
@@ -345,6 +349,9 @@ func TestNativeCredentialMutationLegacyPrecedence(t *testing.T) {
 				t.Fatal(err)
 			}
 			target.assertState(t, ctx, s, h, rr, true, issuer)
+			if !t.Failed() {
+				fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
+			}
 		})
 	}
 }
@@ -388,6 +395,9 @@ func TestNativeCredentialMutationRejectsManagementBearer(t *testing.T) {
 			cookieOnly = credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
 			if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
 				t.Errorf("management Bearer rejection invalidated its cookie: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
+			}
+			if !t.Failed() {
+				fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
 			}
 		})
 	}

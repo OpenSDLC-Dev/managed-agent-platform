@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -283,6 +284,9 @@ func TestGatewayCredentialMutationDelayedBody(t *testing.T) {
 					t.Errorf("post-body grant authority: status=%d marker=%q want=%d/%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), want, marker, rr.Body.String())
 				}
 				target.assertState(t, ctx, f, rr, withdrawal == "unchanged")
+				if withdrawal == "unchanged" && !t.Failed() {
+					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
+				}
 			})
 		}
 	}
@@ -320,6 +324,9 @@ func TestGatewayCredentialMutationLegacyPrecedence(t *testing.T) {
 					t.Errorf("bootstrap credential lost precedence: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
 				}
 				target.assertState(t, ctx, f, rr, true)
+				if !t.Failed() {
+					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
+				}
 			})
 		}
 	}
