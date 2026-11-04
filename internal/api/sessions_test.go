@@ -1444,8 +1444,10 @@ func TestRunningSessionArchiveAndDeleteRejected(t *testing.T) {
 // metadata (2026-10-18-session-update-running); rescheduling takes all four
 // (2026-10-31-mcp-listing); an unarchived terminated session refuses all four
 // (2026-10-18-session-update-terminal). Each refusal is the reference's status
-// and words, and changes nothing. Rescheduling and terminated are forged rows:
-// nothing leaves a session row at either across a commit today.
+// and words, and changes nothing. Every status here is forged on the row, so
+// that each is tested alone; nothing leaves a session row at rescheduling or
+// terminated across a commit today. TestAnInterruptLetsARefusedAgentPatchThrough
+// runs the path a real running session takes.
 func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 	s := newTestServer(t)
 	// The toolset gives a refused patch something to change, so the comparison
@@ -1465,8 +1467,8 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 		return []any{map[string]any{"type": "url", "name": "docs", "url": url}}
 	}
 	clearTools := map[string]any{"agent": map[string]any{"tools": []any{}}}
-	// Refused on presence: the fixture declares no servers, so this patch would
-	// change nothing, and the reference refuses it anyway.
+	// The fixture declares no servers, so this patch would change nothing, and
+	// the reference refuses it anyway.
 	clearServers := map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}
 	addServer := map[string]any{"agent": map[string]any{
 		"tools":       []any{map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"}},
@@ -1574,12 +1576,54 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 
 	// An archived session renders terminated, so it answers the same whatever its
 	// stored status is. No recording updates one.
-	for _, stored := range []domain.SessionStatus{domain.SessionIdle, domain.SessionTerminated} {
-		archived := inStatus(string(stored))
-		if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
-			t.Fatalf("archive: %d %v", status, body)
-		}
-		refuses(archived, all, ended)
+	archived := inStatus(string(domain.SessionIdle))
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+archived+"/archive", nil); status != http.StatusOK {
+		t.Fatalf("archive: %d %v", status, body)
+	}
+	refuses(archived, all, ended)
+}
+
+// The refusal's own advice, on a session that really runs: its title still
+// updates and is announced, and the interrupt it names settles the session so
+// that the same patch applies (#312).
+func TestAnInterruptLetsARefusedAgentPatchThrough(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := readableFixture(t, s)
+	created := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID,
+		"initial_events": []any{userMessage("go")}})
+	sid := created["id"].(string)
+	if created["status"] != "running" {
+		t.Fatalf("session status = %v, want running", created["status"])
+	}
+	clearTools := map[string]any{"agent": map[string]any{"tools": []any{}}}
+
+	status, body := s.do(http.MethodPost, "/v1/sessions/"+sid, clearTools)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Cannot update agent while session is running. Send a `user.interrupt` event first.")
+
+	if status, body := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{"title": "renamed"}); status != http.StatusOK {
+		t.Fatalf("title while running: %d %v", status, body)
+	}
+	_, list := s.do(http.MethodGet, "/v1/sessions/"+sid+"/events", nil)
+	announced := false
+	for _, ev := range listData(t, list) {
+		announced = announced || (ev["type"] == "session.updated" && ev["title"] == "renamed")
+	}
+	if !announced {
+		t.Errorf("no session.updated carries the new title: %v", list)
+	}
+
+	sendEvents(t, s, sid, map[string]any{"type": "user.interrupt"})
+	if _, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil); got["status"] != "idle" {
+		t.Fatalf("status after the interrupt = %v, want idle", got["status"])
+	}
+	status, body = s.do(http.MethodPost, "/v1/sessions/"+sid, clearTools)
+	if status != http.StatusOK {
+		t.Fatalf("the refused patch after the interrupt: %d %v", status, body)
+	}
+	a, _ := body["agent"].(map[string]any)
+	if got := toolTypes(t, a["tools"]); len(got) != 0 {
+		t.Errorf("agent.tools after the patch = %v, want none", got)
 	}
 }
 
@@ -1591,6 +1635,23 @@ func TestSessionUpdateFollowsTheSessionsStatus(t *testing.T) {
 // without FOR UPDATE the guard's plain SELECT reads the pre-flip snapshot,
 // sails past, and the archive lands on a running session.
 func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
+	status, body := postDuringRunningFlip(t, "/archive", "")
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
+}
+
+// The update reads the status under the same lock (#312), so an agent patch
+// raced against the flip is refused rather than written onto a running session.
+func TestAgentPatchObservesConcurrentRunningFlip(t *testing.T) {
+	status, body := postDuringRunningFlip(t, "", `{"agent":{"tools":[]}}`)
+	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
+		"Cannot update agent while session is running. Send a `user.interrupt` event first.")
+}
+
+// postDuringRunningFlip posts to the session's route plus suffix while another
+// transaction holds the row with a flip to running, commits that flip once the
+// request is waiting on the lock, and returns the answer.
+func postDuringRunningFlip(t *testing.T, suffix, payload string) (int, map[string]any) {
+	t.Helper()
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
 	sess := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
@@ -1616,7 +1677,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	}
 	ch := make(chan resp, 1)
 	go func() {
-		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+"/archive", nil)
+		req, err := http.NewRequest(http.MethodPost, s.url+"/v1/sessions/"+id+suffix, strings.NewReader(payload))
 		if err != nil {
 			ch <- resp{err: err}
 			return
@@ -1651,7 +1712,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	for deadline := time.Now().Add(10 * time.Second); ; {
 		select {
 		case r := <-ch:
-			t.Fatalf("archive answered (%d, err %v) before the running flip committed", r.status, r.err)
+			t.Fatalf("request answered (%d, err %v) before the running flip committed", r.status, r.err)
 		default:
 		}
 		var waiting bool
@@ -1671,7 +1732,7 @@ func TestArchiveObservesConcurrentRunningFlip(t *testing.T) {
 	}
 	r := <-ch
 	if r.err != nil {
-		t.Fatalf("archive request: %v", r.err)
+		t.Fatalf("request: %v", r.err)
 	}
-	wantErr(t, r.status, r.body, http.StatusBadRequest, "invalid_request_error")
+	return r.status, r.body
 }
