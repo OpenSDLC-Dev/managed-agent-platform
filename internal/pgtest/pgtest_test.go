@@ -44,8 +44,8 @@ inspect)
 	fi
 	case "$3" in
 	'{{.State.Status}}') printf '%s\n' "$status" ;;
-	'status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}}')
-		printf 'status=%s running=%s exit_code=%s oom_killed=%s started_at=2026-11-01T00:00:00Z finished_at=2026-11-01T00:01:00Z error=""\n' "$status" "$running" "$exit_code" "$oom_killed"
+	'status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}} image={{.Config.Image}} image_id={{.Image}} shm_size={{.HostConfig.ShmSize}} ipc_mode={{.HostConfig.IpcMode}}')
+		printf 'status=%s running=%s exit_code=%s oom_killed=%s started_at=2026-11-01T00:00:00Z finished_at=2026-11-01T00:01:00Z error="" image=pgtest.invalid/synthetic-postgres:projection-only image_id=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef shm_size=100663297 ipc_mode=shareable\n' "$status" "$running" "$exit_code" "$oom_killed"
 		;;
 	*) printf 'unexpected inspect projection\n' >&2; exit 64 ;;
 	esac
@@ -91,6 +91,7 @@ esac
 		name, scenario string
 		want           []string
 	}{
+		{"image-ipc-metadata", "metadata", []string{"image=pgtest.invalid/synthetic-postgres:projection-only", "image_id=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "shm_size=100663297", "ipc_mode=shareable"}},
 		{"exited-oom", "exited", []string{"status=exited", "running=false", "exit_code=137", "oom_killed=true", "started_at=2026-11-01T00:00:00Z", "finished_at=2026-11-01T00:01:00Z", "error=\"\"", "server process was terminated by signal 9", "database system is in recovery mode"}},
 		{"running-recovery", "recovery", []string{"status=running", "running=true", "exit_code=0", "oom_killed=false", "server process was terminated by signal 9", "database system is in recovery mode"}},
 		{"unavailable", "unavailable", []string{"inspect unavailable", "logs unavailable", "exit status 2"}},

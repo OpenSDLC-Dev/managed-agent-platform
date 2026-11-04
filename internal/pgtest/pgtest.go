@@ -151,8 +151,8 @@ func (tail *diagnosticTail) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// containerDiag captures only state fields, not Config.Env. Retain recent
-// server history before recovery refusals hide it, with both time and byte bounds.
+// containerDiag captures state, image and IPC fields, not Config.Env. Retain
+// recent server history before recovery refusals hide it, with time and byte bounds.
 // Each capture gets 10s plus 1s to drain inherited pipes (22s across both).
 // An inspect timeout must not spend the logs capture's budget.
 func containerDiag(containerID string) string {
@@ -170,7 +170,7 @@ func containerDiag(containerID string) string {
 		}
 		return out
 	}
-	state := capture("inspect", "-f", "status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}}", containerID)
+	state := capture("inspect", "-f", "status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}} image={{.Config.Image}} image_id={{.Image}} shm_size={{.HostConfig.ShmSize}} ipc_mode={{.HostConfig.IpcMode}}", containerID)
 	logs := capture("logs", "--timestamps", "--tail", "200", containerID)
 	return fmt.Sprintf("container %s state %s; last 200 log lines (up to %d bytes):\n%s", containerID, state, diagnosticByteLimit, logs)
 }
