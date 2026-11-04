@@ -228,6 +228,9 @@ func TestNativeCredentialTargetExpiryAfterAuthorityWait(t *testing.T) {
 				}
 				assertTargetExpiryCredential(t, ctx, h, secret, lane)
 				assertTargetExpiryCookie(t, ctx, h, headers, session)
+				if expiry == "expires-during-wait" && !t.Failed() {
+					fmt.Printf("TARGET_EXPIRY_ASSERTIONS_PASSED %s\n", t.Name())
+				}
 				if expiry == "no-expiry" && !t.Failed() {
 					fmt.Printf("TARGET_EXPIRY_CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
 				}
