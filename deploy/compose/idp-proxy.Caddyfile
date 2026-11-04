@@ -13,9 +13,9 @@
 #  2. Terminate TLS for the control plane. internal/identity/fetch.go requires
 #     an https key-set URL and its dial guard then refuses loopback addresses
 #     with no exception, so a plain-HTTP IdP cannot be wired to this platform at
-#     all. The browser keeps plain HTTP on :8000 (which is also the issuer, and
-#     so the `iss` claim); the control plane fetches keys from :8443 over a
-#     certificate this proxy issues from its own local CA.
+#     all. Legacy verifier-only installs keep browser HTTP on :8000 and fetch
+#     keys over TLS. Native RP uses idp.localhost over TLS from browser and CP,
+#     for discovery, authorization, token exchange and JWKS, under one issuer.
 
 {
 	# No admin API: nothing here is reconfigured at runtime, and it would be
@@ -43,11 +43,14 @@ http://:8000 {
 	reverse_proxy casdoor:8000
 }
 
-# The control plane's entrance, unpublished. `tls internal` issues from a local
+# Legacy backend TLS and native browser/backend TLS share this CA. Docker DNS
+# resolves idp.localhost to this container; browsers resolve it to loopback.
+# Native RP discovery, token and JWKS use the same HTTPS issuer.
+# `tls internal` issues from a local
 # CA generated on first boot and stored in the idpca volume, which the control
 # plane mounts read-only and trusts through SSL_CERT_FILE — so nothing private
 # is committed and nothing expires on a schedule anyone has to remember.
-https://idp:8443 {
+https://idp:8443, https://idp.localhost:{$IDP_TLS_PORT:8443} {
 	tls internal
 	import saml_deny
 	reverse_proxy casdoor:8000

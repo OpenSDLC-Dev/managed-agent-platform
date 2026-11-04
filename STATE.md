@@ -4,11 +4,26 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None. [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 1 closes with
-[#1000](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1000) and
-[console #240](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/240).
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 2 is in progress.
+Native HTTP login and first-admin setup are implemented.
+Member and service-account management is implemented.
+Private resource access and gateway cookie admission are implemented.
+The Go gate and credential-write contracts pass. Production browser acceptance remains open.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
-None.
+- [x] Browser sessions and local credentials: [session](./internal/login/session_test.go),
+  [password](./internal/login/password_test.go) and [throttle](./internal/login/throttle_test.go) contracts.
+- [x] OIDC code flow and browser-bound attempts: [RP](./internal/identity/oidc_test.go)
+  and [attempt](./internal/login/oidc_test.go) contracts.
+- [x] Native HTTP login and first-admin setup: [login](./internal/api/login_test.go),
+  [setup](./internal/api/passwordsetup_test.go) and [hardening](./internal/api/login_fix1_test.go) contracts.
+- [x] Member and service-account management: [members](./internal/api/members_test.go),
+  [service accounts](./internal/api/serviceaccounts_test.go) and [concurrency](./internal/api/members_race_test.go) contracts.
+- [x] Private resource proxy and gateway cookie admission: [proxy](./internal/api/consoleproxy_test.go),
+  [streams](./internal/api/consoleproxy_stream_test.go) and [gateway](./internal/modelgateway/admin/cookie_test.go) contracts.
+- [x] Console native UI merged and published: [Console #246](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/246).
+- [x] Fence credential writes against cookie or role withdrawal.
+- [ ] Reverify one-origin [Helm](./deploy/helm/managed-agent-platform/ci/native_test.py) and [edge](./deploy/compose/app_edge_test.py) contracts and runtime.
+- [ ] Finish slice 2 integration, committed reviews and CI.

@@ -92,6 +92,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
@@ -125,6 +126,11 @@ func main() {
 // deliverSetupCode keeps the raw code out of logs and telemetry. Config
 // parsing decides whether setup is available without contacting the IdP.
 func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
+	// Validate native origin/development settings before any setup delivery.
+	loginCfg, err := login.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
 	cfg, err := identity.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		return nil, err
@@ -139,7 +145,12 @@ func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
 			break
 		}
 	}
-	code, err := api.MintSetupCode(ctx, pool, mapGrantsAdmin)
+	var code string
+	if loginCfg.Mode == login.ModePassword {
+		code, err = api.MintPasswordSetupCode(ctx, pool)
+	} else {
+		code, err = api.MintSetupCode(ctx, pool, mapGrantsAdmin)
+	}
 	if err != nil || code == "" {
 		return nil, err
 	}
@@ -147,7 +158,11 @@ func deliverSetupCode(ctx context.Context, pool *pgxpool.Pool) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Warn("no admin exists yet: read the one-time setup code from this local file and redeem it from a signed-in session", "setup_code_file", path, "expires_in", "1h")
+	instruction := "no admin exists yet: read the one-time setup code from this local file and redeem it from a signed-in session"
+	if loginCfg.Mode == login.ModePassword {
+		instruction = "no active local admin exists: read the one-time setup code from this local file and create a local admin with a password"
+	}
+	slog.Warn(instruction, "setup_code_file", path, "expires_in", "1h")
 	return cleanup, nil
 }
 
@@ -193,6 +208,10 @@ func run(ctx context.Context) error {
 	brainKey := os.Getenv("BRAIN_API_KEY")
 	if err := apikey.CheckBrainKey(bootKey, brainKey); err != nil {
 		return fmt.Errorf("BRAIN_API_KEY %w", err)
+	}
+	loginCfg, err := login.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		return err
 	}
 	addr := os.Getenv("CONTROLPLANE_ADDR")
 	if addr == "" {
@@ -269,7 +288,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if verifier == nil {
+	if loginCfg.Mode == login.ModePassword {
+		slog.Info("native password login configured for development")
+	} else if verifier == nil {
 		slog.Info("identity not configured; human SSO is off and management auth remains x-api-key only")
 	} else {
 		slog.Info("identity configured", "mode", string(verifier.Mode()))
@@ -313,7 +334,20 @@ func run(ctx context.Context) error {
 		}
 		dreams.MaxInputBytes = n
 	}
+	manager := login.New(pool, loginCfg)
+	var rp *identity.RelyingParty
+	if manager.NativeEnabled() && manager.Mode() == login.ModeOIDC {
+		identityCfg, err := identity.ConfigFromEnv(os.Getenv)
+		if err != nil {
+			return err
+		}
+		rp, err = identity.NewRelyingParty(ctx, identityCfg, loginCfg.OIDCClientID, loginCfg.OIDCClientSecret, loginCfg.PublicOrigin+"/api/auth/callback")
+		if err != nil {
+			return err
+		}
+	}
 	var handlerOpts []api.Option
+	handlerOpts = append(handlerOpts, api.WithLogin(manager, rp))
 	if dreams.TickInterval > 0 {
 		handlerOpts = append(handlerOpts, api.WithDreamRunner())
 	} else {

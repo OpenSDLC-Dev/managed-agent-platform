@@ -107,6 +107,7 @@ type IdP struct {
 	redirectTo   string
 	redirectCode int
 	block        <-chan struct{}
+	tokenHandler http.HandlerFunc
 }
 
 // NewIdP starts a provider holding one RS256 key. The server is closed by
@@ -122,6 +123,7 @@ func NewIdP(t *testing.T) *IdP {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", p.serveDiscovery)
 	mux.HandleFunc("/jwks", p.serveJWKS)
+	mux.HandleFunc("/token", p.serveToken)
 	p.server = httptest.NewServer(mux)
 	t.Cleanup(p.server.Close)
 	return p
@@ -343,7 +345,7 @@ func (p *IdP) Restore() {
 	defer p.mu.Unlock()
 	p.jwksBody, p.discoveryDoc = nil, nil
 	p.jwksStatus, p.redirectCode, p.redirectTo = 0, 0, ""
-	p.block = nil
+	p.block, p.tokenHandler = nil, nil
 }
 
 func (p *IdP) key(kid string) (signingKey, bool) {
@@ -379,7 +381,11 @@ func (p *IdP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 	doc := p.discoveryDoc
 	p.mu.RUnlock()
 	if doc == nil {
-		doc = map[string]any{"issuer": p.Issuer(), "jwks_uri": p.JWKSURL()}
+		doc = map[string]any{
+			"issuer": p.Issuer(), "jwks_uri": p.JWKSURL(),
+			"authorization_endpoint": p.Issuer() + "/authorize",
+			"token_endpoint":         p.Issuer() + "/token",
+		}
 	}
 	// Marshalled before the status and Content-Type are committed. SetDiscovery
 	// takes an arbitrary map, so a test can store something encoding/json refuses;
@@ -394,6 +400,25 @@ func (p *IdP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
+}
+
+// SetTokenHandler controls code-exchange responses. Tests sign ID tokens with
+// Mint, so the relying party still exercises the real signature verifier.
+func (p *IdP) SetTokenHandler(h http.HandlerFunc) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tokenHandler = h
+}
+
+func (p *IdP) serveToken(w http.ResponseWriter, r *http.Request) {
+	p.mu.RLock()
+	h := p.tokenHandler
+	p.mu.RUnlock()
+	if h == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		return
+	}
+	h(w, r)
 }
 
 func (p *IdP) serveJWKS(w http.ResponseWriter, _ *http.Request) {

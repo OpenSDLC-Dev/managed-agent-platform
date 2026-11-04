@@ -108,6 +108,8 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	workItem404 := envKeyRoute{status: http.StatusNotFound, errType: "not_found_error"}
 	scopeRefused := envKeyRoute{status: http.StatusForbidden, errType: "permission_error", refused: true, refusal: skillsScopeMessage}
 	want := map[string]envKeyRoute{
+		// Anonymous platform configuration, not authority granted to the key.
+		"GET /api/auth/config": served,
 		// The work API: the reference's recorded answers on a cloud
 		// environment, and the work-item 404 on the item routes.
 		"GET /v1/environments/{id}/work":           {status: http.StatusNotFound, errType: "not_found_error"},
@@ -140,11 +142,7 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	}
 
 	reached := map[string]bool{}
-	for _, reg := range parseRoutes(t, "server.go") {
-		if reg.isFunc {
-			continue // a 404 or 405 closure, not a route
-		}
-		pattern := resolveRoutePattern(t, reg.pattern)
+	for _, pattern := range registeredRoutePatterns(t) {
 		method, template, _ := strings.Cut(pattern, " ")
 		route := want[pattern]
 		send := func(w world) (int, map[string]any) {
@@ -325,32 +323,75 @@ func envelopeMessage(body map[string]any) string {
 // requests them too. An unknown name fails the test rather than going
 // unrequested.
 var consoleRoutePaths = map[string]string{
-	"consoleTokensPath":    "/api/oauth/organizations/default/environments/{id}/tokens",
-	"consoleRevokePath":    "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
-	"consoleWorkspacePath": "/api/console/organizations/default/workspaces/default",
-	"consoleAPIKeysPath":   "/api/console/organizations/default/workspaces/default/api_keys",
-	"consoleAPIKeyPath":    "/api/console/organizations/default/workspaces/default/api_keys/{key_id}",
-	"consoleOrgAPIKeyPath": "/api/console/organizations/default/api_keys/{key_id}",
-	"consoleSetupCodePath": "/api/console/organizations/default/setup_code/redeem",
-	"gateconfig.Path":      gateconfig.Path,
+	"consoleTokensPath":                "/api/oauth/organizations/default/environments/{id}/tokens",
+	"consoleRevokePath":                "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
+	"consoleWorkspacePath":             "/api/console/organizations/default/workspaces/default",
+	"consoleAPIKeysPath":               "/api/console/organizations/default/workspaces/default/api_keys",
+	"consoleAPIKeyPath":                "/api/console/organizations/default/workspaces/default/api_keys/{key_id}",
+	"consoleOrgAPIKeyPath":             "/api/console/organizations/default/api_keys/{key_id}",
+	"consoleSetupCodePath":             "/api/console/organizations/default/setup_code/redeem",
+	"consoleMembersPath":               "/api/console/organizations/default/members",
+	"consoleMemberPath":                "/api/console/organizations/default/members/{member_id}",
+	"consoleServiceAccountsPath":       "/api/console/organizations/default/service_accounts",
+	"consoleServiceAccountPath":        "/api/console/organizations/default/service_accounts/{service_account_id}",
+	"consoleServiceAccountArchivePath": "/api/console/organizations/default/service_accounts/{service_account_id}/archive",
+	"consoleProxyPath":                 "/api/organizations/default/proxy/v1/{resource...}",
+	"consoleProxyRootPath":             "/api/organizations/default/proxy/v1",
+	"gateconfig.Path":                  gateconfig.Path,
 }
 
-// resolveRoutePattern turns a rendered registration (`GET /v1/agents`, or
-// `POST +consoleTokensPath`) into a method and a path template.
-func resolveRoutePattern(t *testing.T, rendered string) string {
+// registeredRoutePatterns is the shared exhaustive request inventory. Unknown
+// registration forms fail here rather than disappearing from either suite.
+func registeredRoutePatterns(t *testing.T) []string {
 	t.Helper()
+	var patterns []string
+	for _, reg := range parseRoutes(t, "server.go") {
+		if reg.isFunc {
+			continue // a 404 or 405 closure, not a route
+		}
+		resolved, err := resolveRoutePatterns(reg.pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patterns = append(patterns, resolved...)
+	}
+	return patterns
+}
+
+// resolveRoutePatterns retains explicit methods and expands only the two known
+// method-less proxy registrations. PROPFIND also exercises an extension-method
+// fallback; all standard HTTP methods must still authenticate before routing.
+func resolveRoutePatterns(rendered string) ([]string, error) {
 	method, rest, ok := strings.Cut(rendered, " ")
 	if !ok {
-		t.Fatalf("registration %q has no method", rendered)
+		if rendered != "consoleProxyPath" && rendered != "consoleProxyRootPath" {
+			return nil, fmt.Errorf("registration %q has no method", rendered)
+		}
+		path, known := consoleRoutePaths[rendered]
+		if !known || path == "" {
+			return nil, fmt.Errorf("registration %q names an unknown path constant", rendered)
+		}
+		var patterns []string
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+			http.MethodDelete, http.MethodOptions, http.MethodTrace, http.MethodConnect, "PROPFIND"} {
+			patterns = append(patterns, method+" "+path)
+		}
+		return patterns, nil
+	}
+	if method == "" {
+		return nil, fmt.Errorf("registration %q has no method", rendered)
 	}
 	if name, isConst := strings.CutPrefix(rest, "+"); isConst {
 		path, known := consoleRoutePaths[name]
-		if !known {
-			t.Fatalf("registration %q names a path constant this test does not know; add it to consoleRoutePaths", rendered)
+		if !known || path == "" {
+			return nil, fmt.Errorf("registration %q names a path constant this test does not know; add it to consoleRoutePaths", rendered)
 		}
-		return method + " " + path
+		return []string{method + " " + path}, nil
 	}
-	return rendered
+	if !strings.HasPrefix(rest, "/") || strings.ContainsAny(rest, " \t\r\n") {
+		return nil, fmt.Errorf("registration %q has an unsupported path form", rendered)
+	}
+	return []string{rendered}, nil
 }
 
 // fillRoute fills a path template's wildcards with a world's ids: the
@@ -368,6 +409,8 @@ func fillRoute(template, envID, sessionID, fileID, workID, skillID, versionID st
 			segs[i] = workID
 		case seg == "{version}":
 			segs[i] = versionID
+		case seg == "{resource...}":
+			segs[i] = "agents"
 		case seg == "{id}" && segs[i-1] == "environments":
 			segs[i] = envID
 		case seg == "{id}" && segs[i-1] == "sessions":

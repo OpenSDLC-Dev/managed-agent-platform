@@ -198,8 +198,17 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	// over SSO, the machine key's own `apikey_` row id otherwise. This route is
 	// authenticated on both lanes, so it is never empty — and it must not be, since
 	// a NULL issuer is what marks a row env-var-managed.
-	key, row, err := IssueManagementKey(r.Context(), s.pool, *name, expiresAt, principalFrom(r.Context()))
+	ctx := r.Context()
+	tx, err := s.beginCredentialMutation(r)
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	key, row, err := issueManagementKey(ctx, tx, *name, expiresAt, principalFrom(ctx))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return apiKeyIssuedJSON{apiKeyJSON: renderAPIKey(row), RawKey: key}, nil
@@ -264,9 +273,8 @@ func (s *server) updateWorkspaceAPIKey(r *http.Request) (any, error) {
 // updateAPIKeyIn changes a key's status, its name, or both, once the caller
 // has resolved the route's scope.
 //
-// The transaction exists for the check below, not for the write: the row is read
-// FOR UPDATE so a concurrent update cannot change what is being decided on
-// between the decision and the write.
+// The target row is read FOR UPDATE so concurrent updates cannot change the
+// decision. Cookie callers also hold their authority fence until commit.
 func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	keyID := r.PathValue("key_id")
 	// apikey_ is deliberately outside domain.knownPrefixes, so checkID cannot
@@ -302,7 +310,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 		return nil, bodyErr
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginCredentialMutation(r)
 	if err != nil {
 		return nil, err
 	}
@@ -310,11 +318,10 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 
 	var createdBy *string
 	var current string
-	var lapsed bool
 	var rowName string
 	err = tx.QueryRow(ctx,
-		`SELECT created_by, status, (expires_at IS NOT NULL AND expires_at <= now()), name
-		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &lapsed, &rowName)
+		`SELECT created_by, status, name
+		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &rowName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -377,6 +384,14 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// reference's "deleted", on the argument that an operator could act on it.
 	if current == KeyStatusArchived {
 		return nil, errInvalid("Archived API keys cannot be updated.")
+	}
+	// Sample the database clock after FOR UPDATE returns: its SELECT expressions
+	// may run before a row-lock wait. now() would retain the transaction's start.
+	var lapsed bool
+	if err := tx.QueryRow(ctx,
+		`SELECT expires_at IS NOT NULL AND expires_at <= clock_timestamp()
+		 FROM api_keys WHERE id = $1`, keyID).Scan(&lapsed); err != nil {
+		return nil, err
 	}
 	// A lapsed key admits exactly one operation: archiving it. The reference states
 	// the rule in the refusal itself — "Expired API keys can only be deleted, not
@@ -450,11 +465,11 @@ func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
 // to link a key to an identity, as far as the recordings reach. Its shape is
 // recorded: a `user_` or `svac_` id, anything else a 400 with
 // `{error_visibility}` (2026-09-05 batch5 `rec86.create.principal_id.bogus-string`).
-// What a well-formed one does is not, and needs an identity this platform
-// does not have — no users and no service accounts, its humans being
-// `principal_` rows that shape refuses — so a well-formed id names nothing
-// here and is the namespace's 404 for an id that names nothing. An absent or
-// null field is no principal, the only kind of key this platform issues.
+// Reference behavior for a well-formed id is not recorded. Principal-linked
+// key ownership is not implemented in plan 69 slice 2, so even an existing
+// private user/service-account alias receives the namespace's 404. An absent
+// or null field means no principal. This platform currently issues only
+// unowned keys.
 func apiKeyPrincipal(obj map[string]json.RawMessage) error {
 	raw, ok := obj["principal_id"]
 	if !ok || isNull(raw) {

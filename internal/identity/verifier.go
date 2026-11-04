@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -213,10 +214,10 @@ func acceptedIssuers(issuer string) []string {
 // construction cmd/controlplane uses, so nothing else re-derives what
 // "configured" means.
 //
-// It returns (nil, nil) when IDENTITY_MODE is unset or disabled: identity is
-// optional exactly as the cipher and the blob store are, and the caller decides
-// what its absence means. The return type is the concrete *Verifier rather than
-// an interface precisely so that nil compares as nil at the consumer — an
+// It returns (nil, nil) when IDENTITY_MODE is unset, disabled or password.
+// Native password login has no JWT verifier; internal/login validates its config.
+// Otherwise identity is optional like the cipher and blob store. The return
+// type is concrete so nil compares as nil at the consumer — an
 // interface-typed nil would be a non-nil interface holding a nil pointer, and
 // disabled is the one state that must be byte-for-byte today's platform.
 func FromEnv(ctx context.Context) (*Verifier, error) {
@@ -224,7 +225,7 @@ func FromEnv(ctx context.Context) (*Verifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Mode == ModeDisabled {
+	if cfg.Mode == ModeDisabled || cfg.Mode == ModePassword {
 		return nil, nil
 	}
 	return New(ctx, cfg)
@@ -282,6 +283,27 @@ func (v *Verifier) Credential(r *http.Request) (token string, ok bool) {
 // Every failure returns *Error, whose Error() is one constant string. The order
 // of the steps below is the security property, not an implementation detail.
 func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
+	return v.verify(ctx, token, "")
+}
+
+// VerifyNonce authenticates an ID token for one authorization-code attempt. The
+// nonce is read only from the same signature-verified claims as the identity.
+// An empty expected nonce must never disable this check for a browser login.
+func (v *Verifier) VerifyNonce(ctx context.Context, token, expectedNonce string) (Identity, error) {
+	if expectedNonce == "" {
+		return Identity{}, reject("missing expected nonce")
+	}
+	if ctx.Err() != nil {
+		return Identity{}, reject("verification cancelled")
+	}
+	id, err := v.verify(ctx, token, expectedNonce)
+	if ctx.Err() != nil {
+		return Identity{}, reject("verification cancelled")
+	}
+	return id, err
+}
+
+func (v *Verifier) verify(ctx context.Context, token, expectedNonce string) (Identity, error) {
 	if len(token) > maxTokenBytes {
 		return Identity{}, reject("token exceeds the size limit")
 	}
@@ -351,7 +373,8 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 	if !std.Audience.Contains(v.audience) {
 		return Identity{}, reject("audience mismatch")
 	}
-	if len(std.Audience) > 1 && stringClaim(all, "azp") != v.audience {
+	_, hasAZP := all["azp"]
+	if (len(std.Audience) > 1 || expectedNonce != "" && hasAZP) && stringClaim(all, "azp") != v.audience {
 		return Identity{}, reject("azp mismatch")
 	}
 	if std.Subject == "" {
@@ -392,6 +415,10 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Identity, error) {
 		return Identity{}, reject("issued in the future")
 	default:
 		return Identity{}, reject("malformed claims")
+	}
+
+	if expectedNonce != "" && subtle.ConstantTimeCompare([]byte(stringClaim(all, "nonce")), []byte(expectedNonce)) != 1 {
+		return Identity{}, reject("nonce mismatch")
 	}
 
 	return Identity{

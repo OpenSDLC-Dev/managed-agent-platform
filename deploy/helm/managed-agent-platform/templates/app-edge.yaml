@@ -1,0 +1,95 @@
+{{- if .Values.console.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "map.fullname" . }}-app-edge
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+data:
+  {{- (.Files.Glob "files/app-edge/*").AsConfig | nindent 2 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "map.fullname" . }}-app-edge
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.appEdge.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.appEdge.service.port }}
+      targetPort: http
+  selector:
+    {{- include "map.selectorLabels" (dict "ctx" . "component" "app-edge") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-app-edge
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "app-edge") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ (.Files.Glob "files/app-edge/*").AsConfig | sha256sum | quote }}
+      labels:
+        {{- include "map.selectorLabels" (dict "ctx" . "component" "app-edge") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: app-edge
+          image: {{ .Values.appEdge.image | quote }}
+          command: ["/bin/sh", "/etc/caddy/start.sh"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: CONSOLE_AUTH_MODE
+              value: {{ .Values.console.authMode | quote }}
+            - name: CONSOLE_PUBLIC_ORIGIN
+              value: {{ .Values.console.publicOrigin | quote }}
+            - name: IDENTITY_MODE
+              value: {{ .Values.identity.mode | quote }}
+            - name: CONTROLPLANE_UPSTREAM
+              value: "{{ include "map.fullname" . }}-controlplane:{{ .Values.controlplane.service.port }}"
+            - name: CONSOLE_UPSTREAM
+              value: "{{ include "map.fullname" . }}-console:3000"
+            - name: MODELGATEWAY_UPSTREAM
+              {{- if (.Values.modelgateway | default dict).enabled }}
+              value: "{{ include "map.fullname" . }}-modelgateway:{{ .Values.modelgateway.service.port }}"
+              {{- else }}
+              value: ""
+              {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/caddy
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          {{- with .Values.appEdge.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "map.fullname" . }}-app-edge
+{{- end }}

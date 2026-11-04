@@ -1,12 +1,15 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"slices"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/jackc/pgx/v5"
 )
 
 type keyPolicyView struct {
@@ -66,9 +69,24 @@ func (h *handler) putKeyPolicy(r *http.Request) (any, error) {
 	if req.TPM != nil && *req.TPM < 1 {
 		return nil, invalid("tpm must be at least 1, or null for no limit")
 	}
-	k, err := h.cfg.Store.PutKeyPolicy(r.Context(), store.KeyPolicy{
+	var authorize func(pgx.Tx) error
+	if cookie, _ := r.Context().Value(cookieKey{}).(bool); cookie {
+		authorize = func(tx pgx.Tx) error {
+			// Match control-plane principal mutations: principals before sessions,
+			// and both before the target grant. The store holds these through commit.
+			if _, err := tx.Exec(r.Context(), `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+				return err
+			}
+			session, err := h.cfg.Login.AuthenticateInTx(r.Context(), tx, r)
+			if err != nil {
+				return err
+			}
+			return requireRole(context.WithValue(r.Context(), roleKey{}, session.Role), identity.RoleAdmin)
+		}
+	}
+	k, err := h.cfg.Store.PutKeyPolicyAuthorized(r.Context(), store.KeyPolicy{
 		APIKeyID: r.PathValue("api_key_id"), Aliases: req.Aliases, RPM: req.RPM, TPM: req.TPM,
-	})
+	}, authorize)
 	if err != nil {
 		return nil, err
 	}

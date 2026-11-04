@@ -1140,9 +1140,9 @@ restore-ordering constraint you own:
 
 ### 8. Principal retention
 
-Human sign-in stores a `principals` row with the person's issuer, subject,
-profile, role, role source and status (plan 69 slice 1). No token is stored.
-Deactivation lasts: a later sign-in is refused, not provisioned afresh.
+Human identities have a `principals` row with the person's issuer, subject,
+profile, role, role source and status. Deactivation lasts: a later sign-in is
+refused, not provisioned afresh.
 
 **Upgrade: replace the old retention DELETE with a scrub.** The database now
 refuses every `DELETE` and `TRUNCATE` on `principals`, even a DELETE matching no
@@ -1151,26 +1151,37 @@ No retention timer ships; choose a schedule for your audit and erasure duties:
 
 ```sql
 -- Scrub only deactivated principals. Pick your own retention interval.
-UPDATE principals
-SET email = '', display_name = '', description = ''
-WHERE status = 'deactivated'
-  AND last_seen_at < now() - interval '180 days';
+WITH scrubbed AS (
+    UPDATE principals
+    SET email = '', display_name = '', description = ''
+    WHERE status = 'deactivated'
+      AND last_seen_at < now() - interval '180 days'
+    RETURNING id
+)
+DELETE FROM local_accounts
+USING scrubbed
+WHERE local_accounts.principal_id = scrubbed.id;
 ```
 
-An erasure request instead scrubs the principal it names. An active person's
-next verified request refreshes profile fields from the IdP. The scheduled job
-must not scrub active members or service accounts merely because they use
-keys rather than sign in. Slice 1 has no member-management API; deactivation
-is a database operation until slice 2.
+Only the same qualifying principals lose their `local_accounts` credential row.
+The local login name stays on `principals` as the subject under its local issuer;
+removing the credential row erases the stored password hash.
+Successful local password login updates `last_seen_at` with database time, atomically
+with session issuance. Cookie reads do not extend this activity time.
+
+An erasure request instead targets the principal it names, clearing the same
+profile fields and removing its local credential row, if present. It need not
+wait for the scheduled job's deactivation or age criteria. An active person's
+next IdP sign-in can restore profile fields; ordinary cookie reads do not.
+The scheduled job must not scrub active members or service accounts merely
+because they use keys rather than sign in.
 
 A scrub keeps the id, role, role source, deactivation status, issuer and subject.
 The last two prevent a removed person from returning as a new active principal.
 They can themselves identify someone, so this is not complete anonymization.
 The stable id preserves the link from `created_by` to the initiator, though
 cleared profile fields no longer supply a name. `sessions.created_by` remains
-plain text, not a foreign key; scrubbing changes no session history. Local
-accounts arrive in slice 2: their scrub must keep the login name and clear the
-password. Those fields do not exist in slice 1.
+plain text, not a foreign key; scrubbing changes no session history.
 
 ### 9. Single sign-on and the bundled identity provider
 
@@ -1210,9 +1221,11 @@ of the verifier's warming key fetch, never as a permissions message.
 Roles are `user`, `developer` and `admin`. There is no read-only role: someone
 who only needs to read must get `developer`, which can also write. A first
 sign-in with no matching mapping gets `user`. No playground is built yet, so
-that role reaches only setup-code redemption. The mapping rules are below.
-Cookies, platform passwords, member and service-account APIs, and owned API
-keys are later slices; the existing management keys still work unchanged.
+that role reaches authentication/session routes and setup redemption, not
+resources. The mapping rules are below. Native browser login is available
+when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account management
+requires a human admin cookie. Owned API keys remain later work.
+Existing management keys still work unchanged on their existing routes.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1254,18 +1267,27 @@ kubectl -n "$NAMESPACE" exec "$CONTROLPLANE_POD" -c controlplane -- cat "$SETUP_
 
 Do not copy the value into shared logs, tickets or command arguments. Redeem
 it promptly as the JSON `code` field at
-`POST /api/console/organizations/default/setup_code/redeem`, authenticated
-through the configured IdP lane. A management key cannot redeem it. Only an
-active `kind=user` principal whose role source is not `idp` qualifies. Same-UID
-processes, root and other file readers can claim admin with such a sign-in;
-file permissions do not eliminate that privileged-local-reader risk. Log
-access alone does not reveal the code.
+`POST /api/console/organizations/default/setup_code/redeem`. Native OIDC and
+trusted-proxy installs require the browser cookie, exact Origin and CSRF token.
+Verifier-only installs without a public origin retain IdP-token admission.
+A management key cannot redeem it. Only an active `kind=user` principal whose
+role source is not `idp` qualifies for identity promotion. Same-UID processes,
+root and other file readers can claim admin with such a sign-in. File
+permissions do not eliminate that risk; log access alone does not reveal the code.
+
+Development password setup instead takes `{code,login_name,password}` without
+prior authentication. It requires exact Origin and JSON Content-Type. It creates
+a new local admin and session, and is throttled before hashing. It opens only
+when no active local human principal holds admin, regardless of bootstrap history.
+A missing password row does not reopen it. A deactivated principal does not count,
+but its login name remains reserved. Identity and password codes cannot cross modes.
 
 An open setup attempt locks principals before setup codes and rechecks
 eligibility inside the transaction. One concurrent redemption wins. Every
 first admin grant, including a mapped admin or SQL recovery, records a
-permanent bootstrap flag. Later demotion or deactivation never reopens setup.
-Once flagged, redemption returns 409 `invalid_request_error` without those
+permanent bootstrap flag. Later demotion or deactivation never reopens identity
+setup; development password setup has the local-admin exception above.
+Once flagged, identity redemption returns 409 `invalid_request_error` without those
 table locks, even with a spent or malformed code. A valid code also gets 409
 when the caller's role comes from the mapping. The exact response and error
 shapes are in [DIVERGENCES.md](./DIVERGENCES.md).
@@ -1286,7 +1308,119 @@ This promotes an active person or deliberately reactivates a removed one.
 It retains the id, issuer and subject; never delete their tombstone. If a
 mapping matches them, first change it to grant admin or stop matching them,
 or the next request will overwrite this recovery role. Repair an unavailable
-IdP separately: promoting a row does not bypass credential verification.
+IdP or lost local password separately: promotion does not bypass credential verification.
+
+#### Member and service-account management
+
+The private `/api/console/organizations/default/members` and
+`service_accounts` routes require a human admin cookie. API keys and Bearer
+credentials are refused, including beside a valid cookie. Unsafe methods
+require exact Origin and CSRF. A waiting mutation rechecks the caller's
+session, role and status inside its database transaction.
+
+Only active human admins count for the last-admin guard. Manual role changes
+and removals cannot eliminate the last one. An admin service account does
+not count. IdP mapping can still demote the last human admin; use the database
+recovery procedure above if that leaves no admin able to sign in.
+A mapping-owned member role cannot be changed here, but the member can be removed.
+
+Local accounts can be created only in development password mode. Names are
+immutable and never linked by email. Member removal and service-account archival
+are lasting deactivations. Tombstones preserve IDs and issuer/subject pairs;
+archival keeps the service-account name reserved. No restoration endpoint exists.
+These routes do not issue or archive API keys in slice 2; owned keys arrive in slice 3.
+Environment keys remain independent and require separate revocation.
+
+#### Native browser login
+
+Set `CONSOLE_PUBLIC_ORIGIN` to a canonical browser-serialized HTTPS origin,
+with no path, query, fragment or userinfo. Scheme and DNS host must be lowercase;
+omit default ports. For example, use `https://console.example`, not
+`https://CONSOLE.example:443`. DNS hosts use ASCII labels or validated punycode.
+IP addresses use canonical IPv4 or compressed lowercase, non-mapped IPv6.
+Aliases and unsupported spellings fail startup; the server does not rewrite them.
+Literal loopback HTTP requires `DEVELOPMENT_MODE=true`. Use `http://localhost`,
+not `http://localhost:80`. Password mode also requires that flag, even with HTTPS. Without
+an origin, OIDC and trusted-proxy installs keep verifier-only admission.
+Native OIDC needs `IDENTITY_OIDC_CLIENT_ID` equal to `IDENTITY_OIDC_AUDIENCE`.
+Only the control plane reads the optional `IDENTITY_OIDC_CLIENT_SECRET`.
+
+Compose's `console` profile and Helm's `console.enabled` add the published Console
+and a Caddy application edge. Native routing is an explicit selection:
+`CONSOLE_AUTH_MODE=platform` in Compose, or `console.authMode=platform` in Helm.
+The edge sends native login/private paths to CP, admin paths to the gateway,
+and pages/assets/health to Console. Empty mode preserves legacy BFF routing.
+Default identity remains disabled; no staging identity or hostname changes.
+Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional) or
+[the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
+for RP secrets, CA trust and the CP-owned `/api/auth/callback` registration.
+
+With IAP, protect human pages, `/api/auth/*`, private `/api/console/*`,
+`/api/organizations/*`, `/api/oauth/*` and gateway `/admin/v1/*` before the edge.
+Only required infrastructure health may be anonymous. Give SDK `/v1/*` a separate
+IAP-bypass route or listener; it still requires platform API authentication.
+Gateway inference retains its own authenticated listener. Do not put a whole-host
+IAP rule in front of the only SDK endpoint. Signed assertions must reach CP unchanged.
+No chart object here takes ownership of an existing staging IAP deployment.
+
+The private `/api/auth/` routes expose mode configuration, login, callback,
+session and logout. Only the exact mode-specific login/start/callback routes
+and GET config admit anonymous requests; the subtree is not a bypass.
+OIDC uses browser-bound state, nonce and PKCE, then redirects only to `/`.
+With a valid browser binding, a parsed, unambiguous callback spends its attempt
+before code/provider validation.
+Query-parse and duplicate-parameter failures clear the pending cookie, but retain
+the server attempt. A client that restores its original binding can retry it.
+Discovery, JWKS and token requests propagate the current W3C trace context.
+Trusted-proxy login verifies the signed assertion. Password login takes JSON
+`{login_name,password}` with exact Origin. There is no OAuth authorization server.
+
+The host-only `map_session` cookie is HttpOnly, SameSite=Lax and Secure, except
+on declared loopback HTTP. PostgreSQL stores only its SHA-256 hash and imposes
+a fixed 12-hour absolute expiry. Lookup reads the current active human principal,
+without replaying IdP mappings or updating profile and last-seen fields.
+The session DTO returns a derived CSRF token, never the session bearer.
+Unsafe cookie-authenticated requests require exact Origin and `X-CSRF-Token`.
+Cross-site Fetch Metadata is refused. Session/logout reject API-key and
+Authorization headers, even beside a valid cookie. POST logout revokes the
+shared session and expires the cookie; it does not sign out of the IdP.
+Invalid sessions return 401 with `x-platform-signed-out: 1`; a recognized
+removed person gets 403 with that marker, including during native login.
+If authority disappears before session issuance, login returns 401 with the marker.
+Real database failures stay 500 without it. Bad credentials and role refusals do
+not sign anyone out.
+
+Existing private key-management routes and gateway administration retain legacy
+credentials beside cookies. An offered legacy credential keeps precedence and
+cannot fall back to a cookie when invalid. Gateway cookie reads require developer;
+writes require admin. Key-management routes retain their admin floor.
+In native mode, a selected proxy assertion on an unsafe private/admin request
+requires exact Origin when cookies, Origin or Fetch Metadata identify browser traffic.
+Cross-site Fetch Metadata is refused. Signalless nonbrowser assertion clients and
+explicit machine-key lanes retain their legacy contract.
+
+The new `/api/organizations/{org}/proxy/v1/...` resource proxy takes cookies only.
+API-key and Authorization headers are refused, even beside a valid cookie.
+An incidental signed edge assertion cannot replace the cookie or replay a sign-in.
+The proxy retains each resource's role floor, audit actor and trace context.
+Private resource responses and native gateway administration use `Cache-Control: no-store, private`.
+The proxy enforces this after downstream headers, including binary downloads and SSE.
+This forbids shared-cache storage; the shipped Caddy edge does not itself cache responses.
+It cannot forward to worker, gate, internal or inference routes.
+Streams recheck the session every 5 seconds, with a 5-second lookup timeout.
+Revocation, expiry, deactivation, loss of developer authority or a store error
+cancels the stream within 15 seconds, without creating resource events.
+Cancellation can truncate the HTTP response; the next request determines sign-out status.
+Request completion cancels pending lookups and stops the watcher.
+Public `/v1`, worker, gate and gateway inference routes never accept cookies.
+
+Local login names are immutable lowercase subjects in
+`urn:managed-agent-platform:local`, never selected or linked by email.
+Passwords must contain 12–1024 UTF-8 bytes and no NUL. Fixed Argon2id parameters
+allow at most eight concurrent derivations per process. PostgreSQL limits login
+and password setup to 20 attempts per peer and 5 per normalized name per five
+minutes. Forwarded address headers cannot split the peer bucket. A proxy shares
+that peer bucket. Origin checks never trust forwarded host or protocol headers.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 

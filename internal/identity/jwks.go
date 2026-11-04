@@ -24,6 +24,13 @@ type verifyKey struct {
 	pub any    // *rsa.PublicKey | *ecdsa.PublicKey
 }
 
+// keyFlight is one shared refresh. A transport panic is returned to its waiters'
+// goroutines, where the HTTP server can recover it, instead of crashing the process.
+type keyFlight struct {
+	done       chan struct{}
+	panicValue any
+}
+
 // keySet is one URL's kid-indexed public keys, with a bounded lifetime.
 type keySet struct {
 	url      string
@@ -38,9 +45,9 @@ type keySet struct {
 
 	mu        sync.Mutex
 	keys      map[string]verifyKey
-	fetchedAt time.Time     // when keys was last REPLACED (success only)
-	lastTry   time.Time     // when a fetch was last ATTEMPTED (any outcome)
-	inflight  chan struct{} // non-nil while a fetch runs; closed on completion
+	fetchedAt time.Time  // when keys was last REPLACED (success only)
+	lastTry   time.Time  // when a fetch was last ATTEMPTED (any outcome)
+	inflight  *keyFlight // non-nil while a fetch runs; done closes on completion
 }
 
 // newKeySet builds an empty, cold key set for one URL.
@@ -84,13 +91,8 @@ func newKeySet(url string, client *http.Client, algs []string, now func() time.T
 // lookup, so a persistently failing IdP cannot livelock a request.
 func (k *keySet) get(ctx context.Context, kid string) (verifyKey, error) {
 	k.mu.Lock()
-	// The unlock is deferred rather than written on each path because leadFlight
-	// runs the fetch — arbitrary code, including a third-party JSON decoder. A
-	// panic there unwinds through this function, and net/http recovers a handler
-	// panic per connection: the process would survive with this mutex held
-	// forever, which is every later authentication deadlocked. The two paths that
-	// release the lock re-acquire it before returning, so the defer is always
-	// balanced.
+	// A configured clock or a shared transport panic can unwind through get.
+	// Every wait re-acquires the lock, so this defer remains balanced on all paths.
 	defer k.mu.Unlock()
 
 	if key, ok := k.lookupLocked(kid); ok {
@@ -98,16 +100,7 @@ func (k *keySet) get(ctx context.Context, kid string) (verifyKey, error) {
 	}
 	switch {
 	case k.inflight != nil:
-		ch := k.inflight
-		k.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			// This caller abandons; the shared fetch continues for the others.
-			k.mu.Lock()
-			return verifyKey{}, reject("key set unavailable")
-		}
-		k.mu.Lock()
+		// Join the existing flight before considering the cooldown.
 	case k.now().Sub(k.lastTry) < k.cooldown:
 		// Rate-limited: fall through to the final lookup with the cache as it
 		// stands. A stale cache yields nothing, which is the fail-closed answer.
@@ -119,7 +112,21 @@ func (k *keySet) get(ctx context.Context, kid string) (verifyKey, error) {
 		slog.DebugContext(ctx, "identity: key-set refresh rate-limited",
 			"url", redactURL(k.url), "kid", truncate(kid, maxLoggedKID))
 	default:
-		k.leadFlight(ctx) // releases and re-acquires k.mu
+		k.leadFlight(ctx)
+	}
+	if flight := k.inflight; flight != nil {
+		k.mu.Unlock()
+		select {
+		case <-flight.done:
+		case <-ctx.Done():
+			// Leader and followers can all abandon; the one shared fetch continues.
+			k.mu.Lock()
+			return verifyKey{}, reject("key set unavailable")
+		}
+		k.mu.Lock()
+		if flight.panicValue != nil {
+			panic(flight.panicValue)
+		}
 	}
 	key, ok := k.lookupLocked(kid)
 	if !ok {
@@ -150,48 +157,42 @@ func (k *keySet) install(keys map[string]verifyKey) {
 	k.keys, k.fetchedAt, k.lastTry = keys, stamp, stamp
 }
 
-// leadFlight performs one fetch as the flight leader. The caller holds k.mu on
-// entry; leadFlight releases it for the duration of the fetch and holds it again
-// on return.
-//
-// Completion is deferred so the flight always finishes: a panicking fetch would
-// otherwise leave inflight non-nil and block every later caller on a channel
-// nobody closes. stamp is read BEFORE the deferred cleanup rather than inside it
-// for the same reason — k.now() is caller-supplied, and a clock that panics
-// during cleanup would strand inflight non-nil with its channel never closed,
-// which is the exact failure the defer exists to prevent. ok is set on the
-// success line alone, so a panic can neither install a nil key set nor stamp
-// fetchedAt.
+// leadFlight starts one bounded fetch while the caller holds k.mu. All callers,
+// including the leader, wait on the same flight and can abandon independently.
+// No goroutine is created for a cache hit or for a caller joining a flight.
 func (k *keySet) leadFlight(ctx context.Context) {
-	ch := make(chan struct{})
-	k.inflight, k.lastTry = ch, k.now()
-	k.mu.Unlock()
+	flight := &keyFlight{done: make(chan struct{})}
+	k.inflight, k.lastTry = flight, k.now()
+	go func() {
+		var fetched map[string]verifyKey
+		var stamp time.Time
+		ok := false
+		// Complete even if the transport or configured clock panics. Publish the
+		// panic to waiters instead of leaving a stuck flight or crashing the process.
+		// Read the clock before this cleanup: it must not strand the channel.
+		defer func() {
+			panicValue := recover()
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if ok {
+				k.keys, k.fetchedAt = fetched, stamp
+			}
+			flight.panicValue = panicValue
+			k.inflight = nil
+			close(flight.done)
+		}()
 
-	var fetched map[string]verifyKey
-	var stamp time.Time
-	ok := false
-	defer func() {
-		k.mu.Lock()
-		if ok {
-			k.keys, k.fetchedAt = fetched, stamp
+		var err error
+		// Detach cancellation, not trace values. This bounded fetch is shared;
+		// every waiter still honors its own context. Startup fetches stay direct.
+		if fetched, err = k.fetch(context.WithoutCancel(ctx)); err != nil {
+			slog.WarnContext(ctx, "identity: key set fetch failed", "url", redactURL(k.url), "err", err)
+			return
 		}
-		k.inflight = nil
-		close(ch)
+		stamp = k.now()
+		slog.InfoContext(ctx, "identity: key set refreshed", "url", redactURL(k.url), "keys", len(fetched))
+		ok = true
 	}()
-
-	var err error
-	// The fetch is detached from this caller's cancellation (its trace context
-	// still rides along) because it is shared: the request that happened to lead
-	// the flight hanging up must not fail every other caller waiting on it.
-	// Waiters honour their own context on the flight channel instead. Startup
-	// calls fetch directly and so keeps its deadline.
-	if fetched, err = k.fetch(context.WithoutCancel(ctx)); err != nil {
-		slog.WarnContext(ctx, "identity: key set fetch failed", "url", redactURL(k.url), "err", err)
-		return
-	}
-	stamp = k.now()
-	slog.InfoContext(ctx, "identity: key set refreshed", "url", redactURL(k.url), "keys", len(fetched))
-	ok = true
 }
 
 // fetch performs one bounded round trip and decodes the result.

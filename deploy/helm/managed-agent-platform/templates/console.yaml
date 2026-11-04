@@ -1,0 +1,98 @@
+{{- if .Values.console.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "map.fullname" . }}-console
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+  selector:
+    {{- include "map.selectorLabels" (dict "ctx" . "component" "console") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "map.fullname" . }}-console
+  labels:
+    {{- include "map.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "map.selectorLabels" (dict "ctx" . "component" "console") | nindent 6 }}
+  template:
+    metadata:
+      {{- if and (not .Values.console.authMode) (not .Values.console.legacySecret) (not .Values.existingSecret) }}
+      annotations:
+        # Only the chart-managed key consumed by this legacy BFF is known here.
+        checksum/bootstrap-key: {{ .Values.controlplane.apiKey | sha256sum | quote }}
+      {{- end }}
+      labels:
+        {{- include "map.selectorLabels" (dict "ctx" . "component" "console") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "map.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: console
+          image: {{ .Values.console.image | quote }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: CONSOLE_AUTH_MODE
+              value: {{ .Values.console.authMode | quote }}
+            - name: PLATFORM_BASE_URL
+              value: "http://{{ include "map.fullname" . }}-controlplane:{{ .Values.controlplane.service.port }}"
+            {{- if (.Values.modelgateway | default dict).enabled }}
+            - name: MODEL_GATEWAY_BASE_URL
+              value: "http://{{ include "map.fullname" . }}-modelgateway:{{ .Values.modelgateway.service.port }}"
+            {{- end }}
+            {{- if not .Values.console.authMode }}
+            - name: PLATFORM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.console.legacySecret }}
+                  name: {{ .Values.console.legacySecret | quote }}
+                  key: platform-api-key
+                  {{- else }}
+                  name: {{ include "map.secretName" . }}
+                  key: controlplane-api-key
+                  {{- end }}
+            {{- end }}
+            {{- if and (not .Values.console.authMode) .Values.console.legacySecret }}
+            - name: CONSOLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.console.legacySecret | quote }}
+                  key: console-password
+                  optional: true
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+          securityContext:
+            # The pinned image names node; kubelet needs its numeric UID for runAsNonRoot.
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          {{- with .Values.console.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

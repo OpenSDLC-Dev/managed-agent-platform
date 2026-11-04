@@ -14,11 +14,16 @@
 #     casdoor.console.clientId.
 #   - oidc.issuer is `https://` + casdoor.ingress.host, byte for byte, because
 #     that origin becomes the `iss` claim. The chart refuses a mismatch here too.
+console:
+  enabled: true
+  authMode: platform
+  publicOrigin: https://console.ci.example
 identity:
   mode: oidc
   oidc:
     issuer: https://idp.ci.example
     audience: map-console
+    clientId: map-console
   claims:
     roles: groups
   roleMap:
@@ -32,7 +37,7 @@ casdoor:
   console:
     clientSecret: ci-placeholder-client-secret
     redirectURIs:
-      - https://console.ci.example/callback
+      - https://console.ci.example/api/auth/callback
   ingress:
     className: nginx
     host: idp.ci.example

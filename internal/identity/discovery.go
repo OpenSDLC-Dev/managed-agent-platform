@@ -12,7 +12,8 @@ import (
 // metadata at.
 const discoveryPath = "/.well-known/openid-configuration"
 
-// discoveryDoc is the subset of the provider metadata this package reads.
+// discoveryDoc is the subset verifier-only users need. RP-only metadata is
+// decoded separately, so its shape cannot break an existing verifier install.
 type discoveryDoc struct {
 	Issuer  string `json:"issuer"`
 	JWKSURI string `json:"jwks_uri"`
@@ -35,6 +36,14 @@ func discover(ctx context.Context, c *http.Client, issuer string, timeout time.D
 	if err := getJSON(ctx, c, target, timeout, &doc); err != nil {
 		return "", fmt.Errorf("discovery: %w", err)
 	}
+	if err := validateDiscovery(doc, issuer); err != nil {
+		return "", err
+	}
+	return doc.JWKSURI, nil
+}
+
+func validateDiscovery(doc discoveryDoc, issuer string) error {
+	target := strings.TrimSuffix(issuer, "/") + discoveryPath
 	// The published issuer is NOT rendered. It is remote input, bounded only by
 	// maxIdPBytes, so quoting it would put up to 128 KiB of an unauthenticated
 	// endpoint's bytes into a startup error — and this package's own rule is that
@@ -44,14 +53,14 @@ func discover(ctx context.Context, c *http.Client, issuer string, timeout time.D
 	// issuer is, and an operator who wants the published value can fetch the
 	// document themselves.
 	if doc.Issuer != issuer {
-		return "", fmt.Errorf("discovery: %s publishes a different issuer than the configured %s",
+		return fmt.Errorf("discovery: %s publishes a different issuer than the configured %s",
 			redactURL(target), redactURL(issuer))
 	}
 	if doc.JWKSURI == "" {
-		return "", fmt.Errorf("discovery: %s publishes no jwks_uri", target)
+		return fmt.Errorf("discovery: %s publishes no jwks_uri", target)
 	}
 	if err := requireHTTPS(doc.JWKSURI); err != nil {
-		return "", fmt.Errorf("discovery: jwks_uri %w", err)
+		return fmt.Errorf("discovery: jwks_uri %w", err)
 	}
-	return doc.JWKSURI, nil
+	return nil
 }

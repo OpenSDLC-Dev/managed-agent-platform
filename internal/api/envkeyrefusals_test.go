@@ -91,10 +91,12 @@ func sendBounded(t *testing.T, s *tserver, method, path string, headers map[stri
 // download and the skill reads, ahead of their kind gates, and the management
 // lane and the console namespace too — plus GET /v1/models, the route the
 // reference was recorded answering it on outside every key lane, which this
-// platform does not serve. The one exception is the internal gate-config
-// endpoint: it is off the public wire, no reference route, and takes a gate
+// platform does not serve. The internal gate-config endpoint differs: it is
+// off the public wire, no reference route, and takes a gate
 // token and nothing else, so any other credential there is an invalid gate
-// token and is answered as one.
+// token and is answered as one. Native session/logout also require their own
+// cookie, as do members, service accounts and the private resource proxy, while
+// GET auth config is anonymous. Each has an explicit check below.
 func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.T) {
 	s := newTestServer(t)
 	envID, sessionID, _ := selfHostedWorker(t, s, "beside-the-revoked")
@@ -111,11 +113,7 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 	revokeViaConsole(t, s, cloudEnv, "revoked-cloud")
 
 	requests := []string{"GET /v1/models"}
-	for _, reg := range parseRoutes(t, "server.go") {
-		if reg.isFunc {
-			continue // a 404 or 405 closure, not a route
-		}
-		pattern := resolveRoutePattern(t, reg.pattern)
+	for _, pattern := range registeredRoutePatterns(t) {
 		method, template, _ := strings.Cut(pattern, " ")
 		if template == gateconfig.Path {
 			for _, key := range keys {
@@ -132,7 +130,26 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 			method, path, _ := strings.Cut(request, " ")
 			t.Run(kind+" "+request, func(t *testing.T) {
 				status, body := sendBounded(t, s, method, path, asBearer(key))
-				wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
+				switch {
+				case request == "GET /api/auth/config":
+					if status != http.StatusOK || len(body) != 2 || body["mode"] != "disabled" || body["native_login"] != false {
+						t.Fatalf("anonymous auth config = %d %v", status, body)
+					}
+				case path == privateProxy || strings.HasPrefix(path, privateProxy+"/"):
+					if method == http.MethodHead {
+						if status != http.StatusUnauthorized || len(body) != 0 {
+							t.Fatalf("HEAD proxy refusal = %d %v; want a bodyless 401", status, body)
+						}
+					} else {
+						wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
+					}
+				case request == "GET /api/auth/session" || request == "POST /api/auth/logout" ||
+					path == membersPath || strings.HasPrefix(path, membersPath+"/") ||
+					path == serviceAccountsPath || strings.HasPrefix(path, serviceAccountsPath+"/"):
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
+				default:
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
+				}
 			})
 		}
 	}

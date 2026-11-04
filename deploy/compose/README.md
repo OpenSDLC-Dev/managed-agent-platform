@@ -49,6 +49,52 @@ committed `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` are well-known placeholders
 anyone who can reach the port can drive the API with either. To expose it on the
 LAN, set real keys and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
+## One-origin Console (optional)
+
+The `console` profile adds the published Console image and an application Caddy edge.
+Both images have independent immutable pins. Platform builds do not rebuild Console.
+The edge binds only `127.0.0.1:${CONSOLE_PORT:-3000}`. Existing API listeners stay on
+8080 and 8090. Identity remains disabled by default.
+
+For native development login, set these together in the local environment:
+
+```sh
+CONSOLE_AUTH_MODE=platform
+CONSOLE_PUBLIC_ORIGIN=http://localhost:3000
+IDENTITY_MODE=password
+DEVELOPMENT_MODE=true
+```
+
+Leave `CONSOLE_PLATFORM_API_KEY` and `CONSOLE_PASSWORD` unset. Start with
+`docker compose --profile console up --build`, then open `/setup` at that origin.
+Retrieve the first-admin code from the restricted file that the control-plane log names.
+Use the same host spelling throughout; `localhost` and `127.0.0.1` are different origins.
+
+Empty `CONSOLE_AUTH_MODE` retains legacy BFF routing. In that mode, set
+`CONSOLE_PLATFORM_API_KEY` to the control-plane key. An optional `CONSOLE_PASSWORD`
+protects that legacy console. Do not set a native public origin with legacy routing.
+Other mode values fail startup. The Console never receives the RP client secret.
+
+For native bundled OIDC, add the `iam` profile and use the native OIDC block in
+[`.env.example`](./.env.example). Browser and backend share `https://idp.localhost:8443`.
+Docker DNS resolves that name to the IdP proxy, not loopback. Trust its generated
+CA in the development browser; CP trusts the read-only `idpca` mount.
+The production dial guard remains enabled. Discovery runs even with pinned JWKS.
+The seed registers `http://localhost:3000/api/auth/callback`, owned by CP.
+Change the seed and CP settings together when changing origin or client credentials.
+
+Native auth, management, OAuth and resource-proxy paths go to CP. Gateway admin goes
+to the gateway; its inference listener stays separate. Pages, assets and shallow
+`/api/health` go to Console. Native deep health deliberately returns 503 and is not
+readiness. Internal paths and ambiguous path spellings are refused before proxying.
+The edge does not compress SSE or impose a response lifetime.
+If the gateway is omitted in a custom stack, set both `APP_EDGE_GATEWAY_UPSTREAM`
+and `CONSOLE_GATEWAY_BASE_URL` to empty. Native admin then returns 503, with no fallback.
+
+For production TLS or IAP, use the routing boundaries in
+[the security guide](../../docs/self-hosted-security.md#native-browser-login).
+This profile does not change the separately managed staging Console or its hostname.
+
 ## A second stack beside the first
 
 Compose namespaces what it creates by **project**, and the `name:` at the top of
@@ -76,7 +122,10 @@ overrides in the shell rather than the file:
 CONTROLPLANE_PORT=8081 MODELGATEWAY_PORT=8091 docker compose -p mapsecond up --build
 ```
 
-Under `--profile iam` the same goes for `IDP_PORT`. The `observability` profile's
+With the `console` profile, also change `CONSOLE_PORT` and the matching public origin.
+Under `--profile iam`, change `IDP_PORT` and `IDP_TLS_PORT`. The native issuer and JWKS
+URLs must use that TLS port too. Update the seed callback when the Console origin changes.
+The `observability` profile's
 Jaeger ports are fixed, so two stacks cannot both run that profile unchanged.
 
 Give `-p` to **every** verb, not just `up` — `down`, `logs`, `ps`. Without it the command
@@ -215,6 +264,9 @@ and the noise gone, put an OTel Collector at `4317` and let it fan out.
 
 ## Single sign-on (optional)
 
+This block is the legacy verifier-only configuration. Native browser login uses
+the Console profile and HTTPS issuer described above.
+
 ```sh
 # in .env: uncomment all seven SSO lines — the six IDENTITY_* and SSL_CERT_FILE
 # (they ship commented out in .env.example)
@@ -275,10 +327,11 @@ each start. Edits to the four accounts, the three groups, or the `map-console` a
 `casdoor-init-data.json` instead. Anything the seed does not name, such as a user you add
 in the admin UI, is untouched and survives.
 
-The platform never runs the browser flow itself. A client does authorization-code + PKCE
-against `http://localhost:8000` as client `map-console-dev` (the seeded redirect URI is
-`http://localhost:5173/callback`) and sends the resulting ID token to the control plane as
-`Authorization: Bearer <jwt>`; the control plane verifies it and resolves the role.
+Without a native public origin, clients still perform the browser flow and send
+an ID token to CP as `Authorization: Bearer <jwt>`. Native login instead makes CP
+the RP and uses the HTTPS topology above. The seed callback now belongs to CP,
+not a separate Console-local RP. Legacy BFF installations with their own RP must
+register that client and its callback explicitly.
 
 **The proxy is the only way in, and that is an enforced control rather than advice.**
 Casdoor serves its API and its UI from one port, so the browser has to reach it and
@@ -288,7 +341,8 @@ and CAS surfaces (`/api/get-saml-login`, `/api/acs`, `/api/saml/metadata`,
 `/api/saml/redirect/*`, `/cas/*`) — routes this stack uses none of, and where five of the
 nine CERT/CC VU#780781 CVEs live; see
 [docs/self-hosted-security.md](../../docs/self-hosted-security.md) §9. And it terminates
-TLS on a second, unpublished listener (`https://idp:8443`) for the control plane, because
+TLS for legacy backend requests (`https://idp:8443`) and native browser/backend
+requests (`https://idp.localhost:8443`). The native listener is loopback-published, because
 `internal/identity` requires an `https` key-set URL and its dial guard then refuses
 loopback addresses outright — so a plain-HTTP IdP cannot be wired to this platform at all.
 Caddy issues that certificate from a local CA generated on first boot into the `idpca`

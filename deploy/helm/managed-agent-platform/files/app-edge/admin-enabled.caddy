@@ -1,0 +1,4 @@
+@admin path /admin/v1 /admin/v1/*
+reverse_proxy @admin {$MODELGATEWAY_UPSTREAM} {
+	flush_interval 0
+}

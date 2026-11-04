@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
@@ -20,12 +21,16 @@ import (
 )
 
 type server struct {
-	pool   *pgxpool.Pool
-	log    *events.Log
-	broker *events.Broker
-	queue  *queue.Queue
-	blobs  blob.Store
-	cipher secrets.Cipher
+	pool     *pgxpool.Pool
+	log      *events.Log
+	broker   *events.Broker
+	queue    *queue.Queue
+	blobs    blob.Store
+	cipher   secrets.Cipher
+	login    *login.Manager
+	rp       *identity.RelyingParty
+	verifier *identity.Verifier
+	authMode login.Mode
 	// dreamRunner records that this process ticks a dream runner (plan 41
 	// §4.7). False is DREAM_TICK_INTERVAL="0", the one configuration in which
 	// a created dream would never reach a terminal state — the timeout is the
@@ -56,9 +61,19 @@ func newServer(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher) *ser
 	return &server{pool: pool, log: events.NewLog(pool), broker: events.NewBroker(pool), queue: queue.New(pool), blobs: blobs, cipher: cipher}
 }
 
-// Option is a handler setting with no collaborator behind it — variadic so a
-// deployment that wants none writes none.
+// Option is an optional handler setting or collaborator.
 type Option func(*server)
+
+// WithLogin installs native browser login. Existing private credentials remain
+// available until their planned removal; public /v1 never accepts a cookie.
+func WithLogin(manager *login.Manager, rp *identity.RelyingParty) Option {
+	return func(s *server) {
+		s.login, s.rp = manager, rp
+		if manager != nil {
+			s.authMode = manager.Mode()
+		}
+	}
+}
 
 // WithDreamRunner tells the handler that this process ticks a dream runner,
 // which is what lets POST /v1/dreams accept a create (plan 41 §4.7).
@@ -80,17 +95,20 @@ func WithObjectDeletes(q *ObjectDeleteQueue) Option {
 // secrets; nil deploys without one — vault metadata CRUD serves, while the
 // secret-bearing paths (credential create/update with secret fields, the
 // validate probe) answer with a configuration error (fails closed, plan 12 D1).
-// verifier authenticates humans; nil is IDENTITY_MODE=disabled, and the surface
-// is then what it was before plan 31 — no lane, no role check — on every
-// request shape but two, deliberately (see dispatchManagementAuth):
+// verifier authenticates IdP credentials; password mode has no JWT verifier.
+// WithLogin adds native browser sessions on private routes only. With neither,
+// management auth has no human lane or role check. Two existing request shapes
+// deliberately differ from pre-plan-31 behavior (see dispatchManagementAuth):
 // requireAPIKey refuses a repeated x-api-key field in every mode, and an
 // environment key offered as a Bearer on a management route is answered as the
 // reference answers one (answerEnvironmentKey), in every mode for a request
 // that offers no human credential beside it.
 func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, verifier *identity.Verifier, opts ...Option) http.Handler {
 	s := newServer(pool, blobs, cipher)
+	s.verifier, s.authMode = verifier, login.ModeDisabled
 	if verifier != nil {
 		s.setupMapGrantsAdmin = verifier.RoleMapGrantsAdmin()
+		s.authMode = login.Mode(verifier.Mode())
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -207,15 +225,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("POST /v1/dreams/{id}/archive", s.handle(identity.RoleDeveloper, s.archiveDream))
 	mux.HandleFunc("POST /v1/dreams/{id}/cancel", s.handle(identity.RoleDeveloper, s.cancelDream))
 
-	// The console API — off the /v1 wire, mirroring the reference console's own
-	// private path so a console-facing endpoint has a convention rather than an
-	// invented namespace (internal/api/consoleapi.go). Management x-api-key, via
-	// dispatchAuth's default lane: no other lane's predicate can match an /api/
-	// path — they test a /v1/ prefix, or (the gate's) exact equality against
-	// "/internal/v1/gate/config". consoleapi.go states the reasoning in full.
-	// The role mechanism's first real use, and the only annotated routes in
-	// slice 2: issuing a worker credential is the credential surface the
-	// reference gates behind console roles, and the whole SECTION is gated —
+	// Existing environment-key management routes mirror the reference console's
+	// private paths. During rollout they retain management-key and IdP lanes
+	// beside native cookies (loginauth.go); this is not every private route's
+	// admission policy. Issuing a worker credential is the credential surface
+	// the reference gates behind console roles, and the whole SECTION is gated —
 	// list included — because knowing which hosts hold keys, and their names, is
 	// itself the inventory an attacker would want. `admin` rather than
 	// `developer` is a local judgment recorded as INFERRED in docs/DIVERGENCES.md:
@@ -258,7 +272,45 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		})
 	}
 
-	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(s.handle(identity.RoleUser, s.redeemSetupCode)))
+	// This new private surface is cookie-only. Its target re-enters dispatchAuth
+	// so worker/gate lanes are never bypassed by forwarding to the shared mux.
+	proxy := s.serveConsoleProxy(dispatchAuth(pool, s.verifier, mux))
+	mux.HandleFunc(consoleProxyPath, roleGate(identity.RoleDeveloper, proxy))
+	mux.HandleFunc(consoleProxyRootPath, roleGate(identity.RoleDeveloper, proxy))
+
+	// Plan 69's new administration surfaces never inherit legacy key/IdP lanes.
+	// Dispatch enforces cookie-only admission; each handler checks provenance too.
+	mux.HandleFunc("GET "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.listMembers)))
+	mux.HandleFunc("POST "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.createMember)))
+	mux.HandleFunc("GET "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.getMember)))
+	mux.HandleFunc("POST "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.updateMember)))
+	mux.HandleFunc("DELETE "+consoleMemberPath, noStore(s.handle(identity.RoleAdmin, s.removeMember)))
+	mux.HandleFunc("GET "+consoleServiceAccountsPath, noStore(s.handle(identity.RoleAdmin, s.listServiceAccounts)))
+	mux.HandleFunc("POST "+consoleServiceAccountsPath, noStore(s.handle(identity.RoleAdmin, s.createServiceAccount)))
+	mux.HandleFunc("GET "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.getServiceAccount)))
+	mux.HandleFunc("POST "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.updateServiceAccount)))
+	mux.HandleFunc("POST "+consoleServiceAccountArchivePath, noStore(s.handle(identity.RoleAdmin, s.archiveServiceAccount)))
+	for _, pattern := range []string{consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, errMethodNotAllowed)
+		})
+	}
+
+	mux.HandleFunc("GET /api/auth/config", noStore(s.handle(identity.RoleUser, s.authConfig)))
+	mux.HandleFunc("GET /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginStart)))
+	mux.HandleFunc("POST /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginPost)))
+	mux.HandleFunc("GET /api/auth/callback", noStore(roleGate(identity.RoleUser, s.loginCallback)))
+	mux.HandleFunc("GET /api/auth/session", noStore(s.handle(identity.RoleUser, s.authSession)))
+	mux.HandleFunc("POST /api/auth/logout", noStore(roleGate(identity.RoleUser, s.logout)))
+	for _, pattern := range []string{"/api/auth/config", "/api/auth/login", "/api/auth/callback", "/api/auth/session", "/api/auth/logout"} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+			writeError(w, r, errMethodNotAllowed)
+		})
+	}
+
+	mux.HandleFunc("POST "+consoleSetupCodePath, noStore(roleGate(identity.RoleUser, s.redeemSetup)))
 	// The route completeness guard distinguishes fallback closures from typed
 	// handlers by their literal shape, so keep these headers in the closure.
 	mux.HandleFunc(consoleSetupCodePath, func(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +411,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		writeError(w, r, errUnknownPath(r))
 	})
 
-	return withRequestID(withTracing(dispatchAuth(pool, verifier, mux)))
+	return withRequestID(withTracing(s.dispatchLoginAuth(mux)))
 }
 
 // dispatchAuth picks the auth scheme by path and runs it before the router, so
@@ -370,9 +422,15 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // is the router itself, typed as one because the management lane asks it which
 // route a request reaches (answerEnvironmentKey).
 func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
+	return dispatchAuthWithLogin(pool, v, nil, next)
+}
+
+// dispatchAuthWithLogin applies native origin policy on the selected human lane,
+// while sharing legacy credential precedence with dispatchAuth's callers.
+func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	workToken := requireWorkToken(pool, next)
-	mgmt := dispatchManagementAuth(pool, v, next)
+	mgmt := dispatchManagementAuth(pool, v, manager, next)
 	gate := requireGateToken(pool, next)
 	// Built once and shared by every lane that can reach a human: the verifier
 	// is safe for concurrent use and the middleware holds no per-request state.
@@ -380,9 +438,9 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 	// below collapse to exactly its previous behaviour.
 	var human http.Handler
 	if v != nil {
-		human = requireIdentity(pool, v, next)
+		human = requireIdentity(pool, v, manager, next)
 	}
-	sessionEvents := dispatchSessionEventsAuth(pool, v, human, next)
+	sessionEvents := dispatchSessionEventsAuth(pool, v, manager, human, next)
 	skillReads := dualAuth(v, requireEnvironmentKey(pool, next), human, mgmt)
 	fileReads := dualAuth(v, requireSelfHostedEnvironmentKey(pool, next), human, mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -479,13 +537,21 @@ func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux)
 // recorded route each in its recorded words: a machine credential's answer,
 // which has nothing to do with whether humans can sign in, so a request that
 // offers no human credential beside the key draws it in every mode.
-func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
+func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	var human http.Handler
 	if v != nil {
-		human = requireIdentity(pool, v, next)
+		human = requireIdentity(pool, v, manager, next)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the private proxy can bring verified cookie context back into
+		// this dispatcher. Its credentials were stripped before rewriting; this
+		// arm preserves the human actor and every resource's original role floor.
+		if session, ok := cookieSessionFrom(r.Context()); ok {
+			ctx := context.WithValue(r.Context(), ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.Role})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		if apiKeyOffered(r) {
 			mgmt.ServeHTTP(w, r)
 			return
@@ -561,9 +627,9 @@ func dualAuth(v *identity.Verifier, env, human, mgmt http.Handler) http.Handler 
 // on the environment lane, which still validates the key and scopes it to its own
 // environment. Mutating session CRUD (create/update/delete/archive/list) is not
 // routed here, so the environment key never reaches it.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, human http.Handler, next *http.ServeMux) http.Handler {
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, human http.Handler, next *http.ServeMux) http.Handler {
 	return dualAuth(v, requireEnvironmentKeyForSession(pool, next), human,
-		dispatchManagementAuth(pool, v, next))
+		dispatchManagementAuth(pool, v, manager, next))
 }
 
 // apiKeyOffered reports whether the request carries a usable management key —

@@ -7,11 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -28,6 +32,7 @@ func setupIdentityEnv(t *testing.T, mode, roleMap string) {
 		"IDENTITY_PROXY_PRESET", "IDENTITY_PROXY_AUDIENCE", "IDENTITY_PROXY_HEADER",
 		"IDENTITY_PROXY_ISSUER", "IDENTITY_PROXY_KEYS_URL", "IDENTITY_PROXY_ALGS",
 		"IDENTITY_CLAIM_ROLES", "IDENTITY_CLAIM_EMAIL", "IDENTITY_CLAIM_NAME",
+		"CONSOLE_PUBLIC_ORIGIN", "DEVELOPMENT_MODE", "IDENTITY_OIDC_CLIENT_ID", "IDENTITY_OIDC_CLIENT_SECRET",
 	} {
 		t.Setenv(name, "")
 	}
@@ -179,6 +184,213 @@ func TestStartupAdminMapInvalidatesOldSetupCodes(t *testing.T) {
 	files, err := os.ReadDir(temp)
 	if err != nil || len(files) != 0 || logs.Len() != 0 {
 		t.Fatalf("admin-map startup delivered a code: entries=%d err=%v", len(files), err)
+	}
+}
+
+// Invalid native settings must fail before setup mints or delivers anything.
+// This starts run itself, not an independently assembled handler. Omitting
+// WithLogin or constructing a JWT verifier in password mode must fail it.
+func TestStartupNativeHTTP(t *testing.T) {
+	setupIdentityEnv(t, "password", "")
+	pool := pgtest.NewPool(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	listener.Close()
+	origin := "http://" + addr
+	temp := t.TempDir()
+	for key, value := range map[string]string{"DATABASE_URL": pool.Config().ConnString(), "CONTROLPLANE_API_KEY": "native-startup-test-key", "BRAIN_API_KEY": "", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": origin, "CONTROLPLANE_ADDR": addr, "BLOB_BACKEND": "", "SECRETS_BACKEND": "", "DREAM_TICK_INTERVAL": "0", "TMPDIR": temp} {
+		t.Setenv(key, value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+	// Wait on our own process inside the test. Cleanup verifies it really exits.
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("shutdown=%v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("control plane did not stop")
+		}
+	}()
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: time.Second}
+	defer client.CloseIdleConnections()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(10 * time.Second)
+	ready := false
+	for !ready {
+		res, err := client.Get(origin + "/api/auth/config")
+		if err == nil {
+			raw, _ := io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.StatusCode != 200 || !bytes.Contains(raw, []byte(`"mode":"password"`)) || !bytes.Contains(raw, []byte(`"native_login":true`)) {
+				t.Fatalf("startup login wiring=%d %s", res.StatusCode, raw)
+			}
+			ready = true
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("native startup did not listen")
+		}
+	}
+	entries, err := os.ReadDir(temp)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("startup delivery entries=%d err=%v", len(entries), err)
+	}
+	codeFile := filepath.Join(temp, entries[0].Name(), "setup-code")
+	raw, err := os.ReadFile(codeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]string{"code": strings.TrimSpace(string(raw)), "login_name": "startupadmin", "password": "startup-test-password"})
+	req, _ := http.NewRequest("POST", origin+"/api/console/organizations/default/setup_code/redeem", bytes.NewReader(body))
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 || !bytes.Contains(reply, []byte(`"role":"admin"`)) || len(res.Cookies()) != 1 {
+		t.Fatalf("native startup setup=%d %s", res.StatusCode, reply)
+	}
+}
+
+func TestStartupPasswordRestrictedDelivery(t *testing.T) {
+	setupIdentityEnv(t, "password", "")
+	t.Setenv("DEVELOPMENT_MODE", "true")
+	t.Setenv("CONSOLE_PUBLIC_ORIGIN", "http://localhost:3000")
+	t.Setenv("TMPDIR", t.TempDir())
+	pool := pgtest.NewPool(t)
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(old)
+	cleanup, err := deliverSetupCode(context.Background(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup == nil {
+		t.Fatal("password startup omitted delivery")
+	}
+	defer cleanup()
+	var entry struct {
+		File    string `json:"setup_code_file"`
+		Message string `json:"msg"`
+	}
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(entry.Message, "password") || strings.Contains(entry.Message, "signed-in") {
+		t.Fatalf("password setup instruction requires prior sign-in: %q", entry.Message)
+	}
+	raw, err := os.ReadFile(entry.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strings.TrimSpace(string(raw))) != 32 || strings.Contains(logs.String(), strings.TrimSpace(string(raw))) {
+		t.Fatal("missing raw code or leaked code")
+	}
+	for path, mode := range map[string]os.FileMode{entry.File: 0600, filepath.Dir(entry.File): 0700} {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("restricted delivery mode at %s: %v %v", path, info, err)
+		}
+	}
+	cleanup()
+	if _, err := os.Stat(entry.File); !os.IsNotExist(err) {
+		t.Fatalf("owned file survived cleanup: %v", err)
+	}
+}
+
+func TestStartupPasswordSetupEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, issuer, kind, role, status string
+		mint                             bool
+	}{
+		{"external admin", "https://idp.example", "user", "admin", "active", true},
+		{"inactive local admin", "urn:managed-agent-platform:local", "user", "admin", "deactivated", true},
+		{"active local admin without password row", "urn:managed-agent-platform:local", "user", "admin", "active", false},
+		{"local developer", "urn:managed-agent-platform:local", "user", "developer", "active", true},
+		{"service admin", "urn:managed-agent-platform:local", "service_account", "admin", "active", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupIdentityEnv(t, "password", "")
+			t.Setenv("DEVELOPMENT_MODE", "true")
+			t.Setenv("CONSOLE_PUBLIC_ORIGIN", "http://localhost:3000")
+			t.Setenv("TMPDIR", t.TempDir())
+			pool := pgtest.NewPool(t)
+			_, err := pool.Exec(context.Background(), `INSERT INTO principals(id,issuer,subject,kind,role,status) VALUES ('principal_before',$1,'before',$2,$3,$4)`, tc.issuer, tc.kind, tc.role, tc.status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanup, err := deliverSetupCode(context.Background(), pool)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			if err != nil || (cleanup != nil) != tc.mint {
+				t.Fatalf("mint=%t want=%t err=%v", cleanup != nil, tc.mint, err)
+			}
+			if tc.mint {
+				var purpose string
+				if err := pool.QueryRow(context.Background(), `SELECT purpose FROM setup_codes`).Scan(&purpose); err != nil || purpose != "password" {
+					t.Fatalf("purpose=%q err=%v", purpose, err)
+				}
+			}
+		})
+	}
+}
+
+func TestStartupNativeConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, development, origin string
+		valid                     bool
+	}{
+		{"password needs development", "", "https://console.example", false},
+		{"password needs origin", "true", "", false},
+		{"reject remote HTTP", "true", "http://console.example", false},
+		{"reject origin path", "true", "https://console.example/", false},
+		{"reject origin credentials", "true", "https://user:secret@console.example", false},
+		{"reject default HTTP port", "true", "http://localhost:80", false},
+		{"reject case and default HTTPS port", "true", "https://CONSOLE.example:443", false},
+		{"canonical default HTTP", "true", "http://localhost", true},
+		{"canonical nondefault HTTPS", "true", "https://console.example:8443", true},
+		{"loopback development", "true", "http://localhost:3000", true},
+		{"HTTPS development", "true", "https://console.example", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupIdentityEnv(t, "password", "")
+			t.Setenv("DEVELOPMENT_MODE", tc.development)
+			t.Setenv("CONSOLE_PUBLIC_ORIGIN", tc.origin)
+			pool := pgtest.NewPool(t)
+			temp := t.TempDir()
+			t.Setenv("TMPDIR", temp)
+			cleanup, err := deliverSetupCode(context.Background(), pool)
+			if cleanup != nil {
+				defer cleanup()
+			}
+			var codes int
+			if qerr := pool.QueryRow(context.Background(), `SELECT count(*) FROM setup_codes`).Scan(&codes); qerr != nil {
+				t.Fatal(qerr)
+			}
+			if tc.valid {
+				if err != nil || cleanup == nil || codes != 1 {
+					t.Fatalf("password delivery: codes=%d cleanup=%t err=%v", codes, cleanup != nil, err)
+				}
+			} else if err == nil || codes != 0 || cleanup != nil {
+				t.Fatalf("bad settings minted a code: codes=%d err=%v", codes, err)
+			}
+		})
 	}
 }
 

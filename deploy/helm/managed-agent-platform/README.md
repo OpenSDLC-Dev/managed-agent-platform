@@ -130,6 +130,49 @@ new chart's, so a values section a release adds arrives empty — `casdoor`, add
 v0.3.0, fails the render on it, and `modelgateway` keeps the installed chart's
 default, off.
 
+## One-origin Console (`console.enabled`)
+
+Off by default. Enabling it adds release-qualified Console and application-edge
+Deployments and Services. It does not create or adopt an Ingress, hostname or IAP
+resource. The separately managed staging Console remains outside this chart.
+`console.image` and `appEdge.image` require independent immutable digest references;
+platform `image.tag` overrides never change them.
+
+Set `console.authMode=platform` and `console.publicOrigin=https://console.example`
+with the chosen `identity.mode`. Empty auth mode keeps legacy BFF routing and
+requires no public origin. Legacy BFF defaults to the release's bootstrap API key.
+To use a separate key, set `console.legacySecret`, with `platform-api-key` and optional
+`console-password`. Native mode receives neither key and refuses that Secret.
+Chart-managed bootstrap-key rotation rolls the dependent legacy Console, not native Console.
+After same-name content rotation in `existingSecret` or `console.legacySecret`, roll the
+consuming Deployments yourself. Changing the Secret reference name changes their Pod templates.
+The Console and edge never read the platform database or RP client secret.
+
+For external OIDC, set `identity.oidc.clientId` equal to `identity.oidc.audience`.
+An optional `identity.oidc.clientSecret` goes only to CP through the generated Secret.
+With `existingSecret`, leave that value empty. For a confidential client, set
+`identity.oidc.clientSecretKey` to a required key in the existing Secret. A missing
+required key prevents CP startup. Without either setting, a public client reads no
+secret key, including stale keys in an existing Secret. Validation also runs with
+`existingSecret`; it does not read Secret bytes from a cluster.
+Bundled Casdoor instead shares its generated seed Secret's `client-secret` key with CP.
+The client IDs must match, and native `redirectURIs` must contain only
+`<console.publicOrigin>/api/auth/callback`.
+
+Password mode additionally requires `developmentMode=true` and a public origin.
+Only literal-loopback HTTP is allowed in development. HTTPS is required otherwise.
+For a private IdP CA, `identity.caSecret` mounts `ca.crt` into CP and gateway only.
+This replaces their default certificate-file list; include all required roots.
+CP must reach discovery, token and JWKS endpoints through the IdP's protected ingress.
+Do not bypass the Casdoor NetworkPolicy or its SAML/CAS denial routes.
+
+Expose the app-edge Service behind your TLS ingress. Preserve the public origin and
+streaming response; do not add compression, buffering or a short SSE timeout.
+Readiness uses Console's shallow `/api/health`, never native deep health (which returns 503).
+With the gateway disabled, native `/admin/v1` returns 503 and never falls back to CP or Console.
+Raw `/v1` still goes to CP. Keep gateway inference on its existing separate listener.
+For IAP and SDK bypass, follow [the security guide](../../../docs/self-hosted-security.md#native-browser-login).
+
 ## The executor and the Kubernetes sandbox
 
 The executor is wired to the **k8s** sandbox backend (`SANDBOX_BACKEND=k8s`). It launches,
@@ -428,7 +471,7 @@ values — sits orders of magnitude below either.
 
 ## Single sign-on and roles (`identity.*`, `casdoor.*`)
 
-Humans authenticate through OIDC or a trusted proxy. The control plane and
+Human login uses OIDC, a trusted proxy or development-only passwords. The control plane and
 model gateway's operator lane share stored `user`, `developer` and `admin`
 roles (plan 69 slice 1). Reads require developer; no read-only role exists.
 The `identity` block configures both Deployments; `casdoor.enabled` also
@@ -454,10 +497,11 @@ model, and worker environment keys are untouched.
 `identity.roleMap` is written as a **map** — claim value to role — and the chart
 encodes it into the flat `value=role,...` the verifier parses; a claim value or
 role containing `,` or `=` fails the render, because it would encode as a
-different, still-valid map. The map is **optional** in both modes. Each verified
-request applies it: a match sets the stored role, a former match now absent
+different, still-valid map. The map is **optional** in both IdP modes. Each verified
+IdP request or native IdP login applies it; cookie lookup never replays it.
+A match sets the stored role, a former match now absent
 resets to user, and a never-mapped person keeps the stored role. First unmatched
-sign-in gets user, which reaches only setup-code redemption in this slice.
+sign-in gets user, which reaches auth/session routes and setup redemption, not resources.
 Legacy viewer entries mean user and lose read access; map readers to developer.
 Older unexpired tokens can reapply their old mapped role. Deactivated principals
 are refused regardless of mapping.
@@ -516,7 +560,10 @@ templates means owning their lifecycle — image tag, database, seed, CVE tracki
 --set casdoor.ingress.tls.secretName=idp-tls \
 --set casdoor.adminPassword=$(openssl rand -hex 24) \
 --set casdoor.console.clientSecret=$(openssl rand -hex 24) \
---set 'casdoor.console.redirectURIs[0]=https://console.example.com/callback' \
+--set 'casdoor.console.redirectURIs[0]=https://console.example.com/api/auth/callback' \
+--set console.enabled=true --set console.authMode=platform \
+--set console.publicOrigin=https://console.example.com \
+--set identity.oidc.clientId=map-console \
 --set identity.mode=oidc \
 --set identity.oidc.issuer=https://idp.example.com \
 --set identity.oidc.audience=map-console \
@@ -650,7 +697,7 @@ Four decisions. Only the database is mandatory; the other three have a supported
 | Database | bundled Postgres · `externalDatabase.url` | not an option | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
 | Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | supported: no `blob-*` keys, and the features that need object storage are unavailable | the render **fails**, naming the pair |
 | Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported with `modelgateway.enabled=false`: no `secrets-*` keys, and vault credential storage is unavailable; with the gateway on, the render fails | the render **fails**, naming the pair |
-| Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
+| Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` · development-only `identity.mode=password` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
 
 The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a third database option but a
 transport for the **external** one. It is incompatible with `postgresql.enabled`

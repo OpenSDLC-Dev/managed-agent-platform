@@ -24,8 +24,20 @@ func keyPolicyNotFound(id string) error {
 // key must exist in api_keys, which the platform owns, and every alias the
 // grant names must exist.
 func (s *Store) PutKeyPolicy(ctx context.Context, k KeyPolicy) (KeyPolicy, error) {
+	return s.PutKeyPolicyAuthorized(ctx, k, nil)
+}
+
+// PutKeyPolicyAuthorized runs authorize, when non-nil, before the target checks.
+// Its locks survive until the grant and its notification commit together.
+// READ COMMITTED ensures authorization reads current authority after lock waits.
+func (s *Store) PutKeyPolicyAuthorized(ctx context.Context, k KeyPolicy, authorize func(pgx.Tx) error) (KeyPolicy, error) {
 	var out KeyPolicy
-	err := s.write(ctx, func(tx pgx.Tx) error {
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		if authorize != nil {
+			if err := authorize(tx); err != nil {
+				return err
+			}
+		}
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1)`, k.APIKeyID).Scan(&exists); err != nil {
 			return err
@@ -51,6 +63,10 @@ func (s *Store) PutKeyPolicy(ctx context.Context, k KeyPolicy) (KeyPolicy, error
 			   SET aliases = EXCLUDED.aliases, rpm = EXCLUDED.rpm, tpm = EXCLUDED.tpm, updated_at = now()
 			 RETURNING `+keyPolicyCols,
 			k.APIKeyID, k.Aliases, k.RPM, k.TPM))
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `SELECT pg_notify($1, '')`, NotifyChannel)
 		return err
 	})
 	if isForeignKeyViolation(err) {
