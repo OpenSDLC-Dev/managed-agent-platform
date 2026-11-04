@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 Native HTTP login and first-admin setup are implemented.
 Member and service-account management is implemented.
 Private resource access and gateway cookie admission are implemented.
-Credential-fence candidate and current hardening need full gate and runtime verification.
+The Go gate and credential-write contracts pass. Production browser acceptance remains open.
 **no release until plan 69 slice 7**.
 
 ## Tasks
@@ -24,6 +24,6 @@ Credential-fence candidate and current hardening need full gate and runtime veri
 - [x] Private resource proxy and gateway cookie admission: [proxy](./internal/api/consoleproxy_test.go),
   [streams](./internal/api/consoleproxy_stream_test.go) and [gateway](./internal/modelgateway/admin/cookie_test.go) contracts.
 - [x] Console native UI merged and published: [Console #246](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/246).
-- [ ] Fence credential writes against cookie or role withdrawal.
+- [x] Fence credential writes against cookie or role withdrawal.
 - [ ] Reverify one-origin [Helm](./deploy/helm/managed-agent-platform/ci/native_test.py) and [edge](./deploy/compose/app_edge_test.py) contracts and runtime.
 - [ ] Finish slice 2 integration, committed reviews and CI.
