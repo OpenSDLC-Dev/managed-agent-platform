@@ -77,7 +77,10 @@ func startReady() (string, error) {
 	// No --rm: a container whose entrypoint crashes would be auto-removed by
 	// the daemon before containerDiag could read its state and logs — the one
 	// forensic a dead start leaves. Removal is wholly removeContainer's job.
+	// Databases share a postmaster until binary teardown; give this test
+	// fixture a bounded 128 MiB shared-memory budget instead of the default 64 MiB.
 	out, err := exec.Command("docker", dockertest.RunArgs("pgtest",
+		"--shm-size=128m",
 		"-e", "POSTGRES_PASSWORD=test",
 		"-p", "127.0.0.1:0:5432", pgImage)...).Output()
 	if err != nil {

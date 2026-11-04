@@ -285,3 +285,97 @@ func containerDiagWithOwnedDelay(t *testing.T, scenario string) string {
 		return ""
 	}
 }
+
+func TestStartReadySharedMemoryBudgetWithFakeDocker(t *testing.T) {
+	fakeDir := t.TempDir()
+	fake := `#!/bin/sh
+printf '%s\n' "$$" >> "$PGTEST_START_PID_FILE"
+case "$1" in
+run)
+	printf 'run\n' >> "$PGTEST_START_CALL_FILE"
+	printf '%s\n' "$@" > "$PGTEST_START_RUN_FILE"
+	printf 'pgtest-shm-budget-unit-owned\n'
+	;;
+port)
+	[ "$#" -eq 3 ] && [ "$2" = pgtest-shm-budget-unit-owned ] && [ "$3" = 5432/tcp ] || exit 64
+	printf 'port\n' >> "$PGTEST_START_CALL_FILE"
+	exit 73
+	;;
+rm)
+	[ "$#" -eq 4 ] && [ "$2" = -f ] && [ "$3" = -v ] && [ "$4" = pgtest-shm-budget-unit-owned ] || exit 64
+	printf 'rm\n' >> "$PGTEST_START_CALL_FILE"
+	;;
+*) printf 'unexpected Docker operation\n' >&2; exit 64 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeDir, "docker"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir)
+	if path, err := exec.LookPath("docker"); err != nil || path != filepath.Join(fakeDir, "docker") {
+		t.Fatalf("fake Docker selection = %q, %v", path, err)
+	}
+	t.Logf("fake-only Docker=%s; PATH=%s", filepath.Join(fakeDir, "docker"), os.Getenv("PATH"))
+	callFile := filepath.Join(fakeDir, "calls")
+	runFile := filepath.Join(fakeDir, "run-args")
+	pidFile := filepath.Join(fakeDir, "owned-pids")
+	t.Setenv("PGTEST_START_CALL_FILE", callFile)
+	t.Setenv("PGTEST_START_RUN_FILE", runFile)
+	t.Setenv("PGTEST_START_PID_FILE", pidFile)
+	before := time.Now().Unix()
+	// The owned port failure stops startReady before waitReady can dial Postgres.
+	containerID, err := startReady()
+	after := time.Now().Unix()
+	var exitErr *exec.ExitError
+	if containerID != "" || !errors.As(err, &exitErr) || exitErr.ExitCode() != 73 || err.Error() != "resolve postgres port: exit status 73" {
+		t.Fatalf("startReady = %q, %v; want owned port failure before any database dial", containerID, err)
+	}
+	calls, err := os.ReadFile(callFile)
+	if err != nil || string(calls) != "run\nport\nrm\n" {
+		t.Fatalf("startup command order = %q, %v; want run, port, rm", calls, err)
+	}
+	pids, err := os.ReadFile(pidFile)
+	if err != nil || len(strings.Fields(string(pids))) != 3 {
+		t.Fatalf("owned startup PIDs = %q, %v; want three foreground commands", pids, err)
+	}
+	for _, field := range strings.Fields(string(pids)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			t.Fatalf("invalid owned PID %q", field)
+		}
+		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Fatalf("owned startup PID=%d not confirmed absent: %v", pid, err)
+		}
+		t.Logf("owned startup PID=%d absent (ESRCH)", pid)
+	}
+	run, err := os.ReadFile(runFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSuffix(string(run), "\n"), "\n")
+	budgetOptions := 0
+	for _, arg := range args {
+		if arg == "--shm-size=128m" {
+			budgetOptions++
+		}
+	}
+	if budgetOptions != 1 {
+		t.Errorf("startReady shared-memory budget: got %d literal --shm-size=128m options, want exactly 1; run arguments = %q", budgetOptions, args)
+	}
+	const startedPrefix = "dev.opensdlc.managed-agent-platform.test-fixture-started="
+	if len(args) < 6 || !strings.HasPrefix(args[5], startedPrefix) {
+		t.Fatalf("missing startup time label in run arguments = %q", args)
+	}
+	started, err := strconv.ParseInt(strings.TrimPrefix(args[5], startedPrefix), 10, 64)
+	if err != nil || started < before || started > after {
+		t.Fatalf("startup time label = %q, %v; want Unix seconds in [%d, %d]", args[5], err, before, after)
+	}
+	want := []string{"run", "-d",
+		"--label", "dev.opensdlc.managed-agent-platform.test-fixture=pgtest",
+		"--label", startedPrefix + strconv.FormatInt(started, 10),
+		"--shm-size=128m", "-e", "POSTGRES_PASSWORD=test",
+		"-p", "127.0.0.1:0:5432", "postgres:16-alpine"}
+	if string(run) != strings.Join(want, "\n")+"\n" {
+		t.Errorf("startReady run arguments = %q; want %q", args, want)
+	}
+}
