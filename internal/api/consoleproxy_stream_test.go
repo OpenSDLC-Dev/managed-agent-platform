@@ -75,7 +75,7 @@ func privateStream(t *testing.T, s *nativeServer, path, cookie string) (*sseStre
 	return st, done
 }
 
-func observePrivateSQL(t *testing.T, s *nativeServer, ctx context.Context, wantWaiters int, wantListener bool) {
+func observePrivateSQL(t *testing.T, s *nativeServer, ctx context.Context, wantWaiters int, wantListener bool) (int, bool) {
 	t.Helper()
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
@@ -90,7 +90,7 @@ func observePrivateSQL(t *testing.T, s *nativeServer, ctx context.Context, wantW
 			t.Fatal(err)
 		}
 		if waiters == wantWaiters && listener == wantListener {
-			return
+			return waiters, listener
 		}
 		select {
 		case <-ctx.Done():
@@ -116,10 +116,35 @@ func TestObservePrivateSQLWithAllFourPoolSlotsHeld(t *testing.T) {
 	}
 	t.Logf("observer pool MaxConns=%d NumCPU=%d", pool.Config().MaxConns, runtime.NumCPU())
 	s := &nativeServer{tserver: &tserver{t: t, pool: pool}}
+	listener, err := pgx.ConnectConfig(ctx, cfg.ConnConfig.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := listener.Close(ctx); err != nil {
+			t.Errorf("close independent observer-test listener: %v", err)
+		}
+	})
 	if !t.Run("free-pool-positive-control", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		observePrivateSQL(t, s, ctx, 0, false)
+		if waiters, listening := observePrivateSQL(t, s, ctx, 0, false); waiters != 0 || listening {
+			t.Fatalf("initial observation=%d/%t; want 0/false", waiters, listening)
+		}
+		if _, err := listener.Exec(ctx, `LISTEN private_observer_capacity`); err != nil {
+			t.Fatal(err)
+		}
+		if waiters, listening := observePrivateSQL(t, s, ctx, 0, true); waiters != 0 || !listening {
+			t.Fatalf("free-pool LISTEN observation=%d/%t; want 0/true", waiters, listening)
+		}
+		if _, err := listener.Exec(ctx, `UNLISTEN private_observer_capacity`); err != nil {
+			t.Fatal(err)
+		}
+		if waiters, listening := observePrivateSQL(t, s, ctx, 0, false); waiters != 0 || listening {
+			t.Fatalf("free-pool UNLISTEN observation=%d/%t; want 0/false", waiters, listening)
+		}
 	}) {
 		t.Fatal("free-pool observer failed; saturation would not isolate observer capacity")
 	}
@@ -137,10 +162,24 @@ func TestObservePrivateSQLWithAllFourPoolSlotsHeld(t *testing.T) {
 		if stats.AcquiredConns() != 4 || stats.IdleConns() != 0 || stats.TotalConns() != 4 {
 			t.Fatalf("pool not saturated: acquired=%d idle=%d total=%d", stats.AcquiredConns(), stats.IdleConns(), stats.TotalConns())
 		}
-		t.Log("free-pool SQL succeeded; observer must also work with all four slots held")
+		// This independent connection changes real SQL state without freeing a
+		// pool slot. A pool-full early return of 0/false must fail the first check;
+		// a stale 0/true must fail after UNLISTEN.
+		if _, err := listener.Exec(ctx, `LISTEN private_observer_capacity`); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("all four pool slots held; independent LISTEN backend=%d", listener.PgConn().PID())
 		observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer observeCancel()
-		observePrivateSQL(t, s, observeCtx, 0, false)
+		if waiters, listening := observePrivateSQL(t, s, observeCtx, 0, true); waiters != 0 || !listening {
+			t.Errorf("saturated LISTEN observation=%d/%t; want 0/true", waiters, listening)
+		}
+		if _, err := listener.Exec(ctx, `UNLISTEN private_observer_capacity`); err != nil {
+			t.Fatal(err)
+		}
+		if waiters, listening := observePrivateSQL(t, s, observeCtx, 0, false); waiters != 0 || listening {
+			t.Errorf("saturated UNLISTEN observation=%d/%t; want 0/false", waiters, listening)
+		}
 	})
 }
 

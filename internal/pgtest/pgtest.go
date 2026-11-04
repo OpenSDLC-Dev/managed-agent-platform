@@ -153,12 +153,15 @@ func (tail *diagnosticTail) Write(p []byte) (int, error) {
 
 // containerDiag captures only state fields, not Config.Env. Retain recent
 // server history before recovery refusals hide it, with both time and byte bounds.
+// Each capture gets 10s plus 1s to drain inherited pipes (22s across both).
+// An inspect timeout must not spend the logs capture's budget.
 func containerDiag(containerID string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	capture := func(args ...string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		var tail diagnosticTail
 		cmd := exec.CommandContext(ctx, "docker", args...)
+		cmd.WaitDelay = time.Second
 		cmd.Stdout, cmd.Stderr = &tail, &tail
 		err := cmd.Run()
 		out := strings.TrimSpace(string(tail))

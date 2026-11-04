@@ -1,10 +1,15 @@
 package pgtest
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestContainerDiagWithFakeDocker(t *testing.T) {
@@ -27,6 +32,16 @@ fi
 case "$1" in
 inspect)
 	[ "$#" -eq 4 ] && [ "$2" = -f ] && [ "$4" = pgtest-unit-owned ] || exit 64
+	if [ "$PGTEST_DIAG_SCENARIO" = inherited-pipes ]; then
+		/bin/sleep 3 &
+		printf '%s %s\n' "$$" "$!" > "$PGTEST_DIAG_PID_FILE"
+		printf 'inherited-pipe-state\n'
+		exit 0
+	elif [ "$PGTEST_DIAG_SCENARIO" = inspect-timeout ]; then
+		printf '%s\n' "$$" > "$PGTEST_DIAG_PID_FILE"
+		printf 'inspect-budget-exhaustion\n'
+		exec /bin/sleep 12
+	fi
 	case "$3" in
 	'{{.State.Status}}') printf '%s\n' "$status" ;;
 	'status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}}')
@@ -39,7 +54,9 @@ logs)
 	if [ "$#" -eq 4 ] && [ "$2" = --tail ] && [ "$3" = 3 ] && [ "$4" = pgtest-unit-owned ]; then
 		printf 'FATAL: database system is in recovery mode\nFATAL: database system is in recovery mode\nFATAL: database system is in recovery mode\n'
 	elif [ "$#" -eq 5 ] && [ "$2" = --timestamps ] && [ "$3" = --tail ] && [ "$4" = 200 ] && [ "$5" = pgtest-unit-owned ]; then
-		if [ "$PGTEST_DIAG_SCENARIO" = oversized ]; then
+		if [ "$PGTEST_DIAG_SCENARIO" = inspect-timeout ]; then
+			printf '2026-11-01T00:00:58Z useful-history-after-inspect-timeout\n'
+		elif [ "$PGTEST_DIAG_SCENARIO" = oversized ]; then
 			printf 'discarded-old-prefix\n'
 			chunk=0123456789abcdef
 			for n in 1 2 3 4 5 6; do chunk="$chunk$chunk"; done
@@ -78,10 +95,17 @@ esac
 		{"running-recovery", "recovery", []string{"status=running", "running=true", "exit_code=0", "oom_killed=false", "server process was terminated by signal 9", "database system is in recovery mode"}},
 		{"unavailable", "unavailable", []string{"inspect unavailable", "logs unavailable", "exit status 2"}},
 		{"bounded-tail", "oversized", []string{"status=exited", "recent-log-tail-end"}},
+		{"inherited-pipe-drain", "inherited-pipes", []string{"inherited-pipe-state", exec.ErrWaitDelay.Error(), "server process was terminated by signal 9"}},
+		{"inspect-timeout-keeps-logs", "inspect-timeout", []string{"inspect-budget-exhaustion", "signal: killed", "2026-11-01T00:00:58Z useful-history-after-inspect-timeout"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PGTEST_DIAG_SCENARIO", tc.scenario)
-			got := containerDiag("pgtest-unit-owned")
+			var got string
+			if tc.scenario == "inherited-pipes" || tc.scenario == "inspect-timeout" {
+				got = containerDiagWithOwnedDelay(t, tc.scenario)
+			} else {
+				got = containerDiag("pgtest-unit-owned")
+			}
 			for _, want := range tc.want {
 				if !strings.Contains(got, want) {
 					t.Errorf("diagnostic missing %q: %.2000s", want, got)
@@ -93,5 +117,96 @@ esac
 				}
 			}
 		})
+	}
+}
+
+// Both delays are finite even without either production guard. The pipe holder
+// exits naturally; the timeout fake execs sleep so cancellation leaves no child.
+func containerDiagWithOwnedDelay(t *testing.T, scenario string) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "owned-pids")
+	t.Setenv("PGTEST_DIAG_PID_FILE", pidFile)
+	pgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("owner PID=%d PGID=%d", os.Getpid(), pgid)
+	var got string
+	done := make(chan struct{})
+	go func() {
+		got = containerDiag("pgtest-unit-owned")
+		close(done)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("finite diagnostic fake did not finish")
+		}
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			t.Errorf("read owned process identities for cleanup: %v", err)
+			return
+		}
+		for _, field := range strings.Fields(string(data)) {
+			pid, err := strconv.Atoi(field)
+			if err != nil || pid <= 0 || pid == os.Getpid() {
+				t.Errorf("invalid owned PID %q", field)
+				continue
+			}
+			deadline := time.Now().Add(15 * time.Second)
+			for {
+				err := syscall.Kill(pid, 0)
+				if errors.Is(err, syscall.ESRCH) {
+					t.Logf("owned PID=%d absent (ESRCH)", pid)
+					break
+				}
+				if err != nil || time.Now().After(deadline) {
+					t.Errorf("owned PID=%d not confirmed absent: %v", pid, err)
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	})
+	wantPIDs := 1
+	if scenario == "inherited-pipes" {
+		wantPIDs = 2
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, _ := os.ReadFile(pidFile)
+		fields := strings.Fields(string(data))
+		if len(fields) == wantPIDs {
+			for i, field := range fields {
+				pid, err := strconv.Atoi(field)
+				if err != nil || pid <= 0 || pid == os.Getpid() {
+					t.Fatalf("invalid owned PID %q", field)
+				}
+				childPGID, err := syscall.Getpgid(pid)
+				// The wrapper may already have exited, but the last PID is
+				// the delay and must be alive to exercise the schedule.
+				if i == 0 && wantPIDs == 2 && errors.Is(err, syscall.ESRCH) {
+					t.Logf("owned wrapper PID=%d inherited PGID=%d; already absent", pid, pgid)
+					continue
+				}
+				if err != nil || childPGID != pgid {
+					t.Fatalf("owned PID=%d PGID=%d: %v; want PGID=%d", pid, childPGID, err, pgid)
+				}
+				t.Logf("owned PID=%d PGID=%d observed", pid, childPGID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("finite diagnostic fake did not publish owned process identities")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-done:
+		return got
+	case <-time.After(15 * time.Second):
+		t.Fatal("finite diagnostic fake did not finish")
+		return ""
 	}
 }

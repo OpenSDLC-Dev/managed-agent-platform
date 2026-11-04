@@ -229,8 +229,13 @@ func (target grantTarget) assertState(t *testing.T, ctx context.Context, f *gran
 		}
 		if rr.Code == 200 {
 			var body map[string]any
-			if json.Unmarshal(rr.Body.Bytes(), &body) != nil || body["type"] != "key_policy" || body["api_key_id"] != target.id || body["aliases"] != nil || body["rpm"] != nil || body["tpm"] != nil {
+			if json.Unmarshal(rr.Body.Bytes(), &body) != nil || body["type"] != "key_policy" || body["api_key_id"] != target.id {
 				t.Errorf("grant reply does not describe the widened target: %s", rr.Body.String())
+			}
+			for _, key := range []string{"aliases", "rpm", "tpm"} {
+				if value, present := body[key]; !present || value != nil {
+					t.Errorf("widened grant reply requires explicit null %q: present=%t value=%v body=%s", key, present, value, rr.Body.String())
+				}
 			}
 		}
 	case target.before != nil:
