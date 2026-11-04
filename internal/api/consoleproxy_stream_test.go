@@ -7,12 +7,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // privateStream uses a real connection. Returning headers alone is insufficient:
@@ -97,6 +100,50 @@ func observePrivateSQL(t *testing.T, s *nativeServer, ctx context.Context, wantW
 	}
 }
 
+func TestObservePrivateSQLWithAllFourPoolSlotsHeld(t *testing.T) {
+	fixture := pgtest.NewPool(t)
+	cfg := fixture.Config()
+	cfg.MaxConns = 4
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if got := pool.Config().MaxConns; got != 4 {
+		t.Fatalf("MaxConns=%d; want 4", got)
+	}
+	t.Logf("observer pool MaxConns=%d NumCPU=%d", pool.Config().MaxConns, runtime.NumCPU())
+	s := &nativeServer{tserver: &tserver{t: t, pool: pool}}
+	if !t.Run("free-pool-positive-control", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		observePrivateSQL(t, s, ctx, 0, false)
+	}) {
+		t.Fatal("free-pool observer failed; saturation would not isolate observer capacity")
+	}
+	t.Run("all-four-slots-held", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for range 4 {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("hold pool slot: %v", err)
+			}
+			t.Cleanup(conn.Release)
+		}
+		stats := pool.Stat()
+		if stats.AcquiredConns() != 4 || stats.IdleConns() != 0 || stats.TotalConns() != 4 {
+			t.Fatalf("pool not saturated: acquired=%d idle=%d total=%d", stats.AcquiredConns(), stats.IdleConns(), stats.TotalConns())
+		}
+		t.Log("free-pool SQL succeeded; observer must also work with all four slots held")
+		observeCtx, observeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer observeCancel()
+		observePrivateSQL(t, s, observeCtx, 0, false)
+	})
+}
+
 func blockPrivateSessions(t *testing.T, s *nativeServer, ctx context.Context) pgx.Tx {
 	t.Helper()
 	tx, err := s.pool.Begin(ctx)
@@ -114,6 +161,7 @@ func blockPrivateSessions(t *testing.T, s *nativeServer, ctx context.Context) pg
 // next blocked query to prove a successful developer recheck kept both streams.
 func TestPrivateProxyStreamsKeepDeveloperAuthority(t *testing.T) {
 	s := newPrivateServer(t)
+	t.Logf("stream pool MaxConns=%d NumCPU=%d", s.pool.Config().MaxConns, runtime.NumCPU())
 	caller := seedMember(t, s, "developer-stream-reader", "developer", "console")
 	cookie, _ := s.issue(caller)
 	sid := eventsFixture(t, s.tserver)
@@ -152,6 +200,7 @@ func TestPrivateProxyStreamsAndRevocation(t *testing.T) {
 	for _, withdrawal := range []string{"revoke", "expire", "deactivate", "demote", "store-error", "blocked-store", "client-cancel"} {
 		t.Run(withdrawal, func(t *testing.T) {
 			s := newPrivateServer(t)
+			t.Logf("stream pool MaxConns=%d NumCPU=%d", s.pool.Config().MaxConns, runtime.NumCPU())
 			caller := seedMember(t, s, "stream-reader", "admin", "console")
 			cookie, _ := s.issue(caller)
 			sid := eventsFixture(t, s.tserver)

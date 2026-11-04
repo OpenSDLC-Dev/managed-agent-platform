@@ -62,7 +62,11 @@ func Main(m *testing.M) int {
 		}
 	}
 	defer removeContainer(containerID)
-	return m.Run()
+	code := m.Run()
+	if code != 0 {
+		fmt.Fprintf(os.Stderr, "pgtest: suite failed (exit code %d): %s\n", code, containerDiag(containerID))
+	}
+	return code
 }
 
 // startReady runs one Postgres container, waits for its published port to
@@ -130,15 +134,42 @@ func containerState(containerID string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// containerDiag captures the container's state and last log lines for the
-// failure message, distinguishing a crashed container from a live one behind
-// a dead port mapping.
+const diagnosticByteLimit = 64 << 10
+
+type diagnosticTail []byte
+
+func (tail *diagnosticTail) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= diagnosticByteLimit {
+		*tail = append((*tail)[:0], p[n-diagnosticByteLimit:]...)
+	} else {
+		if discard := len(*tail) + n - diagnosticByteLimit; discard > 0 {
+			*tail = (*tail)[discard:]
+		}
+		*tail = append(*tail, p...)
+	}
+	return n, nil
+}
+
+// containerDiag captures only state fields, not Config.Env. Retain recent
+// server history before recovery refusals hide it, with both time and byte bounds.
 func containerDiag(containerID string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	logs, _ := exec.CommandContext(ctx, "docker", "logs", "--tail", "3", containerID).CombinedOutput()
-	return fmt.Sprintf("container state %s; last log: %s",
-		containerState(containerID), strings.TrimSpace(string(logs)))
+	capture := func(args ...string) string {
+		var tail diagnosticTail
+		cmd := exec.CommandContext(ctx, "docker", args...)
+		cmd.Stdout, cmd.Stderr = &tail, &tail
+		err := cmd.Run()
+		out := strings.TrimSpace(string(tail))
+		if err != nil {
+			return fmt.Sprintf("%s (%v)", out, err)
+		}
+		return out
+	}
+	state := capture("inspect", "-f", "status={{.State.Status}} running={{.State.Running}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} started_at={{.State.StartedAt}} finished_at={{.State.FinishedAt}} error={{json .State.Error}}", containerID)
+	logs := capture("logs", "--timestamps", "--tail", "200", containerID)
+	return fmt.Sprintf("container %s state %s; last 200 log lines (up to %d bytes):\n%s", containerID, state, diagnosticByteLimit, logs)
 }
 
 func hostPort(containerID string) (string, error) {

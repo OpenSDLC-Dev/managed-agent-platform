@@ -24,6 +24,6 @@ Current hardening still needs full gate and runtime verification.
 - [x] Private resource proxy and gateway cookie admission: [proxy](./internal/api/consoleproxy_test.go),
   [streams](./internal/api/consoleproxy_stream_test.go) and [gateway](./internal/modelgateway/admin/cookie_test.go) contracts.
 - [x] Console native UI merged and published: [Console #246](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/246).
-- [ ] Reverify current one-origin contracts and runtime: [Helm](./deploy/helm/managed-agent-platform/ci/native_test.py)
-  and [edge](./deploy/compose/app_edge_test.py) contracts.
+- [ ] Fence credential writes against cookie or role withdrawal.
+- [ ] Reverify one-origin [Helm](./deploy/helm/managed-agent-platform/ci/native_test.py) and [edge](./deploy/compose/app_edge_test.py) contracts and runtime.
 - [ ] Finish slice 2 integration, committed reviews and CI.

@@ -14,7 +14,7 @@ import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from unittest import mock
+import unittest.mock as mock
 
 ROOT = Path(__file__).resolve().parent
 IMAGE = "caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
@@ -102,6 +102,7 @@ class EdgeRouting(unittest.TestCase):
                         if request("/api/health")[0] == 200:
                             break
                     except (OSError, http.client.HTTPException):
+                        # Startup errors are retried within the bounded readiness loop.
                         pass
                     time.sleep(0.1)
                 else:
@@ -197,6 +198,7 @@ class AliasNameRouting(unittest.TestCase):
         self.forwarded = []
         self.refused = []
         self.addCleanup(self.cleanup)
+        self.command("pull", IMAGE)
         self.command("network", "create", self.directory.name, acquire=self.capture_network)
         self.assertTrue(self.network, "original network creation returned no ownership receipt")
         self.receipt["networkConfig"] = json.loads(self.command("network", "inspect", self.network).stdout)[0]
@@ -260,6 +262,7 @@ class AliasNameRouting(unittest.TestCase):
                 try:
                     os.killpg(entry["pgid"], sig)
                 except ProcessLookupError:
+                    # The group can exit after the liveness probe.
                     pass
             try:
                 output = self.communicate(process, max(.001, deadline - time.monotonic()))
@@ -417,6 +420,7 @@ class AliasNameRouting(unittest.TestCase):
                             self.forwarded.append(case)
                             break
                     except (OSError, http.client.HTTPException):
+                        # Startup errors are retried within the bounded readiness loop.
                         pass
                     time.sleep(0.1)
                 else:
@@ -466,7 +470,7 @@ class AliasNameRouting(unittest.TestCase):
         def attempt(*args):
             if self.active and (args[0] == "rm" or args[:2] == ("network", "rm")):
                 errors.append("owned children still active; resource cleanup withheld")
-                return
+                return None
             try:
                 result = self.command(*args, check=False)
                 if not result.returncode:
@@ -474,6 +478,7 @@ class AliasNameRouting(unittest.TestCase):
                 errors.append(result.stderr or result.stdout or repr(args))
             except Exception as error:
                 errors.append(f"{args!r}: {error}")
+            return None
 
         with self.defer_interrupts():
             self.cleaning = True
@@ -605,6 +610,7 @@ class AliasFixtureContracts(unittest.TestCase):
             self.cleanup_exception = cleanup_exception
             self.calls, self.processes, self.cleanup_observations = [], [], []
             self.ownership_errors = []
+            self.images = set()
             self.networks = {"unrelated-network"}
             self.volumes = {"unrelated-volume"}
             self.containers = {"unrelated-container": {}}
@@ -632,7 +638,7 @@ class AliasFixtureContracts(unittest.TestCase):
                     process.helper_live = process.group_alive = False
                     if process.returncode is None:
                         process.returncode = -sig
-                return
+                return None
             if self.real_groups.get(pgid) != {"pid": process.pid, "pgid": pgid}:
                 raise AssertionError("synthetic group lacks original identity evidence")
             return self.real_killpg(pgid, sig)
@@ -655,6 +661,11 @@ class AliasFixtureContracts(unittest.TestCase):
             return json.loads(path.read_text()) if path.exists() else {}
 
         def execute(self, args, process):
+            if args == ["pull", IMAGE]:
+                if self.fault == "image-preparation":
+                    return "", "fake pinned image preparation failed", 1
+                self.images.add(IMAGE)
+                return IMAGE + "\n", "", 0
             if args[:2] == ["network", "create"]:
                 self.networks.add("original-network-id")
                 return "original-network-id\n", "", 0
@@ -663,6 +674,10 @@ class AliasFixtureContracts(unittest.TestCase):
                     self.ownership_errors.append("network ownership not durable before inspection")
                 return json.dumps([{"Id": args[2], "Name": "fake-owned-network"}]), "", 0
             if args[0] == "create":
+                if "--pull=never" not in args or IMAGE not in args:
+                    raise AssertionError("fake creation requires the pinned image with --pull=never")
+                if IMAGE not in self.images:
+                    return "", "No such image: " + IMAGE, 1
                 cidfile = Path(args[args.index("--cidfile") + 1])
                 if self.fixture.directory not in cidfile.parents or cidfile.exists():
                     raise AssertionError("fake creation requires its own fresh cidfile")
@@ -802,6 +817,45 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assertTrue({"cleanupErrors", "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"} <= receipt.keys(),
                         "partial receipt was not finalized after cleanup")
         return receipt
+
+    def test_cold_image_is_prepared_before_resource_creation(self):
+        fixture, transport, result, interrupted = self.run_fixture(
+            configure=lambda transport: self.assertNotIn(IMAGE, transport.images))
+        self.assertFalse(interrupted)
+        self.assertEqual(result.errors + result.failures, [], "cold-cache setup must prepare the pinned image")
+        self.assertEqual(transport.calls[0], ["pull", IMAGE], "prepare before any network or container acquisition")
+        self.assertEqual(transport.calls.count(["pull", IMAGE]), 1)
+        self.assertEqual(transport.images, {IMAGE})
+        self.assertEqual(sum(args[:2] == ["network", "create"] for args in transport.calls), 1)
+        creations = [args for args in transport.calls if args[0] == "create"]
+        self.assertEqual(len(creations), 7)
+        self.assertTrue(all("--pull=never" in args and IMAGE in args for args in creations))
+        self.assertEqual(len(fixture.receipt["requests"]), 1464)
+        self.assert_cleaned(transport)
+
+    def test_image_preparation_failure_allocates_no_resources(self):
+        fixture, transport, result, interrupted = self.run_fixture(
+            "image-preparation", configure=lambda transport: self.assertNotIn(IMAGE, transport.images))
+        self.assertFalse(interrupted)
+        self.assertIsNone(fixture.network, "failed image preparation must not allocate a network")
+        self.assertEqual(fixture.receipt["containers"], [], "failed image preparation must not attempt container creation")
+        self.assertEqual(transport.calls, [["pull", IMAGE], ["ps", "-aq", "--no-trunc"],
+                                         ["volume", "ls", "-q"], ["network", "ls", "--no-trunc", "-q"]])
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("fake pinned image preparation failed", result.failures[0][1])
+        self.assertEqual(transport.images, set())
+        self.assertEqual(set(transport.containers), {"unrelated-container"})
+        self.assertEqual(transport.networks, {"unrelated-network"})
+        self.assertEqual(transport.volumes, {"unrelated-volume"})
+        self.assertEqual(transport.cleanup_observations, [])
+        self.assertEqual(transport.completed_requests, 0)
+        self.assertEqual(fixture.active, {})
+        self.assertTrue(all(process.returncode is not None and not process.group_alive for process in transport.processes))
+        receipt = transport.persisted()
+        self.assertEqual(receipt["cleanupErrors"], [])
+        self.assertTrue(all(receipt[key] for key in
+                            ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved")))
 
     def test_capture_exception_keeps_original_creation_unresolved(self):
         for fault in ("cidfile-read", "ownership-checkpoint"):
@@ -1110,9 +1164,9 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assertEqual(result.errors + result.failures, [])
         self.assert_cleaned(transport)
         receipt = transport.persisted()
-        self.assertTrue({"pid", "pgid", "containers", "commands", "network", "networkConfig", "originPortBindings",
-                         "requests", "seen", "expectedForwarded", "expectedRefused", "cleanupErrors",
-                         "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"} <= receipt.keys())
+        self.assertLessEqual({"pid", "pgid", "containers", "commands", "network", "networkConfig", "originPortBindings",
+                              "requests", "seen", "expectedForwarded", "expectedRefused", "cleanupErrors",
+                              "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"}, receipt.keys())
         self.assertEqual(receipt["requests"], fixture.receipt["requests"])
         count = len(receipt["requests"])
         self.assertEqual(count, 1464, "fake readiness succeeds on its first request")
@@ -1238,6 +1292,7 @@ class AliasFixtureContracts(unittest.TestCase):
                         if os.getpgid(owned["pid"]) == owned["pgid"]:
                             os.killpg(owned["pgid"], signal.SIGTERM)
                     except ProcessLookupError:
+                        # The owned child can exit before this final group check.
                         pass
                 process.communicate(timeout=5)
                 listing = subprocess.run(["ps", "-axo", "pid=,pgid=,comm="], capture_output=True, text=True, check=True)
