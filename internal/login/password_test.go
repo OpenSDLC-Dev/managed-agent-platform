@@ -1,6 +1,7 @@
 package login
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
@@ -13,9 +14,18 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+func passwordMatches(t *testing.T, encoded, password string) bool {
+	t.Helper()
+	matches, err := VerifyPassword(context.Background(), encoded, password)
+	if err != nil {
+		t.Error(err)
+	}
+	return matches
+}
+
 func TestPasswordHashAndMalformedPHC(t *testing.T) {
 	const password = "a sufficiently long local password"
-	encoded, err := HashPassword(password)
+	encoded, err := HashPassword(context.Background(), password)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,10 +45,10 @@ func TestPasswordHashAndMalformedPHC(t *testing.T) {
 	if subtle.ConstantTimeCompare(key, independent) != 1 {
 		t.Fatal("hash is not Argon2id with the declared policy")
 	}
-	if !VerifyPassword(encoded, password) || VerifyPassword(encoded, password+"wrong") {
+	if !passwordMatches(t, encoded, password) || passwordMatches(t, encoded, password+"wrong") {
 		t.Fatal("password verification accepted mismatch or rejected the password")
 	}
-	again, err := HashPassword(password)
+	again, err := HashPassword(context.Background(), password)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,16 +56,16 @@ func TestPasswordHashAndMalformedPHC(t *testing.T) {
 		t.Fatal("password salt reused")
 	}
 	for _, password := range []string{strings.Repeat("a", 12), strings.Repeat("x", 1024), strings.Repeat("界", 4)} {
-		encoded, err := HashPassword(password)
-		if err != nil || !VerifyPassword(encoded, password) {
+		encoded, err := HashPassword(context.Background(), password)
+		if err != nil || !passwordMatches(t, encoded, password) {
 			t.Fatalf("valid byte-boundary password rejected: length %d, err %v", len(password), err)
 		}
 	}
 	for _, password := range []string{"", strings.Repeat("a", 11), strings.Repeat("a", 1025), "long\x00password text", string([]byte{0xff, 0xfe}) + strings.Repeat("a", 12)} {
-		if _, err := HashPassword(password); err == nil {
+		if _, err := HashPassword(context.Background(), password); err == nil {
 			t.Fatalf("invalid password accepted: length %d", len(password))
 		}
-		if VerifyPassword(encoded, password) {
+		if passwordMatches(t, encoded, password) {
 			t.Fatal("invalid password verified")
 		}
 	}
@@ -80,7 +90,7 @@ func TestPasswordHashAndMalformedPHC(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for i, value := range malformed {
-		if VerifyPassword(value, password) {
+		if passwordMatches(t, value, password) {
 			t.Fatalf("malformed PHC case %d accepted", i)
 		}
 	}
@@ -90,7 +100,7 @@ func TestPasswordHashAndMalformedPHC(t *testing.T) {
 	}
 	// Unknown accounts use the same bounded Argon2 path, never an empty-hash acceptance.
 	runtime.ReadMemStats(&before)
-	if VerifyPassword("", password) {
+	if passwordMatches(t, "", password) {
 		t.Fatal("unknown login's dummy hash authenticated")
 	}
 	runtime.ReadMemStats(&after)
@@ -131,13 +141,13 @@ func TestPasswordHashWorkIsProcessBounded(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		ready <- struct{}{}
-		_, err := HashPassword("bounded local password")
+		_, err := HashPassword(context.Background(), "bounded local password")
 		done <- err
 	}()
 	go func() {
 		defer workers.Done()
 		ready <- struct{}{}
-		if VerifyPassword("", "bounded local password") {
+		if passwordMatches(t, "", "bounded local password") {
 			done <- fmt.Errorf("dummy password authenticated")
 		} else {
 			done <- nil

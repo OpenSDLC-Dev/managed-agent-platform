@@ -175,7 +175,7 @@ func TestOIDCVerifiedNonce(t *testing.T) {
 }
 
 func TestOIDCRelyingPartyMetadata(t *testing.T) {
-	for _, fault := range []string{"issuer", "missing authorization", "missing token", "insecure authorization", "insecure token", "credentials", "fragment", "oversize", "client auth"} {
+	for _, fault := range []string{"issuer", "missing authorization", "missing token", "insecure authorization", "insecure token", "other loopback authorization", "other loopback token", "credentials", "fragment", "oversize", "client auth"} {
 		t.Run(fault, func(t *testing.T) {
 			p := identitytest.NewIdP(t)
 			doc := map[string]any{"issuer": p.Issuer(), "jwks_uri": p.JWKSURL(), "authorization_endpoint": p.Issuer() + "/authorize", "token_endpoint": p.Issuer() + "/token"}
@@ -190,6 +190,10 @@ func TestOIDCRelyingPartyMetadata(t *testing.T) {
 				doc["authorization_endpoint"] = "http://idp.example/authorize"
 			case "insecure token":
 				doc["token_endpoint"] = "http://169.254.169.254/token"
+			case "other loopback authorization":
+				doc["authorization_endpoint"] = "http://127.0.0.2/authorize"
+			case "other loopback token":
+				doc["token_endpoint"] = "http://127.255.255.254/token"
 			case "credentials":
 				doc["token_endpoint"] = "https://user:secret@idp.example/token"
 			case "fragment":

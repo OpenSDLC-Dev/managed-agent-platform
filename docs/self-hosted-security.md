@@ -1166,6 +1166,8 @@ WHERE local_accounts.principal_id = scrubbed.id;
 Only the same qualifying principals lose their `local_accounts` credential row.
 The local login name stays on `principals` as the subject under its local issuer;
 removing the credential row erases the stored password hash.
+Successful local password login updates `last_seen_at` with database time, atomically
+with session issuance. Cookie reads do not extend this activity time.
 
 An erasure request instead targets the principal it names, clearing the same
 profile fields and removing its local credential row, if present. It need not
@@ -1392,11 +1394,18 @@ Existing private key-management routes and gateway administration retain legacy
 credentials beside cookies. An offered legacy credential keeps precedence and
 cannot fall back to a cookie when invalid. Gateway cookie reads require developer;
 writes require admin. Key-management routes retain their admin floor.
+In native mode, a selected proxy assertion on an unsafe private/admin request
+requires exact Origin when cookies, Origin or Fetch Metadata identify browser traffic.
+Cross-site Fetch Metadata is refused. Signalless nonbrowser assertion clients and
+explicit machine-key lanes retain their legacy contract.
 
 The new `/api/organizations/{org}/proxy/v1/...` resource proxy takes cookies only.
 API-key and Authorization headers are refused, even beside a valid cookie.
 An incidental signed edge assertion cannot replace the cookie or replay a sign-in.
 The proxy retains each resource's role floor, audit actor and trace context.
+Private resource responses and native gateway administration use `Cache-Control: no-store, private`.
+The proxy enforces this after downstream headers, including binary downloads and SSE.
+This forbids shared-cache storage; the shipped Caddy edge does not itself cache responses.
 It cannot forward to worker, gate, internal or inference routes.
 Streams recheck the session every 5 seconds, with a 5-second lookup timeout.
 Revocation, expiry, deactivation, loss of developer authority or a store error

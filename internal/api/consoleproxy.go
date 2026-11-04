@@ -112,7 +112,8 @@ func consoleResourcePath(escaped string) bool {
 	return false
 }
 
-// Headers and bytes otherwise pass through unchanged. Unwrap and Flush retain
+// Headers and bytes otherwise pass through unchanged, except private cache policy.
+// Unwrap and Flush retain
 // the real connection's streaming/cancellation behavior, without buffering SSE.
 type consoleProxyWriter struct {
 	http.ResponseWriter
@@ -127,6 +128,9 @@ func (w *consoleProxyWriter) WriteHeader(status int) {
 		return
 	}
 	w.wrote = true
+	// Resource handlers can copy blob metadata or set SSE's no-cache. Enforce
+	// the browser boundary last, without changing the public /v1 handlers.
+	w.Header().Set("Cache-Control", "no-store, private")
 	if status >= 300 && status < 400 {
 		u, err := url.Parse(w.Header().Get("Location"))
 		if err == nil && u.User == nil && u.Opaque == "" && consoleResourcePath(u.EscapedPath()) &&

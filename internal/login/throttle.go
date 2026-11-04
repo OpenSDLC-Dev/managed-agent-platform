@@ -41,7 +41,7 @@ func (m *Manager) Throttle(ctx context.Context, r *http.Request, loginName strin
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM login_throttle WHERE window_start <= clock_timestamp()-interval '5 minutes'`); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM login_throttle WHERE window_start <= statement_timestamp()-interval '5 minutes'`); err != nil {
 		return 0, err
 	}
 	for _, bucket := range buckets {

@@ -130,7 +130,7 @@ func sessionReply(t *testing.T, res *http.Response, raw []byte) (string, login.S
 func (s *nativeServer) seedLocal(name, role, status string) string {
 	s.t.Helper()
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	hash, err := login.HashPassword(localPassword)
+	hash, err := login.HashPassword(context.Background(), localPassword)
 	if err != nil {
 		s.t.Fatal(err)
 	}

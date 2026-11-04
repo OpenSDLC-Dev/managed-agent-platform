@@ -182,8 +182,11 @@ func TestLocalMemberCreation(t *testing.T) {
 		}
 	}
 	var internalID, hash string
-	if err := s.pool.QueryRow(context.Background(), `SELECT p.id,a.password_hash FROM principals p JOIN local_accounts a ON a.principal_id=p.id WHERE p.issuer=$1 AND p.subject='local.person'`, login.LocalIssuer).Scan(&internalID, &hash); err != nil || !login.VerifyPassword(hash, localPassword) {
-		t.Fatalf("local row+credential err=%v", err)
+	if err := s.pool.QueryRow(context.Background(), `SELECT p.id,a.password_hash FROM principals p JOIN local_accounts a ON a.principal_id=p.id WHERE p.issuer=$1 AND p.subject='local.person'`, login.LocalIssuer).Scan(&internalID, &hash); err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := login.VerifyPassword(context.Background(), hash, localPassword); err != nil || !valid {
+		t.Fatalf("local credential valid=%v err=%v", valid, err)
 	}
 	expectManagement(t, s, "POST", membersPath, body, h, 409)
 	expectManagement(t, s, "POST", "/api/auth/login", fmt.Sprintf(`{"login_name":"local.person","password":%q}`, localPassword), nativeHeaders("", ""), 200)

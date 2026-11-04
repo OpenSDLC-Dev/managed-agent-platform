@@ -170,6 +170,22 @@ func (s *server) redeemSetupCode(r *http.Request) (any, error) {
 	if bootstrapped {
 		return nil, errConflict("an admin already exists")
 	}
+	if s.nativeLogin() {
+		// Revalidate after the principal-first table locks, and retain the
+		// session's SHARE lock through promotion and code consumption.
+		session, err := s.login.AuthenticateInTx(ctx, tx, r)
+		if err != nil {
+			switch {
+			case errors.Is(err, login.ErrUnauthenticated):
+				err = &apiErrorWithHeaders{err: errAuth("invalid or expired browser session"), headers: map[string]string{"x-platform-signed-out": "1"}}
+			case errors.Is(err, principal.ErrDeactivated):
+				err = &apiErrorWithHeaders{err: errDeactivated, headers: map[string]string{"x-platform-signed-out": "1"}}
+			}
+			return nil, err
+		}
+		p = identityPrincipal{ID: session.PrincipalID, Role: session.Role}
+	}
+	// The browser-session lock can also wait past the code's expiry.
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM setup_codes
 		WHERE code_hash = $1 AND purpose = 'identity' AND expires_at > clock_timestamp())`, hash).Scan(&valid); err != nil {
 		return nil, err
@@ -267,7 +283,7 @@ func (s *server) createSetupLocalAdmin(r *http.Request) (string, error) {
 	if !valid {
 		return "", errInvalid("invalid or expired setup code")
 	}
-	encoded, err := login.HashPassword(password)
+	encoded, err := login.HashPassword(ctx, password)
 	if err != nil {
 		return "", err
 	}

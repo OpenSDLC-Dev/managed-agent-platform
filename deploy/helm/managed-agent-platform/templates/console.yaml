@@ -28,6 +28,11 @@ spec:
       {{- include "map.selectorLabels" (dict "ctx" . "component" "console") | nindent 6 }}
   template:
     metadata:
+      {{- if and (not .Values.console.authMode) (not .Values.console.legacySecret) (not .Values.existingSecret) }}
+      annotations:
+        # Only the chart-managed key consumed by this legacy BFF is known here.
+        checksum/bootstrap-key: {{ .Values.controlplane.apiKey | sha256sum | quote }}
+      {{- end }}
       labels:
         {{- include "map.selectorLabels" (dict "ctx" . "component" "console") | nindent 8 }}
     spec:

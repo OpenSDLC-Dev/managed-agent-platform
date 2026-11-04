@@ -35,7 +35,7 @@ func privateStream(t *testing.T, s *nativeServer, path, cookie string) (*sseStre
 		res.Body.Close()
 		t.Fatalf("stream did not flush headers: %d %s", res.StatusCode, raw)
 	}
-	if res.Header.Get("Content-Length") != "" || res.Header.Get("Cache-Control") != "no-cache" {
+	if res.Header.Get("Content-Length") != "" || res.Header.Get("Cache-Control") != "no-store, private" {
 		t.Fatalf("SSE headers=%v", res.Header)
 	}
 	st := &sseStream{cancel: cancel, frames: make(chan sseFrame, 64)}

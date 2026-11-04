@@ -143,6 +143,9 @@ with the chosen `identity.mode`. Empty auth mode keeps legacy BFF routing and
 requires no public origin. Legacy BFF defaults to the release's bootstrap API key.
 To use a separate key, set `console.legacySecret`, with `platform-api-key` and optional
 `console-password`. Native mode receives neither key and refuses that Secret.
+Chart-managed bootstrap-key rotation rolls the dependent legacy Console, not native Console.
+After same-name content rotation in `existingSecret` or `console.legacySecret`, roll the
+consuming Deployments yourself. Changing the Secret reference name changes their Pod templates.
 The Console and edge never read the platform database or RP client secret.
 
 For external OIDC, set `identity.oidc.clientId` equal to `identity.oidc.audience`.

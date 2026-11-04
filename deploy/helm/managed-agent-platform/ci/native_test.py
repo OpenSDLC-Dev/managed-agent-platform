@@ -54,6 +54,41 @@ class NativeRender(unittest.TestCase):
         self.assertIn("controlplane-api-key", section(legacy, "console.yaml"))
         self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", legacy)
 
+    def test_legacy_console_key_rollout(self):
+        def pods(values):
+            text = render(values)
+            return {name: section(text, name).split("\n  template:\n", 1)[1]
+                    for name in ["console.yaml", "controlplane-deployment.yaml", "modelgateway-deployment.yaml"]}
+
+        for mode in ["managed", "native", "existing", "explicit-legacy"]:
+            with self.subTest(mode=mode):
+                values = native() if mode == "native" else {"console": {"enabled": True}}
+                if mode == "existing":
+                    values.update(existingSecret="external-platform", postgresql={"enabled": False},
+                                  minio={"enabled": False}, openbao={"enabled": False})
+                if mode == "explicit-legacy":
+                    values["console"]["legacySecret"] = "external-console"
+                values["controlplane"] = {"apiKey": "render-only-old-key"}
+                old = pods(values)
+                values["controlplane"]["apiKey"] = "render-only-new-key"
+                new = pods(values)
+                self.assertEqual(old["console.yaml"] != new["console.yaml"], mode == "managed")
+                for name in ["controlplane-deployment.yaml", "modelgateway-deployment.yaml"]:
+                    self.assertEqual(old[name] != new[name], mode != "existing")
+                if mode == "native":
+                    self.assertNotIn("checksum/", new["console.yaml"])
+                    self.assertNotIn("controlplane-api-key", new["console.yaml"])
+                if mode in ["existing", "explicit-legacy"]:
+                    # Helm cannot read same-name external Secret content. Changing
+                    # the reference name, unlike its bytes, changes the template.
+                    if mode == "existing":
+                        values["existingSecret"] = "external-platform-next"
+                    else:
+                        values["console"]["legacySecret"] = "external-console-next"
+                    renamed = pods(values)
+                    self.assertNotEqual(new["console.yaml"], renamed["console.yaml"])
+                    self.assertNotIn("checksum/", renamed["console.yaml"])
+
     def test_console_numeric_non_root_user(self):
         for mode, values in [("native", native()), ("legacy", {"console": {"enabled": True}})]:
             with self.subTest(mode=mode):

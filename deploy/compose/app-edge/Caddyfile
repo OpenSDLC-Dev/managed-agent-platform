@@ -7,9 +7,15 @@
 # HTTP in development. Never cache, compress or buffer event streams here.
 :8080 {
 	route {
-		# Refuse ambiguous path spellings before any upstream sees them. Match the
-		# original URI, not Caddy's cleaned path; query escaping remains allowed.
-		@ambiguous expression `{http.request.orig_uri}.matches('(?i)^[^?]*(%25|%2e|%2f|%5c|\\\\|//|/\\.{1,2}(/|[?]|$))')`
+		# Match the original URI, not Caddy's cleaned path. Only literal alias
+		# prefixes admit escaped name data (also through the legacy Console BFF).
+		# Decode once: a literal percent is data, but empty/dot path segments and
+		# raw backslashes remain ambiguous. Query escaping remains allowed.
+		@ambiguous expression `
+			{http.request.orig_uri}.matches('(?i)^[^?]*(\\\\|//|(/|%2f)(\\.|%2e){1,2}(/|%2f|[?]|$)|/%2f|%2f(/|%2f|[?]|$))') ||
+			({http.request.orig_uri}.matches('(?i)^[^?]*(%25|%2e|%2f|%5c)') &&
+			 !{http.request.orig_uri}.matches('^/(admin/v1/aliases|api/gateway/admin/v1/aliases)/'))
+		`
 		respond @ambiguous "not found" 404
 		@internal path /internal /internal/*
 		respond @internal "not found" 404

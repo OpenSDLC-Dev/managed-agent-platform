@@ -201,6 +201,9 @@ type roleKey struct{}
 // before routing too: every route needs the developer role at least, so a
 // caller who can call nothing, a user, learns nothing about which paths exist.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if m := h.cfg.Login; m != nil && m.NativeEnabled() {
+		w.Header().Set("Cache-Control", "no-store, private")
+	}
 	role, err := h.authenticate(w, r)
 	if err != nil {
 		writeError(w, r, err)
@@ -246,6 +249,9 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 				}
 				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
 				return "", unauthenticated("invalid operator token")
+			}
+			if m := h.cfg.Login; v.AssertionHeader() != "" && m != nil && m.NativeEnabled() && m.CheckProxyOrigin(r) != nil {
+				return "", forbidden("invalid browser origin")
 			}
 			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
 			if errors.Is(err, principal.ErrDeactivated) {

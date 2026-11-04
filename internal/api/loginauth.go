@@ -98,6 +98,9 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 	cookie := s.requireCookie(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := next.Handler(r)
+		if s.nativeLogin() && privateCookiePath(r) {
+			w.Header().Set("Cache-Control", "no-store, private")
+		}
 		if strings.Contains(pattern, "/api/auth/") || strings.Contains(pattern, "setup_code/redeem") {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Pragma", "no-cache")
@@ -140,6 +143,14 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 		if s.nativeLogin() && privateCookiePath(r) && !legacyLoginCredentialOffered(r, s.verifier) {
 			cookie.ServeHTTP(w, r)
 			return
+		}
+		// Match management dispatch's machine-first selection. A proxy assertion
+		// may be ambient browser authority even without a platform session cookie.
+		if s.nativeLogin() && privateCookiePath(r) && !apiKeyOffered(r) && s.verifier != nil && s.verifier.AssertionHeader() != "" {
+			if _, selected := s.verifier.Credential(r); selected && s.login.CheckProxyOrigin(r) != nil {
+				writeError(w, r, errForbidden("invalid browser origin"))
+				return
+			}
 		}
 		legacy.ServeHTTP(w, r)
 	})

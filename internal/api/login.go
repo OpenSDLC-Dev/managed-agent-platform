@@ -160,7 +160,12 @@ func (s *server) loginPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// An absent account takes the bounded dummy verification path too.
-		if !login.VerifyPassword(encoded, password) || id == "" || kind != "user" {
+		matches, err := login.VerifyPassword(r.Context(), encoded, password)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		if !matches || id == "" || kind != "user" {
 			writeError(w, r, errAuth("invalid login name or password"))
 			return
 		}
@@ -212,7 +217,11 @@ func writeNativeLoginError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func (s *server) issueLogin(w http.ResponseWriter, r *http.Request, id string) {
-	issued, err := s.login.Issue(r.Context(), id)
+	issue := s.login.Issue
+	if s.login.Mode() == login.ModePassword {
+		issue = s.login.IssuePasswordLogin
+	}
+	issued, err := issue(r.Context(), id)
 	if err != nil {
 		writeNativeLoginError(w, r, err)
 		return

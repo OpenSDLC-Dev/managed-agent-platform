@@ -32,7 +32,7 @@ func (m *Manager) BeginOIDC(ctx context.Context, _ *http.Request) (state, nonce,
 		return "", "", "", "", err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM browser_login_attempts WHERE expires_at<=clock_timestamp()`); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM browser_login_attempts WHERE expires_at<=statement_timestamp()`); err != nil {
 		return "", "", "", "", err
 	}
 	if _, err := tx.Exec(ctx, `

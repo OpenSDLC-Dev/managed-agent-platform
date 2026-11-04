@@ -53,6 +53,16 @@ func (s IssuedSession) Format(state fmt.State, _ rune) { io.WriteString(state, s
 // Issue stores only SHA-256 of a fresh 32-byte bearer. The database starts the
 // absolute 12-hour lifetime. Issuance also prunes expired sessions and attempts.
 func (m *Manager) Issue(ctx context.Context, principalID string) (IssuedSession, error) {
+	return m.issue(ctx, principalID, false)
+}
+
+// IssuePasswordLogin records a verified local login in the same transaction as
+// session issuance. The caller must verify the password before calling it.
+func (m *Manager) IssuePasswordLogin(ctx context.Context, principalID string) (IssuedSession, error) {
+	return m.issue(ctx, principalID, true)
+}
+
+func (m *Manager) issue(ctx context.Context, principalID string, passwordLogin bool) (IssuedSession, error) {
 	raw := make([]byte, 32)
 	rand.Read(raw)
 	token := base64.RawURLEncoding.EncodeToString(raw)
@@ -61,9 +71,19 @@ func (m *Manager) Issue(ctx context.Context, principalID string) (IssuedSession,
 		return IssuedSession{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM browser_sessions WHERE expires_at <= clock_timestamp();
-		DELETE FROM browser_login_attempts WHERE expires_at <= clock_timestamp()`); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM browser_sessions WHERE expires_at <= statement_timestamp();
+		DELETE FROM browser_login_attempts WHERE expires_at <= statement_timestamp()`); err != nil {
 		return IssuedSession{}, err
+	}
+	if passwordLogin {
+		tag, err := tx.Exec(ctx, `UPDATE principals SET last_seen_at=clock_timestamp()
+			WHERE id=$1 AND issuer=$2 AND kind='user' AND status='active'`, principalID, LocalIssuer)
+		if err != nil {
+			return IssuedSession{}, err
+		}
+		if tag.RowsAffected() != 1 {
+			return IssuedSession{}, ErrUnauthenticated
+		}
 	}
 	session, err := scanSession(tx.QueryRow(ctx, `
 		WITH stamp AS MATERIALIZED (SELECT clock_timestamp() AS at), issued AS (

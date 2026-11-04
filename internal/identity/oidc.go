@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -51,7 +52,7 @@ func NewRelyingParty(ctx context.Context, cfg Config, clientID, clientSecret, re
 	if err := requireIssuerURL(cfg.Issuer); err != nil {
 		return nil, errors.New("identity: invalid OIDC relying-party issuer")
 	}
-	if _, err := oidcEndpoint(redirectURL); err != nil {
+	if !validOIDCCallback(redirectURL) {
 		return nil, errors.New("identity: invalid OIDC callback URL")
 	}
 	client := cfg.HTTPClient
@@ -96,6 +97,21 @@ func NewRelyingParty(ctx context.Context, cfg Config, clientID, clientSecret, re
 	}
 	return &RelyingParty{verifier: v, client: client, authorization: authorization, tokenEndpoint: doc.TokenEndpoint,
 		clientID: clientID, clientSecret: clientSecret, redirectURL: redirectURL, secretInBody: secretInBody}, nil
+}
+
+// A callback is browser navigation, not an outbound IdP fetch. Native origin
+// config permits canonical addresses throughout 127/8 in development. Keep that
+// exception separate from oidcEndpoint and the production client's dial guard.
+func validOIDCCallback(raw string) bool {
+	if _, err := oidcEndpoint(raw); err == nil {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Opaque != "" || strings.Contains(raw, "#") {
+		return false
+	}
+	addr, err := netip.ParseAddr(u.Hostname())
+	return err == nil && addr.Zone() == "" && !addr.Is4In6() && addr.IsLoopback() && addr.String() == u.Hostname()
 }
 
 // oidcEndpoint adds OAuth's no-fragment rule to the shared HTTPS policy.

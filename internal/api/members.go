@@ -297,7 +297,7 @@ func (s *server) createMember(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Expensive password hashing never holds a principal lock.
-	hash, err := login.HashPassword(password)
+	hash, err := login.HashPassword(r.Context(), password)
 	if err != nil {
 		return nil, err
 	}

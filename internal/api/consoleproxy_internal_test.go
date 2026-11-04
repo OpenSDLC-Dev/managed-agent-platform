@@ -109,12 +109,14 @@ func TestPrivateProxyResourceRedirects(t *testing.T) {
 			mux.HandleFunc("GET /v1/agents", roleGate(identity.RoleDeveloper, func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Location", tc.location)
 				w.Header().Set("Content-Type", "application/binary")
+				// Downstream headers must not weaken the private boundary.
+				w.Header().Set("Cache-Control", "public, max-age=600")
 				w.WriteHeader(307)
 				io.WriteString(w, "raw-redirect-body")
 			}))
 			w := httptest.NewRecorder()
 			s.serveConsoleProxy(dispatchAuth(nil, nil, mux))(w, r)
-			if w.Code != 307 || w.Header().Get("Location") != tc.want || w.Body.String() != "raw-redirect-body" || w.Header().Get("Content-Type") != "application/binary" {
+			if w.Code != 307 || w.Header().Get("Location") != tc.want || w.Body.String() != "raw-redirect-body" || w.Header().Get("Content-Type") != "application/binary" || w.Header().Get("Cache-Control") != "no-store, private" {
 				t.Fatalf("redirect=%d location=%q body=%s headers=%v; want location=%q", w.Code, w.Header().Get("Location"), w.Body.String(), w.Header(), tc.want)
 			}
 		})

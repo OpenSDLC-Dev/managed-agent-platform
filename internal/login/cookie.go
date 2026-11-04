@@ -86,6 +86,24 @@ func (m *Manager) CheckOrigin(r *http.Request) error {
 	return nil
 }
 
+// CheckProxyOrigin protects native mutations authenticated by an ambient proxy
+// assertion. Signalless nonbrowser clients keep the legacy assertion contract.
+// Call only after selecting that credential lane, never for explicit API keys.
+func (m *Manager) CheckProxyOrigin(r *http.Request) error {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return nil
+	}
+	browser := len(r.Header.Values("Origin")) > 0 || len(r.Header.Values("Cookie")) > 0
+	for name := range r.Header {
+		browser = browser || strings.HasPrefix(strings.ToLower(name), "sec-fetch-")
+	}
+	if browser {
+		return m.CheckOrigin(r)
+	}
+	return nil
+}
+
 // CheckCSRF protects cookie-authenticated unsafe methods. Anonymous password
 // login/setup instead use CheckOrigin plus a JSON content-type admission check.
 func (m *Manager) CheckCSRF(r *http.Request, session Session) error {
