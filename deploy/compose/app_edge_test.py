@@ -241,27 +241,59 @@ class AliasNameRouting(unittest.TestCase):
                     self.pending_interrupt = True
         raise subprocess.TimeoutExpired(process.args, timeout)
 
-    def stop_child(self, process):
-        for stop in (process.terminate, process.kill):
-            if process.poll() is None:
-                stop()
+    def child_group_alive(self, process, entry):
+        pgid = entry["pgid"]
+        # start_new_session owns this original independent group, not just its
+        # leader. Never signal the parent group or a replacement looked up by name.
+        if pgid <= 0 or pgid != process.pid or pgid == os.getpgid(0):
+            raise RuntimeError("owned child lacks an independent original process group")
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def stop_child(self, process, entry):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            deadline = time.monotonic() + 5
+            if self.child_group_alive(process, entry):
+                try:
+                    os.killpg(entry["pgid"], sig)
+                except ProcessLookupError:
+                    pass
             try:
-                return self.communicate(process, 5)
+                output = self.communicate(process, max(.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                pass
-        raise RuntimeError(f"owned child {process.pid} could not be drained and reaped")
+                continue
+            while self.child_group_alive(process, entry):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(.01)
+            else:
+                if process.returncode is not None:
+                    return output
+        raise RuntimeError(f"owned child {process.pid} could not be drained, reaped and group-quiesced")
 
     def settle_child(self, process, entry, acquire, output=None):
+        if acquire:
+            entry["ownershipUnresolved"] = True
         try:
-            if output is None:
-                output = self.stop_child(process)
+            if output is None or self.child_group_alive(process, entry):
+                output = self.stop_child(process, entry)
+            if process.returncode is None:
+                raise RuntimeError(f"owned child {process.pid} was not reaped")
         except Exception as error:
             entry["reapError"] = str(error)
+            entry["returncode"] = process.returncode
+            return output
         entry["returncode"] = process.returncode
-        if process.returncode is not None:
-            self.active.pop(process.pid, None)
-            if acquire:
+        self.active.pop(process.pid, None)
+        if acquire:
+            try:
                 entry["ownershipUnresolved"] = not acquire(output[0] if output else "")
+            except Exception as error:
+                entry["ownershipError"] = repr(error)
+                raise
         return output
 
     def command(self, *args, check=True, acquire=None):
@@ -478,14 +510,17 @@ class AliasNameRouting(unittest.TestCase):
                 after = attempt("ps", "-aq", "--no-trunc")
                 volumes = attempt("volume", "ls", "-q")
                 networks = attempt("network", "ls", "--no-trunc", "-q")
+                container_ids = set(after.stdout.split()) if after is not None else None
+                volume_names = set(volumes.stdout.split()) if volumes is not None else None
+                network_ids = set(networks.stdout.split()) if networks is not None else None
                 known = not unresolved and not self.active
                 self.receipt["containerRemovalObserved"] = bool(after is not None and known and all(
-                    e["id"] not in after.stdout.split() for e in self.receipt["containers"] if "id" in e))
+                    e["id"] not in container_ids for e in self.receipt["containers"] if "id" in e))
                 self.receipt["volumeRemovalObserved"] = bool(volumes is not None and known and all(
                     "mounts" in e for e in self.receipt["containers"] if "id" in e) and all(
-                    m["Name"] not in volumes.stdout.split() for e in self.receipt["containers"]
+                    m["Name"] not in volume_names for e in self.receipt["containers"]
                     for m in e.get("mounts", []) if m["Type"] == "volume"))
-                self.receipt["networkRemovalObserved"] = bool(networks is not None and known and self.network not in networks.stdout.split())
+                self.receipt["networkRemovalObserved"] = bool(networks is not None and known and self.network not in network_ids)
             except Exception as error:
                 errors.append(str(error))
             finally:
@@ -511,6 +546,7 @@ class AliasFixtureContracts(unittest.TestCase):
             self.pid = 800000 + len(transport.processes)
             self.returncode = None
             self.output = None
+            self.group_alive, self.helper_live, self.group_stop_error = True, False, False
 
         def communicate(self, input=None, timeout=None):
             args, transport = self.args[1:], self.transport
@@ -526,6 +562,14 @@ class AliasFixtureContracts(unittest.TestCase):
             if self.output is None:
                 self.output = transport.execute(args, self)
             stdout, stderr, self.returncode = self.output
+            if args[0] == "create" and transport.fault in ("helper-pipe", "helper-stop-error"):
+                self.helper_live = True
+                self.group_stop_error = transport.fault == "helper-stop-error"
+                transport.fault = None
+            self.group_alive = self.helper_live
+            if self.helper_live:
+                # The leader exited; a same-group helper still owns an output pipe.
+                raise subprocess.TimeoutExpired(self.args, timeout)
             if transport.fault == "setup" and args[:2] == ["network", "inspect"]:
                 transport.fault = None
                 raise KeyboardInterrupt("setup after original network receipt")
@@ -562,6 +606,31 @@ class AliasFixtureContracts(unittest.TestCase):
             self.ports, self.seen = {}, []
             self.completed_requests = 0
             self.child_factory = None
+            self.group_calls, self.real_groups = [], {}
+            self.real_killpg, self.parent_pgid = os.killpg, os.getpgid(0)
+
+        def killpg(self, pgid, sig):
+            # Fabricated PIDs never reach the host. The existing synthetic child
+            # is admitted only after its actual independent identity is recorded.
+            if pgid <= 0 or pgid == self.parent_pgid or sig not in (0, signal.SIGTERM, signal.SIGKILL):
+                raise AssertionError("unowned process-group operation")
+            process = next((item for item in self.processes if item.pid == pgid), None)
+            if process is None:
+                raise AssertionError("no fallback for an unknown process group")
+            self.group_calls.append({"pgid": pgid, "signal": sig})
+            if isinstance(process, AliasFixtureContracts.Process):
+                if not process.group_alive:
+                    raise ProcessLookupError(pgid)
+                if sig:
+                    if process.group_stop_error:
+                        raise OSError("fake owned group could not be signalled")
+                    process.helper_live = process.group_alive = False
+                    if process.returncode is None:
+                        process.returncode = -sig
+                return
+            if self.real_groups.get(pgid) != {"pid": process.pid, "pgid": pgid}:
+                raise AssertionError("synthetic group lacks original identity evidence")
+            return self.real_killpg(pgid, sig)
 
         def popen(self, args, **kwargs):
             if args[0] != "docker" or not kwargs.get("start_new_session"):
@@ -624,7 +693,8 @@ class AliasFixtureContracts(unittest.TestCase):
                 return output, "", 0
             if args[0] == "rm" or args[:2] == ["network", "rm"]:
                 receipt = self.persisted()
-                active = [item.pid for item in self.processes if item is not process and item.returncode is None]
+                active = [item.pid for item in self.processes if item is not process
+                          and (item.returncode is None or getattr(item, "group_alive", False))]
                 target = args[-1]
                 owned = (receipt.get("network") == target if args[0] == "network" else
                          any(entry.get("id") == target for entry in receipt.get("containers", [])))
@@ -689,10 +759,12 @@ class AliasFixtureContracts(unittest.TestCase):
             configure(transport)
         fake_subprocess = types.SimpleNamespace(**vars(subprocess))
         fake_subprocess.Popen, fake_subprocess.run = transport.popen, transport.forbidden
+        fake_os = types.SimpleNamespace(**vars(os))
+        fake_os.killpg = transport.killpg
         fake_http = types.SimpleNamespace(client=types.SimpleNamespace(HTTPConnection=transport.connection,
                                                                      HTTPException=http.client.HTTPException))
         result, interrupted = unittest.TestResult(), False
-        with mock.patch.dict(globals(), {"EVIDENCE": self.directory, "subprocess": fake_subprocess, "http": fake_http}):
+        with mock.patch.dict(globals(), {"EVIDENCE": self.directory, "subprocess": fake_subprocess, "os": fake_os, "http": fake_http}):
             try:
                 fixture.run(result)
             except KeyboardInterrupt:
@@ -715,6 +787,8 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assertEqual(transport.volumes, {"unrelated-volume"})
         self.assertTrue(all(process.returncode is not None for process in transport.processes),
                         "owned command still active after fixture unwound")
+        self.assertFalse(any(getattr(process, "group_alive", False) for process in transport.processes),
+                         "owned helper group still active after fixture unwound")
 
     def assert_partial_receipt(self, fixture, transport):
         receipt = transport.persisted()
@@ -723,6 +797,96 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assertTrue({"cleanupErrors", "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"} <= receipt.keys(),
                         "partial receipt was not finalized after cleanup")
         return receipt
+
+    def test_capture_exception_keeps_original_creation_unresolved(self):
+        for fault in ("cidfile-read", "ownership-checkpoint"):
+            with self.subTest(fault=fault):
+                original_read, original_write = Path.read_text, Path.write_text
+                injected = []
+
+                def read(path, *args, **kwargs):
+                    if fault == "cidfile-read" and path.name == "origin.cid" and path.exists() and not injected:
+                        injected.append(fault)
+                        raise OSError("original cidfile read failed")
+                    return original_read(path, *args, **kwargs)
+
+                def write(path, data, *args, **kwargs):
+                    if fault == "ownership-checkpoint" and path.name == "receipt.json" and not injected:
+                        value = json.loads(data)
+                        if any("id" in entry for entry in value.get("containers", [])):
+                            injected.append(fault)
+                            raise OSError("original ownership checkpoint failed")
+                    return original_write(path, data, *args, **kwargs)
+
+                with mock.patch.object(Path, "read_text", read), mock.patch.object(Path, "write_text", write):
+                    fixture, transport, result, interrupted = self.run_fixture()
+                self.assertEqual(injected, [fault], "fault must follow original fake creation")
+                self.assertFalse(interrupted)
+                self.assertTrue(result.errors)
+                self.assertIn("original cidfile read failed" if fault == "cidfile-read" else
+                              "original ownership checkpoint failed", result.errors[0][1])
+                self.assert_unrelated_untouched(transport)
+                receipt = transport.persisted()
+                creation = next(entry for entry in receipt["commands"] if entry["args"][0] == "create")
+                with self.subTest(contract="unresolved-original-capture"):
+                    self.assertTrue(creation.get("ownershipUnresolved"), "capture exception lost original ownership uncertainty")
+                with self.subTest(contract="partial-error-evidence"):
+                    self.assertTrue(receipt["cleanupErrors"], "capture failure vanished from cleanup evidence")
+                    self.assertIn("ownershipError", creation)
+                    self.assertEqual(receipt["requests"], fixture.receipt["requests"])
+                with self.subTest(contract="no-unsafe-network-removal"):
+                    self.assertIn("original-network-id", transport.networks)
+                    self.assertFalse(any(args[:2] == ["network", "rm"] for args in transport.calls))
+                for key in ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"):
+                    with self.subTest(observation=key):
+                        self.assertFalse(receipt[key], "unknown original resources cannot be reported absent")
+                if fault == "cidfile-read":
+                    self.assertNotIn("id", receipt["containers"][0])
+                    self.assertEqual(set(transport.containers), {"unrelated-container", "original-container-1"})
+                    self.assertIn("owned-volume-original-container-1", transport.volumes)
+                    self.assertFalse(any(args[0] in ("inspect", "rm") for args in transport.calls),
+                                     "an unknown original container ID must never be guessed")
+
+    def test_exited_leader_requires_pipe_drain_and_group_quiescence(self):
+        for fault in ("helper-pipe", "helper-stop-error"):
+            with self.subTest(fault=fault):
+                fixture, transport, result, interrupted = self.run_fixture(fault)
+                self.assertFalse(interrupted)
+                self.assertTrue(result.errors)
+                self.assertIn("TimeoutExpired", result.errors[0][1])
+                helper = next(process for process in transport.processes if process.args[1] == "create")
+                self.assertEqual(helper.returncode, 0, "the regression requires an already-exited leader")
+                receipt = transport.persisted()
+                creation = next(entry for entry in receipt["commands"] if entry["pid"] == helper.pid)
+                (self.directory / (fault + "-observation.json")).write_text(json.dumps({
+                    "leaderReturncode": helper.returncode, "helperLive": helper.helper_live,
+                    "groupCalls": transport.group_calls, "cleanup": transport.cleanup_observations,
+                    "active": list(fixture.active), "creation": creation}, indent=2))
+                self.assert_unrelated_untouched(transport)
+                if fault == "helper-pipe":
+                    with self.subTest(contract="drain-and-group-stop"):
+                        self.assertFalse(helper.helper_live, "leader exit is not whole-group quiescence")
+                        self.assertNotIn(helper.pid, fixture.active)
+                        self.assertTrue(any(call["pgid"] == helper.pid and call["signal"] in (signal.SIGTERM, signal.SIGKILL)
+                                            for call in transport.group_calls))
+                    with self.subTest(contract="deletion-after-quiescence"):
+                        self.assert_cleaned(transport)
+                        self.assertTrue(all(receipt[key] for key in
+                                            ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved")))
+                else:
+                    with self.subTest(contract="unresolved-live-group"):
+                        self.assertTrue(helper.helper_live)
+                        self.assertIn(helper.pid, fixture.active, "failed drain must retain the original active group")
+                        self.assertTrue(creation.get("ownershipUnresolved"))
+                        self.assertIn("fake owned group could not be signalled", creation.get("reapError", ""))
+                        self.assertTrue(receipt["cleanupErrors"])
+                    with self.subTest(contract="no-deletion-with-live-helper"):
+                        self.assertEqual(transport.cleanup_observations, [])
+                        self.assertIn("original-container-1", transport.containers)
+                        self.assertIn("original-network-id", transport.networks)
+                    for key in ("containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"):
+                        with self.subTest(observation=key):
+                            self.assertFalse(receipt[key], "a live owned group forbids an absence claim")
 
     def test_ordinary_exception_cleans_owned_resources(self):
         fixture, transport, result, interrupted = self.run_fixture("requests-error")
@@ -761,6 +925,56 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assert_unrelated_untouched(transport)
         receipt = self.assert_partial_receipt(fixture, transport)
         self.assertTrue(receipt["cleanupErrors"], "cleanup failure vanished from the partial receipt")
+
+    def test_cleanup_lists_are_parsed_once_and_failures_remain_unobserved(self):
+        for failed_listing in (None, "containers", "volumes", "networks"):
+            with self.subTest(failed_listing=failed_listing):
+                counts = {"containers": 0, "volumes": 0, "networks": 0}
+
+                class CountedOutput(str):
+                    def split(self, *args, **kwargs):
+                        counts[self.kind] += 1
+                        return super().split(*args, **kwargs)
+
+                def configure(transport):
+                    original_execute = transport.execute
+
+                    def execute(args, process):
+                        stdout, stderr, code = original_execute(args, process)
+                        kind = ("containers" if args[0] == "ps" else "volumes" if args[:2] == ["volume", "ls"]
+                                else "networks" if args[:2] == ["network", "ls"] else None)
+                        if kind:
+                            stdout = CountedOutput(stdout)
+                            stdout.kind = kind
+                            if kind == failed_listing:
+                                stderr, code = "fake " + kind + " listing failed", 1
+                        return stdout, stderr, code
+
+                    transport.execute = execute
+
+                fixture, transport, result, interrupted = self.run_fixture(configure=configure)
+                receipt = transport.persisted()
+                (self.directory / ("listing-counts-" + (failed_listing or "success") + ".json")).write_text(json.dumps({
+                    "splitCalls": counts, "failedListing": failed_listing, "requests": len(receipt["requests"]),
+                    "ownedContainers": len(receipt["containers"]),
+                    "ownedVolumes": sum(mount["Type"] == "volume" for entry in receipt["containers"]
+                                        for mount in entry["mounts"])}, indent=2))
+                self.assertFalse(interrupted)
+                self.assert_cleaned(transport)
+                self.assertEqual(len(receipt["requests"]), 1464)
+                self.assertEqual(result.errors, [])
+                if failed_listing:
+                    self.assertEqual(len(result.failures), 1)
+                    self.assertIn("fake " + failed_listing + " listing failed", " ".join(receipt["cleanupErrors"]))
+                else:
+                    self.assertEqual(result.failures, [])
+                for kind, key in (("containers", "containerRemovalObserved"), ("volumes", "volumeRemovalObserved"),
+                                  ("networks", "networkRemovalObserved")):
+                    with self.subTest(listing=kind):
+                        self.assertEqual(receipt[key], kind != failed_listing)
+                        self.assertEqual(counts[kind], 0 if kind == failed_listing else 1,
+                                         "parse each successful listing once, not once per owned resource")
+                self.assertEqual(receipt["requests"], fixture.receipt["requests"])
 
     def test_all_checkpoints_serialize_histories_linearly(self):
         snapshots, writes = [], []
@@ -828,7 +1042,8 @@ class AliasFixtureContracts(unittest.TestCase):
     def test_detached_creation_child_is_reaped_before_cleanup(self):
         real_popen = subprocess.Popen
         ready, release = self.directory / "child-ready.json", self.directory / "child-release"
-        owned, signal_errors = {}, []
+        owned, signal_errors, readiness_reads = {}, [], []
+        original_read = Path.read_text
         stop = threading.Event()
         script = ("import json,os,sys,time\nfrom pathlib import Path\n"
                   "ready,release,cidfile=map(Path,sys.argv[1:])\n"
@@ -851,6 +1066,7 @@ class AliasFixtureContracts(unittest.TestCase):
                     raise AssertionError("fake child must own a separate process group")
                 owned.update(identity)
                 (self.directory / "original-child-identity.json").write_text(json.dumps(identity))
+                transport.real_groups[process.pid] = identity.copy()
                 communicate = process.communicate
 
                 def interrupted_communicate(*args, **kwargs):
@@ -874,7 +1090,11 @@ class AliasFixtureContracts(unittest.TestCase):
                         while not stop.wait(.01) and time.monotonic() < deadline:
                             if not ready.exists():
                                 continue
-                            metadata = json.loads(ready.read_text())
+                            try:
+                                metadata = json.loads(ready.read_text())
+                            except json.JSONDecodeError:
+                                # The path exists before write_text finishes publication.
+                                continue
                             if metadata != identity:
                                 raise AssertionError("child identity changed before signal")
                             frame = sys._current_frames()[threading.main_thread().ident]
@@ -894,10 +1114,23 @@ class AliasFixtureContracts(unittest.TestCase):
                 return process
             transport.child_factory = factory
 
+        def incomplete_readiness_once(path, *args, **kwargs):
+            if path == ready and not readiness_reads:
+                readiness_reads.append("{")
+                return "{"
+            value = original_read(path, *args, **kwargs)
+            if path == ready:
+                readiness_reads.append(value)
+            return value
+
         try:
-            _, transport, _, interrupted = self.run_fixture(configure=configure)
+            with mock.patch.object(Path, "read_text", incomplete_readiness_once):
+                _, transport, _, interrupted = self.run_fixture(configure=configure)
             self.assertTrue(interrupted, "real child-creation SIGINT was not propagated")
             self.assertEqual(signal_errors, [])
+            self.assertEqual(readiness_reads[0], "{")
+            self.assertGreaterEqual(len(readiness_reads), 2, "the observer must retry incomplete readiness")
+            self.assertEqual(json.loads(readiness_reads[-1]), {"pid": owned["pid"], "pgid": owned["pgid"]})
             self.assertIsNotNone(owned["process"].returncode, "fixture unwound without reaping its owned detached creation child")
             self.assert_cleaned(transport)
         finally:
@@ -918,8 +1151,12 @@ class AliasFixtureContracts(unittest.TestCase):
                              if any(int(value) in (owned["pid"], owned["pgid"]) for value in line.split(None, 2)[:2])]
                 (self.directory / "child-final-observation.json").write_text(json.dumps({
                     "pid": owned["pid"], "pgid": owned["pgid"], "returncode": process.returncode,
-                    "processListingSucceeded": listing.returncode == 0, "remaining": remaining}, indent=2))
+                    "processListingSucceeded": listing.returncode == 0, "remaining": remaining,
+                    "observerAlive": owned["thread"].is_alive() if "thread" in owned else False,
+                    "readinessReads": readiness_reads, "signalErrors": signal_errors}, indent=2))
                 self.assertEqual(remaining, [], "owned child PID/group survived teardown")
+            if "thread" in owned:
+                self.assertFalse(owned["thread"].is_alive(), "owned interrupt observer survived teardown")
 
 
 if __name__ == "__main__":
