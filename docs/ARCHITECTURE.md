@@ -681,6 +681,10 @@ and holds the two OS-touching adapters `gaterun/` declares.
   members and service accounts require actual cookie identity, not merely the old
   role annotation. Member and service-account mutations take the principal table
   lock before rechecking the caller's session and current admin authority.
+  Cookie-selected management-key issuance and updates, worker-key issuance, and
+  gateway grant creation or replacement use the same principal-first order.
+  They read the body before taking locks and recheck human admin authority in
+  the write transaction. The principal and session locks last until commit.
   Manual demotion/removal protects the last active human admin; mapping is exempt.
   The cookie-only resource proxy re-enters management dispatch with the same
   role floors, audit actor and trace context. It cannot enter machine or inference

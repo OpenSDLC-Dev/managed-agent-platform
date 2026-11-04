@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -100,6 +101,11 @@ func scanManagementKey(row pgx.Row) (ManagementKey, error) {
 // and it is the reference's: an operator issuing a management credential picks
 // its lifetime; a worker credential's lifetime is the platform's business.
 func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, expiresAt *time.Time, createdBy string) (string, ManagementKey, error) {
+	return issueManagementKey(ctx, pool, name, expiresAt, createdBy)
+}
+
+// issueManagementKey also accepts the transaction holding the issuer's authority.
+func issueManagementKey(ctx context.Context, db principal.Querier, name string, expiresAt *time.Time, createdBy string) (string, ManagementKey, error) {
 	// Enforced rather than asserted, because two code paths read this field for
 	// the same fact and would disagree about a blank one: the listing renders an
 	// empty issuer as `created_by: null`, which is the documented signal for "this
@@ -132,7 +138,7 @@ func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, ex
 	// resource already reporting `expired`. Nothing needs guarding once the value
 	// is allowed to be in the past — the row is simply born in the derived state,
 	// which the credential path refuses exactly as it refuses any lapsed key.
-	row := pool.QueryRow(ctx,
+	row := db.QueryRow(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+managementKeyColumns,

@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/jackc/pgx/v5"
 )
 
 type cookieContextKey struct{}
@@ -28,6 +29,16 @@ func requireCookieSession(r *http.Request) (login.Session, error) {
 		return login.Session{}, errAuth("a browser session cookie is required")
 	}
 	return session, nil
+}
+
+// beginCredentialMutation fences cookie-selected authority until the write commits.
+// Callers read the body first. Legacy credentials keep their existing admission.
+func (s *server) beginCredentialMutation(r *http.Request) (pgx.Tx, error) {
+	if _, ok := cookieSessionFrom(r.Context()); ok {
+		tx, _, err := s.beginPrincipalMutation(r)
+		return tx, err
+	}
+	return s.pool.Begin(r.Context())
 }
 
 func (s *server) nativeLogin() bool { return s.login != nil && s.login.NativeEnabled() }

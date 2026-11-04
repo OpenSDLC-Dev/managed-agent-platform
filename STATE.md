@@ -8,7 +8,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 Native HTTP login and first-admin setup are implemented.
 Member and service-account management is implemented.
 Private resource access and gateway cookie admission are implemented.
-Current hardening still needs full gate and runtime verification.
+Credential-fence candidate and current hardening need full gate and runtime verification.
 **no release until plan 69 slice 7**.
 
 ## Tasks

@@ -342,7 +342,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 	// insert's foreign key into a 500 where this route's own not-found branch is
 	// the right answer.
 	ctx := r.Context()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginCredentialMutation(r)
 	if err != nil {
 		return nil, err
 	}

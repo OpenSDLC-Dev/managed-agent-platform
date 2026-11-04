@@ -198,8 +198,17 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	// over SSO, the machine key's own `apikey_` row id otherwise. This route is
 	// authenticated on both lanes, so it is never empty — and it must not be, since
 	// a NULL issuer is what marks a row env-var-managed.
-	key, row, err := IssueManagementKey(r.Context(), s.pool, *name, expiresAt, principalFrom(r.Context()))
+	ctx := r.Context()
+	tx, err := s.beginCredentialMutation(r)
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	key, row, err := issueManagementKey(ctx, tx, *name, expiresAt, principalFrom(ctx))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return apiKeyIssuedJSON{apiKeyJSON: renderAPIKey(row), RawKey: key}, nil
@@ -264,9 +273,8 @@ func (s *server) updateWorkspaceAPIKey(r *http.Request) (any, error) {
 // updateAPIKeyIn changes a key's status, its name, or both, once the caller
 // has resolved the route's scope.
 //
-// The transaction exists for the check below, not for the write: the row is read
-// FOR UPDATE so a concurrent update cannot change what is being decided on
-// between the decision and the write.
+// The target row is read FOR UPDATE so concurrent updates cannot change the
+// decision. Cookie callers also hold their authority fence until commit.
 func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	keyID := r.PathValue("key_id")
 	// apikey_ is deliberately outside domain.knownPrefixes, so checkID cannot
@@ -302,7 +310,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 		return nil, bodyErr
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginCredentialMutation(r)
 	if err != nil {
 		return nil, err
 	}

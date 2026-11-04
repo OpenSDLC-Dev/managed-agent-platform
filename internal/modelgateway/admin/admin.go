@@ -196,6 +196,7 @@ func (h *handler) route(path string, eps ...endpoint) {
 }
 
 type roleKey struct{}
+type cookieKey struct{}
 
 // ServeHTTP authenticates before routing, and refuses a caller below developer
 // before routing too: every route needs the developer role at least, so a
@@ -204,12 +205,15 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m := h.cfg.Login; m != nil && m.NativeEnabled() {
 		w.Header().Set("Cache-Control", "no-store, private")
 	}
-	role, err := h.authenticate(w, r)
+	role, cookie, err := h.authenticate(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	if cookie {
+		ctx = context.WithValue(ctx, cookieKey{}, true)
+	}
 	if err := requireRole(ctx, identity.RoleDeveloper); err != nil {
 		writeError(w, r, err)
 		return
@@ -222,19 +226,20 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // decision 4): principal.Resolve applies the mapping and rejects removed
 // members. A browser cookie instead reads current authority without a sign-in.
 // Offered legacy credentials retain precedence, including their failures.
-func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity.Role, error) {
+// cookie is true only when a browser session actually authenticated the request.
+func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, err error) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
-		return "", unauthenticated("a credential header is repeated")
+		return "", false, unauthenticated("a credential header is repeated")
 	}
 	if len(keys) == 1 {
 		if h.isBootstrap(keys[0]) {
-			return identity.RoleAdmin, nil
+			return identity.RoleAdmin, false, nil
 		}
-		return "", unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
+		return "", false, unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
 	}
 	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && h.isBootstrap(tok) {
-		return identity.RoleAdmin, nil
+		return identity.RoleAdmin, false, nil
 	}
 	if v := h.cfg.Verifier; v != nil {
 		if tok, ok := v.Credential(r); ok {
@@ -248,21 +253,21 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 					reason = ie.Reason()
 				}
 				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
-				return "", unauthenticated("invalid operator token")
+				return "", false, unauthenticated("invalid operator token")
 			}
 			if m := h.cfg.Login; v.AssertionHeader() != "" && m != nil && m.NativeEnabled() && m.CheckProxyOrigin(r) != nil {
-				return "", forbidden("invalid browser origin")
+				return "", false, forbidden("invalid browser origin")
 			}
 			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
 			if errors.Is(err, principal.ErrDeactivated) {
 				// A 403 as on the control plane: the token is genuine, and the
 				// refusal is of the account.
-				return "", forbidden("this account has been removed from the organization")
+				return "", false, forbidden("this account has been removed from the organization")
 			}
 			if err != nil {
-				return "", err
+				return "", false, err
 			}
-			return p.Role, nil
+			return p.Role, false, nil
 		}
 	}
 	legacyOffered := len(r.Header.Values("Authorization")) > 0
@@ -272,22 +277,14 @@ func (h *handler) authenticate(w http.ResponseWriter, r *http.Request) (identity
 	if m := h.cfg.Login; !legacyOffered && m != nil && m.NativeEnabled() {
 		session, err := m.Authenticate(r.Context(), r)
 		if err != nil {
-			switch {
-			case errors.Is(err, login.ErrUnauthenticated):
-				w.Header().Set("x-platform-signed-out", "1")
-				err = unauthenticated("invalid or expired browser session")
-			case errors.Is(err, principal.ErrDeactivated):
-				w.Header().Set("x-platform-signed-out", "1")
-				err = forbidden("this account has been removed from the organization")
-			}
-			return "", err
+			return "", false, err
 		}
 		if err := m.CheckCSRF(r, session); err != nil {
-			return "", forbidden("invalid browser origin or CSRF token")
+			return "", false, forbidden("invalid browser origin or CSRF token")
 		}
-		return session.Role, nil
+		return session.Role, true, nil
 	}
-	return "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
+	return "", false, unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
 }
 
 // isBootstrap compares digests, so the comparison is constant-time in the
@@ -336,6 +333,12 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var ae *apiError
 	if !errors.As(err, &ae) {
 		switch {
+		case errors.Is(err, login.ErrUnauthenticated):
+			w.Header().Set("x-platform-signed-out", "1")
+			ae = unauthenticated("invalid or expired browser session")
+		case errors.Is(err, principal.ErrDeactivated):
+			w.Header().Set("x-platform-signed-out", "1")
+			ae = forbidden("this account has been removed from the organization")
 		case errors.Is(err, store.ErrNotFound):
 			ae = notFound("%s", err)
 		case errors.Is(err, store.ErrConflict):
