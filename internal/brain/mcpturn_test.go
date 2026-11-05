@@ -61,6 +61,24 @@ func requestTools(t *testing.T, req provider.Request) []string {
 	return out
 }
 
+// A declared server no toolset names holds the turn the same way (#1018). It can
+// offer nothing yet, but discovery walks the declared servers, not the toolsets,
+// so a later patch can restore its toolset without a second dial.
+func TestATurnWaitsForAServerNoToolsetNames(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "unused"), done("end_turn", 3)}}, nil)
+	mcpAgent(t, h, "")
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 0 {
+		t.Fatalf("model requests = %d, want 0 while discovery runs", n)
+	}
+	if got := h.liveOf(t, queue.MCPExec); got != 1 {
+		t.Errorf("mcp_exec items = %d, want 1", got)
+	}
+}
+
 // A server this session has never listed has tools nobody can name, so the turn
 // is not assembled at all: no model call, the item comes back as mcp_exec, and
 // the session stays running while discovery runs. Sending the turn without the

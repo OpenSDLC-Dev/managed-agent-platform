@@ -5,10 +5,12 @@ import (
 )
 
 // MCPServerAdmitted reports whether the environment's networking policy admits
-// an MCP server the agent declares at host. Two places ask, and must never
-// disagree: session create, where the reference asks — a refusal there is its
-// recorded 400 (#571) — and the executor before every dial, since mcp_servers
-// is mid-session-mutable and a host can arrive after create.
+// an MCP server the agent declares at host. Three places ask, and must never
+// disagree: session create and a session update that names servers, where the
+// reference asks — a refusal there is its recorded 400 (#571, #1017) — and the
+// executor before every dial, which also judges what those two never see: a
+// coordinator's roster members, a host stored before the check, and a policy
+// that changed since.
 //
 // What decides is the policy's type, not which kind of environment carries it
 // — and type rather than presence, because a value struct cannot tell an
@@ -35,7 +37,7 @@ import (
 //
 // allow_mcp_servers "allows access to MCP server endpoints configured on the
 // agent" on top of allowed_hosts, and this is only ever asked about a server the
-// agent declared — both callers walk that array and nothing else — so under
+// agent declared — every caller walks that array and nothing else — so under
 // the flag the host is admitted without a second list to check it against.
 func MCPServerAdmitted(cfg domain.EnvironmentConfig, host string) bool {
 	if cfg.Type == domain.EnvSelfHosted && cfg.Networking.Type == "" {

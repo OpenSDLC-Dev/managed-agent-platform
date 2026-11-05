@@ -172,6 +172,30 @@ func TestMCPToolsAreOfferedUnderAPrefixedName(t *testing.T) {
 	}
 }
 
+// A session update may leave a declared server with no mcp_toolset (#1018). Its
+// listing is in the catalog and offers the model nothing: tools come from the
+// toolsets, never from the servers.
+func TestADeclaredServerNoToolsetNamesOffersNothing(t *testing.T) {
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
+		MCPServers: []json.RawMessage{json.RawMessage(`{"type":"url","name":"docs","url":"https://docs.example.com"}`)},
+	}}
+	cat := mcpCatalog{"docs": listingOf(t, mcpTool("search"))}
+
+	defs, class, notes, _, err := resolveTools(agent, cat, delegationNone, time.Now())
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if len(notes) != 0 {
+		t.Errorf("notes = %v, want none", notes)
+	}
+	if got := defNames(t, defs); len(got) != 0 {
+		t.Errorf("offered = %v, want nothing", got)
+	}
+	if _, ok := class["mcp__docs__search"]; ok {
+		t.Error("the server's tool has a class, so a call to it would be routed")
+	}
+}
+
 // The Messages API pins a tool's name to ^[a-zA-Z0-9_-]{1,128}$, and an MCP
 // server chooses its own names under no such rule — 255 characters of server
 // name and 128 of tool name both fit the MCP wire. A name the endpoint would

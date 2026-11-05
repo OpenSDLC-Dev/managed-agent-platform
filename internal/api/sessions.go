@@ -1272,10 +1272,28 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 				return nil, errInvalid("only agent.tools and agent.mcp_servers can be updated on a session")
 			}
 		}
-		// Validate the merged result, exactly as agent update does: a patch
-		// that strands a stored mcp_server or grows past a cap rejects (#287).
-		if err := validateAgentSpec(agent.AgentSpec); err != nil {
+		// Validate the merged result, as agent update does: a patch that leaves a
+		// toolset naming no server or grows past a cap rejects (#287). One that
+		// leaves a server no toolset names lands (#1018).
+		if err := validatePatchedSessionAgent(agent.AgentSpec); err != nil {
 			return nil, err
+		}
+		// A patch that names servers meets the check session create runs, in the
+		// order create runs it (#1017). It judges the whole list, because a patch
+		// replaces the whole list. A patch to tools alone judges nothing: no
+		// recording sent one on a stored host the policy no longer admits, and the
+		// dial still refuses that host. The read takes no lock, because a policy
+		// that changes just after it is one that changes just after the patch,
+		// which is what the dial is there for.
+		if _, named := patch["mcp_servers"]; named {
+			var envConfig []byte
+			if err := tx.QueryRow(ctx, `SELECT config FROM environments WHERE id = $1`,
+				row.environmentID).Scan(&envConfig); err != nil {
+				return nil, err
+			}
+			if err := admitMCPServers(envConfig, agent.MCPServers); err != nil {
+				return nil, err
+			}
 		}
 		// A coordinator's `self` copy is its resolved spec for this session,
 		// so the patch reaches that member of the snapshot too (roster.go).
