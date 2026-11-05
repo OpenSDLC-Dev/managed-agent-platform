@@ -3,8 +3,11 @@ package api_test
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 )
 
 // mcpAgent creates an agent declaring one MCP server per {name, url} pair, in
@@ -194,4 +197,88 @@ func TestDeploymentRunRecordsABlockedMCPHost(t *testing.T) {
 	if msg, _ := re["message"].(string); !strings.Contains(msg, `"deepwiki" (mcp.deepwiki.com)`) {
 		t.Errorf("error.message = %q, want it to name the blocked server and host", msg)
 	}
+}
+
+// A session update that names agent.mcp_servers meets the check create runs,
+// and answers in the recorded words (2026-10-18-session-update-running
+// `idle.agent_mcp_servers`, sent alone to an idle session on this policy; #1017).
+// The list a patch sends is judged whole. A patch that names no server judges
+// none: the recording sent mcp_servers alone, so that half is ours, and the dial
+// still refuses (docs/DIVERGENCES.md, the session-update edges under INFERRED).
+func TestSessionUpdateRefusesAnMCPHostItsEnvironmentBlocks(t *testing.T) {
+	s := newTestServer(t)
+	agentID, _ := fixture(t, s)
+	server := map[string]any{"type": "url", "name": "rec32_context7", "url": "https://mcp.context7.com/mcp"}
+	naming := map[string]any{"agent": map[string]any{"mcp_servers": []any{server}}}
+	const blocked = `MCP server host(s) blocked by environment network policy: "rec32_context7" (mcp.context7.com). ` +
+		`Add these hosts to the environment's allowed_hosts, or set allow_mcp_servers=true.`
+	inStatus := func(envID string, status domain.SessionStatus) string {
+		t.Helper()
+		sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = $2 WHERE id = $1`, sid, string(status)); err != nil {
+			t.Fatalf("set %s: %v", status, err)
+		}
+		return sid
+	}
+	refused := func(sid, msg string) {
+		t.Helper()
+		_, before := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, naming)
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", msg)
+		_, after := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		for _, k := range []string{"agent", "updated_at"} {
+			if !reflect.DeepEqual(after[k], before[k]) {
+				t.Errorf("%s after the refusal = %v, want %v", k, after[k], before[k])
+			}
+		}
+	}
+
+	envID := envWith(t, s, limited([]string{}, false))
+	refused(inStatus(envID, domain.SessionIdle), blocked)
+	refused(inStatus(envID, domain.SessionRescheduling), blocked)
+	// The status refusals answer first (`running.agent_mcp_servers`).
+	refused(inStatus(envID, domain.SessionRunning),
+		"Cannot update agent while session is running. Send a `user.interrupt` event first.")
+	refused(inStatus(envID, domain.SessionTerminated), "Cannot modify archived session")
+	// The merged-result check answers ahead of it, in the order create runs them.
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+inStatus(envID, domain.SessionIdle),
+		map[string]any{"agent": map[string]any{"mcp_servers": []any{server}, "tools": []any{mcpToolset("ghost")}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`mcp_toolset references mcp_server "ghost", which is not declared in mcp_servers`)
+
+	// A cleared list has no host to judge (`idle.mcp_empty`, on this same policy).
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+inStatus(envID, domain.SessionIdle),
+		map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}); status != http.StatusOK {
+		t.Errorf("clearing the servers: status %d (body %v)", status, res)
+	}
+
+	// Each path the message names admits the same patch, and so does no policy.
+	for _, config := range []map[string]any{
+		limited([]string{"mcp.context7.com"}, false),
+		limited([]string{"*.context7.com"}, false),
+		limited([]string{}, true),
+		{"type": "cloud", "networking": map[string]any{"type": "unrestricted"}},
+	} {
+		sid := inStatus(envWith(t, s, config), domain.SessionIdle)
+		if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, naming); status != http.StatusOK {
+			t.Errorf("config %v: status %d (body %v)", config, status, res)
+		}
+	}
+
+	// A policy that tightens after the server was stored. A patch to tools alone
+	// names no server and lands. A patch that lists the stored server is judged.
+	tightens := envWith(t, s, limited([]string{"mcp.context7.com"}, false))
+	sid := createSession(t, s, map[string]any{"environment_id": tightens,
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{server}, "tools": []any{mcpToolset("rec32_context7")}}})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/environments/"+tightens,
+		map[string]any{"config": limited([]string{}, false)}); status != http.StatusOK {
+		t.Fatalf("tighten the policy: status %d (body %v)", status, res)
+	}
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": map[string]any{"tools": []any{}}}); status != http.StatusOK {
+		t.Errorf("a patch to tools alone: status %d (body %v)", status, res)
+	}
+	refused(sid, blocked)
 }

@@ -5,10 +5,11 @@ import (
 )
 
 // MCPServerAdmitted reports whether the environment's networking policy admits
-// an MCP server the agent declares at host. Two places ask, and must never
-// disagree: session create, where the reference asks — a refusal there is its
-// recorded 400 (#571) — and the executor before every dial, since mcp_servers
-// is mid-session-mutable and a host can arrive after create.
+// an MCP server the agent declares at host. Three places ask, and must never
+// disagree: session create and a session update that names servers, where the
+// reference asks — a refusal there is its recorded 400 (#571, #1017) — and the
+// executor before every dial, since an environment's policy can change after
+// either.
 //
 // What decides is the policy's type, not which kind of environment carries it
 // — and type rather than presence, because a value struct cannot tell an

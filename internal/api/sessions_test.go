@@ -139,10 +139,11 @@ func TestSessionOverridesValidateAgentSpec(t *testing.T) {
 	wantRejected(map[string]any{"agent": pre, "environment_id": envID}, "srv")
 }
 
-// Session update validates the resulting resolved agent, exactly as agent
-// update validates the merged spec: a patch that strands a stored mcp_server
-// or grows tools past the cap rejects, one that keeps the spec consistent
-// lands (#287).
+// Session update validates the resulting resolved agent as agent update
+// validates the merged spec, less one rung (see
+// TestSessionUpdateTakesAPatchThatStrandsAServer): a patch that clears a server
+// a toolset still names, or grows tools past the cap, rejects, and one that
+// keeps the spec consistent lands (#287).
 func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -154,10 +155,10 @@ func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 	})
 	sid := created["id"].(string)
 
-	// Clearing tools alone strands the stored server.
+	// Clearing the servers alone leaves a toolset that names nothing.
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
-		map[string]any{"agent": map[string]any{"tools": []any{}}})
-	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
+		map[string]any{"agent": map[string]any{"mcp_servers": []any{}}})
+	wantRejected(t, status, res, `mcp_toolset references mcp_server "srv"`)
 
 	tools := make([]any, 0, 129)
 	for i := 0; i < 129; i++ {
@@ -183,6 +184,78 @@ func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 		"agent": map[string]any{"tools": []any{}, "mcp_servers": []any{}}}); status != http.StatusOK {
 		t.Fatalf("clearing both: status %d (body %v)", status, res)
 	}
+}
+
+// A patch may leave a declared server with no mcp_toolset (#1018). The reference
+// answered 200 to this body on a rescheduling session, read the server back, and
+// took the clear of the servers as a second update (2026-10-31-mcp-listing
+// `null-retry.attempt.1.tools.update`, `.mcp.before`, `.mcp.update`). The SDK
+// states the rule on agent create and update, not on this route's params. Idle
+// is an inference from that sample (docs/DIVERGENCES.md, the session-update
+// edges under INFERRED): nothing here commits rescheduling, so a rule held to
+// that status would change nothing.
+func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
+	s := newTestServer(t)
+	agentID, envID := fixture(t, s)
+	withServer := map[string]any{"type": "agent_with_overrides", "id": agentID,
+		"mcp_servers": []any{mcpServer("srv")}, "tools": []any{mcpToolset("srv")}}
+	serverNames := func(agent any) []string {
+		t.Helper()
+		var names []string
+		servers, _ := agent.(map[string]any)["mcp_servers"].([]any)
+		for _, srv := range servers {
+			names = append(names, srv.(map[string]any)["name"].(string))
+		}
+		return names
+	}
+
+	for _, stored := range []domain.SessionStatus{domain.SessionIdle, domain.SessionRescheduling} {
+		sid := createSession(t, s, map[string]any{"agent": withServer, "environment_id": envID})["id"].(string)
+		if _, err := s.pool.Exec(context.Background(),
+			`UPDATE sessions SET status = $2 WHERE id = $1`, sid, string(stored)); err != nil {
+			t.Fatalf("set %s: %v", stored, err)
+		}
+		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+			map[string]any{"agent": map[string]any{"tools": []any{}}})
+		if status != http.StatusOK {
+			t.Fatalf("%s: clearing tools: status %d (body %v)", stored, status, res)
+		}
+		_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		agent, _ := got["agent"].(map[string]any)
+		if types := toolTypes(t, agent["tools"]); len(types) != 0 {
+			t.Errorf("%s: agent.tools = %v, want none", stored, types)
+		}
+		if names := serverNames(got["agent"]); !slices.Equal(names, []string{"srv"}) {
+			t.Errorf("%s: server names = %v, want the stored server", stored, names)
+		}
+
+		if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+			map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}); status != http.StatusOK {
+			t.Fatalf("%s: clearing the servers after: status %d (body %v)", stored, status, res)
+		}
+		_, got = s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		if names := serverNames(got["agent"]); len(names) != 0 {
+			t.Errorf("%s: server names = %v, want none", stored, names)
+		}
+	}
+
+	// The same state by the other door: a patch adds a server and no toolset.
+	sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+		map[string]any{"agent": map[string]any{"mcp_servers": []any{mcpServer("added")}}}); status != http.StatusOK {
+		t.Fatalf("adding a server alone: status %d (body %v)", status, res)
+	}
+	_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	if names := serverNames(got["agent"]); !slices.Equal(names, []string{"added"}) {
+		t.Errorf("server names = %v, want the added server", names)
+	}
+
+	// Session create's overrides keep the rung: only this route was recorded
+	// without it.
+	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID,
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("srv")}, "tools": []any{}}})
+	wantRejected(t, status, res, `mcp_servers entry "srv" is not referenced`)
 }
 
 // The SDK documents session metadata with the same sentence as agents and

@@ -10,12 +10,13 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 )
 
-// admitMCPServers is the reference's create-time check on the hosts an agent
-// declares MCP servers at (#571): a session whose environment's networking does
-// not admit one is refused with a 400 and never exists, where the dial-time
-// check alone would have created it to fail one work cycle at a time. The
-// predicate is the executor's own (egress.MCPServerAdmitted), which still runs
-// before every dial, because mcp_servers is mid-session-mutable.
+// admitMCPServers is the reference's check on the hosts an agent declares MCP
+// servers at (#571): a session whose environment's networking does not admit one
+// is refused with a 400 and never exists, where the dial-time check alone would
+// have created it to fail one work cycle at a time. A session update that names
+// servers answers the same (#1017). The predicate is the executor's own
+// (egress.MCPServerAdmitted), which still runs before every dial, because the
+// environment's policy can change after either check.
 //
 // The message is the reference's, recorded for one server; several are joined
 // with ", " in declaration order, which is ours (docs/DIVERGENCES.md). The

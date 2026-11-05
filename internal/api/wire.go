@@ -751,6 +751,21 @@ func capOverrideRunes(path, val string, limit int) error {
 // the reference's update wording ("the agent's resulting tools"). Entry
 // shapes were already checked one-by-one (parseTools, parseMCPServers).
 func validateAgentSpec(spec agentSpec) error {
+	return checkAgentSpec(spec, true)
+}
+
+// validatePatchedSessionAgent is validateAgentSpec for what a session update
+// leaves behind, which may hold a declared server no mcp_toolset references. The
+// SDK states that rule on agent create and update and not on this route's params,
+// and the reference took such a patch (2026-10-31-mcp-listing
+// `null-retry.attempt.1.tools.update`; #1018). The server stays declared, so
+// discovery still dials it, and it offers no tools, because tools come from the
+// toolsets.
+func validatePatchedSessionAgent(spec agentSpec) error {
+	return checkAgentSpec(spec, false)
+}
+
+func checkAgentSpec(spec agentSpec, everyServerReferenced bool) error {
 	if len(spec.Tools) > maxAgentTools {
 		return errInvalid("tools lists at most %d entries", maxAgentTools)
 	}
@@ -827,6 +842,9 @@ func validateAgentSpec(spec agentSpec) error {
 			}
 			toolNames[name] = true
 		}
+	}
+	if !everyServerReferenced {
+		return nil
 	}
 	for _, name := range serverNames {
 		if !referenced[name] {
