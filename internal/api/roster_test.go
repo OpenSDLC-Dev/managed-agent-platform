@@ -444,6 +444,23 @@ func TestRosterSessionSnapshot(t *testing.T) {
 	ea, _ := updated["agent"].(map[string]any)
 	checkPatched("session.updated", ea)
 
+	// A patch that leaves the server with no toolset reaches the self copy the
+	// same way (#1018): no tools, and the server still declared.
+	status, upd = s.do(http.MethodPost, "/v1/sessions/"+res["id"].(string), map[string]any{
+		"agent": map[string]any{"tools": []any{}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("clearing tools: %d %v", status, upd)
+	}
+	ua, _ = upd["agent"].(map[string]any)
+	self := rosterOf(t, ua)[1]
+	if tools, _ := self["tools"].([]any); len(tools) != 0 {
+		t.Errorf("self member tools after clearing = %v, want none", self["tools"])
+	}
+	if servers, _ := self["mcp_servers"].([]any); len(servers) != 1 {
+		t.Errorf("self member mcp_servers after clearing = %v, want the stored server", self["mcp_servers"])
+	}
+
 	// A single-agent session still renders multiagent null.
 	plain := createSession(t, s, map[string]any{"agent": a, "environment_id": envID})
 	if pa, _ := plain["agent"].(map[string]any); pa["multiagent"] != nil {

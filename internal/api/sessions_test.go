@@ -740,8 +740,8 @@ func TestSessionUpdate(t *testing.T) {
 	})
 	id := created["id"].(string)
 
-	// The patched pair must satisfy validateAgentSpec (#287): the server needs
-	// a referencing mcp_toolset in the resulting tools.
+	// The pair a session means to use: a server and the mcp_toolset that offers
+	// its tools.
 	tools := []any{
 		map[string]any{"type": "agent_toolset_20260401"},
 		map[string]any{"type": "mcp_toolset", "mcp_server_name": "docs"},

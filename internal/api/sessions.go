@@ -1280,10 +1280,11 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		}
 		// A patch that names servers meets the check session create runs, in the
 		// order create runs it (#1017). It judges the whole list, because a patch
-		// replaces the whole list. A patch to tools alone was not recorded, and
-		// judges nothing: the dial still does. The read takes no lock, because a
-		// policy that changes just after it is one that changes just after the
-		// patch, which is what the dial is there for.
+		// replaces the whole list. A patch to tools alone judges nothing: no
+		// recording sent one on a stored host the policy no longer admits, and the
+		// dial still refuses that host. The read takes no lock, because a policy
+		// that changes just after it is one that changes just after the patch,
+		// which is what the dial is there for.
 		if _, named := patch["mcp_servers"]; named {
 			var envConfig []byte
 			if err := tx.QueryRow(ctx, `SELECT config FROM environments WHERE id = $1`,

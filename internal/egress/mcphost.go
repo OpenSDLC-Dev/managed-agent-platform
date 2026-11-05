@@ -36,7 +36,7 @@ import (
 //
 // allow_mcp_servers "allows access to MCP server endpoints configured on the
 // agent" on top of allowed_hosts, and this is only ever asked about a server the
-// agent declared — both callers walk that array and nothing else — so under
+// agent declared — every caller walks that array and nothing else — so under
 // the flag the host is admitted without a second list to check it against.
 func MCPServerAdmitted(cfg domain.EnvironmentConfig, host string) bool {
 	if cfg.Type == domain.EnvSelfHosted && cfg.Networking.Type == "" {
