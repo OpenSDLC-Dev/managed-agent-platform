@@ -15,8 +15,9 @@ import (
 // is refused with a 400 and never exists, where the dial-time check alone would
 // have created it to fail one work cycle at a time. A session update that names
 // servers answers the same (#1017). The predicate is the executor's own
-// (egress.MCPServerAdmitted), which still runs before every dial, because the
-// environment's policy can change after either check.
+// (egress.MCPServerAdmitted), which still runs before every dial: roster members
+// and hosts stored before #1017 meet no check here, and the environment's policy
+// can change after either check.
 //
 // The message is the reference's, recorded for one server; several are joined
 // with ", " in declaration order, which is ours (docs/DIVERGENCES.md). The

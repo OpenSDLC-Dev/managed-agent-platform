@@ -211,9 +211,11 @@ func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
 
 	for _, stored := range []domain.SessionStatus{domain.SessionIdle, domain.SessionRescheduling} {
 		sid := createSession(t, s, map[string]any{"agent": withServer, "environment_id": envID})["id"].(string)
+		setSessionStatus(t, s, sid, string(stored))
 		if _, err := s.pool.Exec(context.Background(),
-			`UPDATE sessions SET status = $2 WHERE id = $1`, sid, string(stored)); err != nil {
-			t.Fatalf("set %s: %v", stored, err)
+			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+			 VALUES ($1, 'srv', 'https://mcp.example/srv', '[]'::jsonb, 'ready')`, sid); err != nil {
+			t.Fatalf("%s: seed the listing: %v", stored, err)
 		}
 		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
 			map[string]any{"agent": map[string]any{"tools": []any{}}})
@@ -228,6 +230,11 @@ func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
 		if names := serverNames(got["agent"]); !slices.Equal(names, []string{"srv"}) {
 			t.Errorf("%s: server names = %v, want the stored server", stored, names)
 		}
+		// The server is still declared, so its listing stays, which lets a later
+		// patch restore the toolset without a second dial.
+		if rows := catalogRows(t, s, sid); !slices.Equal(rows, []string{"srv"}) {
+			t.Errorf("%s: catalog rows = %v, want the listing kept", stored, rows)
+		}
 
 		if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
 			map[string]any{"agent": map[string]any{"mcp_servers": []any{}}}); status != http.StatusOK {
@@ -236,6 +243,9 @@ func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
 		_, got = s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
 		if names := serverNames(got["agent"]); len(names) != 0 {
 			t.Errorf("%s: server names = %v, want none", stored, names)
+		}
+		if rows := catalogRows(t, s, sid); len(rows) != 0 {
+			t.Errorf("%s: catalog rows = %v, want the listing gone with the server", stored, rows)
 		}
 	}
 

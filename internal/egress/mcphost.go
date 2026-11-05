@@ -8,8 +8,9 @@ import (
 // an MCP server the agent declares at host. Three places ask, and must never
 // disagree: session create and a session update that names servers, where the
 // reference asks — a refusal there is its recorded 400 (#571, #1017) — and the
-// executor before every dial, since an environment's policy can change after
-// either.
+// executor before every dial, which also judges what those two never see: a
+// coordinator's roster members, a host stored before the check, and a policy
+// that changed since.
 //
 // What decides is the policy's type, not which kind of environment carries it
 // — and type rather than presence, because a value struct cannot tell an

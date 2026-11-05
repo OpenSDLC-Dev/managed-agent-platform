@@ -215,10 +215,7 @@ func TestSessionUpdateRefusesAnMCPHostItsEnvironmentBlocks(t *testing.T) {
 	inStatus := func(envID string, status domain.SessionStatus) string {
 		t.Helper()
 		sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
-		if _, err := s.pool.Exec(context.Background(),
-			`UPDATE sessions SET status = $2 WHERE id = $1`, sid, string(status)); err != nil {
-			t.Fatalf("set %s: %v", status, err)
-		}
+		setSessionStatus(t, s, sid, string(status))
 		return sid
 	}
 	refused := func(sid, msg string) {
