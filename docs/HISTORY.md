@@ -49,6 +49,64 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 2 browser acceptance
+
+On 2026-11-05, acceptance passed for [platform #1016](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1016)
+and [Console #246](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/246).
+The accepted platform commit was `8621734e1ba27b9a34eb99fb101d5dc61d5cb77e`.
+[Main CI run 41935201222](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/41935201222)
+reported aggregate statement coverage of **91.75%**. All five jobs succeeded:
+
+- `ci`
+- `coverage`
+- `helm`
+- `terraform`
+- `compose`
+
+The controller ran the browser acceptance ladder with the published Console image
+and binaries authenticated against the merged platform source.
+The pinned verifier independently audited the execution evidence and cleanup without a duplicate runtime.
+It reused the main-CI and wire/docs certification, without rerunning builds or the Go gate.
+The audit found no product defect.
+
+Ten browser checks passed:
+
+- **Setup and request guards (2 checks).** Administrator setup issued an HttpOnly, SameSite=Lax cookie.
+  Session metadata responses forbade caching.
+  The control plane and gateway rejected missing CSRF and wrong Origin requests.
+- **Principals and authentication boundaries (3 checks).** Native member and service-account pages passed creation and role-change checks.
+  Developer password login allowed resource reads but denied member management.
+  `/v1` rejected cookies; existing control-plane and gateway key paths remained valid and isolated.
+- **Resources and streams (3 checks).** JSON and multipart requests passed; the Silo download matched all four bytes and its filename.
+  Original parent and child SSE readers received live injected events without compression.
+  Disconnects released database listeners.
+  Logout revoked the original session and closed both established streams in **5,876 ms**, within the 15-second bound.
+  The old cookie then returned 401.
+- **Compatibility and federation (2 checks).** The same published image served the legacy dashboard and both backend-for-frontend (BFF) routes.
+  Real Casdoor login completed through the control-plane callback without browser calls to the token endpoint.
+
+Cleanup confirmed these owned resources were absent:
+
+- 13 containers;
+- one new shared volume;
+- one new network.
+
+The same 23 baseline container IDs remained.
+This establishes cleanup of the run's identified resources, not whole-machine cleanup.
+
+Acceptance limits:
+
+- The streams used original `fetch` SSE readers, not EventSource automatic reconnect.
+- SQL fixtures supplied thread, event and downloadable-file state, not full agent/tool execution.
+- The application entry used development HTTP, not a production HTTPS Secure-cookie deployment.
+- Google OIDC/IAP staging, a real Helm installation and paid/live tiers were not tested.
+  CI Helm/edge contracts do not establish a real Helm installation.
+
+These limits are not new slice-2 prerequisites.
+[Plan 69](./plan/69_principal-bound-auth.md) remains in-progress, with no release until slice 7.
+
+---
+
 ## Model gateway credential check and deployment test (#953), run 2026-10-18 — ✅ passed
 
 The owner settled #953's four open questions on 2026-10-18, before any code. A test is written to the ledger, marked as a test. Neither route stores its result. Neither runs on create. The check needs the admin role, as the test does.
