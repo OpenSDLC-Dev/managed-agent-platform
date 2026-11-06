@@ -65,6 +65,10 @@ type Request struct {
 	Messages  []Message
 	Tools     []json.RawMessage // Anthropic tool definitions, verbatim
 	MaxTokens int64
+	// ToolChoiceNone lets the model call none of Tools: Anthropic's tool_choice
+	// {"type": "none"}, Chat Completions' "none". False sends no tool_choice,
+	// so the endpoint's default stands.
+	ToolChoiceNone bool
 	// BuiltinTools names the Tools entries that are the platform's own
 	// built-in definitions (agent_toolset_20260401), by provenance: the brain
 	// marks a name only when the definition it offers under that name is the

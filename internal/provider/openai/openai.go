@@ -106,6 +106,9 @@ func (p *openaiProvider) Generate(ctx context.Context, req provider.Request) (pr
 		StreamOptions:   &streamOptions{IncludeUsage: true},
 		Tools:           tools,
 	}
+	if req.ToolChoiceNone {
+		body.ToolChoice = "none"
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -208,6 +211,7 @@ type chatRequest struct {
 	Stream        bool               `json:"stream"`
 	StreamOptions *streamOptions     `json:"stream_options,omitempty"`
 	Tools         []convert.ChatTool `json:"tools,omitempty"`
+	ToolChoice    string             `json:"tool_choice,omitempty"`
 }
 
 type streamOptions struct {

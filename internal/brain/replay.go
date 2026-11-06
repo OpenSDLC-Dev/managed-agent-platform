@@ -82,6 +82,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		msgs       []replayMessage
 		uses       []string       // tool_use ids of the open assistant turn
 		answering  map[string]int // the last assistant turn's, by position
+		toolBlocks bool           // a tool_use or tool_result block was replayed
 		systemTail string
 		budgets    = map[string]int64{} // max_iterations by outcome_id, from each definition
 		acks       []ackBlock           // acknowledgment prompts of the open user turn
@@ -403,6 +404,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			}
 			blocks = append(blocks, blk)
 			uses = append(uses, ev.ID.String())
+			toolBlocks = true
 
 		case domain.EventUserToolResult, domain.EventUserCustomToolRes,
 			domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
@@ -414,6 +416,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			results = append(results, answer)
+			toolBlocks = true
 			// The skills the read found below a repository's root follow
 			// in the same turn; flush keeps every result ahead of them.
 			if text, ok := nested[ev.ID]; ok {
@@ -437,6 +440,12 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		return req, 0, err
 	}
 	req.System += systemTail
+	// Before admitThinking, because the placeholder is part of the prefix a
+	// kept block is checked against, as it is of the one digestThinking stores.
+	if len(req.Tools) == 0 && toolBlocks {
+		req.Tools = []json.RawMessage{noToolsPlaceholder}
+		req.ToolChoiceNone = true
+	}
 	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
 		return req, 0, err
 	}
@@ -449,6 +458,21 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	}
 	return req, watermark, nil
 }
+
+// noToolsPlaceholder is the one tool a request defines when its history carries
+// a tool_use or tool_result block and the agent offers no tools, as after a
+// session update sets agent.tools to [] (#1021). Anthropic's Messages API is
+// reported to refuse tool blocks in a request that defines no tools (the
+// wording is quoted by third parties, not by Anthropic's own pages), and
+// Claude Code keeps one tool defined in its compaction request for the same
+// reason. Replaying the blocks unchanged keeps the conversation the model
+// actually had; the request sends tool_choice none beside the placeholder, so
+// the model can call nothing. An endpoint that lets a call through anyway
+// reaches no class (resolveTools never classes this name), so the call is
+// answered as an unknown tool. The definition is constant, so every turn of a
+// session in this state shares one prefix and its kept thinking stays valid.
+// What the reference does on such a turn is unrecorded (docs/DIVERGENCES.md).
+var noToolsPlaceholder = json.RawMessage(`{"name":"no_tools_available","description":"No tools are available. The tools called earlier in this conversation have been removed, so do not try to call a tool.","input_schema":{"type":"object","properties":{}}}`)
 
 // contentBlocks normalizes wire message content (a bare string or an array
 // of blocks) into individual raw blocks, preserved verbatim.
