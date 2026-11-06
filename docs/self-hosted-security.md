@@ -1328,8 +1328,10 @@ Local accounts can be created only in development password mode. Names are
 immutable and never linked by email. Member removal and service-account archival
 are lasting deactivations. Tombstones preserve IDs and issuer/subject pairs;
 archival keeps the service-account name reserved. No restoration endpoint exists.
-These routes do not issue or archive API keys in slice 2; owned keys arrive in slice 3.
-Environment keys remain independent and require separate revocation.
+These routes issue no API keys. Slice 3's preparatory database guard archives
+any owned keys when their principal is deactivated; restoring the principal restores no key.
+Existing keys remain unowned and are not archived merely because their issuer is removed.
+Owned-key HTTP issuance is not enabled. Environment keys remain independent and require separate revocation.
 
 #### Native browser login
 
@@ -1528,6 +1530,13 @@ could be handed over.
 Numbered last because it shipped last (plan 32,
 [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)); read it
 beside §6, whose environment-key lifecycle it parallels.
+
+Plan 69 slice 3 currently prepares storage only. Existing and newly HTTP-issued
+keys remain unowned. Owned digests are isolated from legacy authentication;
+legacy gateway policies cannot target them. Owner and issuer are different facts.
+Startup checks, owned HTTP issuance and current-role admission are still pending.
+Before enabling owned issuance, its replacement issuer must also close the legacy
+human INSERT path. This batch alone is not a complete rolling rollout.
 
 The management `x-api-key` authenticates every **management** `/v1` route and the
 console API behind it — the work API is the exception, taking a worker's

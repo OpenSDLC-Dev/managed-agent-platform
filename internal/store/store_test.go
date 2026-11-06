@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 59
+const wantMigrations = 60
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -891,45 +891,19 @@ func TestDeploymentsAgentLiveIndexLeavesNoSort(t *testing.T) {
 // row per slot and leaving other slots alone.
 func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	ctx := context.Background()
-	pool := open(t, pgtest.FreshDB(t))
+	pool := rawPool(t, pgtest.FreshDB(t))
+	// Start at the real old schema. Dropping columns from today's schema can
+	// silently remove later guards while leaving their migrations recorded.
+	if err := store.MigrateThrough(ctx, pool, "0012_session_gate_tokens.sql"); err != nil {
+		t.Fatal(err)
+	}
 	seedSessionChain(t, pool)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO environments (id, name, kind, config) VALUES ('env_2', 'e2', 'cloud', '{"type":"cloud"}')`); err != nil {
 		t.Fatalf("second environment: %v", err)
 	}
 
-	// Rewind to the pre-0013 schema, then stage the state the race produced.
-	//
-	// Every later migration that touched what 0013 built is rewound with it, so the
-	// replay is 0013 → 0021 → 0024 in the order a real upgrade runs them. Rewinding
-	// 0013 alone would not merely be untidy, it would not work: 0024 drops the
-	// api_keys.revoked_at column 0013's repair writes, so 0013 against a current
-	// schema fails on a missing column. And leaving 0021 recorded would be worse
-	// than untidy — 0013 creates BOTH one-live indexes, so replaying it recreates
-	// environment_keys_one_live, and a still-recorded 0021 never runs again to drop
-	// the index it exists to drop. The test would end on a schema no deployment can
-	// reach, quietly asserting against it.
-	//
-	// Replaying the real order also makes this test cover one thing more than it
-	// used to: that 0024's backfill turns what 0013's repair produced (revoked
-	// duplicates) into archived rows.
-	for _, q := range []string{
-		`DROP INDEX api_keys_one_live_unissued`,
-		`ALTER TABLE api_keys ADD COLUMN revoked_at timestamptz`,
-		`UPDATE api_keys SET revoked_at = now() WHERE status <> 'active'`,
-		`ALTER TABLE api_keys DROP COLUMN status,
-		   DROP COLUMN expires_at, DROP COLUMN partial_key_hint, DROP COLUMN created_by`,
-		`DROP INDEX environment_keys_environment_idx`,
-		`ALTER TABLE environment_keys DROP COLUMN name, DROP COLUMN expires_at`,
-		`DELETE FROM schema_migrations
-		   WHERE version IN ('0013_key_rotation_one_live.sql',
-		                     '0021_environment_keys_named.sql',
-		                     '0024_api_keys_lifecycle.sql')`,
-	} {
-		if _, err := pool.Exec(ctx, q); err != nil {
-			t.Fatalf("rewind %q: %v", q, err)
-		}
-	}
+	// Stage the race's duplicates before 0013; run every pending migration below.
 	for i := 0; i < 3; i++ {
 		created := fmt.Sprintf("2026-01-0%d", i+1)
 		if _, err := pool.Exec(ctx,
@@ -954,7 +928,7 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	}
 
 	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("re-applying 0013 over existing duplicates must repair them, not fail: %v", err)
+		t.Fatalf("upgrading past 0013 over existing duplicates must repair them, not fail: %v", err)
 	}
 
 	// One live row per slot, and the survivor is the newest — the row a mint
@@ -1003,8 +977,7 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 		t.Errorf("archived rows under 'boot' = %v, want %v", archived, want)
 	}
 
-	// And 0021 really did run again on top of the replayed 0013, rather than
-	// staying recorded while 0013 quietly recreated the index it had retired.
+	// 0021 removes 0013's environment-key index in the real upgrade order.
 	var oneLive bool
 	if err := pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'environment_keys_one_live')`).
@@ -1012,8 +985,30 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 		t.Fatalf("query pg_indexes: %v", err)
 	}
 	if oneLive {
-		t.Error("environment_keys_one_live is back: the replay did not run 0021 after 0013")
+		t.Error("environment_keys_one_live is back: the upgrade did not run 0021 after 0013")
 	}
+	// End on the shipping schema, not a partial rewind that lost a constraint.
+	requireOwnedKeyColumns(t, pool)
+	var shape bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_constraint
+		WHERE conrelid='api_keys'::regclass AND conname='api_keys_credential_shape' AND convalidated)`).Scan(&shape); err != nil || !shape {
+		t.Fatalf("shipping credential CHECK retained = %t, err %v", shape, err)
+	}
+	for _, guard := range []struct{ table, name string }{
+		{"api_keys", "api_keys_credential_immutable"},
+		{"principals", "principals_archive_owned_keys"},
+		{"modelgateway.key_policies", "modelgateway_key_policy_unowned"},
+	} {
+		var enabled bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger
+			WHERE tgrelid=$1::regclass AND tgname=$2 AND tgenabled='O')`, guard.table, guard.name).Scan(&enabled); err != nil || !enabled {
+			t.Errorf("shipping trigger %s retained = %t, err %v", guard.name, enabled, err)
+		}
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO api_keys (id,name) VALUES ('apikey_malformed','malformed')`)
+	requireKeyPGError(t, err, pgCheckViolation, "api_keys_credential_shape")
+	_, err = pool.Exec(ctx, `UPDATE api_keys SET key_hash='rewritten' WHERE id='apikey_other'`)
+	requireKeyPGError(t, err, pgCheckViolation, "api_keys_credential_immutable")
 }
 
 func TestTenancyColumnsHaveSingleTenantDefaults(t *testing.T) {
