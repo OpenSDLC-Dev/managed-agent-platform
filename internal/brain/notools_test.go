@@ -22,22 +22,6 @@ func (h *harness) removeTools(t *testing.T) {
 	}
 }
 
-// toolNames reads the names a request offers the model.
-func toolNames(t *testing.T, req provider.Request) []string {
-	t.Helper()
-	var out []string
-	for _, raw := range req.Tools {
-		var d struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal(raw, &d); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, d.Name)
-	}
-	return out
-}
-
 // thinkingTexts is the thinking a request replays, in order.
 func thinkingTexts(t *testing.T, h *harness, call int) []string {
 	t.Helper()
@@ -76,12 +60,12 @@ func TestATurnAfterTheToolsAreRemovedOffersOnlyThePlaceholder(t *testing.T) {
 		t.Fatalf("model requests = %d, want 3", n)
 	}
 	for i, req := range h.provider.calls[:2] {
-		if got := toolNames(t, req); !slices.Equal(got, []string{"lookup"}) {
+		if got := requestTools(t, req); !slices.Equal(got, []string{"lookup"}) {
 			t.Errorf("request %d: tools = %v, want lookup", i, got)
 		}
 	}
 	last := h.provider.calls[2]
-	if got := toolNames(t, last); !slices.Equal(got, []string{"no_tools_available"}) {
+	if got := requestTools(t, last); !slices.Equal(got, []string{"no_tools_available"}) {
 		t.Fatalf("request after the removal: tools = %v, want the placeholder alone", got)
 	}
 	var kinds []string
@@ -199,5 +183,38 @@ func TestAPlaceholderLoopEndsAtTheChainCap(t *testing.T) {
 	uses, err := h.log.List(context.Background(), h.sessionID, events.ListQuery{Types: []string{"agent.tool_use"}})
 	if err != nil || len(uses) != 1 {
 		t.Errorf("placeholder calls = %d (%v), want 1", len(uses), err)
+	}
+}
+
+// A tool-less agent's model that calls a tool anyway gets #567's answer, and
+// the chained request is the first with a tool block in its history, so it
+// offers the placeholder: the thinking kept from the call's turn, bound to a
+// prefix with no tools, is dropped there. TestThinkingReplaysAfterADelegatedSettlement
+// pins the other side, an agent whose tools stay the same.
+func TestAToolLessAgentsStrayCallDropsItsThinking(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{
+		{
+			thinkingChunk(0, "delegate it"), signatureChunk(0, "sig-d"),
+			toolCall("t1", "create_agent", `{"agent_name":"researcher","message":"go"}`),
+			done("tool_use", 1),
+		},
+		{textChunk(0, "done"), done("end_turn", 1)},
+	}, nil)
+	h.wake(t, "hello")
+	h.runOnce(t)
+	if n := h.thinkingRows(t); n != 1 {
+		t.Fatalf("kept blocks = %d, want the stray call's turn's one", n)
+	}
+	h.runOnce(t)
+
+	if got := requestTools(t, h.provider.calls[0]); len(got) != 0 {
+		t.Errorf("first request offered %v, want nothing", got)
+	}
+	if got := requestTools(t, h.provider.calls[1]); !slices.Equal(got, []string{"no_tools_available"}) {
+		t.Fatalf("chained request offered %v, want the placeholder alone", got)
+	}
+	turns := h.assistantBlocks(t, 1)
+	if len(turns) != 1 || !slices.Equal(blockTypes(turns[0]), []string{"tool_use"}) {
+		t.Errorf("chained request's assistant turns = %v, want the call alone, its thinking dropped", turns)
 	}
 }

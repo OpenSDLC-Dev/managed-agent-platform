@@ -23,7 +23,10 @@ import (
 // agent's tools[] and the session's MCP catalog, and the same resolution has to
 // decide what a name the model calls back means. So the agent reaches here as
 // its system prompt and nothing more — everything else it contributes to a
-// request has been resolved by the time replay runs.
+// request has been resolved by the time replay runs. The one definition added
+// here is noToolsPlaceholder, which the log does decide: it goes out only when
+// the resolution offered nothing and the history carries a tool block, and no
+// class backs it.
 //
 // Replay mapping, v1:
 //   - user.message           → user text/blocks
@@ -446,7 +449,7 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	// carries text, image and document blocks alone (events.blocksUserMessage),
 	// and an agent.message text alone.
 	if len(req.Tools) == 0 && toolBlocks {
-		req.Tools = []json.RawMessage{noToolsPlaceholder}
+		req.Tools = []json.RawMessage{json.RawMessage(noToolsPlaceholder)}
 	}
 	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
 		return req, 0, err
@@ -462,29 +465,35 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 }
 
 // noToolsPlaceholder is the one tool a request defines when its history carries
-// a tool_use or tool_result block and the agent offers no tools, as after a
-// session update sets agent.tools to [] (#1021). Anthropic's Messages API is
+// a tool_use or tool_result block and the agent offers no tools: after a
+// session update sets agent.tools to [] (#1021), but also when an agent's only
+// tools are an MCP server's and none is offered this turn, or a tool-less
+// agent's model made a call anyway. Anthropic's Messages API is
 // reported to refuse tool blocks in a request that defines no tools (a third
 // party quotes the wording; Anthropic's own pages do not). Claude Code's
 // compaction request, which carries tool history, keeps at least one tool
 // defined. Replaying the blocks unchanged keeps the conversation the model
-// actually had.
+// actually had. The brain cannot tell which upstream serves a request (the
+// model gateway routes it), so the placeholder goes out on every route.
 //
 // The description tells the model not to call it, and no tool_choice none goes
 // with it: the model gateway refuses none on an upstream that ignores it (its
 // zhipu profile), which would fail every turn in this state there. A call the
 // model makes anyway reaches no class (resolveTools never classes this name),
-// so it is answered as an unknown tool and the turn chains, and the
-// settlement's chain cap ends a model that keeps calling it.
+// so it is answered as an unknown tool (an answer that calls the tool "not
+// offered", though the request listed it) and the turn chains, and the
+// settlement's chain cap ends a model that keeps calling it. The call and its
+// answer are events like any other, so a client sees the placeholder's name.
 //
 // The definition is constant, so every turn of a session in this state shares
 // one prefix and its kept thinking stays valid. A block bound to its prefix and
 // kept before the state began is dropped, as any change of tools drops it (one
 // stored under its route's anyPrefixDigest is not); for an agent that never
 // offered tools, that is the turn whose stray call put the first tool block in
-// its history. What the reference does on such a turn is unrecorded
-// (docs/DIVERGENCES.md).
-var noToolsPlaceholder = json.RawMessage(`{"name":"no_tools_available","description":"No tools are available in this conversation now. The tools called earlier have been removed. Do not call this tool or any other: answer in text.","input_schema":{"type":"object","properties":{}}}`)
+// its history, and the placeholder stays for the rest of that session, since
+// the block does. What the reference does on such a turn is unrecorded
+// (docs/DIVERGENCES.md). A constant, so no request shares bytes with another.
+const noToolsPlaceholder = `{"name":"no_tools_available","description":"No tools are available in this turn. Do not call this tool or any other: answer in text.","input_schema":{"type":"object","properties":{}}}`
 
 // contentBlocks normalizes wire message content (a bare string or an array
 // of blocks) into individual raw blocks, preserved verbatim.

@@ -204,14 +204,14 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 
 	t.Run("tool history and no tools", func(t *testing.T) {
 		req := build(t, nil, withCalls)
-		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
+		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
 			t.Fatalf("tools = %s, want the placeholder alone", req.Tools)
 		}
 		var def struct {
 			Name        string          `json:"name"`
 			InputSchema json.RawMessage `json:"input_schema"`
 		}
-		if err := json.Unmarshal(noToolsPlaceholder, &def); err != nil || def.Name == "" || len(def.InputSchema) == 0 {
+		if err := json.Unmarshal([]byte(noToolsPlaceholder), &def); err != nil || def.Name == "" || len(def.InputSchema) == 0 {
 			t.Fatalf("placeholder %s is not a tool definition: %v", noToolsPlaceholder, err)
 		}
 		offered := build(t, []json.RawMessage{bash}, withCalls)
@@ -238,13 +238,13 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 	})
 	t.Run("a result alone", func(t *testing.T) {
 		req := build(t, nil, []domain.Event{withCalls[2]})
-		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
+		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
 			t.Errorf("tools = %s: a tool_result block needs a definition too", req.Tools)
 		}
 	})
 	t.Run("a call alone", func(t *testing.T) {
 		req := build(t, nil, withCalls[:2])
-		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
+		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
 			t.Errorf("tools = %s: a tool_use block needs a definition too", req.Tools)
 		}
 	})
