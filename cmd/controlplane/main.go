@@ -223,15 +223,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	if err := api.EnsureAPIKey(ctx, pool, "bootstrap", bootKey); err != nil {
-		return err
-	}
-	if brainKey != "" {
-		err = api.EnsureAPIKey(ctx, pool, "brain", brainKey)
-	} else {
-		err = api.RetireAPIKey(ctx, pool, "brain")
-	}
-	if err != nil {
+	if err := api.EnsureManagementPresets(ctx, pool, bootKey, brainKey); err != nil {
 		return err
 	}
 	cleanupSetupCode, err := deliverSetupCode(ctx, pool)

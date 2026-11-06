@@ -74,6 +74,23 @@ func partialKeyHint(key string) string {
 	return "..." + string(r[len(r)-tail:])
 }
 
+// EnsureManagementPresets prepares both configured credentials atomically. Check
+// both values before any write: a rejected brain value must not rotate bootstrap.
+func EnsureManagementPresets(ctx context.Context, pool *pgxpool.Pool, bootstrapKey, brainKey string) error {
+	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		if err := apikey.CheckPresetOwnership(ctx, tx, bootstrapKey, brainKey); err != nil {
+			return err
+		}
+		if err := ensureAPIKeyIn(ctx, tx, "bootstrap", bootstrapKey); err != nil {
+			return err
+		}
+		if brainKey != "" {
+			return ensureAPIKeyIn(ctx, tx, "brain", brainKey)
+		}
+		return retireAPIKeyIn(ctx, tx, "brain")
+	})
+}
+
 // EnsureAPIKey makes key the one live credential for the named logical key:
 // it inserts (or reactivates) the hash and archives every other live key
 // under the same name. That gives rotation-by-restart semantics — changing
@@ -87,21 +104,20 @@ func partialKeyHint(key string) string {
 // that index and marks them env-var-managed. A key issued over the console
 // records its issuer and is deliberately outside the one-live rule (plan 32).
 func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) error {
+	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		if err := apikey.CheckPresetOwnership(ctx, tx, key); err != nil {
+			return err
+		}
+		return ensureAPIKeyIn(ctx, tx, name, key)
+	})
+}
+
+func ensureAPIKeyIn(ctx context.Context, tx pgx.Tx, name, key string) error {
 	hash := apikey.Hash(key)
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// Adopting a key somebody issued from the console is the right outcome (see the
-	// ON CONFLICT clause below) but it must not be a silent one. An operator who
-	// pasted an archived console key out of an old runbook has just brought a
-	// retired credential back, and since this runs once at boot there is nothing
-	// else that would ever mention it. Refusing to boot instead was considered and
-	// rejected: it would strand the control plane behind a state only a direct
-	// database edit could clear, and it protects nobody — setting the variable at
-	// all requires the deployment access that could equally configure a fresh
-	// value. So: adopt, and say so.
+	// An unowned console-issued key may still be adopted, even after retirement.
+	// Log that revival. An owned key must instead stop startup: adoption would
+	// replace its principal-bound authority with the preset's full authority.
+	// The caller checks ownership before this helper writes anything.
 	var priorIssuer *string
 	var priorStatus string
 	switch err := tx.QueryRow(ctx,
@@ -133,8 +149,8 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 	// rotation and leave two live credentials under one name; and an inherited
 	// expiry would let EnsureAPIKey report success over a key authenticate then
 	// refuses, i.e. a control plane that starts without a working bootstrap
-	// credential. Naming a value in CONTROLPLANE_API_KEY makes it env-var-managed,
-	// whatever it was before.
+	// credential. Naming an unowned value in CONTROLPLANE_API_KEY makes it
+	// env-var-managed. Owned values never reach this write.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint) VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (key_hash) DO UPDATE
@@ -143,7 +159,7 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 		domain.NewID(domain.PrefixAPIKey).String(), name, hash, partialKeyHint(key)); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // RetireAPIKey archives every live env-var-managed key under name — the rows
@@ -153,7 +169,13 @@ func EnsureAPIKey(ctx context.Context, pool *pgxpool.Pool, name, key string) err
 // retirement that archives anything is logged, since whatever still holds the
 // key is refused from then on.
 func RetireAPIKey(ctx context.Context, pool *pgxpool.Pool, name string) error {
-	tag, err := pool.Exec(ctx,
+	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		return retireAPIKeyIn(ctx, tx, name)
+	})
+}
+
+func retireAPIKeyIn(ctx context.Context, tx pgx.Tx, name string) error {
+	tag, err := tx.Exec(ctx,
 		`UPDATE api_keys SET status = 'archived' WHERE name = $1 AND status = 'active' AND created_by IS NULL`, name)
 	if err != nil {
 		return err

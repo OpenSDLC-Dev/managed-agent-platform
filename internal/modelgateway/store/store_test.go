@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -410,6 +411,79 @@ func TestKeyPolicies(t *testing.T) {
 	}
 	if err := s.DeleteKeyPolicy(ctx, "key_app"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
+	}
+}
+
+// The database already rejects these writes. The store must refuse them with
+// ErrInvalid before alias/upsert work, after the caller's authority fence.
+func TestKeyPolicyRejectsOwnedTargets(t *testing.T) {
+	s, pool := newStore(t)
+	ctx := context.Background()
+	mkKey(t, pool, "key_unowned")
+	if _, err := s.PutKeyPolicy(ctx, store.KeyPolicy{APIKeyID: "key_unowned"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO principals (id,issuer,subject,role) VALUES ('principal_owner','policy-test','owner','developer')`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		t.Helper()
+		var rows string
+		if err := pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(k) ORDER BY api_key_id)::text FROM modelgateway.key_policies k`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	before := snapshot()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "LISTEN "+store.NotifyChannel); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"active", "inactive", "archived", "expired"} {
+		t.Run(state, func(t *testing.T) {
+			status := state
+			if state == "expired" {
+				status = "active"
+			}
+			id := "key_owned_" + state
+			if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
+				VALUES ($1,$1,'principal_owner',$1,'principal_owner',$2,
+				CASE WHEN $3 THEN now() - interval '1 hour' ELSE NULL END)`, id, status, state == "expired"); err != nil {
+				t.Fatal(err)
+			}
+			for _, aliases := range [][]string{nil, {"missing-alias"}} {
+				authorized := false
+				_, err := s.PutKeyPolicyAuthorized(ctx, store.KeyPolicy{APIKeyID: id, Aliases: aliases}, func(tx pgx.Tx) error {
+					authorized = true
+					return nil
+				})
+				if !authorized || !errors.Is(err, store.ErrInvalid) || !strings.Contains(err.Error(), "principal-owned API key") {
+					t.Errorf("owned target must return typed ErrInvalid after authorization, got %v; authorized=%t", err, authorized)
+				}
+			}
+			denied := errors.New("authority withdrawn")
+			if _, err := s.PutKeyPolicyAuthorized(ctx, store.KeyPolicy{APIKeyID: id}, func(pgx.Tx) error { return denied }); !errors.Is(err, denied) {
+				t.Errorf("target check bypassed the authority fence: %v", err)
+			}
+			if snapshot() != before {
+				t.Error("owned refusal changed stored policies")
+			}
+			// PostgreSQL delivers committed notifications in commit order. A marker
+			// after the refused write proves absence without a timeout-as-success.
+			if _, err := pool.Exec(ctx, `SELECT pg_notify($1, 'after-owned-refusal')`, store.NotifyChannel); err != nil {
+				t.Fatal(err)
+			}
+			wait, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			n, err := conn.Conn().WaitForNotification(wait)
+			if err != nil || n.Payload != "after-owned-refusal" {
+				t.Fatalf("refused policy emitted a mutation notification: notification=%+v err=%v", n, err)
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
@@ -66,6 +67,80 @@ func cookieAdminRequest(t *testing.T, e *env, method, path, body string, headers
 
 func cookieAdminHeaders(issued login.IssuedSession) http.Header {
 	return http.Header{"Cookie": {"map_session=" + issued.Token}, "Origin": {cookieOrigin}, "X-Csrf-Token": {issued.CSRFToken}}
+}
+
+func TestGatewayAdminRefusesOwnedKeyPolicies(t *testing.T) {
+	e, m := newCookieAdmin(t, login.ModePassword, cookieOrigin, false)
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO principals (id,issuer,subject,kind,role) VALUES
+		('principal_admin','policy-test','admin','user','admin'),
+		('principal_user','policy-test','user','user','developer'),
+		('principal_service','policy-test','service','service_account','developer')`); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := m.Issue(ctx, "principal_admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := cookieAdminHeaders(issued)
+	if _, err := e.pool.Exec(ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ('key_unowned','unowned','unowned-digest')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"aliases":null,"rpm":60,"tpm":1000}`, `{"aliases":null,"rpm":120,"tpm":2000}`} {
+		status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/key_unowned", body, cookie)
+		if status != http.StatusOK {
+			t.Fatalf("unowned create/replacement control=%d %s", status, raw)
+		}
+	}
+	snapshot := func() string {
+		t.Helper()
+		var rows string
+		if err := e.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(k) ORDER BY api_key_id)::text FROM modelgateway.key_policies k`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	before := snapshot()
+	for _, owner := range []string{"principal_user", "principal_service"} {
+		for _, state := range []string{"active", "inactive", "archived", "expired"} {
+			id := "key_" + owner + "_" + state
+			status := state
+			if state == "expired" {
+				status = "active"
+			}
+			if _, err := e.pool.Exec(ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
+				VALUES ($1,$1,$2,$3,'principal_admin',$4,CASE WHEN $5 THEN now() - interval '1 hour' ELSE NULL END)`,
+				id, owner, apikey.Hash(id+"-synthetic-secret"), status, state == "expired"); err != nil {
+				t.Fatal(err)
+			}
+			for lane, h := range map[string]http.Header{"cookie": cookie, "bootstrap": {"X-Api-Key": {bootstrap}}} {
+				t.Run(owner+"/"+state+"/"+lane, func(t *testing.T) {
+					// This endpoint writes a whole policy for create and replacement.
+					// No owned policy can be seeded under the database guard; repeated
+					// whole writes must remain refused and preserve the unowned grant.
+					for _, body := range []string{`{"aliases":null,"rpm":null,"tpm":null}`, `{"aliases":["missing-alias"],"rpm":10,"tpm":20}`} {
+						status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/"+id, body, h)
+						if status != http.StatusBadRequest || !strings.Contains(raw, "invalid_request_error") || !strings.Contains(raw, "principal-owned API key") {
+							t.Errorf("owned whole policy write=%d %s", status, raw)
+						}
+					}
+					if snapshot() != before {
+						t.Error("owned policy refusal changed stored grants")
+					}
+				})
+			}
+		}
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE principals SET role='developer' WHERE id='principal_admin'`); err != nil {
+		t.Fatal(err)
+	}
+	status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/key_principal_user_active", `{"aliases":null,"rpm":null,"tpm":null}`, cookie)
+	if status != http.StatusForbidden || strings.Contains(raw, "principal-owned") {
+		t.Fatalf("owned target check bypassed current cookie authority: %d %s", status, raw)
+	}
+	if snapshot() != before {
+		t.Error("denied cookie write changed stored grants")
+	}
 }
 
 // A cached login role, sign-in mapping/profile replay, missing CSRF or wrong sign-out marker fails this.

@@ -12,13 +12,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
@@ -461,4 +465,190 @@ func TestStartupSetupCode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func buildPresetControlplane(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "controlplane")
+	cmd := exec.Command("go", "build", "-o", binary, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build actual controlplane: %v\n%s", err, out)
+	}
+	return binary
+}
+
+func presetStartupRows(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	var rows string
+	if err := pool.QueryRow(context.Background(), `SELECT jsonb_agg(to_jsonb(k) ORDER BY id)::text FROM api_keys k`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func seedStartupOwned(t *testing.T, pool *pgxpool.Pool, raw, state string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO principals (id,issuer,subject,role) VALUES ('principal_owner','startup-test','owner','developer')`); err != nil {
+		t.Fatal(err)
+	}
+	status := state
+	if state == "expired" {
+		status = "active"
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
+		VALUES ('apikey_owned','owned','principal_owner',$1,'principal_owner',$2,
+		CASE WHEN $3 THEN now() - interval '1 hour' ELSE NULL END)`, apikey.Hash(raw), status, state == "expired"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The actual executable, rather than a reconstructed handler, owns the listener
+// and startup side effects. A refused start must exit, not merely time out.
+func runPresetControlplane(t *testing.T, binary string, pool *pgxpool.Pool, boot, brain string, refuse bool) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	listener.Close()
+	temp := t.TempDir()
+	log, err := os.CreateTemp(t.TempDir(), "startup-log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	cmd := exec.Command(binary)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + temp,
+		"DATABASE_URL=" + pool.Config().ConnString(), "CONTROLPLANE_API_KEY=" + boot, "BRAIN_API_KEY=" + brain,
+		"CONTROLPLANE_ADDR=" + addr, "IDENTITY_MODE=password", "DEVELOPMENT_MODE=true",
+		"CONSOLE_PUBLIC_ORIGIN=http://" + addr, "DREAM_TICK_INTERVAL=0"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout, cmd.Stderr = log, log
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Logf("created controlplane pid=%d pgid=%d loopback=%s", pid, pid, addr)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	waited := false
+	defer func() {
+		if !waited {
+			_ = syscall.Kill(-pid, syscall.SIGTERM)
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("controlplane orderly shutdown: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				<-done
+				t.Error("controlplane required forced cleanup")
+			}
+		}
+		if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("owned process group still exists: %v", err)
+		} else {
+			t.Logf("removed controlplane pid=%d pgid=%d; group absent", pid, pid)
+		}
+		if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			conn.Close()
+			t.Error("owned loopback listener survived exit")
+		}
+		entries, err := os.ReadDir(temp)
+		if err != nil || len(entries) != 0 {
+			t.Errorf("startup left temporary delivery resources: entries=%d err=%v", len(entries), err)
+		}
+	}()
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 200 * time.Millisecond}
+	defer client.CloseIdleConnections()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			waited = true
+			raw, readErr := os.ReadFile(log.Name())
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !refuse || err == nil {
+				t.Fatalf("startup exit=%v; want refused=%t", err, refuse)
+			}
+			if !bytes.Contains(raw, []byte("principal-owned API key")) {
+				t.Errorf("startup omitted safe owned-preset refusal: %s", raw)
+			}
+			if bytes.Contains(raw, []byte(boot)) || (brain != "" && bytes.Contains(raw, []byte(brain))) || bytes.Contains(raw, []byte("listening")) || bytes.Contains(raw, []byte("setup_code_file")) {
+				t.Error("refusal exposed a credential, listener or setup delivery")
+			}
+			var codes int
+			if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM setup_codes`).Scan(&codes); err != nil || codes != 0 {
+				t.Errorf("refusal reached setup mint: codes=%d err=%v", codes, err)
+			}
+			return
+		case <-ticker.C:
+			res, err := client.Get("http://" + addr + "/api/auth/config")
+			if err != nil {
+				continue
+			}
+			res.Body.Close()
+			if refuse {
+				t.Errorf("owned preset exposed actual controlplane listener: HTTP %d", res.StatusCode)
+			} else if res.StatusCode != http.StatusOK {
+				t.Errorf("unowned control did not serve native auth config: HTTP %d", res.StatusCode)
+			}
+			return
+		case <-deadline:
+			t.Fatal("startup neither exited nor exposed its test-owned listener")
+		}
+	}
+}
+
+func TestPresetPreparationIsAtomic(t *testing.T) {
+	binary := buildPresetControlplane(t)
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	for _, name := range []string{"bootstrap", "brain"} {
+		if err := api.EnsureAPIKey(ctx, pool, name, "previous-"+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const owned = "synthetic-owned-brain-preset"
+	seedStartupOwned(t, pool, owned, "active")
+	before := presetStartupRows(t, pool)
+	runPresetControlplane(t, binary, pool, "replacement-bootstrap", owned, true)
+	if presetStartupRows(t, pool) != before {
+		t.Error("failed startup changed prior presets: bootstrap rotated before the brain collision")
+	}
+}
+
+func TestControlplaneRefusesAnOwnedPreset(t *testing.T) {
+	binary := buildPresetControlplane(t)
+	for _, name := range []string{"bootstrap", "brain"} {
+		for _, state := range []string{"active", "inactive", "archived", "expired"} {
+			t.Run(name+"/"+state, func(t *testing.T) {
+				pool := pgtest.NewPool(t)
+				const owned = "synthetic-owned-startup-preset"
+				seedStartupOwned(t, pool, owned, state)
+				boot, brain := "unowned-bootstrap", "unowned-brain"
+				if name == "bootstrap" {
+					boot = owned
+				} else {
+					brain = owned
+				}
+				before := presetStartupRows(t, pool)
+				runPresetControlplane(t, binary, pool, boot, brain, true)
+				if presetStartupRows(t, pool) != before {
+					t.Error("refused startup changed key rows")
+				}
+			})
+		}
+	}
+	t.Run("unowned control", func(t *testing.T) {
+		pool := pgtest.NewPool(t)
+		runPresetControlplane(t, binary, pool, "unowned-bootstrap", "unowned-brain", false)
+	})
 }

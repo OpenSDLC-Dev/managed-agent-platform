@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
@@ -23,6 +24,97 @@ func catalogFor(t *testing.T, e *env) *catalog.Catalog {
 		t.Fatal(err)
 	}
 	return c
+}
+
+type noOwnedInferenceTransport struct{ t *testing.T }
+
+func (n noOwnedInferenceTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	n.t.Error("owned-key refusal called a vendor transport")
+	return nil, errors.New("vendor calls are forbidden in the owned-key negative contract")
+}
+
+func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
+	e := newEnv(t)
+	p := e.provider("https://vendor.invalid")
+	e.credential(p, "synthetic-vendor-credential", 1)
+	e.alias("fast", target(e.deployment(p, "m"), 0))
+	unowned := e.key(everyAlias)
+	// Build an honestly stale in-memory catalog using a separate fixture
+	// database. Its keys are unowned; its cached policies name the owned IDs
+	// in the authentication database. No database guard is disabled or bypassed.
+	auth := pgtest.NewPool(t)
+	if _, err := auth.Exec(e.ctx, `INSERT INTO principals (id,issuer,subject,kind,role) VALUES
+		('principal_user','inference-test','user','user','developer'),
+		('principal_service','inference-test','service','service_account','admin')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.Exec(e.ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ('key_1','unowned',$1)`, apikey.Hash(unowned)); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	for _, owner := range []string{"principal_user", "principal_service"} {
+		for _, state := range []string{"active", "inactive", "archived", "expired"} {
+			id := "key_" + owner + "_" + state
+			key := "sk-map-api01-synthetic-" + owner + "-" + state
+			keys = append(keys, key)
+			status := state
+			if state == "expired" {
+				status = "active"
+			}
+			if _, err := auth.Exec(e.ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
+				VALUES ($1,$1,$2,$3,$2,$4,CASE WHEN $5 THEN now() - interval '1 hour' ELSE NULL END)`, id, owner, apikey.Hash(key), status, state == "expired"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ($1,$1,$1)`, id); err != nil {
+				t.Fatal(err)
+			}
+			_, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: id})
+			e.must(err)
+		}
+	}
+	e.start(func(cfg *modelgateway.Config) {
+		cfg.Keys = auth
+		cfg.Client = &http.Client{Transport: noOwnedInferenceTransport{t}}
+		if _, ok := cfg.Catalog.Snapshot().KeyPolicy("key_principal_user_active"); !ok {
+			t.Fatal("stale catalog fixture lacks the owned row's cached grant")
+		}
+	})
+	for _, prefix := range []string{"", "/anthropic", "/openai"} {
+		res, body := e.do("GET", prefix+"/v1/models", "", map[string]string{"x-api-key": unowned})
+		if res.StatusCode != 200 || !strings.Contains(string(body), "fast") {
+			t.Fatalf("unowned model-list control=%d %s", res.StatusCode, body)
+		}
+	}
+	for _, key := range keys {
+		for lane, headers := range map[string]map[string]string{
+			"x-api-key": {"x-api-key": key}, "Bearer": {"Authorization": "Bearer " + key},
+		} {
+			for _, route := range []struct {
+				method, path string
+				prefixes     []string
+			}{
+				{"GET", "/v1/models", []string{"", "/anthropic", "/openai"}},
+				{"GET", "/v1/models/fast", []string{"", "/anthropic", "/openai"}},
+				{"POST", "/v1/messages", []string{"", "/anthropic"}},
+				{"POST", "/v1/messages/count_tokens", []string{"", "/anthropic"}},
+				{"POST", "/v1/chat/completions", []string{"", "/openai"}},
+				{"POST", "/v1/responses", []string{"", "/openai"}},
+				{"GET", "/v1/responses/response_fixture", []string{"", "/openai"}},
+				{"DELETE", "/v1/responses/response_fixture", []string{"", "/openai"}},
+				{"POST", "/v1/embeddings", []string{"", "/openai"}},
+				{"POST", "/v1/rerank", []string{"", "/openai"}},
+			} {
+				for _, prefix := range route.prefixes {
+					t.Run(strings.TrimPrefix(key, "sk-map-api01-synthetic-")+"/"+lane+"/"+route.method+prefix+route.path, func(t *testing.T) {
+						res, raw := e.do(route.method, prefix+route.path, `{"model":"fast","max_tokens":8,"messages":[{"role":"user","content":"test"}],"input":"test","query":"test","documents":["test"]}`, headers)
+						if res.StatusCode != 401 || res.Header.Get("x-platform-signed-out") != "" {
+							t.Fatalf("owned key admitted before routing: status=%d body=%s", res.StatusCode, raw)
+						}
+					})
+				}
+			}
+		}
+	}
 }
 
 func TestAuthentication(t *testing.T) {
