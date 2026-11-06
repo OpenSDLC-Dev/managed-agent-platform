@@ -242,6 +242,12 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 			t.Errorf("tools = %s: a tool_result block needs a definition too", req.Tools)
 		}
 	})
+	t.Run("a call alone", func(t *testing.T) {
+		req := build(t, nil, withCalls[:2])
+		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
+			t.Errorf("tools = %s: a tool_use block needs a definition too", req.Tools)
+		}
+	})
 }
 
 func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {

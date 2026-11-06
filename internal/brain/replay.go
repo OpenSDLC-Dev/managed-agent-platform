@@ -442,6 +442,9 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	req.System += systemTail
 	// Before admitThinking, because the placeholder is part of the prefix a
 	// kept block is checked against, as it is of the one digestThinking stores.
+	// The tool event cases are the only source of tool blocks: a user.message
+	// carries text, image and document blocks alone (events.blocksUserMessage),
+	// and an agent.message text alone.
 	if len(req.Tools) == 0 && toolBlocks {
 		req.Tools = []json.RawMessage{noToolsPlaceholder}
 	}
@@ -461,10 +464,10 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 // noToolsPlaceholder is the one tool a request defines when its history carries
 // a tool_use or tool_result block and the agent offers no tools, as after a
 // session update sets agent.tools to [] (#1021). Anthropic's Messages API is
-// reported to refuse tool blocks in a request that defines no tools (the
-// wording is quoted by third parties, not by Anthropic's own pages). Claude
-// Code keeps one tool defined in its compaction request, which carries tool
-// history. Replaying the blocks unchanged keeps the conversation the model
+// reported to refuse tool blocks in a request that defines no tools (a third
+// party quotes the wording; Anthropic's own pages do not). Claude Code's
+// compaction request, which carries tool history, keeps at least one tool
+// defined. Replaying the blocks unchanged keeps the conversation the model
 // actually had.
 //
 // The description tells the model not to call it, and no tool_choice none goes
@@ -475,8 +478,9 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 // settlement's chain cap ends a model that keeps calling it.
 //
 // The definition is constant, so every turn of a session in this state shares
-// one prefix and its kept thinking stays valid. A block kept before the state
-// began is dropped, as any change of tools drops it; for an agent that never
+// one prefix and its kept thinking stays valid. A block bound to its prefix and
+// kept before the state began is dropped, as any change of tools drops it (one
+// stored under its route's anyPrefixDigest is not); for an agent that never
 // offered tools, that is the turn whose stray call put the first tool block in
 // its history. What the reference does on such a turn is unrecorded
 // (docs/DIVERGENCES.md).
