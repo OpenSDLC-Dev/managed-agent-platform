@@ -450,6 +450,64 @@ func TestOwnedKeysCannotReceiveLegacyPolicies(t *testing.T) {
 	})
 }
 
+// A metadata UPDATE already holds the policy row. Taking its parent's lock
+// would reverse DELETE's parent-before-cascaded-child order.
+func TestUnchangedPolicyUpdateDoesNotLockParent(t *testing.T) {
+	ctx := context.Background()
+	pool := open(t, pgtest.FreshDB(t))
+	insertKeyFixture(t, pool, "apikey_legacy", "", "active")
+	keyExec(t, pool, `INSERT INTO modelgateway.key_policies (api_key_id,aliases,rpm,tpm)
+		VALUES ('apikey_legacy',ARRAY['old'],5,100)`)
+
+	parent, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Rollback(ctx)
+	keyExec(t, parent, `SELECT id FROM api_keys WHERE id='apikey_legacy' FOR UPDATE`)
+	writer, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback(ctx)
+	if parent.Conn().PgConn().PID() == writer.Conn().PgConn().PID() {
+		t.Fatal("policy writer must use a separate backend")
+	}
+	// Observe the conflicting parent lock, not merely a goroutine starting or
+	// time passing. Roll back only the probe so the writer can then UPDATE.
+	keyExec(t, writer, `SAVEPOINT lock_probe`)
+	_, err = writer.Exec(ctx, `SELECT id FROM api_keys WHERE id='apikey_legacy' FOR KEY SHARE NOWAIT`)
+	requireKeyPGError(t, err, "55P03", "")
+	keyExec(t, writer, `ROLLBACK TO SAVEPOINT lock_probe`)
+	t.Logf("parent backend %d holds a row lock conflicting with writer %d KEY SHARE", parent.Conn().PgConn().PID(), writer.Conn().PgConn().PID())
+	keyExec(t, writer, `SET LOCAL lock_timeout = '2s'`)
+	_, err = writer.Exec(ctx, `UPDATE modelgateway.key_policies
+		SET api_key_id=api_key_id,aliases=ARRAY['replacement'],rpm=7,tpm=900,
+		    updated_at='2030-01-02T03:04:05Z' WHERE api_key_id='apikey_legacy'`)
+	if err != nil {
+		t.Fatalf("unchanged-target metadata UPDATE must not wait for the locked parent: %v", err)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := keySnapshot(t, pool, `SELECT (aliases=ARRAY['replacement'] AND rpm=7 AND tpm=900
+		AND updated_at='2030-01-02T03:04:05Z')::text FROM modelgateway.key_policies
+		WHERE api_key_id='apikey_legacy'`); got != "true" {
+		t.Fatal("metadata UPDATE did not persist the requested policy")
+	}
+	// The parent still owns the conflicting lock. Its deletion must cascade
+	// over the updated policy, and no new policy may reference the deleted key.
+	keyExec(t, parent, `DELETE FROM api_keys WHERE id='apikey_legacy'`)
+	if err := parent.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := keySnapshot(t, pool, `SELECT count(*)::text FROM modelgateway.key_policies`); got != "0" {
+		t.Fatalf("parent DELETE left %s policies, want none", got)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO modelgateway.key_policies (api_key_id) VALUES ('apikey_legacy')`)
+	requireKeyPGError(t, err, pgForeignKeyViolation, "modelgateway_key_policy_target")
+}
+
 func TestAnUncommittedOwnedPolicyTargetIsRefused(t *testing.T) {
 	ctx := context.Background()
 	pool := open(t, pgtest.FreshDB(t))

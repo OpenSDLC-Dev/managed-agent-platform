@@ -77,7 +77,8 @@ func partialKeyHint(key string) string {
 // EnsureManagementPresets prepares both configured credentials atomically. Check
 // both values before any write: a rejected brain value must not rotate bootstrap.
 func EnsureManagementPresets(ctx context.Context, pool *pgxpool.Pool, bootstrapKey, brainKey string) error {
-	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+	var retired int64
+	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		if err := apikey.CheckPresetOwnership(ctx, tx, bootstrapKey, brainKey); err != nil {
 			return err
 		}
@@ -87,8 +88,14 @@ func EnsureManagementPresets(ctx context.Context, pool *pgxpool.Pool, bootstrapK
 		if brainKey != "" {
 			return ensureAPIKeyIn(ctx, tx, "brain", brainKey)
 		}
-		return retireAPIKeyIn(ctx, tx, "brain")
+		n, err := retireAPIKeyIn(ctx, tx, "brain")
+		retired = n
+		return err
 	})
+	if err == nil && retired > 0 {
+		slog.WarnContext(ctx, "management key's variable is unset; archived its env-var-managed key", "name", "brain", "archived", retired)
+	}
+	return err
 }
 
 // EnsureAPIKey makes key the one live credential for the named logical key:
@@ -169,21 +176,26 @@ func ensureAPIKeyIn(ctx context.Context, tx pgx.Tx, name, key string) error {
 // retirement that archives anything is logged, since whatever still holds the
 // key is refused from then on.
 func RetireAPIKey(ctx context.Context, pool *pgxpool.Pool, name string) error {
-	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
-		return retireAPIKeyIn(ctx, tx, name)
+	var retired int64
+	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		n, err := retireAPIKeyIn(ctx, tx, name)
+		retired = n
+		return err
 	})
+	if err == nil && retired > 0 {
+		slog.WarnContext(ctx, "management key's variable is unset; archived its env-var-managed key", "name", name, "archived", retired)
+	}
+	return err
 }
 
-func retireAPIKeyIn(ctx context.Context, tx pgx.Tx, name string) error {
+// The caller announces the count only after its enclosing transaction commits.
+func retireAPIKeyIn(ctx context.Context, tx pgx.Tx, name string) (int64, error) {
 	tag, err := tx.Exec(ctx,
 		`UPDATE api_keys SET status = 'archived' WHERE name = $1 AND status = 'active' AND created_by IS NULL`, name)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if n := tag.RowsAffected(); n > 0 {
-		slog.WarnContext(ctx, "management key's variable is unset; archived its env-var-managed key", "name", name, "archived", n)
-	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // requireAPIKey is the management-auth middleware: every /v1 route needs a

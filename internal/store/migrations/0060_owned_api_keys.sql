@@ -51,15 +51,19 @@ CREATE TRIGGER principals_archive_owned_keys AFTER UPDATE OF status ON principal
     FOR EACH ROW WHEN (OLD.status = 'active' AND NEW.status = 'deactivated')
     EXECUTE FUNCTION principals_archive_owned_keys();
 
--- Reject old policy writers too, not just a new gateway's HTTP handler. Refuse
--- a target this statement cannot see before the FK can wait/recheck visibility.
--- KEY SHARE keeps a visible target present; credential immutability above keeps
--- its ownership fixed. Neither an uncommitted nor an owned target gets a grant.
+-- Reject old policy writers too, not just a new gateway's HTTP handler. A
+-- same-target UPDATE keeps an unowned target because ownership is immutable.
+-- Do not lock its parent after the policy row: DELETE locks parent then child.
+-- INSERTs and retargeting must see an unowned target before the FK can wait or
+-- recheck visibility. KEY SHARE keeps that visible target present.
 CREATE FUNCTION modelgateway.key_policy_require_unowned() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     owner_id text;
 BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.api_key_id = OLD.api_key_id THEN
+        RETURN NEW;
+    END IF;
     SELECT owner_principal_id INTO owner_id FROM api_keys
         WHERE id = NEW.api_key_id FOR KEY SHARE;
     IF NOT FOUND THEN

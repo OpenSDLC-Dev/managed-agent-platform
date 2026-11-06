@@ -113,6 +113,86 @@ func TestPresetPreparationRollsBackWrites(t *testing.T) {
 	}
 }
 
+// A successful retirement UPDATE is not an archival until the outer COMMIT
+// succeeds. A deferred constraint fails after both wrappers have done their work.
+func TestRetirementWarningsRequireCommit(t *testing.T) {
+	ctx := context.Background()
+	for _, wrapper := range []string{"RetireAPIKey", "EnsureManagementPresets"} {
+		t.Run(wrapper, func(t *testing.T) {
+			pool := pgtest.NewPool(t)
+			ownedPreset(t, pool, "brain", "active", false)
+			if err := api.EnsureManagementPresets(ctx, pool, "old-bootstrap", "old-brain"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id,name,key_hash,created_by)
+				VALUES ('apikey_issued','brain',$1,'principal_owner')`, apikey.Hash("issued-brain")); err != nil {
+				t.Fatal(err)
+			}
+			before := presetRows(t, pool)
+			warnings := captureWarnings(t)
+			if _, err := pool.Exec(ctx, `CREATE FUNCTION reject_retirement_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN RAISE EXCEPTION 'test retirement commit failure'
+				USING ERRCODE='23514', CONSTRAINT='test_retirement_commit'; END $$;
+				CREATE CONSTRAINT TRIGGER reject_retirement_commit AFTER UPDATE ON api_keys
+				DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+				WHEN (OLD.name='brain' AND OLD.status='active' AND NEW.status='archived' AND OLD.created_by IS NULL)
+				EXECUTE FUNCTION reject_retirement_commit()`); err != nil {
+				t.Fatal(err)
+			}
+			retire := func() error {
+				if wrapper == "EnsureManagementPresets" {
+					return api.EnsureManagementPresets(ctx, pool, "new-bootstrap", "")
+				}
+				return api.RetireAPIKey(ctx, pool, "brain")
+			}
+			err := retire()
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "test_retirement_commit" {
+				t.Fatalf("want the deferred COMMIT error unchanged, got %v", err)
+			}
+			if presetRows(t, pool) != before {
+				t.Error("failed COMMIT changed credentials, including bootstrap")
+			}
+			for _, raw := range []string{"old-bootstrap", "old-brain"} {
+				if id, err := apikey.Authenticate(ctx, pool, raw); err != nil || id == "" {
+					t.Errorf("failed COMMIT retired %q: id=%q err=%v", raw, id, err)
+				}
+			}
+			const message = "archived its env-var-managed key"
+			if got := warnings(); strings.Contains(got, message) {
+				t.Errorf("failed COMMIT announced successful retirement:\n%s", got)
+			}
+
+			if _, err := pool.Exec(ctx, `DROP TRIGGER reject_retirement_commit ON api_keys`); err != nil {
+				t.Fatal(err)
+			}
+			beforeSuccess := warnings()
+			if err := retire(); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.TrimPrefix(warnings(), beforeSuccess)
+			if strings.Count(got, message) != 1 || !strings.Contains(got, "name=brain archived=1") {
+				t.Errorf("committed retirement must log one archived row once:\n%s", got)
+			}
+			var retired, unaffected bool
+			if err := pool.QueryRow(ctx, `SELECT status='archived' FROM api_keys WHERE key_hash=$1`, apikey.Hash("old-brain")).Scan(&retired); err != nil || !retired {
+				t.Fatalf("successful retirement did not archive brain: retired=%t err=%v", retired, err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(*)=2 AND bool_and(status='active') FROM api_keys
+				WHERE id IN ('apikey_owned','apikey_issued')`).Scan(&unaffected); err != nil || !unaffected {
+				t.Fatalf("retirement touched owned or issued keys: unaffected=%t err=%v", unaffected, err)
+			}
+			committed, logged := presetRows(t, pool), warnings()
+			if err := retire(); err != nil {
+				t.Fatal(err)
+			}
+			if warnings() != logged || presetRows(t, pool) != committed {
+				t.Error("zero-row retirement changed credentials or logged an archival")
+			}
+		})
+	}
+}
+
 func TestPresetPreparationPreservesUnownedLifecycle(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)

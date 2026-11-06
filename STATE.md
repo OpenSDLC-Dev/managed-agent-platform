@@ -10,8 +10,8 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 
 ## Tasks
 
-- [x] Isolate owned digests; constrain identity, removal and old policy writes. Verified and reviewed in `0967266f`.
-- [x] Reject owned preset values at both servers' startup; add typed gateway-policy refusal. Verified and reviewed in `82d3c036`.
+- [ ] Isolate owned digests; constrain identity, removal and old policy writes. Recheck unchanged-policy-update locking after review.
+- [ ] Reject owned preset values at both servers' startup; add typed gateway-policy refusal. Recheck retirement logs on failed commits.
 - [ ] Obtain private owned-key response/assignment evidence ([recordings #82](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/82)); keep lower-role visibility and `can_manage:false` in [#40](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/40).
 - [ ] Obtain service-account direct-key memory attribution evidence ([recordings #83](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/83)).
 - [ ] Complete owned issuance/authorization and its mutation fence; refuse legacy human INSERTs when activating the new issuer.
