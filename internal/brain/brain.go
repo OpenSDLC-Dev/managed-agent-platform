@@ -336,7 +336,9 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	memoryBlock, memoryInjected, memoryMisses := b.resolveMemoryBlock(ctx, resourcesJSON)
 	recordMemoryResolveMisses(ctx, memoryMisses)
 	// The tool surface: what the model may call, and what each name it calls
-	// back means. Both come from the same resolution so the two cannot disagree,
+	// back means. Both come from the same resolution so the two cannot disagree
+	// (buildRequest's placeholder, offered when this resolution offers nothing
+	// and backed by no class, is the one exception, and is answered unknown),
 	// and every tool the agent declared that the model was not offered is logged
 	// with its reason. It sits below the injection counters deliberately — a
 	// resolve miss is a fact of assembly whatever fails next (skillsinject_test).
@@ -769,7 +771,8 @@ func stampThread(evs []events.NewEvent, threadID domain.ID, askIDs []domain.ID) 
 // reason an ask's is: the answer has to name it.
 //
 // A name absent from class entirely — the model was not offered it under any
-// role — takes the same shape as a delegation call rather than a fifth of its
+// role, or was offered only buildRequest's placeholder, which no class backs —
+// takes the same shape as a delegation call rather than a fifth of its
 // own: delegatedCall.unoffered marks it so d.run answers it "unknown tool"
 // instead of dispatching one of the six (#567). This is deliberately distinct
 // from the settlement-executed-but-unoffered case just above (a coordinator
