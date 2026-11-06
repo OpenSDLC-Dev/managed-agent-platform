@@ -471,7 +471,10 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 // reaches no class (resolveTools never classes this name), so the call is
 // answered as an unknown tool. The definition is constant, so every turn of a
 // session in this state shares one prefix and its kept thinking stays valid.
-// What the reference does on such a turn is unrecorded (docs/DIVERGENCES.md).
+// A block kept before the state began is dropped, as any change of tools drops
+// it; for an agent that never offered tools, that is the turn whose stray call
+// put the first tool block in its history. What the reference does on such a
+// turn is unrecorded (docs/DIVERGENCES.md).
 var noToolsPlaceholder = json.RawMessage(`{"name":"no_tools_available","description":"No tools are available. The tools called earlier in this conversation have been removed, so do not try to call a tool.","input_schema":{"type":"object","properties":{}}}`)
 
 // contentBlocks normalizes wire message content (a bare string or an array
