@@ -1,8 +1,10 @@
 package modelgateway_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -24,13 +26,6 @@ func catalogFor(t *testing.T, e *env) *catalog.Catalog {
 		t.Fatal(err)
 	}
 	return c
-}
-
-type noOwnedInferenceTransport struct{ t *testing.T }
-
-func (n noOwnedInferenceTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	n.t.Error("owned-key refusal called a vendor transport")
-	return nil, errors.New("vendor calls are forbidden in the owned-key negative contract")
 }
 
 func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
@@ -74,7 +69,13 @@ func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
 	}
 	e.start(func(cfg *modelgateway.Config) {
 		cfg.Keys = auth
-		cfg.Client = &http.Client{Transport: noOwnedInferenceTransport{t}}
+		cfg.Client = &http.Client{Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				t.Error("owned-key refusal called a vendor transport")
+				return nil, errors.New("vendor calls are forbidden in the owned-key negative contract")
+			},
+		}}
 		if _, ok := cfg.Catalog.Snapshot().KeyPolicy("key_principal_user_active"); !ok {
 			t.Fatal("stale catalog fixture lacks the owned row's cached grant")
 		}
