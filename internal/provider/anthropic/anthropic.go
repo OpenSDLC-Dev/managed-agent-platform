@@ -177,9 +177,6 @@ func (p *anthropicProvider) Generate(ctx context.Context, req provider.Request) 
 		param.SetJSON(t, &tp)
 		params.Tools = append(params.Tools, tp)
 	}
-	if req.ToolChoiceNone {
-		params.ToolChoice = sdk.ToolChoiceUnionParam{OfNone: &sdk.ToolChoiceNoneParam{}}
-	}
 
 	// The guard bounds the whole call, the wait for response headers included:
 	// cancelling the context the SDK was handed also stops it retrying, which a

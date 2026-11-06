@@ -181,9 +181,9 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 }
 
 // A request whose history carries a tool call must still define a tool, so a
-// turn after the agent's tools were all removed sends the placeholder and asks
-// for tool_choice none (#1021). History replays as it would with tools, and a
-// request that offers tools, or carries no tool block, is left alone.
+// turn after the agent's tools were all removed sends the placeholder (#1021).
+// History replays as it would with tools, and a request that offers tools, or
+// carries no tool block, is left alone.
 func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) {
 	use := ev(2, domain.EventAgentToolUse, `{"name":"bash","input":{"command":"ls"}}`)
 	withCalls := []domain.Event{
@@ -207,9 +207,6 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
 			t.Fatalf("tools = %s, want the placeholder alone", req.Tools)
 		}
-		if !req.ToolChoiceNone {
-			t.Error("the placeholder went out callable: tool_choice none not asked for")
-		}
 		var def struct {
 			Name        string          `json:"name"`
 			InputSchema json.RawMessage `json:"input_schema"`
@@ -229,20 +226,20 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 	})
 	t.Run("tool history and tools", func(t *testing.T) {
 		req := build(t, []json.RawMessage{bash}, withCalls)
-		if len(req.Tools) != 1 || string(req.Tools[0]) != string(bash) || req.ToolChoiceNone {
-			t.Errorf("tools = %s, tool_choice none = %v: want the agent's tools as they were", req.Tools, req.ToolChoiceNone)
+		if len(req.Tools) != 1 || string(req.Tools[0]) != string(bash) {
+			t.Errorf("tools = %s, want the agent's tools as they were", req.Tools)
 		}
 	})
 	t.Run("no tool history and no tools", func(t *testing.T) {
 		req := build(t, nil, []domain.Event{ev(1, domain.EventUserMessage, `{"content":"hi"}`)})
-		if len(req.Tools) != 0 || req.ToolChoiceNone {
-			t.Errorf("tools = %s, tool_choice none = %v: want neither", req.Tools, req.ToolChoiceNone)
+		if len(req.Tools) != 0 {
+			t.Errorf("tools = %s, want none", req.Tools)
 		}
 	})
 	t.Run("a result alone", func(t *testing.T) {
 		req := build(t, nil, []domain.Event{withCalls[2]})
-		if len(req.Tools) != 1 || !req.ToolChoiceNone {
-			t.Errorf("tools = %s, tool_choice none = %v: a tool_result block needs a definition too", req.Tools, req.ToolChoiceNone)
+		if len(req.Tools) != 1 || string(req.Tools[0]) != string(noToolsPlaceholder) {
+			t.Errorf("tools = %s: a tool_result block needs a definition too", req.Tools)
 		}
 	})
 }

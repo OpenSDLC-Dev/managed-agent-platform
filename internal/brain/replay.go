@@ -444,7 +444,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	// kept block is checked against, as it is of the one digestThinking stores.
 	if len(req.Tools) == 0 && toolBlocks {
 		req.Tools = []json.RawMessage{noToolsPlaceholder}
-		req.ToolChoiceNone = true
 	}
 	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
 		return req, 0, err
@@ -463,19 +462,25 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 // a tool_use or tool_result block and the agent offers no tools, as after a
 // session update sets agent.tools to [] (#1021). Anthropic's Messages API is
 // reported to refuse tool blocks in a request that defines no tools (the
-// wording is quoted by third parties, not by Anthropic's own pages), and
-// Claude Code keeps one tool defined in its compaction request for the same
-// reason. Replaying the blocks unchanged keeps the conversation the model
-// actually had; the request sends tool_choice none beside the placeholder, so
-// the model can call nothing. An endpoint that lets a call through anyway
-// reaches no class (resolveTools never classes this name), so the call is
-// answered as an unknown tool. The definition is constant, so every turn of a
-// session in this state shares one prefix and its kept thinking stays valid.
-// A block kept before the state began is dropped, as any change of tools drops
-// it; for an agent that never offered tools, that is the turn whose stray call
-// put the first tool block in its history. What the reference does on such a
-// turn is unrecorded (docs/DIVERGENCES.md).
-var noToolsPlaceholder = json.RawMessage(`{"name":"no_tools_available","description":"No tools are available. The tools called earlier in this conversation have been removed, so do not try to call a tool.","input_schema":{"type":"object","properties":{}}}`)
+// wording is quoted by third parties, not by Anthropic's own pages). Claude
+// Code keeps one tool defined in its compaction request, which carries tool
+// history. Replaying the blocks unchanged keeps the conversation the model
+// actually had.
+//
+// The description tells the model not to call it, and no tool_choice none goes
+// with it: the model gateway refuses none on an upstream that ignores it (its
+// zhipu profile), which would fail every turn in this state there. A call the
+// model makes anyway reaches no class (resolveTools never classes this name),
+// so it is answered as an unknown tool and the turn chains, and the
+// settlement's chain cap ends a model that keeps calling it.
+//
+// The definition is constant, so every turn of a session in this state shares
+// one prefix and its kept thinking stays valid. A block kept before the state
+// began is dropped, as any change of tools drops it; for an agent that never
+// offered tools, that is the turn whose stray call put the first tool block in
+// its history. What the reference does on such a turn is unrecorded
+// (docs/DIVERGENCES.md).
+var noToolsPlaceholder = json.RawMessage(`{"name":"no_tools_available","description":"No tools are available in this conversation now. The tools called earlier have been removed. Do not call this tool or any other: answer in text.","input_schema":{"type":"object","properties":{}}}`)
 
 // contentBlocks normalizes wire message content (a bare string or an array
 // of blocks) into individual raw blocks, preserved verbatim.
