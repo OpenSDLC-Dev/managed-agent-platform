@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -67,7 +68,16 @@ func TestOwnedKeyPublicAdmission(t *testing.T) {
 	for _, kind := range []string{"user", "service_account"} {
 		for _, role := range []string{"developer", "admin"} {
 			owner := ownedPrincipalFixture(t, s.pool, kind, role)
-			raw, _ := ownedKeyFixture(t, s.pool, owner, issuer)
+			var headers http.Header
+			var alias *string
+			if kind == "service_account" {
+				headers = ownedCookie(t, s, issuer)
+				id := principal.PublicID(owner, kind)
+				alias = &id
+			} else {
+				headers = ownedCookie(t, s, owner)
+			}
+			raw, _ := issueOwnedHTTP(t, s, headers, "public admission", alias)
 			for _, header := range []string{"x-api-key", "Bearer"} {
 				t.Run(kind+"/"+role+"/"+header, func(t *testing.T) {
 					assertOwnedResponse(t, s.doRaw("GET", "/v1/agents", nil, ownedHeaders(header, raw)), 200)
@@ -77,7 +87,7 @@ func TestOwnedKeyPublicAdmission(t *testing.T) {
 	}
 	t.Run("current_role", func(t *testing.T) {
 		owner := s.seedLocal("demoted", "developer", "active")
-		raw, _ := ownedKeyFixture(t, s.pool, owner, issuer)
+		raw, _ := issueOwnedHTTP(t, s, ownedCookie(t, s, owner), "current role", nil)
 		for _, change := range []struct {
 			role string
 			want int
@@ -141,8 +151,8 @@ func TestOwnedKeyCredentialDispatch(t *testing.T) {
 	cookie, session := s.issue(admin)
 	user := s.seedLocal("user", "user", "active")
 	userKey, _ := ownedKeyFixture(t, s.pool, user, admin)
-	adminKey, _ := ownedKeyFixture(t, s.pool, admin, admin)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy issued", nil, admin)
+	adminKey, _ := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "dispatch admin", nil)
+	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy issued", nil, "apikey_fixture_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,9 +201,10 @@ func TestOwnedKeyPrivateIsolation(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
 	admin := s.seedLocal("admin", "admin", "active")
 	cookie, session := s.issue(admin)
-	raw, keyID := ownedKeyFixture(t, s.pool, admin, admin)
+	raw, keyID := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "private isolation", nil)
 	service := ownedPrincipalFixture(t, s.pool, "service_account", "admin")
-	serviceRaw, _ := ownedKeyFixture(t, s.pool, service, admin)
+	alias := principal.PublicID(service, "service_account")
+	serviceRaw, _ := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "private service isolation", &alias)
 	paths := []string{consoleAPIKeysPath, consoleAPIKey(keyID), consoleOrgAPIKey(keyID),
 		"/api/console/organizations/default/members", "/api/console/organizations/default/service_accounts",
 		"/api/organizations/default/proxy/v1/agents", "/api/unknown"}

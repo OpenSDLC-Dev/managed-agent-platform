@@ -145,7 +145,7 @@ func TestHumanCanonicalizationBoundaryControls(t *testing.T) {
 func TestOwnedKeyCanonicalizationBoundary(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
 	admin := s.seedLocal("admin", "admin", "active")
-	raw, _ := ownedKeyFixture(t, s.pool, admin, admin)
+	raw, _ := issueOwnedHTTP(t, s, ownedCookie(t, s, admin), "canonicalization", nil)
 	cookie, session := s.issue(admin)
 	before := ownedDurableSnapshot(t, s.pool)
 	for _, tc := range []struct {

@@ -669,10 +669,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
   members and service accounts require actual cookie identity, not merely the old
   role annotation. Member and service-account mutations take the principal table
   lock before rechecking the caller's session and current admin authority.
-  Cookie-selected management-key issuance and updates, worker-key issuance, and
-  gateway grant creation or replacement use the same principal-first order.
-  They read the body before taking locks and recheck human admin authority in
-  the write transaction. The principal and session locks last until commit.
+  Key issuance and updates use a separate developer-or-admin fence in the same
+  principal-first order. They finish reading the body before taking locks.
+  Cookie callers recheck the session; retained IdP callers re-read stored authority
+  without replaying the mapping. Owner assignment and row permission are checked
+  in that transaction. Principal and session locks last until commit.
+  Worker-key issuance and gateway grant writes retain their human admin fence.
   Manual demotion/removal protects the last active human admin; mapping is exempt.
   The cookie-only resource proxy re-enters management dispatch with the same
   role floors, audit actor and trace context. It cannot enter machine or inference
@@ -680,12 +682,17 @@ and holds the two OS-touching adapters `gaterun/` declares.
   authority loss or store failure cancels them within 15 seconds.
   Gateway administration accepts current-session developer reads and admin writes.
   Its offered legacy credentials keep precedence; inference never gains cookie authority.
-  Public `/v1`, worker and gate paths never accept raw cookies. Owned-key HTTP
-  issuance remains pending; public role admission is separate from that issuer.
+  Public `/v1`, worker and gate paths never accept raw cookies. Public key
+  authority is checked per request; withdrawal does not end already-open public
+  streams. That lifetime is separate from the cookie proxy's bounded recheck.
 - **Owned digests stay outside legacy database authentication.** Slice 3's preparatory
   migration separates owned digests from the legacy authentication column.
   One uniqueness rule spans both columns; credential identity cannot change.
-  Existing keys remain unowned, regardless of their issuer audit ID.
+  Existing keys remain unowned, regardless of their issuer audit ID. New human
+  issuance binds the caller, or an active service account an admin cookie names.
+  A legacy unowned credential still issues only unowned keys. Migration 0061
+  refuses old human-unowned INSERTs, including prepared statements and dangling
+  human issuer IDs; historical rows and metadata updates remain valid.
   Principal deactivation archives owned keys transactionally; restoration revives none.
   Old gateway policy writes reject owned or invisible targets. The store also
   returns a typed invalid-request error for owned targets, after authorization.
@@ -696,9 +703,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   the default organization. It enforces route roles for both humans and service
   accounts, including when login is disabled. Owned keys are refused on private
   paths and by gateway inference. Audit and Memory attribution still name the
-  selected key, not its owner or issuer. No owned HTTP issuer is enabled yet.
-  The new issuer must share the principal-first mutation fence and refuse legacy
-  human INSERTs at activation. This is not a complete rolling-issuance protocol.
+  selected key, not its owner or issuer. Human key mutations hold current authority
+  through commit in the principal-first fence. Mixed receivers can refuse issuance
+  or owned-key use until old receivers are drained.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

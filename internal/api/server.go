@@ -247,10 +247,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 
 	// Management-key issuance (plan 32 slice 2, #378), on the reference's own
 	// `/api/console/` prefix rather than the `/api/oauth/` one above — it uses
-	// both, and each surface keeps the one it was recorded under. Admin for the
-	// same reason the environment-key section is: a listing of which credentials
-	// exist, their names and their issuers is itself the inventory an attacker
-	// would want, so the section is gated whole rather than only its mutations.
+	// both, and each surface keeps the one it was recorded under. Developers
+	// manage only their owned rows; admins manage all non-preset rows. The
+	// handlers enforce row permission and fence current authority through commit.
 	//
 	// There is deliberately no /v1 twin. The reference withholds key creation from
 	// its public API on purpose ("new API keys can only be created through the
@@ -261,11 +260,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// The update is served twice: on the reference's own route, which names no
 	// workspace, and on the workspace-scoped one served first, kept as an alias
 	// (#820). The workspace read answers the reference's recorded 404 and
-	// renders no workspace (getWorkspace), and sits in the same admin section.
-	mux.HandleFunc("POST "+consoleAPIKeysPath, noStore(s.handle(identity.RoleAdmin, s.createAPIKey)))
-	mux.HandleFunc("GET "+consoleAPIKeysPath, s.handle(identity.RoleAdmin, s.listAPIKeys))
-	mux.HandleFunc("POST "+consoleOrgAPIKeyPath, s.handle(identity.RoleAdmin, s.updateAPIKey))
-	mux.HandleFunc("POST "+consoleAPIKeyPath, s.handle(identity.RoleAdmin, s.updateWorkspaceAPIKey))
+	// renders no workspace (getWorkspace). It retains its separate admin floor.
+	mux.HandleFunc("POST "+consoleAPIKeysPath, noStore(s.handle(identity.RoleDeveloper, s.createAPIKey)))
+	mux.HandleFunc("GET "+consoleAPIKeysPath, s.handle(identity.RoleDeveloper, s.listAPIKeys))
+	mux.HandleFunc("POST "+consoleOrgAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateAPIKey))
+	mux.HandleFunc("POST "+consoleAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateWorkspaceAPIKey))
 	mux.HandleFunc("GET "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.getWorkspace))
 	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacePath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {

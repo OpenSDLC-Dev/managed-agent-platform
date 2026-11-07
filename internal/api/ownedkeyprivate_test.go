@@ -10,10 +10,11 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
 // An ignored legacy Bearer must not displace the private assertion or become
-// machine authority. The assertion still supplies the route's admin role.
+// machine authority. The assertion supplies the current role and owned-row view.
 func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
 	s := newLaneServerWith(t, func(c *identity.Config) {
 		c.Mode = identity.ModeTrustedProxy
@@ -26,7 +27,7 @@ func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals WHERE issuer=$1 AND subject='user-1'`, s.idp.Issuer()).Scan(&human); err != nil {
 		t.Fatal(err)
 	}
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, human)
+	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,13 +39,13 @@ func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
 		h := headers.Clone()
 		h.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-read"))
 		status, typ, body := laneRead(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, h))
-		if status != 403 || typ != "permission_error" || laneMessage(t, body) != "this route requires the admin role" {
-			t.Fatalf("status=%d error=%q body=%s; want human admin-role 403", status, typ, body)
+		if status != 403 || typ != "permission_error" || laneMessage(t, body) != "this route requires the developer role" {
+			t.Fatalf("status=%d error=%q body=%s; want human developer-role 403", status, typ, body)
 		}
 	})
 	for _, state := range []string{"active", "inactive", "expired", "archived"} {
 		t.Run(state, func(t *testing.T) {
-			raw, row, err := api.IssueManagementKey(t.Context(), s.pool, "legacy "+state, nil, human)
+			raw, row, err := api.IssueManagementKey(t.Context(), s.pool, "legacy "+state, nil, "apikey_companion_issuer")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -63,14 +64,35 @@ func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
 				want            int
 			}{
 				{"admin", s.token("platform-admins"), 200},
-				{"developer", s.token("platform-devs"), 403},
+				{"developer", s.token("platform-devs"), 200},
 				{"user", s.token("platform-read"), 403},
 				{"bad_assertion", "not-a-valid-assertion", 401},
 				{"no_assertion", "", 401},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					h.Set("X-Goog-IAP-JWT-Assertion", tc.assertion)
-					assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, h), tc.want)
+					res := ownedFirstHop(t, s.url, consoleAPIKeysPath, h)
+					if tc.name == "developer" {
+						status, _, body := laneRead(t, res)
+						if status != 200 {
+							t.Fatalf("developer list status=%d", status)
+						}
+						var rows []map[string]any
+						if json.Unmarshal([]byte(body), &rows) != nil {
+							t.Fatal("invalid key list")
+						}
+						for _, key := range rows {
+							owner, ok := key["principal"].(map[string]any)
+							if !ok || owner["user_id"] != principal.PublicID(human, "user") || key["can_manage"] != true {
+								t.Fatal("companion key bypassed true-owner list filter")
+							}
+						}
+						// Workspace remains an admin-only control; bypassing the human role
+						// would return its 404 instead of 403.
+						assertOwnedResponse(t, ownedFirstHop(t, s.url, "/api/console/organizations/default/workspaces/default", h), 403)
+					} else {
+						assertOwnedResponse(t, res, tc.want)
+					}
 				})
 			}
 			// Classification ignores lifecycle only for the companion Bearer. The
@@ -103,7 +125,7 @@ func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
 				if err := s.pool.QueryRow(t.Context(), `SELECT created_by FROM api_keys WHERE id=$1`, created.ID).Scan(&creator); err != nil {
 					t.Fatal(err)
 				}
-				if creator != human || created.CreatedBy.ID != human || created.CreatedBy.Type != "principal" {
+				if creator != human || created.CreatedBy.ID != principal.PublicID(human, "user") || created.CreatedBy.Type != "user" {
 					t.Fatalf("creator=%q response_actor=%+v want human %q, never companion key %q", creator, created.CreatedBy, human, row.ID)
 				}
 			})
@@ -183,7 +205,7 @@ func TestOwnedKeyPrivateAssertionIsolation(t *testing.T) {
 
 func TestPrivateLegacyBearerSelection(t *testing.T) {
 	s, headers, human := privateAssertionServer(t)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, human)
+	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,15 +272,15 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 			t.Fatal(err)
 		}
 		status, typ, body := laneRead(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers))
-		if status != 403 || typ != "permission_error" || laneMessage(t, body) != "this route requires the admin role" {
+		if status != 403 || typ != "permission_error" || laneMessage(t, body) != "this route requires the developer role" {
 			t.Fatalf("status=%d error=%q body=%s want current human role refusal", status, typ, body)
 		}
 	})
 }
 
 func TestPrivateLegacyBearerLookupFailure(t *testing.T) {
-	s, headers, human := privateAssertionServer(t)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, human)
+	s, headers, _ := privateAssertionServer(t)
+	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +296,7 @@ func TestPrivateLegacyBearerCanonicalization(t *testing.T) {
 		c.Mode = identity.ModeTrustedProxy
 		c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
 	})
-	issuer := ownedPrincipalFixture(t, s.pool, "user", "admin")
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, issuer)
+	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}

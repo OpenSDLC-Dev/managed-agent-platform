@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
 func ownedMemoryRequest(t *testing.T, s *tserver, method, path string, body any, headers map[string]string) map[string]any {
@@ -32,12 +33,21 @@ func TestOwnedKeyMemoryActors(t *testing.T) {
 	for _, kind := range []string{"user", "service_account"} {
 		for _, header := range []string{"x-api-key", "Bearer"} {
 			t.Run(kind+"/"+header, func(t *testing.T) {
-				s := newTestServer(t)
+				ns := newNativeServer(t, login.ModePassword)
+				s := ns.tserver
 				issuer := ownedPrincipalFixture(t, s.pool, "user", "admin")
 				owner := ownedPrincipalFixture(t, s.pool, kind, "developer")
 				admin := ownedPrincipalFixture(t, s.pool, kind, "admin")
-				raw, keyID := ownedKeyFixture(t, s.pool, owner, issuer)
-				adminRaw, adminKeyID := ownedKeyFixture(t, s.pool, admin, issuer)
+				var raw, keyID, adminRaw, adminKeyID string
+				if kind == "user" {
+					raw, keyID = issueOwnedHTTP(t, ns, ownedCookie(t, ns, owner), "memory writer", nil)
+					adminRaw, adminKeyID = issueOwnedHTTP(t, ns, ownedCookie(t, ns, admin), "memory admin", nil)
+				} else {
+					headers := ownedCookie(t, ns, issuer)
+					ownerAlias, adminAlias := principal.PublicID(owner, kind), principal.PublicID(admin, kind)
+					raw, keyID = issueOwnedHTTP(t, ns, headers, "memory service writer", &ownerAlias)
+					adminRaw, adminKeyID = issueOwnedHTTP(t, ns, headers, "memory service admin", &adminAlias)
+				}
 				headers := ownedHeaders(header, raw)
 				store := createMemoryStore(t, s, "owned actors")
 				base := "/v1/memory_stores/" + store

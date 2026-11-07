@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -36,10 +37,8 @@ func TestNativeCredentialTargetExpiryAfterTargetRowWait(t *testing.T) {
 				AND expires_at>clock_timestamp()+interval '2 minutes') FROM principals WHERE id=$1`, caller).Scan(&validCaller); err != nil || !validCaller {
 				t.Fatalf("target-row expiry premise: caller/session is not a durable active human admin: valid=%v err=%v", validCaller, err)
 			}
-			secret, target, err := api.IssueManagementKey(ctx, s.pool, "target-row-before", nil, caller)
-			if err != nil {
-				t.Fatal(err)
-			}
+			secret, keyID := issueOwnedHTTP(t, s, headers, "target-row-before", nil)
+			target := api.ManagementKey{ID: keyID}
 			admitted := credentialCall(ctx, h, "GET", "/v1/agents", nil, http.Header{"X-Api-Key": {secret}})
 			if admitted.Code != 200 || admitted.Header().Get("x-platform-signed-out") != "" {
 				t.Fatalf("target-row expiry premise: newly issued target did not authenticate: status=%d signed_out=%t", admitted.Code, admitted.Header().Get("x-platform-signed-out") != "")
@@ -62,7 +61,7 @@ func TestNativeCredentialTargetExpiryAfterTargetRowWait(t *testing.T) {
 			var beforeKeys, beforeWorkers int
 			var validTarget bool
 			if err := observer.QueryRow(ctx, `SELECT name='target-row-before' AND status='active'
-				AND created_by=$2 AND key_hash=$3 AND expires_at IS NOT DISTINCT FROM $4::timestamptz
+				AND created_by=$2 AND owned_key_hash=$3 AND expires_at IS NOT DISTINCT FROM $4::timestamptz
 				AND clock_timestamp()<$5::timestamptz,
 				(SELECT count(*) FROM api_keys),(SELECT count(*) FROM environment_keys)
 				FROM api_keys WHERE id=$1`, target.ID, caller, apikey.Hash(secret), expiresAt, deadline).Scan(&validTarget, &beforeKeys, &beforeWorkers); err != nil || !validTarget {
@@ -123,7 +122,7 @@ func TestNativeCredentialTargetExpiryAfterTargetRowWait(t *testing.T) {
 					ExpiresAt        *time.Time                 `json:"expires_at"`
 					RawKey           string                     `json:"raw_key"`
 				}
-				if json.Unmarshal(rr.Body.Bytes(), &resource) != nil || resource.ID != target.ID || resource.Name != wantName || resource.Status != "active" || resource.CreatedBy == nil || resource.CreatedBy.ID != caller || resource.CreatedBy.Type != "principal" || resource.ExpiresAt != nil || resource.RawKey != "" {
+				if json.Unmarshal(rr.Body.Bytes(), &resource) != nil || resource.ID != target.ID || resource.Name != wantName || resource.Status != "active" || resource.CreatedBy == nil || resource.CreatedBy.ID != principal.PublicID(caller, "user") || resource.CreatedBy.Type != "user" || resource.ExpiresAt != nil || resource.RawKey != "" {
 					t.Error("target-row expiry control returned invalid renamed key metadata or disclosed a credential")
 				}
 			}
@@ -131,7 +130,7 @@ func TestNativeCredentialTargetExpiryAfterTargetRowWait(t *testing.T) {
 			var storedName, storedStatus, issuer string
 			var storedExpiry *time.Time
 			var matchesHash bool
-			if err := observer.QueryRow(ctx, `SELECT name,status,created_by,expires_at,key_hash=$2 FROM api_keys WHERE id=$1`, target.ID, apikey.Hash(secret)).Scan(&storedName, &storedStatus, &issuer, &storedExpiry, &matchesHash); err != nil {
+			if err := observer.QueryRow(ctx, `SELECT name,status,created_by,expires_at,owned_key_hash=$2 FROM api_keys WHERE id=$1`, target.ID, apikey.Hash(secret)).Scan(&storedName, &storedStatus, &issuer, &storedExpiry, &matchesHash); err != nil {
 				t.Fatalf("read durable target-row expiry metadata: %v", err)
 			}
 			if storedName != wantName || storedStatus != "active" || issuer != caller || !matchesHash {

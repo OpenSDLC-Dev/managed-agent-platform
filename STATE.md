@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 3: principal-owned key delivery.
-Public owned-key admission is verified. HTTP issuance, Console and integrated acceptance remain pending.
+Public owned-key admission, HTTP issuance and its mutation fence are verified. Console and integrated acceptance remain pending.
 Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance).
 **no release until plan 69 slice 7**.
 
@@ -16,6 +16,6 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 - [x] Obtain owned-key response/assignment evidence ([recordings #82](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/82#issuecomment-6702692704)). Lower-role visibility and `can_manage:false` remain unconfirmed in [#40](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/40).
 - [x] Confirm both owners' direct-key Memory attribution ([recordings #83](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/83#issuecomment-6702693061)).
 - [x] Verify owned public role/Bearer admission and remove public IdP/proxy sign-in, including cleaning redirects ([admission tests](./internal/api/ownedkeyauth_test.go), [redirect tests](./internal/api/ownedkeyredirect_test.go)).
-- [ ] Complete owned HTTP issuance and its mutation fence. Activate legacy human INSERT refusal in a new numbered migration with the issuer. Never edit migration 0060.
+- [x] Verify owned HTTP issuance and fenced per-row mutations ([issuer tests](./internal/api/ownedkeys_test.go), [fence tests](./internal/api/ownedkeymutation_test.go)). Migration 0061 rejects new human-unowned INSERTs; 0060 is unchanged.
 - [ ] Update the native Console for principal-owned key creation and row permissions.
 - [ ] Run real SDK/`ant` and fresh Compose acceptance; pair the Console source/image and add executable CI coverage.

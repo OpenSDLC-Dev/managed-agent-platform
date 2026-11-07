@@ -308,8 +308,8 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 		if errType != "permission_error" {
 			t.Errorf("GET api_keys as %q: error type %q, want permission_error", claim, errType)
 		}
-		if msg := laneMessage(t, body); msg != "this route requires the admin role" {
-			t.Errorf("GET api_keys as %q: message %q, want %q", claim, msg, "this route requires the admin role")
+		if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+			t.Errorf("GET api_keys as %q: message %q, want %q", claim, msg, "this route requires the developer role")
 		}
 		if role, source := storedRole(t, s); role != "user" || source != "console" {
 			t.Errorf("after %q: stored (role, role_source) = (%q, %q), want (user, console)", claim, role, source)
@@ -337,8 +337,8 @@ func TestAFirstSignInWithoutAMappingIsAUser(t *testing.T) {
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Fatalf("GET api_keys at a first, unmapped sign-in: status %d, error %q, want 403 permission_error", status, errType)
 	}
-	if msg := laneMessage(t, body); msg != "this route requires the admin role" {
-		t.Errorf("message = %q, want %q", msg, "this route requires the admin role")
+	if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+		t.Errorf("message = %q, want %q", msg, "this route requires the developer role")
 	}
 	if role, source := storedRole(t, s); role != "user" || source != "console" {
 		t.Errorf("stored (role, role_source) = (%q, %q), want (user, console)", role, source)
@@ -368,8 +368,8 @@ func checkTheMappingIsStoredAndFollowed(t *testing.T, s *laneServer, send func(m
 	if status, errType := laneStatus(t, send(http.MethodGet, path, "platform-devs")); status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET tokens mapped to developer: status %d, error %q, want 403 permission_error", status, errType)
 	}
-	if status, errType := laneStatus(t, send(http.MethodGet, consoleAPIKeysPath, "platform-devs")); status != http.StatusForbidden {
-		t.Errorf("GET api_keys mapped to developer: status %d, error %q, want 403", status, errType)
+	if status, errType := laneStatus(t, send(http.MethodGet, consoleAPIKeysPath, "platform-devs")); status != http.StatusOK {
+		t.Errorf("GET api_keys mapped to developer: status %d, error %q, want 200", status, errType)
 	}
 	if role, source := storedRole(t, s); role != "developer" || source != "idp" {
 		t.Errorf("after a developer mapping: stored (role, role_source) = (%q, %q), want (developer, idp)", role, source)
@@ -417,8 +417,8 @@ func TestAnUnmappedFormerIdPRoleFallsToUser(t *testing.T) {
 	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET api_keys no longer mapped: status %d, error %q, want 403 permission_error", status, errType)
-	} else if msg := laneMessage(t, body); msg != "this route requires the admin role" {
-		t.Errorf("message = %q, want %q", msg, "this route requires the admin role")
+	} else if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+		t.Errorf("message = %q, want %q", msg, "this route requires the developer role")
 	}
 	if role, source := storedRole(t, s); role != "user" || source != "console" {
 		t.Errorf("stored (role, role_source) = (%q, %q), want (user, console)", role, source)
@@ -560,13 +560,9 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 	}
 }
 
-// TestIdentityLaneAPIKeyRoutesRequireAdmin is the environment-key section's twin
-// for management keys (plan 32 slice 2, #378), and gated the same way and for a
-// sharper reason: this surface mints the credential that reaches every /v1 route,
-// so a developer who could issue one would hold admin by another name. The
-// listing is gated with the mutations because which credentials exist, what they
-// are named and who issued them is itself the inventory an attacker would want.
-func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
+// Human developers issue self-owned keys; user stays denied. Environment keys
+// and workspace reads retain their independent admin floor.
+func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 	s := newLaneServer(t)
 
 	for _, tc := range []struct {
@@ -574,7 +570,7 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		want int
 	}{
 		{role: "platform-read", want: http.StatusForbidden},
-		{role: "platform-devs", want: http.StatusForbidden},
+		{role: "platform-devs", want: http.StatusOK},
 		{role: "platform-admins", want: http.StatusOK},
 	} {
 		status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
@@ -598,10 +594,10 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		consoleAPIKey("apikey_" + strings.Repeat("a", 24)),
 		consoleOrgAPIKey("apikey_" + strings.Repeat("a", 24)),
 	} {
-		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-devs"),
+		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-read"),
 			map[string]any{"status": "archived"}))
 		if status != http.StatusForbidden || errType != "permission_error" {
-			t.Errorf("update %s as a developer: status %d, error type %q, want 403 permission_error", path, status, errType)
+			t.Errorf("update %s as a user: status %d, error type %q, want 403 permission_error", path, status, errType)
 		}
 	}
 	// The workspace read sits in the same admin section.
@@ -611,9 +607,8 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		t.Errorf("workspace read as a developer: status %d, error type %q, want 403 permission_error", status, errType)
 	}
 
-	// An admin who issues a key over the identity lane is recorded as its creator
-	// by their stable principal_ id — the audit answer plan 31 shipped principals
-	// for, and the reason created_by is not merely decorative.
+	// New owned resources expose the human creator alias, separate from the
+	// unchanged internal principal_ audit identifier stored in SQL.
 	_, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token("platform-admins"),
 		map[string]any{"name": "issued-by-a-human"}))
 	var issued struct {
@@ -622,8 +617,8 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &issued); err != nil {
 		t.Fatalf("decode issuance: %v (body %s)", err, raw)
 	}
-	if issued.CreatedBy.Type != "principal" || !strings.HasPrefix(issued.CreatedBy.ID, "principal_") {
-		t.Errorf("created_by = %+v, want the issuing human's principal_ id", issued.CreatedBy)
+	if issued.CreatedBy.Type != "user" || !strings.HasPrefix(issued.CreatedBy.ID, "user_") {
+		t.Errorf("created_by = %+v, want the issuing human's user_ alias", issued.CreatedBy)
 	}
 }
 
