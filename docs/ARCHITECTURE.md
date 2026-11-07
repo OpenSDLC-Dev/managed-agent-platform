@@ -692,7 +692,21 @@ and holds the two OS-touching adapters `gaterun/` declares.
   authority loss or store failure cancels them within 15 seconds.
   Gateway administration accepts current-session developer reads and admin writes.
   Its offered legacy credentials keep precedence; inference never gains cookie authority.
-  Public `/v1`, worker and gate paths never accept cookies. Owned keys remain later work.
+  Public `/v1`, worker and gate paths never accept cookies. Owned-key HTTP issuance
+  and admission remain later work.
+- **Owned digests stay outside legacy database authentication.** Slice 3's preparatory
+  migration separates owned digests from the legacy authentication column.
+  One uniqueness rule spans both columns; credential identity cannot change.
+  Existing keys remain unowned, regardless of their issuer audit ID.
+  Principal deactivation archives owned keys transactionally; restoration revives none.
+  Old gateway policy writes reject owned or invisible targets. The store also
+  returns a typed invalid-request error for owned targets, after authorization.
+  Both servers check configured bootstrap and brain values before exposing handlers.
+  Any owned match stops startup, regardless of status or expiry. The control plane
+  checks both values before preparing their rows in one READ COMMITTED transaction.
+  These safeguards do not enable owned HTTP issuance or current-role API admission.
+  The new issuer must share the principal-first mutation fence and refuse legacy
+  human INSERTs at activation. This is not a complete rolling-issuance protocol.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

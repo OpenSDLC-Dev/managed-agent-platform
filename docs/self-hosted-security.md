@@ -1328,8 +1328,10 @@ Local accounts can be created only in development password mode. Names are
 immutable and never linked by email. Member removal and service-account archival
 are lasting deactivations. Tombstones preserve IDs and issuer/subject pairs;
 archival keeps the service-account name reserved. No restoration endpoint exists.
-These routes do not issue or archive API keys in slice 2; owned keys arrive in slice 3.
-Environment keys remain independent and require separate revocation.
+These routes issue no API keys. Slice 3's preparatory database guard archives
+any owned keys when their principal is deactivated; restoring the principal restores no key.
+Existing keys remain unowned and are not archived merely because their issuer is removed.
+Owned-key HTTP issuance is not enabled. Environment keys remain independent and require separate revocation.
 
 #### Native browser login
 
@@ -1529,13 +1531,28 @@ Numbered last because it shipped last (plan 32,
 [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)); read it
 beside §6, whose environment-key lifecycle it parallels.
 
+Plan 69 slice 3 adds storage and startup safeguards. Existing and newly HTTP-issued
+keys remain unowned. Owned digests are isolated from legacy authentication;
+gateway policy writes refuse owned targets. Owner and issuer are different facts.
+Both servers stop at startup if either configured preset matches an owned key,
+including inactive, archived or expired rows. The control plane checks both values
+before preparing bootstrap and brain in one transaction, before setup-code delivery.
+A failed preparation leaves both presets unchanged. Unowned adoption, rotation and
+brain retirement keep their existing behavior.
+
+These safeguards cover normal rolling deploys with consistent preset configuration.
+They cannot constrain an old gateway manually reconfigured with a new owned raw bootstrap value.
+Owned HTTP issuance and current-role admission are still pending. Before enabling
+owned issuance, its replacement issuer must also close the legacy human INSERT path.
+This batch alone is not a complete rolling rollout.
+
 The management `x-api-key` authenticates every **management** `/v1` route and the
 console API behind it — the work API is the exception, taking a worker's
 environment key instead — so it is the credential with the widest blast radius in
 the platform. Two things write it, and they are deliberately different.
 
-`CONTROLPLANE_API_KEY` is **env-var-managed**: `EnsureAPIKey` runs once at boot,
-hashes the value you configured, and archives any other live **env-var-managed**
+`CONTROLPLANE_API_KEY` is **env-var-managed**: `EnsureManagementPresets` runs once at boot,
+hashes the accepted unowned value, and archives any other live **env-var-managed**
 key sharing its name. That is **rotation-by-restart** — set a new value, restart,
 and the previous one is dead — and `api_keys_one_live_unissued` makes "one live
 key per name" a schema invariant for those rows, so two control-plane replicas
@@ -1544,8 +1561,8 @@ racing to adopt different values cannot both win. Read the qualifier literally: 
 not this lane's to retire and several live keys may share a name here. Restarting
 with a new value therefore rotates the bootstrap credential and nothing else — if
 you also meant to retire an issued key, archive it over the console API. Its inverse is worth knowing before you meet
-it: rotation is by *value*, so putting a previously-archived value back into the
-variable revives that row at the next boot. If the value had been issued from the
+it: rotation is by *value*, so putting a previously-archived unowned value back into
+the variable revives that row at the next boot. If the value had been issued from the
 console, the adoption is logged with a warning naming its previous status; if it
 was env-var-managed all along, it is not, having never left that lane.
 

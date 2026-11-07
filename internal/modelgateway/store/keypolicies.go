@@ -21,8 +21,8 @@ func keyPolicyNotFound(id string) error {
 }
 
 // PutKeyPolicy writes k whole, creating it or replacing the key's grant. The
-// key must exist in api_keys, which the platform owns, and every alias the
-// grant names must exist.
+// key must exist and be unowned in api_keys, which the platform owns. Every
+// alias the grant names must exist.
 func (s *Store) PutKeyPolicy(ctx context.Context, k KeyPolicy) (KeyPolicy, error) {
 	return s.PutKeyPolicyAuthorized(ctx, k, nil)
 }
@@ -38,12 +38,18 @@ func (s *Store) PutKeyPolicyAuthorized(ctx context.Context, k KeyPolicy, authori
 				return err
 			}
 		}
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1)`, k.APIKeyID).Scan(&exists); err != nil {
+		// Ownership is immutable. Keep the target from being deleted/replaced
+		// until the write commits; the database trigger also protects old writers.
+		var owned bool
+		err := tx.QueryRow(ctx, `SELECT owner_principal_id IS NOT NULL FROM api_keys WHERE id = $1 FOR KEY SHARE`, k.APIKeyID).Scan(&owned)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fail(ErrNotFound, "api key %q does not exist", k.APIKeyID)
+		}
+		if err != nil {
 			return err
 		}
-		if !exists {
-			return fail(ErrNotFound, "api key %q does not exist", k.APIKeyID)
+		if owned {
+			return fail(ErrInvalid, "principal-owned API key cannot receive a legacy model grant")
 		}
 		if k.Aliases != nil {
 			found, err := collectStrings(ctx, tx, `SELECT name FROM modelgateway.aliases WHERE name = ANY($1) FOR SHARE`, k.Aliases)
@@ -56,7 +62,6 @@ func (s *Store) PutKeyPolicyAuthorized(ctx context.Context, k KeyPolicy, authori
 				}
 			}
 		}
-		var err error
 		out, err = scanKeyPolicy(tx.QueryRow(ctx,
 			`INSERT INTO modelgateway.key_policies (api_key_id, aliases, rpm, tpm) VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (api_key_id) DO UPDATE

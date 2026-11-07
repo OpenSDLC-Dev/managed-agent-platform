@@ -53,6 +53,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
@@ -129,6 +130,9 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
+	if err := apikey.CheckPresetOwnership(ctx, pool, bootKey, os.Getenv("BRAIN_API_KEY")); err != nil {
+		return err
+	}
 	cipher, err := backend.FromEnv(ctx)
 	if err != nil {
 		return err

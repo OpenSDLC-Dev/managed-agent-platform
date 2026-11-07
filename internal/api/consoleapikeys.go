@@ -46,9 +46,10 @@ const apiKeyNameMax = 500
 // names a workspace that does not exist.
 const reservedWorkspace = "default"
 
-// actorJSON renders the reference's `{id, type}` actor. Its own vocabulary for
-// type is `user`; ours is `principal` or `api_key`, because we have no `user_`
-// id to give — a divergence, registered in docs/DIVERGENCES.md.
+// actorJSON renders the recorded private creator's `{id, type}` shape. That
+// recording uses `user`; this surface retains stored audit IDs and the existing
+// `principal`/`api_key` vocabulary, not member-management's private user_ aliases.
+// The divergence is registered in docs/DIVERGENCES.md.
 type actorJSON struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
@@ -57,10 +58,9 @@ type actorJSON struct {
 // apiKeyJSON is a management key as both the listing and the update render it,
 // field-for-field from the recorded resource, in its order.
 //
-// Three fields are deliberately not what the reference's public schema shows.
-// `workspace_id` and `principal` are emitted null — which is mirroring rather
-// than reserving-by-guess, because on the reference's own single-tenant account
-// both came back null (#378), so #56 can populate them without a shape change.
+// `workspace_id` and `principal` remain null, as recorded in #378. That capture
+// establishes no non-null private principal shape. Owned-key issuance and its
+// DTO await managed-agents-wire-recordings#82; actorJSON is no evidence for it.
 // `can_manage`, which the listing carries and the created resource does not, is
 // omitted entirely: these routes are admin-only, so the field would be a
 // constant true — a per-row authorization hint for a permission split we have
@@ -92,12 +92,11 @@ type apiKeyIssuedJSON struct {
 // apiKeyResourceType is the resource discriminator the reference emits.
 const apiKeyResourceType = "api_key"
 
-// The actor vocabulary, which is a SEPARATE wire concept from the resource
-// discriminator above even though one of its values is spelled the same. The
-// reference's actor union has a single member, `user`; ours has two, because we
-// have no `user_` id to give. Binding actorMachine to apiKeyResourceType would
-// mean that matching the resource discriminator to a future recording silently
-// rewrote every machine issuer's actor type in the same edit.
+// The creator vocabulary is separate from the resource discriminator above.
+// The recorded creator uses `user`; our existing audit rendering uses these two
+// values. This says nothing about a non-null private key principal. Binding
+// actorMachine to apiKeyResourceType would let a resource-discriminator change
+// silently rewrite every machine issuer's actor type.
 const (
 	actorMachine = "api_key"
 	actorHuman   = "principal"
@@ -465,11 +464,11 @@ func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
 // to link a key to an identity, as far as the recordings reach. Its shape is
 // recorded: a `user_` or `svac_` id, anything else a 400 with
 // `{error_visibility}` (2026-09-05 batch5 `rec86.create.principal_id.bogus-string`).
-// Reference behavior for a well-formed id is not recorded. Principal-linked
-// key ownership is not implemented in plan 69 slice 2, so even an existing
-// private user/service-account alias receives the namespace's 404. An absent
-// or null field means no principal. This platform currently issues only
-// unowned keys.
+// Successful assignment and its private response await recording request #82
+// in managed-agents-wire-recordings. Storage preparation enables no HTTP
+// ownership assignment, so even an existing private user/service-account alias
+// receives the namespace's 404. An absent or null field means no principal.
+// HTTP issuance still creates only unowned keys.
 func apiKeyPrincipal(obj map[string]json.RawMessage) error {
 	raw, ok := obj["principal_id"]
 	if !ok || isNull(raw) {
