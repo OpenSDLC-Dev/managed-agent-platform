@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -473,11 +474,12 @@ func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *lo
 }
 
 // dispatchManagementAuth preserves verified cookie context from the private
-// resource proxy. Otherwise x-api-key wins, including invalid/repeated fields;
-// an issued-prefix Bearer selects the key lane without a fallback lookup.
-// Human credentials remain only off public /v1. There they precede the
-// environment-key refusal, as before. On public /v1 an assertion is ignored,
-// so an environment Bearer keeps its recorded answer in every identity mode.
+// resource proxy. Otherwise x-api-key wins, including invalid/repeated fields.
+// On public /v1, an issued-prefix Bearer selects the key lane without fallback.
+// Off public /v1, a known unowned Bearer can accompany a human assertion; it
+// supplies no authority. Owned or unknown issued tokens cannot take that path.
+// Human credentials still precede private environment-key refusals. On public
+// /v1 an assertion is ignored, preserving the environment Bearer's own answer.
 func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
 	var human http.Handler
@@ -493,13 +495,35 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *l
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		if apiKeyOffered(r) || issuedAPIKeyBearer(r) {
+		requestedPublic, routedPublic := publicAPIPaths(r)
+		if apiKeyOffered(r) || issuedAPIKeyBearer(r) && (requestedPublic || routedPublic) {
 			mgmt.ServeHTTP(w, r)
 			return
 		}
-		requestedPublic, routedPublic := publicAPIPaths(r)
 		if human != nil && !requestedPublic && !routedPublic {
 			if _, ok := v.Credential(r); ok {
+				if issuedAPIKeyBearer(r) {
+					if len(r.Header.Values("Authorization")) > 1 {
+						mgmt.ServeHTTP(w, r)
+						return
+					}
+					// Classify the immutable stored shape, not active authority.
+					// A legacy companion is ignored even after expiry/archive;
+					// an owned one must never fall through after losing authority.
+					token, _ := bearerToken(r)
+					var legacy bool
+					err := pool.QueryRow(r.Context(), `SELECT EXISTS (
+						SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
+						apikey.Hash(token)).Scan(&legacy)
+					if err != nil {
+						writeError(w, r, err)
+						return
+					}
+					if !legacy {
+						mgmt.ServeHTTP(w, r)
+						return
+					}
+				}
 				human.ServeHTTP(w, r)
 				return
 			}
