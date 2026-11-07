@@ -183,7 +183,7 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 // A turn whose history holds tool calls and whose agent offers no tools sends
 // no tools, and replays the history as a request with tools would. The
 // reference was recorded taking such a turn (docs/DIVERGENCES.md, the session
-// update entry); #1021's placeholder tool, reverted, sent one here.
+// update entry); PR #1023's placeholder tool (#1021), reverted, sent one here.
 func TestBuildRequestSendsToolHistoryWithNoTools(t *testing.T) {
 	use := ev(2, domain.EventAgentToolUse, `{"name":"bash","input":{"command":"ls"}}`)
 	history := []domain.Event{
@@ -203,6 +203,15 @@ func TestBuildRequestSendsToolHistoryWithNoTools(t *testing.T) {
 	req := build(nil)
 	if len(req.Tools) != 0 {
 		t.Fatalf("tools = %s, want none", req.Tools)
+	}
+	var replayed strings.Builder
+	for _, m := range req.Messages {
+		replayed.Write(m.Content)
+	}
+	for _, block := range []string{`"type":"tool_use"`, `"type":"tool_result"`} {
+		if !strings.Contains(replayed.String(), block) {
+			t.Fatalf("replayed messages lack %s: %s", block, replayed.String())
+		}
 	}
 	offered := build([]json.RawMessage{json.RawMessage(`{"name":"bash","description":"d","input_schema":{"type":"object"}}`)})
 	if len(req.Messages) != len(offered.Messages) {

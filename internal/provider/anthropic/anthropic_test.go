@@ -316,6 +316,37 @@ func TestGenerateEmptyToolInputAndStringContent(t *testing.T) {
 	}
 }
 
+// A request with tool history and no tools leaves `tools` and `tool_choice` off
+// the wire, as the brain sends one after an agent's tools are cleared
+// (docs/DIVERGENCES.md, the session update entry).
+func TestGenerateSendsNoToolsKeyWhenNoneIsOffered(t *testing.T) {
+	f := &fakeServer{sse: []string{
+		`{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	}}
+	p := start(t, f)
+	stream, err := p.Generate(context.Background(), provider.Request{
+		Messages: []provider.Message{
+			{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"run ls"}]`)},
+			{Role: "assistant", Content: json.RawMessage(`[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"ls"}}]`)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"toolu_1","content":"a.txt"},{"type":"text","text":"thanks"}]`)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	collect(t, stream)
+	for _, key := range []string{"tools", "tool_choice"} {
+		if v, ok := f.gotBody[key]; ok {
+			t.Errorf("%s = %v, want the key absent", key, v)
+		}
+	}
+	if n := len(f.gotBody["messages"].([]any)); n != 3 {
+		t.Errorf("messages = %d, want 3", n)
+	}
+}
+
 func TestGeneratePassthroughPreservesFields(t *testing.T) {
 	// Fields and tool types unknown to the pinned SDK version must survive
 	// to the wire value-preserved (the SDK marshaler may compact and
