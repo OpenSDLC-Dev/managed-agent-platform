@@ -270,12 +270,11 @@ func run(ctx context.Context) error {
 		slog.Info("secrets cipher not configured; vault credential storage will report the absence")
 	}
 
-	// Human authentication is optional the same way, and constructing it here is
-	// what makes a misconfigured IdP a boot failure rather than a 500 on the
-	// first human's first request: New performs discovery and one warming key
-	// fetch. Without it (IDENTITY_MODE unset or disabled) the surface is
-	// byte-for-byte what it was — no lane, no role check, machine credentials
-	// unchanged.
+	// The IdP is optional. Constructing its verifier here makes a misconfigured
+	// IdP a boot failure rather than a 500 on the first human request: New
+	// performs discovery and one warming key fetch. Without an IdP
+	// (IDENTITY_MODE unset or disabled), owned public API keys still use their
+	// owner's current role.
 	verifier, err := identity.FromEnv(ctx)
 	if err != nil {
 		return err
@@ -283,7 +282,7 @@ func run(ctx context.Context) error {
 	if loginCfg.Mode == login.ModePassword {
 		slog.Info("native password login configured for development")
 	} else if verifier == nil {
-		slog.Info("identity not configured; human SSO is off and management auth remains x-api-key only")
+		slog.Info("identity not configured; human SSO is off and API-key authentication remains available")
 	} else {
 		slog.Info("identity configured", "mode", string(verifier.Mode()))
 	}

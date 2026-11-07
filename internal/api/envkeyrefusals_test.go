@@ -308,13 +308,8 @@ func TestARevokedGrandfatheredKeyIsAnsweredAsDead(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
 }
 
-// TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman: in trusted_proxy mode a
-// proxy's assertion and a worker's Bearer can ride one request, and the human
-// the proxy vouched for is served, whatever state the stale Bearer is in: on
-// the management lane an environment key is only ever refused, so it is
-// answered only when no human credential is offered. An assertion that fails
-// verification is the human lane's own 401, not the environment key's answer.
-// (In oidc mode the two cannot meet: the human's credential is the Bearer.)
+// A trusted proxy assertion wins over an environment Bearer only on the
+// retained private human lane. Public routes keep the environment-key answer.
 func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
 	const header = "x-goog-iap-jwt-assertion"
 	s := newLaneServerWith(t, func(c *identity.Config) {
@@ -325,20 +320,25 @@ func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
 	live := issueViaConsole(t, s.tserver, envID, "stale-but-live")
 	revoked := issueViaConsole(t, s.tserver, envID, "stale-and-revoked")
 	revokeViaConsole(t, s.tserver, envID, "stale-and-revoked")
-	human := s.token("platform-devs")
-
-	for name, key := range map[string]string{"a live key": live, "a revoked key": revoked} {
+	human := s.token("platform-admins")
+	for _, key := range []string{live, revoked} {
+		headers := map[string]string{header: human, "Authorization": "Bearer " + key}
+		assertOwnedResponse(t, s.doRaw("GET", consoleTokens(envID), nil, headers), 200)
 		for _, path := range []string{"/v1/agents", "/v1/skills"} {
-			res := s.doRaw(http.MethodGet, path, nil, map[string]string{header: human, "Authorization": "Bearer " + key})
-			if status, body := readJSON(t, res); status != http.StatusOK {
-				t.Errorf("an assertion beside %s on %s: status %d, body %v; want the human served", name, path, status, body)
+			code, body := readJSON(t, s.doRaw("GET", path, nil, headers))
+			wantCode, wantType, message := 401, "authentication_error", "Authentication failed"
+			if key == revoked {
+				message = revokedKeyMessage
+			} else if path == "/v1/skills" {
+				wantCode, wantType, message = 403, "permission_error", skillsScopeMessage
 			}
+			wantErrMsg(t, code, body, wantCode, wantType, message)
 		}
 	}
-	status, body := readJSON(t, s.doRaw(http.MethodGet, "/v1/agents", nil,
+	code, body := readJSON(t, s.doRaw("GET", consoleTokens(envID), nil,
 		map[string]string{header: "not-a-token", "Authorization": "Bearer " + live}))
-	if status != http.StatusUnauthorized || envelopeMessage(body) == "Authentication failed" {
-		t.Errorf("a bad assertion beside a live key: status %d, body %v; want the human lane's 401", status, body)
+	if code != 401 || envelopeMessage(body) == "Authentication failed" {
+		t.Errorf("bad private assertion: status %d body %v; want human-lane 401", code, body)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // The memory-store wire surface (plan 36 slice 1, #52): shapes per the SDK's
@@ -591,7 +593,9 @@ func TestMemoryStoreList(t *testing.T) {
 // answers, and a store that recorded nobody would look exactly like a working
 // one until someone needed the audit trail.
 func TestMemoryStoreRecordsItsCreator(t *testing.T) {
-	s := newLaneServer(t)
+	s := newNativeServer(t, login.ModePassword)
+	owner := s.seedLocal("store-writer", "developer", "active")
+	cookie, session := s.issue(owner)
 
 	// The machine lane: the x-api-key's own row id.
 	machineID := createMemoryStore(t, s.tserver, "machine-made")
@@ -609,8 +613,8 @@ func TestMemoryStoreRecordsItsCreator(t *testing.T) {
 	}
 
 	// The human lane: the principal id, not the api key's and not the subject.
-	status, _, raw := laneRead(t, s.bearer(http.MethodPost, "/v1/memory_stores",
-		s.token("platform-devs"), map[string]any{"name": "human-made"}))
+	status, _, raw := laneRead(t, s.doRaw(http.MethodPost, "/api/organizations/default/proxy/v1/memory_stores",
+		map[string]any{"name": "human-made"}, map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken}))
 	if status != http.StatusOK {
 		t.Fatalf("a developer creating a store: status %d (%v)", status, laneMessage(t, raw))
 	}

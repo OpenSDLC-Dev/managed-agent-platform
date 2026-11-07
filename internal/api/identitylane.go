@@ -20,9 +20,8 @@ type identityPrincipal struct {
 	Role identity.Role
 }
 
-// identityFrom returns the human a request authenticated as. ok is false on
-// every machine lane — the management key, an environment key, a gate token —
-// which is exactly what makes requireRole a no-op there.
+// identityFrom returns the authenticated human. API-key owners have a separate
+// authority context, so an owned credential never becomes a cookie/IdP actor.
 func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 	p, ok := ctx.Value(ctxKeyIdentity).(identityPrincipal)
 	return p, ok
@@ -46,7 +45,7 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Ma
 			return
 		}
 		// Dispatch has selected the human lane. An accompanying worker Bearer
-		// cannot exempt its ambient assertion, even on a public management route.
+		// cannot exempt its ambient assertion on the retained private surface.
 		if manager != nil && manager.NativeEnabled() && v.Mode() == identity.ModeTrustedProxy && manager.CheckProxyOrigin(r) != nil {
 			writeError(w, r, errForbidden("invalid browser origin"))
 			return
@@ -77,34 +76,27 @@ func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Ma
 	})
 }
 
-// requireRole enforces a route's minimum role. It is the whole enforcement
-// point, and it applies to the identity lane alone: a machine credential carries
-// no role, so on those lanes it returns nil without looking at min.
-//
-// Default-deny falls out of Role.AtLeast rather than being coded here. AtLeast
-// fails closed at both ends — a minimum that is not one of the three roles
-// denies, and RoleNone satisfies nothing — and identity.RoleNone is not one of
-// the three. So a route registered with RoleNone denies every human, with no
-// branch to forget. A human whose claims mapped to nothing is not RoleNone here:
-// they hold their stored role, which is user unless the console set another, and
-// the route table admits a user only where TestNoRouteAdmitsUserExceptRedemption
-// allows. Slice 3 annotated every identity-reachable route per the plan's
-// matrix; the registrations still at RoleNone are the machine lanes. Usually
-// this function has already returned nil for those, min unread — but not
-// always, and the exception is the reason they keep RoleNone rather than
-// nothing: dispatchAuth classifies the escaped path while ServeMux matches the
-// decoded one, so a percent-encoded spelling of a work or gate route arrives HERE,
-// on the identity lane, with a real principal. RoleNone is what turns it away.
+// requireRole checks owned-key authority first, then the retained human lane.
+// Legacy unowned keys and scoped machine credentials keep their own rules.
+// RoleNone satisfies no principal-bound caller: an encoded work/gate segment
+// can miss dispatch's machine predicate but still match ServeMux's route.
+// That route's RoleNone must refuse before its handler checks work scope.
 func requireRole(ctx context.Context, min identity.Role) error {
-	p, onIdentityLane := identityFrom(ctx)
-	if !onIdentityLane {
+	var role identity.Role
+	refusal := "this route is not available to SSO-authenticated callers"
+	if key, ok := ownedKeyFrom(ctx); ok {
+		role = key.Role
+		refusal = "this route is not available to principal-owned API keys"
+	} else if p, ok := identityFrom(ctx); ok {
+		role = p.Role
+	} else {
 		return nil
 	}
-	if p.Role.AtLeast(min) {
+	if role.AtLeast(min) {
 		return nil
 	}
 	if _, real := identity.ParseRole(string(min)); real {
 		return errForbidden("this route requires the " + string(min) + " role")
 	}
-	return errForbidden("this route is not available to SSO-authenticated callers")
+	return errForbidden(refusal)
 }
