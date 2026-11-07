@@ -2,9 +2,9 @@ package main
 
 import "testing"
 
-// The third allowed-hosts list goes through the same front end the two API lists
-// do, so an operator can write a Unicode name where the matcher canonicalizes
-// one (plan 43, #609).
+// The third allowed-hosts list goes through the front end the two API lists
+// share, and alone still converts a Unicode name to its A-label (plan 43, #609).
+// The API lists refuse one, as the reference does (#614).
 func TestSplitDomainsStoresTheALabel(t *testing.T) {
 	got, err := splitDomains("b\u00fccher.example, *.B\u00dcCHER.example ,API.example.com")
 	if err != nil {

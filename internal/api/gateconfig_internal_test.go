@@ -108,9 +108,9 @@ func TestEmitUnreachableCredentialsNoConflict(t *testing.T) {
 }
 
 // Every declaration that would widen the gate past the server it names is
-// refused. The list is agent-controlled and passes no URL grammar at all
-// (parseMCPServers requires a non-empty string), so this reader is where the
-// shape is decided — which is why it is driven directly.
+// refused. The list is agent-controlled and passes almost no URL grammar
+// (parseMCPServers requires a non-empty string free of non-ASCII), so this
+// reader is where the shape is decided — which is why it is driven directly.
 func TestTheGatesMCPEndpointsRefuseWhatWouldWiden(t *testing.T) {
 	limited := domain.Networking{Type: domain.NetLimited, AllowMCPServers: true}
 	declared := []byte(`[

@@ -1354,6 +1354,12 @@ func TestEnvironmentAllowedHostsRefuseAUnicodeName(t *testing.T) {
 	status, res := s.do(http.MethodPost, "/v1/environments", map[string]any{
 		"name": "u-label", "config": limited("b\u00fccher.example")})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+	// A character %q would escape, such as a soft hyphen, is quoted as written too.
+	status, res = s.do(http.MethodPost, "/v1/environments", map[string]any{
+		"name": "soft-hyphen", "config": limited("soft\u00adhyphen.example")})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"`allowed_hosts` entries must be hostnames or wildcard patterns, "+
+			"e.g. \"example.com\" or \"*.example.com\". Got \"soft\u00adhyphen.example\".")
 
 	env := createEnvironment(t, s, map[string]any{"name": "a-label", "config": limited("xn--bcher-kva.example")})
 	id := env["id"].(string)

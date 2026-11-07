@@ -210,6 +210,17 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 	return errInvalid("packages require networking.allow_package_managers to be true under limited networking")
 }
 
+// envUnicodeHost is the reference's refusal of a Unicode environment
+// allowed_hosts entry, recorded 2026-11-07 on create and update alike
+// (managed-agents-wire-recordings 2026-11-07-empty-tools-followup idx 20,
+// 2026-11-07-unicode-session-alternatives idx 1). The recordings show "ü" quoted
+// as written. How the reference echoes a character %q would escape, such as a
+// soft hyphen, is unrecorded; this quotes it as written too.
+func envUnicodeHost(h string) error {
+	return errInvalid("`allowed_hosts` entries must be hostnames or wildcard patterns, "+
+		"e.g. \"example.com\" or \"*.example.com\". Got \"%s\".", h)
+}
+
 // parseNetworking validates a networking object strictly (unknown fields are
 // rejected — a typo'd allowed_hosts must not silently lock all egress open or
 // closed). When both the patch and prior are "limited", omitted fields keep
@@ -225,16 +236,6 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // reference's words (#614). The reference also refuses an A-label entry, which
 // this platform accepts. Its answer to the other shapes the grammar refuses is
 // unrecorded, so those 400s are in our words. DIVERGENCES registers all three.
-// envUnicodeHost is the reference's refusal of a Unicode environment
-// allowed_hosts entry, recorded 2026-11-07 on create and update alike
-// (managed-agents-wire-recordings 2026-11-07-empty-tools-followup idx 20,
-// 2026-11-07-unicode-session-alternatives idx 1). The entry is quoted as written,
-// as the recording shows; %q would escape a soft hyphen or a zero-width space.
-func envUnicodeHost(h string) error {
-	return errInvalid("`allowed_hosts` entries must be hostnames or wildcard patterns, "+
-		"e.g. \"example.com\" or \"*.example.com\". Got \"%s\".", h)
-}
-
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
