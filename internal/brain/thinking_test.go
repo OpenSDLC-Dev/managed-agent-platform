@@ -373,10 +373,7 @@ func TestThinkingIsNotKeptAfterURLMedia(t *testing.T) {
 
 // The delegated settlement keeps thinking too: a call the settlement answers
 // itself — here a name the model was not offered (#567) — commits through
-// commitDelegatedTurn, and the request it chains to carries the block. The agent
-// declares a tool so both requests offer the same ones: a tool-less agent's
-// second request would offer the placeholder instead (#1021), and a change of
-// tools drops every block kept before it.
+// commitDelegatedTurn, and the request it chains to carries the block.
 func TestThinkingReplaysAfterADelegatedSettlement(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{
 		{
@@ -386,7 +383,6 @@ func TestThinkingReplaysAfterADelegatedSettlement(t *testing.T) {
 		},
 		{textChunk(0, "done"), done("end_turn", 1)},
 	}, nil)
-	h.customTool(t, "lookup")
 	h.wake(t, "hello")
 	h.runOnce(t)
 	if n := h.thinkingRows(t); n != 1 {

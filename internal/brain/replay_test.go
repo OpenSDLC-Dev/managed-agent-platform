@@ -180,20 +180,19 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 	}
 }
 
-// A request whose history carries a tool call must still define a tool, so a
-// turn after the agent's tools were all removed sends the placeholder (#1021).
-// History replays as it would with tools, and a request that offers tools, or
-// carries no tool block, is left alone.
-func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) {
+// A turn whose history holds tool calls and whose agent offers no tools sends
+// no tools, and replays the history as a request with tools would. The
+// reference was recorded taking such a turn (docs/DIVERGENCES.md, the session
+// update entry); PR #1023's placeholder tool (#1021), reverted, sent one here.
+func TestBuildRequestSendsToolHistoryWithNoTools(t *testing.T) {
 	use := ev(2, domain.EventAgentToolUse, `{"name":"bash","input":{"command":"ls"}}`)
-	withCalls := []domain.Event{
+	history := []domain.Event{
 		ev(1, domain.EventUserMessage, `{"content":"run ls"}`),
 		use,
 		ev(3, domain.EventUserToolResult, `{"tool_use_id":"`+use.ID.String()+`","content":[{"type":"text","text":"a.txt"}]}`),
 		ev(4, domain.EventUserMessage, `{"content":"thanks"}`),
 	}
-	bash := json.RawMessage(`{"name":"bash","description":"d","input_schema":{"type":"object"}}`)
-	build := func(t *testing.T, tools []json.RawMessage, history []domain.Event) provider.Request {
+	build := func(tools []json.RawMessage) provider.Request {
 		t.Helper()
 		req, _, err := buildRequest("sys", tools, history, "", "", "", "", nil, replayThinking{})
 		if err != nil {
@@ -201,53 +200,28 @@ func TestBuildRequestDefinesAPlaceholderForToolHistoryWithNoTools(t *testing.T) 
 		}
 		return req
 	}
-
-	t.Run("tool history and no tools", func(t *testing.T) {
-		req := build(t, nil, withCalls)
-		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
-			t.Fatalf("tools = %s, want the placeholder alone", req.Tools)
+	req := build(nil)
+	if len(req.Tools) != 0 {
+		t.Fatalf("tools = %s, want none", req.Tools)
+	}
+	var replayed strings.Builder
+	for _, m := range req.Messages {
+		replayed.Write(m.Content)
+	}
+	for _, block := range []string{`"type":"tool_use"`, `"type":"tool_result"`} {
+		if !strings.Contains(replayed.String(), block) {
+			t.Fatalf("replayed messages lack %s: %s", block, replayed.String())
 		}
-		var def struct {
-			Name        string          `json:"name"`
-			InputSchema json.RawMessage `json:"input_schema"`
+	}
+	offered := build([]json.RawMessage{json.RawMessage(`{"name":"bash","description":"d","input_schema":{"type":"object"}}`)})
+	if len(req.Messages) != len(offered.Messages) {
+		t.Fatalf("messages = %d, want the %d a request with tools replays", len(req.Messages), len(offered.Messages))
+	}
+	for i := range req.Messages {
+		if string(req.Messages[i].Content) != string(offered.Messages[i].Content) {
+			t.Errorf("message %d = %s, want %s", i, req.Messages[i].Content, offered.Messages[i].Content)
 		}
-		if err := json.Unmarshal([]byte(noToolsPlaceholder), &def); err != nil || def.Name == "" || len(def.InputSchema) == 0 {
-			t.Fatalf("placeholder %s is not a tool definition: %v", noToolsPlaceholder, err)
-		}
-		offered := build(t, []json.RawMessage{bash}, withCalls)
-		if len(req.Messages) != len(offered.Messages) {
-			t.Fatalf("messages = %d, want the %d a request with tools replays", len(req.Messages), len(offered.Messages))
-		}
-		for i := range req.Messages {
-			if string(req.Messages[i].Content) != string(offered.Messages[i].Content) {
-				t.Errorf("message %d = %s, want %s", i, req.Messages[i].Content, offered.Messages[i].Content)
-			}
-		}
-	})
-	t.Run("tool history and tools", func(t *testing.T) {
-		req := build(t, []json.RawMessage{bash}, withCalls)
-		if len(req.Tools) != 1 || string(req.Tools[0]) != string(bash) {
-			t.Errorf("tools = %s, want the agent's tools as they were", req.Tools)
-		}
-	})
-	t.Run("no tool history and no tools", func(t *testing.T) {
-		req := build(t, nil, []domain.Event{ev(1, domain.EventUserMessage, `{"content":"hi"}`)})
-		if len(req.Tools) != 0 {
-			t.Errorf("tools = %s, want none", req.Tools)
-		}
-	})
-	t.Run("a result alone", func(t *testing.T) {
-		req := build(t, nil, []domain.Event{withCalls[2]})
-		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
-			t.Errorf("tools = %s: a tool_result block needs a definition too", req.Tools)
-		}
-	})
-	t.Run("a call alone", func(t *testing.T) {
-		req := build(t, nil, withCalls[:2])
-		if len(req.Tools) != 1 || string(req.Tools[0]) != noToolsPlaceholder {
-			t.Errorf("tools = %s: a tool_use block needs a definition too", req.Tools)
-		}
-	})
+	}
 }
 
 func TestBuildRequestEmptyToolInputDefaults(t *testing.T) {
