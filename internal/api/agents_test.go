@@ -261,6 +261,14 @@ func TestAnMCPServerURLWithAUnicodeHostIsRefused(t *testing.T) {
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
 		"session.agent.config.mcp_servers.0.url: must be a valid URI")
 
+	// The check is on the whole url, not the host alone: an inference past the
+	// recorded case, pinned so that narrowing it is a decision, not an accident.
+	status, res = s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"mcp_servers": []any{map[string]any{"type": "url", "name": "unicode", "url": "https://example.com/mcp/caf\u00e9"}},
+		"tools":       tools}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"mcp_servers.0.url: must be a valid URI")
+
 	const encoded = "https://b%C3%BCcher.example/mcp"
 	created := createAgent(t, s, agentBody(map[string]any{
 		"mcp_servers": []any{map[string]any{"type": "url", "name": "unicode", "url": encoded}},
