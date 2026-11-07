@@ -1438,8 +1438,11 @@ func TestEnvironmentAllowedHostsCheckedOnThePatchNotTheStoredList(t *testing.T) 
 func TestEnvironmentAllowedHostsSurviveAReadModifyWrite(t *testing.T) {
 	s := newTestServer(t)
 	id := createEnvironment(t, s, map[string]any{"name": "round-trip"})["id"].(string)
+	// The row also holds a U-label, which a row written before plan 43 could, and
+	// which #614 refuses when a patch newly supplies one: the carry-through has to
+	// run before that refusal.
 	const legacy = `{"type":"cloud","networking":{"type":"limited",` +
-		`"allowed_hosts":["internal.corp:8080","_acme.example.com"],"allow_mcp_servers":false,` +
+		`"allowed_hosts":["internal.corp:8080","_acme.example.com","bücher.example"],"allow_mcp_servers":false,` +
 		`"allow_package_managers":false},` +
 		`"packages":{"apt":[],"cargo":[],"gem":[],"go":[],"npm":[],"pip":[]}}`
 	if _, err := s.pool.Exec(context.Background(),
@@ -1458,8 +1461,8 @@ func TestEnvironmentAllowedHostsSurviveAReadModifyWrite(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("posting back the config this API just returned: %d %v", status, echoed)
 	}
-	if hosts := storedAllowedHosts(t, echoed); len(hosts) != 2 ||
-		hosts[0] != "internal.corp:8080" || hosts[1] != "_acme.example.com" {
+	if hosts := storedAllowedHosts(t, echoed); len(hosts) != 3 ||
+		hosts[0] != "internal.corp:8080" || hosts[1] != "_acme.example.com" || hosts[2] != "b\u00fccher.example" {
 		t.Errorf("the echoed list = %v, want the row's own entries carried through", hosts)
 	}
 

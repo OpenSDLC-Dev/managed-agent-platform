@@ -211,8 +211,8 @@ func mcpGateEndpoints(net domain.Networking, declared []byte) ([]string, int) {
 // mcpEndpoint reduces one declared url to the `host:port` the gate matches on,
 // or refuses it. The refusals are the declarations that would widen the gate
 // past the server they name — which is the whole risk of this list, since an
-// `mcp_servers` url passes no grammar at all (parseMCPServers requires a
-// non-empty string and nothing more).
+// `mcp_servers` url passes almost no grammar (parseMCPServers requires a
+// non-empty string free of non-ASCII, and nothing more).
 func mcpEndpoint(raw string) (string, bool) {
 	// A declaration this platform would refuse to dial is not a promise of reach
 	// either: admitting its host would hand the sandbox a host the flag never

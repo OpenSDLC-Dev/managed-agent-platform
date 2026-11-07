@@ -225,6 +225,16 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // reference's words (#614). The reference also refuses an A-label entry, which
 // this platform accepts. Its answer to the other shapes the grammar refuses is
 // unrecorded, so those 400s are in our words. DIVERGENCES registers all three.
+// envUnicodeHost is the reference's refusal of a Unicode environment
+// allowed_hosts entry, recorded 2026-11-07 on create and update alike
+// (managed-agents-wire-recordings 2026-11-07-empty-tools-followup idx 20,
+// 2026-11-07-unicode-session-alternatives idx 1). The entry is quoted as written,
+// as the recording shows; %q would escape a soft hyphen or a zero-width space.
+func envUnicodeHost(h string) error {
+	return errInvalid("`allowed_hosts` entries must be hostnames or wildcard patterns, "+
+		"e.g. \"example.com\" or \"*.example.com\". Got \"%s\".", h)
+}
+
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -273,15 +283,7 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 					if slices.Contains(prev.AllowedHosts, h) {
 						continue
 					}
-					// Recorded 2026-11-07 on create and update alike
-					// (managed-agents-wire-recordings
-					// 2026-11-07-empty-tools-followup idx 20,
-					// 2026-11-07-unicode-session-alternatives idx 1).
-					if hasNonASCII(h) {
-						return nil, errInvalid("`allowed_hosts` entries must be hostnames or wildcard patterns, "+
-							"e.g. \"example.com\" or \"*.example.com\". Got %q.", h)
-					}
-					canonical, err := canonicalAllowedHost(h)
+					canonical, err := canonicalAllowedHost(h, envUnicodeHost)
 					if err != nil {
 						return nil, err
 					}

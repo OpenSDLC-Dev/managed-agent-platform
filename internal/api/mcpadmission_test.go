@@ -71,6 +71,28 @@ func TestSessionCreateRefusesAnMCPHostItsEnvironmentBlocks(t *testing.T) {
 	}
 }
 
+// A percent-encoded host is judged decoded, by its A-label: url.Parse decodes
+// it, so the encoded Kelvin sign is admitted under an exact "k.example", and a
+// refusal names the decoded host. The reference judged the spelling as written
+// and refused the first (managed-agents-wire-recordings
+// 2026-11-07-unicode-session-alternatives/setup.json idx 11 and 20). #1030
+// tracks aligning; this pins today's answer, which docs/DIVERGENCES.md records.
+func TestAPercentEncodedMCPHostIsJudgedDecoded(t *testing.T) {
+	s := newTestServer(t)
+	kelvin := mcpAgent(t, s, [2]string{"unicode", "https://%E2%84%AA.example/mcp"})
+	createSession(t, s, map[string]any{"agent": kelvin,
+		"environment_id": envWith(t, s, limited([]string{"k.example"}, false))})
+
+	bucher := mcpAgent(t, s, [2]string{"unicode", "https://b%C3%BCcher.example/mcp"})
+	createSession(t, s, map[string]any{"agent": bucher,
+		"environment_id": envWith(t, s, limited([]string{"xn--bcher-kva.example"}, false))})
+	status, res := s.do(http.MethodPost, "/v1/sessions", map[string]any{"agent": bucher,
+		"environment_id": envWith(t, s, limited([]string{"other.example"}, false))})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		`MCP server host(s) blocked by environment network policy: "unicode" (b`+"\u00fc"+`cher.example). `+
+			`Add these hosts to the environment's allowed_hosts, or set allow_mcp_servers=true.`)
+}
+
 // Both paths the message names admit the session, the flag still false — an
 // exact host and a wildcard over it, as recorded (`sess.create.mcp-host-exact-gate`,
 // `sess.create.mcp-host-wildcard-gate`) — and so does the flag itself. A policy

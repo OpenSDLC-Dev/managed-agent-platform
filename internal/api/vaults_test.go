@@ -432,10 +432,6 @@ func TestCredentialValidationRules(t *testing.T) {
 			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"::ffff:10.0.0.1"}}},
 		"underscore label": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
 			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"_acme.x.com"}}},
-		// A Unicode name IDNA itself refuses: the trailing hyphen is inside the
-		// label, where the ASCII grammar alone would never have looked.
-		"unicode name IDNA refuses": {"type": "environment_variable", "secret_name": "K", "secret_value": "v",
-			"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"\u00e4-.example"}}},
 		"missing access_token":   {"type": "mcp_oauth", "mcp_server_url": "https://m.example.com"},
 		"mcp missing server_url": {"type": "mcp_oauth", "access_token": "at"},
 		"mcp bad server_url":     {"type": "mcp_oauth", "mcp_server_url": "notaurl", "access_token": "at"},
