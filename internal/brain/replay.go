@@ -23,10 +23,7 @@ import (
 // agent's tools[] and the session's MCP catalog, and the same resolution has to
 // decide what a name the model calls back means. So the agent reaches here as
 // its system prompt and nothing more — everything else it contributes to a
-// request has been resolved by the time replay runs. The one definition added
-// here is noToolsPlaceholder, which the log does decide: it goes out only when
-// the resolution offered nothing and the history carries a tool block, and no
-// class backs it.
+// request has been resolved by the time replay runs.
 //
 // Replay mapping, v1:
 //   - user.message           → user text/blocks
@@ -85,7 +82,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		msgs       []replayMessage
 		uses       []string       // tool_use ids of the open assistant turn
 		answering  map[string]int // the last assistant turn's, by position
-		toolBlocks bool           // a tool_use or tool_result block was replayed
 		systemTail string
 		budgets    = map[string]int64{} // max_iterations by outcome_id, from each definition
 		acks       []ackBlock           // acknowledgment prompts of the open user turn
@@ -407,7 +403,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 			}
 			blocks = append(blocks, blk)
 			uses = append(uses, ev.ID.String())
-			toolBlocks = true
 
 		case domain.EventUserToolResult, domain.EventUserCustomToolRes,
 			domain.EventAgentToolResult, domain.EventAgentMCPToolResult:
@@ -419,7 +414,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 				return req, 0, err
 			}
 			results = append(results, answer)
-			toolBlocks = true
 			// The skills the read found below a repository's root follow
 			// in the same turn; flush keeps every result ahead of them.
 			if text, ok := nested[ev.ID]; ok {
@@ -443,14 +437,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 		return req, 0, err
 	}
 	req.System += systemTail
-	// Before admitThinking, because the placeholder is part of the prefix a
-	// kept block is checked against, as it is of the one digestThinking stores.
-	// The tool event cases are the only source of tool blocks: a user.message
-	// carries text, image and document blocks alone (events.blocksUserMessage),
-	// and an agent.message text alone.
-	if len(req.Tools) == 0 && toolBlocks {
-		req.Tools = []json.RawMessage{json.RawMessage(noToolsPlaceholder)}
-	}
 	if err := admitThinking(thinking, req.System, req.Tools, msgs); err != nil {
 		return req, 0, err
 	}
@@ -463,37 +449,6 @@ func buildRequest(system string, tools []json.RawMessage, history []domain.Event
 	}
 	return req, watermark, nil
 }
-
-// noToolsPlaceholder is the one tool a request defines when its history carries
-// a tool_use or tool_result block and the agent offers no tools: after a
-// session update sets agent.tools to [] (#1021), but also when an agent's only
-// tools are an MCP server's and none is offered this turn, or a tool-less
-// agent's model made a call anyway. Anthropic's Messages API is
-// reported to refuse tool blocks in a request that defines no tools (a third
-// party quotes the wording; Anthropic's own pages do not). Claude Code's
-// compaction request, which carries tool history, keeps at least one tool
-// defined. Replaying the blocks unchanged keeps the conversation the model
-// actually had. The brain cannot tell which upstream serves a request (the
-// model gateway routes it), so the placeholder goes out on every route.
-//
-// The description tells the model not to call it, and no tool_choice none goes
-// with it: the model gateway refuses none on an upstream that ignores it (its
-// zhipu profile), which would fail every turn in this state there. A call the
-// model makes anyway reaches no class (resolveTools never classes this name),
-// so it is answered as an unknown tool (an answer that calls the tool "not
-// offered", though the request listed it) and the turn chains, and the
-// settlement's chain cap ends a model that keeps calling it. The call and its
-// answer are events like any other, so a client sees the placeholder's name.
-//
-// The definition is constant, so every turn of a session in this state shares
-// one prefix and its kept thinking stays valid. A block bound to its prefix and
-// kept before the state began is dropped, as any change of tools drops it (one
-// stored under its route's anyPrefixDigest is not); for an agent that never
-// offered tools, that is the turn whose stray call put the first tool block in
-// its history, and the placeholder stays for the rest of that session, since
-// the block does. What the reference does on such a turn is unrecorded
-// (docs/DIVERGENCES.md). A constant, so no request shares bytes with another.
-const noToolsPlaceholder = `{"name":"no_tools_available","description":"No tools are available in this turn. Do not call this tool or any other: answer in text.","input_schema":{"type":"object","properties":{}}}`
 
 // contentBlocks normalizes wire message content (a bare string or an array
 // of blocks) into individual raw blocks, preserved verbatim.
