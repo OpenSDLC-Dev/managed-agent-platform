@@ -7,8 +7,8 @@
 //	                      (hashed) into api_keys at startup. Changing it and
 //	                      restarting archives the previous bootstrap key. Naming
 //	                      a value here makes that key env-var-managed: if the
-//	                      value already exists as a console-issued key, the row
-//	                      loses its issuer and any expiry it carried.
+//	                      value already exists as an unowned console-issued key,
+//	                      the row loses its issuer and any expiry it carried.
 //	BRAIN_API_KEY         the brain's platform key for the model gateway
 //	                      (optional; must differ from CONTROLPLANE_API_KEY and
 //	                      carry no surrounding whitespace), seeded into

@@ -236,7 +236,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	return apiKeyIssuedJSON{apiKeyJSON: renderAPIKey(row), RawKey: key}, nil
 }
 
-// listAPIKeys renders every management key as a bare JSON array — no envelope,
+// listAPIKeys renders visible management keys as a bare JSON array — no envelope,
 // no paging, which is what the reference's console list returns. The wire
 // surface's `{data, next_page}` envelope stays on the wire surface, and the
 // public Admin API's `{data, first_id, has_more, last_id}` is a third shape for
@@ -245,11 +245,15 @@ func (s *server) listAPIKeys(r *http.Request) (any, error) {
 	if err := consoleWorkspace(r); err != nil {
 		return nil, err
 	}
-	keys, err := ListManagementKeys(r.Context(), s.pool)
+	caller, _ := identityFrom(r.Context())
+	ownerID := ""
+	if caller.ID != "" && caller.Role != identity.RoleAdmin {
+		ownerID = caller.ID
+	}
+	keys, err := listManagementKeys(r.Context(), s.pool, ownerID)
 	if err != nil {
 		return nil, err
 	}
-	caller, _ := identityFrom(r.Context())
 	out := make([]apiKeyListItemJSON, 0, len(keys))
 	for _, k := range keys {
 		manageable := canManageAPIKey(k, caller)

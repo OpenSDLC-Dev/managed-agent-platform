@@ -186,27 +186,25 @@ func updateManagementKey(ctx context.Context, tx pgx.Tx, id string, status, name
 // can reach this API. It renders with a null issuer, which is the honest answer
 // to "who created this" for a key an environment variable did.
 //
-// No paging. The reference's console list is a bare array with no pagination at
-// all, and this table holds one row per issued credential plus the bootstrap
-// one — an operator-paced count, not a growing log.
-//
-// And no index, which settles a question migration 0024 left open. Its closing
-// comment declined `api_keys (created_at DESC)` as build-ahead and said "the
-// listing that would want one lands in slice 2"; the listing has landed and does
-// not want one. A migration is immutable once merged, so the reconsideration has
-// to be recorded where a reader will meet it rather than by editing that file:
-// the sort is over an operator-paced table with no growth driver — issuance is a
-// deliberate admin action, and nothing else writes rows — so an index would be
-// paid for on every write to speed a read that has nothing to scan. If a
-// deployment ever does accumulate keys, the missing bound is the *response size*,
-// which an index does not fix; that would be paging, and the reference's own
-// surface has none to mirror.
+// No paging: the reference's console list is a bare array with no pagination.
+// Developers and admins can issue keys, so neither table nor response size is
+// bounded. Owner filtering limits the developer query, not the admin response.
 func ListManagementKeys(ctx context.Context, pool *pgxpool.Pool) ([]ManagementKey, error) {
+	return listManagementKeys(ctx, pool, "")
+}
+
+// An empty ownerID preserves the full administrative/legacy listing.
+func listManagementKeys(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]ManagementKey, error) {
+	query := `SELECT ` + managementKeyColumns + ` FROM api_keys`
+	var args []any
+	if ownerID != "" {
+		query += ` WHERE owner_principal_id = $1`
+		args = append(args, ownerID)
+	}
 	// id breaks ties so the order is total rather than merely partial: two keys
 	// issued inside one clock tick would otherwise sort arbitrarily, and the same
 	// listing taken twice could show them in either order.
-	rows, err := pool.Query(ctx,
-		`SELECT `+managementKeyColumns+` FROM api_keys ORDER BY created_at DESC, id DESC`)
+	rows, err := pool.Query(ctx, query+` ORDER BY created_at DESC, id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

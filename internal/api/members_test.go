@@ -33,11 +33,14 @@ func seedMember(t *testing.T, s *nativeServer, subject, role, source string) str
 	return id
 }
 
-func expectManagement(t *testing.T, s *nativeServer, method, path, body string, headers http.Header, want int) []byte {
+func expectManagement(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}, s *nativeServer, method, path, body string, headers http.Header, want int) []byte {
 	t.Helper()
 	res, raw := s.request(method, path, body, headers)
 	if res.StatusCode != want {
-		t.Fatalf("%s %s status=%d want=%d body=%s", method, path, res.StatusCode, want, raw)
+		t.Fatalf("%s %s status=%d want=%d body=%s", method, path, res.StatusCode, want, managementDiagnosticBody(raw))
 	}
 	return raw
 }
