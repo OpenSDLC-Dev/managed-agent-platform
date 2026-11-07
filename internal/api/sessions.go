@@ -432,7 +432,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		spec.Tools = items
 	}
 	if raw, ok := overrides["mcp_servers"]; ok {
-		items, err := parseMCPServers(raw, "agent.agent_with_overrides.config.", capOverrideRunes)
+		items, err := parseMCPServers(raw, "agent.agent_with_overrides.config.", "agent.agent_with_overrides.config.", capOverrideRunes)
 		if err != nil {
 			return snap, err
 		}
@@ -1263,7 +1263,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 				// The path and words this route was recorded refusing a
 				// custom tool name's length in (idx 13 above); for the
 				// server name an inference (#987).
-				items, err := parseMCPServers(val, "session.agent.config.", capOverrideRunes)
+				items, err := parseMCPServers(val, "session.agent.config.", "session.agent.config.", capOverrideRunes)
 				if err != nil {
 					return nil, err
 				}

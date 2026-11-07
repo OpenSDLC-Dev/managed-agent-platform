@@ -646,9 +646,12 @@ func checkCustomToolName(name string, i int, agentRoute bool, prefix string) err
 }
 
 // parseMCPServers validates mcp_servers[]: only {type:"url", name, url}, the
-// name at most maxMCPServerNameRunes. prefix opens the path the name's cap is
-// refused under, as parseTools' prefix does, and capName words the refusal.
-func parseMCPServers(raw json.RawMessage, prefix string, capName func(path, val string, limit int) error) ([]json.RawMessage, error) {
+// name at most maxMCPServerNameRunes and the url free of non-ASCII. prefix opens
+// the path the name's cap is refused under, as parseTools' prefix does, and
+// capName words the refusal. urlPrefix opens the url's path, which differs from
+// prefix on agent update alone: the name's length sentence is bare there, and
+// the url's schema sentence takes agentUpdatePath.
+func parseMCPServers(raw json.RawMessage, prefix, urlPrefix string, capName func(path, val string, limit int) error) ([]json.RawMessage, error) {
 	items, err := rawList(raw, "mcp_servers")
 	if err != nil {
 		return nil, err
@@ -668,8 +671,29 @@ func parseMCPServers(raw json.RawMessage, prefix string, capName func(path, val 
 		if err := capName(fmt.Sprintf("%smcp_servers.%d.name", prefix, i), probe.Name, maxMCPServerNameRunes); err != nil {
 			return nil, err
 		}
+		// The reference refuses a url whose host is a U-label, in these words,
+		// on every route that takes one (#614). A URI cannot hold a non-ASCII
+		// character anywhere, so the check is on the whole string. That is an
+		// inference past the host, the only place it was recorded. A
+		// percent-encoded host is ASCII and passes, as it did there. Nothing else
+		// in the url is checked.
+		if hasNonASCII(probe.URL) {
+			return nil, errInvalid("%smcp_servers.%d.url: must be a valid URI", urlPrefix, i)
+		}
 	}
 	return items, nil
+}
+
+// hasNonASCII reports whether s holds a byte outside ASCII. It is the one test
+// behind the refusal of a Unicode host on the wire (#614): an allowed_hosts
+// entry on either list, and an MCP server url.
+func hasNonASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= utf8.RuneSelf {
+			return true
+		}
+	}
+	return false
 }
 
 // maxMCPServerNameRunes is the server name's documented "1-255 characters"

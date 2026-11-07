@@ -379,7 +379,16 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 			return nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
 		}
 		for i, h := range hosts {
-			e, err := canonicalAllowedHost(h)
+			// Recorded 2026-11-07 on create (managed-agents-wire-recordings
+			// 2026-11-07-empty-tools-followup idx 22). Update shares this
+			// parser, and its answer there is unrecorded. The sentence names a
+			// 63-character label bound the grammar does not hold an ASCII
+			// entry to (DIVERGENCES).
+			e, err := canonicalAllowedHost(h, func(string) error {
+				return errInvalid("auth.networking.allowed_hosts.%d: entry is not a valid hostname — "+
+					"use dot-separated labels of letters, digits, and hyphens, each 1 to 63 characters "+
+					"and not starting or ending with a hyphen, for example api.example.com or *.example.com", i)
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -417,12 +426,14 @@ func validateEndpointURL(raw, field string) error {
 // (IPv4 is hostname-shaped, so one label check covers both) — and returns the
 // form to store.
 //
-// An entry written as a Unicode name is stored as its A-label, so a credential
-// registered for "bücher.example" holds "xn--bcher-kva.example" and matches a
-// request however the sandbox spells that host. The reference's published
-// grammar names neither Unicode nor punycode, so both the acceptance and the
-// echo are ours and are registered in DIVERGENCES (plan 43, #609).
-func canonicalAllowedHost(h string) (string, error) {
+// A Unicode entry is refused before the grammar runs, with the error unicode
+// returns, because the reference refuses one on each list in words of its own
+// (#614). So what reaches CanonicalEntry is ASCII and comes back as written: its
+// A-label conversion is the executor's WEBTOOL_ALLOWED_DOMAINS's alone.
+func canonicalAllowedHost(h string, unicode func(h string) error) (string, error) {
+	if hasNonASCII(h) {
+		return "", unicode(h)
+	}
 	// The grammar lives with its matcher (internal/egress, the shared
 	// HostSet); this wrapper only recasts the failure as a wire 400.
 	e, err := egress.CanonicalEntry(h)

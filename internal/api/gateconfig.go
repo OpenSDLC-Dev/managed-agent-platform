@@ -211,19 +211,19 @@ func mcpGateEndpoints(net domain.Networking, declared []byte) ([]string, int) {
 // mcpEndpoint reduces one declared url to the `host:port` the gate matches on,
 // or refuses it. The refusals are the declarations that would widen the gate
 // past the server they name — which is the whole risk of this list, since an
-// `mcp_servers` url passes no grammar at all (parseMCPServers requires a
-// non-empty string and nothing more).
+// `mcp_servers` url passes almost no grammar (parseMCPServers requires a
+// non-empty string free of non-ASCII, and nothing more).
 func mcpEndpoint(raw string) (string, bool) {
 	// A declaration this platform would refuse to dial is not a promise of reach
 	// either: admitting its host would hand the sandbox a host the flag never
 	// named.
 	//
 	// One consequence is worth naming rather than leaving to be rediscovered.
-	// The grammar below refuses a non-ASCII host, so a server declared as a
-	// U-label never enters the set, while every allowed_hosts list accepts one
-	// and stores its A-label (plan 43). Widening what the *gate admits* is a
-	// different decision from validating an operator's list, so this stays as it
-	// was; #614 tracks it.
+	// A url holding a U-label is refused at the API, as the reference refuses
+	// it (#614), but a percent-encoded one is not, and url.Parse decodes it to
+	// the U-label. The grammar below refuses that host, so such a server never
+	// enters the set. What the reference's runtime does with that url under
+	// allow_mcp_servers is unrecorded (DIVERGENCES).
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", false

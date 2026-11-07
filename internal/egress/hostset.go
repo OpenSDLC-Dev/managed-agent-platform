@@ -363,7 +363,9 @@ func canonicalName(h string) string {
 // case included, because rewriting those would change what every existing
 // environment reads back for no gain. The store therefore holds one *alphabet*
 // per host, not one spelling — "API.example" and "api.example" are both kept as
-// typed, and it is the matcher that folds them into one host.
+// typed, and it is the matcher that folds them into one host. The API's two
+// lists refuse a Unicode entry before calling this (#614), so the conversion
+// serves the executor's WEBTOOL_ALLOWED_DOMAINS alone.
 //
 // The wildcard prefix is cut before conversion and restored after, because an
 // asterisk is a rune IDNA refuses — which is also why CanonicalHost cannot be

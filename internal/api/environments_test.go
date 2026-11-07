@@ -1291,10 +1291,9 @@ func setWorkState(t *testing.T, s *tserver, envID, state string) {
 }
 
 // An environment's allowed_hosts is held to the same entry grammar a
-// credential's is, and a Unicode entry is stored as its A-label (plan 43,
-// #609). The list was unvalidated before, so both the refusal and the rewrite
-// are ours: the reference publishes no grammar for this field and documents no
-// rejection for it, and DIVERGENCES carries both.
+// credential's is (plan 43, #609). The list was unvalidated before. The
+// reference refuses a Unicode entry and an A-label one (#614); its answer to the
+// other shapes refused here is unrecorded, and DIVERGENCES carries both.
 func TestEnvironmentAllowedHostsAreHeldToTheEntryGrammar(t *testing.T) {
 	s := newTestServer(t)
 	for name, tc := range map[string]struct {
@@ -1307,17 +1306,13 @@ func TestEnvironmentAllowedHostsAreHeldToTheEntryGrammar(t *testing.T) {
 		"an IPv6 literal is not accepted":      {"::1", ""},
 		"an underscore is not a hostname rune": {"_acme.example.com", ""},
 		"a malformed IPv4 is neither":          {"999.999.999.999", ""},
-		// A Unicode name IDNA itself refuses — a trailing hyphen inside the
-		// label — which the ASCII label loop alone would never have seen.
-		"a Unicode name IDNA refuses":   {"\u00e4-.example", ""},
-		"a bare hostname is kept":       {"api.example.com", "api.example.com"},
-		"case is not what makes a name": {"API.example.com", "API.example.com"},
-		"a wildcard keeps its prefix":   {"*.internal.example.com", "*.internal.example.com"},
-		"an IPv4 literal is a host":     {"192.0.2.1", "192.0.2.1"},
-		"a U-label is stored as its A-label": {
-			"b\u00fccher.example", "xn--bcher-kva.example"},
-		"a wildcard U-label is cut before it is converted": {
-			"*.B\u00dcCHER.example", "*.xn--bcher-kva.example"},
+		"a bare hostname is kept":              {"api.example.com", "api.example.com"},
+		"case is not what makes a name":        {"API.example.com", "API.example.com"},
+		"a wildcard keeps its prefix":          {"*.internal.example.com", "*.internal.example.com"},
+		"an IPv4 literal is a host":            {"192.0.2.1", "192.0.2.1"},
+		"a U-label is refused, not converted":  {"b\u00fccher.example", ""},
+		"a wildcard U-label is refused too":    {"*.B\u00dcCHER.example", ""},
+		"an A-label is kept as written":        {"xn--bcher-kva.example", "xn--bcher-kva.example"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, "/v1/environments", map[string]any{
@@ -1338,6 +1333,42 @@ func TestEnvironmentAllowedHostsAreHeldToTheEntryGrammar(t *testing.T) {
 				t.Errorf("%q stored as %v, want [%q]", tc.entry, got, tc.stored)
 			}
 		})
+	}
+}
+
+// A Unicode entry is refused in the reference's words on create and on update,
+// where plan 43 stored its A-label (managed-agents-wire-recordings
+// 2026-11-07-empty-tools-followup/setup.json idx 20, and
+// 2026-11-07-unicode-session-alternatives/setup.json idx 1 for update; #614).
+// The A-label stays accepted, although the reference refuses it too (idx 24 and
+// idx 3): refusing both would leave an internationalized name with no spelling an
+// environment can hold.
+func TestEnvironmentAllowedHostsRefuseAUnicodeName(t *testing.T) {
+	s := newTestServer(t)
+	const want = "`allowed_hosts` entries must be hostnames or wildcard patterns, " +
+		"e.g. \"example.com\" or \"*.example.com\". Got \"b\u00fccher.example\"."
+	limited := func(hosts ...any) map[string]any {
+		return map[string]any{"type": "cloud", "networking": map[string]any{
+			"type": "limited", "allowed_hosts": hosts}}
+	}
+	status, res := s.do(http.MethodPost, "/v1/environments", map[string]any{
+		"name": "u-label", "config": limited("b\u00fccher.example")})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+	// A character %q would escape, such as a soft hyphen, is quoted as written too.
+	status, res = s.do(http.MethodPost, "/v1/environments", map[string]any{
+		"name": "soft-hyphen", "config": limited("soft\u00adhyphen.example")})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"`allowed_hosts` entries must be hostnames or wildcard patterns, "+
+			"e.g. \"example.com\" or \"*.example.com\". Got \"soft\u00adhyphen.example\".")
+
+	env := createEnvironment(t, s, map[string]any{"name": "a-label", "config": limited("xn--bcher-kva.example")})
+	id := env["id"].(string)
+	status, res = s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
+		"config": limited("xn--bcher-kva.example", "b\u00fccher.example")})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
+	_, got := s.do(http.MethodGet, "/v1/environments/"+id, nil)
+	if hosts := storedAllowedHosts(t, got); len(hosts) != 1 || hosts[0] != "xn--bcher-kva.example" {
+		t.Errorf("after the refused update the list = %v, want [\"xn--bcher-kva.example\"]", hosts)
 	}
 }
 
@@ -1392,10 +1423,10 @@ func TestEnvironmentAllowedHostsCheckedOnThePatchNotTheStoredList(t *testing.T) 
 	if status != http.StatusBadRequest {
 		t.Fatalf("a patch supplying a bad entry: %d %v", status, body)
 	}
-	// ...and a good one replaces the row's list with the canonical spelling.
+	// ...and a good one replaces the row's list.
 	status, fixed := s.do(http.MethodPost, "/v1/environments/"+id, map[string]any{
 		"config": map[string]any{"type": "cloud", "networking": map[string]any{
-			"type": "limited", "allowed_hosts": []any{"b\u00fccher.example"}}},
+			"type": "limited", "allowed_hosts": []any{"xn--bcher-kva.example"}}},
 	})
 	if status != http.StatusOK {
 		t.Fatalf("a patch supplying a good entry: %d %v", status, fixed)
@@ -1413,8 +1444,11 @@ func TestEnvironmentAllowedHostsCheckedOnThePatchNotTheStoredList(t *testing.T) 
 func TestEnvironmentAllowedHostsSurviveAReadModifyWrite(t *testing.T) {
 	s := newTestServer(t)
 	id := createEnvironment(t, s, map[string]any{"name": "round-trip"})["id"].(string)
+	// The row also holds a U-label, which a row written before plan 43 could, and
+	// which #614 refuses when a patch newly supplies one: the carry-through has to
+	// run before that refusal.
 	const legacy = `{"type":"cloud","networking":{"type":"limited",` +
-		`"allowed_hosts":["internal.corp:8080","_acme.example.com"],"allow_mcp_servers":false,` +
+		`"allowed_hosts":["internal.corp:8080","_acme.example.com","bücher.example"],"allow_mcp_servers":false,` +
 		`"allow_package_managers":false},` +
 		`"packages":{"apt":[],"cargo":[],"gem":[],"go":[],"npm":[],"pip":[]}}`
 	if _, err := s.pool.Exec(context.Background(),
@@ -1433,8 +1467,8 @@ func TestEnvironmentAllowedHostsSurviveAReadModifyWrite(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("posting back the config this API just returned: %d %v", status, echoed)
 	}
-	if hosts := storedAllowedHosts(t, echoed); len(hosts) != 2 ||
-		hosts[0] != "internal.corp:8080" || hosts[1] != "_acme.example.com" {
+	if hosts := storedAllowedHosts(t, echoed); len(hosts) != 3 ||
+		hosts[0] != "internal.corp:8080" || hosts[1] != "_acme.example.com" || hosts[2] != "b\u00fccher.example" {
 		t.Errorf("the echoed list = %v, want the row's own entries carried through", hosts)
 	}
 
