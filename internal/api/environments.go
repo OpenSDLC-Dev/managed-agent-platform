@@ -215,15 +215,16 @@ func checkPackagesNetworking(cfg cloudConfigJSON) error {
 // closed). When both the patch and prior are "limited", omitted fields keep
 // their prior values.
 //
-// Each allowed_hosts entry is held to the same grammar a credential's is, and a
-// Unicode entry is stored as its A-label (canonicalAllowedHost, over
-// egress.CanonicalEntry). This list was unvalidated until plan 43, which is why
-// the check runs on what a patch newly supplies rather than on the merged list,
-// and skips an entry the row already holds: refusing an update over what an
-// earlier one stored would take a stored environment's egress away for a field
-// nobody is changing, and would refuse the read-modify-write every client does.
-// The reference publishes no grammar for this field and documents no rejection
-// for it, so the 400 is ours and is registered in DIVERGENCES.
+// Each allowed_hosts entry is held to the same grammar a credential's is
+// (canonicalAllowedHost, over egress.CanonicalEntry). This list was unvalidated
+// until plan 43, which is why the check runs on what a patch newly supplies
+// rather than on the merged list, and skips an entry the row already holds:
+// refusing an update over what an earlier one stored would take a stored
+// environment's egress away for a field nobody is changing, and would refuse the
+// read-modify-write every client does. A Unicode entry is refused first, in the
+// reference's words (#614). The reference also refuses an A-label entry, which
+// this platform accepts. Its answer to the other shapes the grammar refuses is
+// unrecorded, so those 400s are in our words. DIVERGENCES registers all three.
 func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -271,6 +272,14 @@ func parseNetworking(raw, prior json.RawMessage) (json.RawMessage, error) {
 				for i, h := range hosts {
 					if slices.Contains(prev.AllowedHosts, h) {
 						continue
+					}
+					// Recorded 2026-11-07 on create and update alike
+					// (managed-agents-wire-recordings
+					// 2026-11-07-empty-tools-followup idx 20,
+					// 2026-11-07-unicode-session-alternatives idx 1).
+					if hasNonASCII(h) {
+						return nil, errInvalid("`allowed_hosts` entries must be hostnames or wildcard patterns, "+
+							"e.g. \"example.com\" or \"*.example.com\". Got %q.", h)
 					}
 					canonical, err := canonicalAllowedHost(h)
 					if err != nil {

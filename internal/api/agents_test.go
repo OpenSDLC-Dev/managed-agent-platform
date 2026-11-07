@@ -228,6 +228,48 @@ func TestAgentMCPServerNameIsCapped(t *testing.T) {
 		"session.agent.config.mcp_servers.0.name: must be at most 255 characters")
 }
 
+// An MCP server url carrying a non-ASCII character is refused in the
+// reference's words on each route that takes one, under that route's path
+// (managed-agents-wire-recordings 2026-11-07-empty-tools-followup/setup.json
+// idx 25 for agent create; 2026-11-07-unicode-session-alternatives/setup.json
+// idx 6, 10 and 23 for agent update, a session create's override and a session
+// update; #614). The same host percent-encoded is a valid URI: the reference
+// accepted it and echoed it as written (the second recording's idx 16), and so
+// does this platform.
+func TestAnMCPServerURLWithAUnicodeHostIsRefused(t *testing.T) {
+	s := newTestServer(t)
+	servers := []any{map[string]any{"type": "url", "name": "unicode", "url": "https://b\u00fccher.example/mcp"}}
+	tools := []any{mcpToolset("unicode")}
+
+	status, res := s.do(http.MethodPost, "/v1/agents", agentBody(map[string]any{
+		"mcp_servers": servers, "tools": tools}))
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"mcp_servers.0.url: must be a valid URI")
+
+	id := createAgent(t, s, agentBody(nil))["id"].(string)
+	wantUpdateRejected(t, s, id, map[string]any{"mcp_servers": servers, "tools": tools},
+		"agent.mcp_servers.0.url: must be a valid URI")
+
+	agentID, envID := fixture(t, s)
+	status, res = s.do(http.MethodPost, "/v1/sessions", map[string]any{"environment_id": envID, "agent": map[string]any{
+		"type": "agent_with_overrides", "id": agentID, "mcp_servers": servers, "tools": tools}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"agent.agent_with_overrides.config.mcp_servers.0.url: must be a valid URI")
+	sid := createSession(t, s, map[string]any{"environment_id": envID, "agent": agentID})["id"].(string)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"mcp_servers": servers, "tools": tools}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
+		"session.agent.config.mcp_servers.0.url: must be a valid URI")
+
+	const encoded = "https://b%C3%BCcher.example/mcp"
+	created := createAgent(t, s, agentBody(map[string]any{
+		"mcp_servers": []any{map[string]any{"type": "url", "name": "unicode", "url": encoded}},
+		"tools":       tools}))
+	if got := created["mcp_servers"].([]any)[0].(map[string]any)["url"]; got != encoded {
+		t.Errorf("a percent-encoded url came back as %v, want %q as written", got, encoded)
+	}
+}
+
 // A custom tool cannot take a name in the frame an MCP tool is offered under,
 // refused in the reference's words: the create body has the recorded one's
 // shape (managed-agents-wire-recordings 2026-09-03/batch2.json idx 57

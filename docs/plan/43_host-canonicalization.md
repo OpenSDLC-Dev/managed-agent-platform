@@ -14,6 +14,12 @@ The first half merged as `766878f` (#611): `internal/mcp`'s `sameHost` stopped
 folding by Unicode. That fix is correct and closes a real leak, but it buys the
 leak with a withholding cost this plan removes.
 
+> **Decision 5 is superseded and is not authority.** An archived plan is a record, not a
+> live spec. Since #614 the API refuses a U-label entry on both `allowed_hosts` lists,
+> and in an MCP server `url`, in the reference's words, after 2026-11-07 recordings
+> showed the reference refusing all three. The executor's `WEBTOOL_ALLOWED_DOMAINS`
+> keeps decision 5's conversion. docs/DIVERGENCES.md holds the current rule.
+
 ## Why a plan and not a patch
 
 Three of the decisions here are wire-observable or change behaviour for every

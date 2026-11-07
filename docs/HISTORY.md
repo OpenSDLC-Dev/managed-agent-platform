@@ -1746,7 +1746,8 @@ harder; validate an environment's `networking.allowed_hosts` at create and updat
 rather than at read; leave stored rows unmigrated and unvalidated, checking only
 what a patch newly supplies so the ordinary read-modify-write is not a 400; and
 accept a U-label entry while storing its A-label on both lists, so an operator
-reads back punycode they did not type. The gate dials the canonical name rather
+reads back punycode they did not type. #614 reversed that last one on both lists
+(2026-11-07), after recordings showed the reference refusing a U-label. The gate dials the canonical name rather
 than the authority the sandbox wrote, since admission and connection could
 otherwise name two different hosts.
 

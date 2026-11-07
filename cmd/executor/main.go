@@ -166,10 +166,12 @@ import (
 // the operator's fence when it is really a hole in it — it fails startup
 // instead.
 //
-// It goes through the same front end the two API lists do, so this third
-// allowed-hosts list accepts a Unicode name and holds its A-label — otherwise an
-// operator could write one where the matcher canonicalizes and be refused where
-// it is read (plan 43, #609).
+// It goes through CanonicalEntry, the front end the two API lists share, so it
+// accepts a Unicode name and holds its A-label — otherwise an operator could
+// write one where the matcher canonicalizes and be refused where it is read
+// (plan 43, #609). The API lists refuse a Unicode name before that front end, in
+// the reference's words (#614). This list is operator configuration with no
+// counterpart there, so it keeps plan 43's conversion.
 func splitDomains(s string) ([]string, error) {
 	var out []string
 	for _, d := range strings.Split(s, ",") {

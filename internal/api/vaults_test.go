@@ -1004,28 +1004,40 @@ func TestCredentialList(t *testing.T) {
 	}
 }
 
-// A credential entry written as a Unicode name is stored — and echoed — as its
-// A-label, so the stored list holds one spelling per host however the sandbox
-// later writes it (plan 43, #609). An ASCII entry is stored exactly as typed:
-// case is not what tells two names apart, and the matcher folds it.
-func TestCredentialAllowedHostsStoreTheALabel(t *testing.T) {
+// A credential entry written as a Unicode name is refused in the reference's
+// words, where plan 43 stored its A-label (managed-agents-wire-recordings
+// 2026-11-07-empty-tools-followup/setup.json idx 22; #614). The index is the
+// entry's. Update shares the parser, and its answer is unrecorded. An A-label
+// and an ASCII entry are stored exactly as written: case is not what tells two
+// names apart, and the matcher folds it.
+func TestCredentialAllowedHostsRefuseAUnicodeName(t *testing.T) {
 	s := newTestServer(t)
 	vaultID := createVault(t, s, "idn")
-
-	auth := envVarAuth("IDN_KEY")
-	auth["networking"] = map[string]any{"type": "limited", "allowed_hosts": []string{
-		"b\u00fccher.example", "*.B\u00dcCHER.example", "API.example.com", "192.0.2.1"}}
-	body := createCredential(t, s, vaultID, auth)
-
-	nw := body["auth"].(map[string]any)["networking"].(map[string]any)
-	raw := nw["allowed_hosts"].([]any)
-	want := []string{"xn--bcher-kva.example", "*.xn--bcher-kva.example", "API.example.com", "192.0.2.1"}
-	if len(raw) != len(want) {
-		t.Fatalf("allowed_hosts = %v, want %v", raw, want)
+	const want = "auth.networking.allowed_hosts.1: entry is not a valid hostname — " +
+		"use dot-separated labels of letters, digits, and hyphens, each 1 to 63 characters " +
+		"and not starting or ending with a hyphen, for example api.example.com or *.example.com"
+	limited := func(hosts ...string) map[string]any {
+		auth := envVarAuth("IDN_KEY")
+		auth["networking"] = map[string]any{"type": "limited", "allowed_hosts": hosts}
+		return auth
 	}
-	for i, w := range want {
-		if raw[i] != w {
-			t.Errorf("allowed_hosts[%d] = %v, want %q", i, raw[i], w)
-		}
+
+	for _, host := range []string{"b\u00fccher.example", "*.B\u00dcCHER.example"} {
+		status, res := s.do("POST", "/v1/vaults/"+vaultID+"/credentials",
+			map[string]any{"auth": limited("api.example.com", host)})
+		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
 	}
+
+	body := createCredential(t, s, vaultID, limited("xn--bcher-kva.example", "API.example.com", "192.0.2.1"))
+	got := body["auth"].(map[string]any)["networking"].(map[string]any)["allowed_hosts"].([]any)
+	if fmt.Sprint(got) != "[xn--bcher-kva.example API.example.com 192.0.2.1]" {
+		t.Errorf("allowed_hosts = %v, want the entries as written", got)
+	}
+
+	id := body["id"].(string)
+	status, res := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+id, map[string]any{
+		"auth": map[string]any{"type": "environment_variable",
+			"networking": map[string]any{"type": "limited",
+				"allowed_hosts": []string{"xn--bcher-kva.example", "b\u00fccher.example"}}}})
+	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", want)
 }

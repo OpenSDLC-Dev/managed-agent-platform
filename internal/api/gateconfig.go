@@ -219,11 +219,11 @@ func mcpEndpoint(raw string) (string, bool) {
 	// named.
 	//
 	// One consequence is worth naming rather than leaving to be rediscovered.
-	// The grammar below refuses a non-ASCII host, so a server declared as a
-	// U-label never enters the set, while every allowed_hosts list accepts one
-	// and stores its A-label (plan 43). Widening what the *gate admits* is a
-	// different decision from validating an operator's list, so this stays as it
-	// was; #614 tracks it.
+	// A url holding a U-label is refused at the API, as the reference refuses
+	// it (#614), but a percent-encoded one is not, and url.Parse decodes it to
+	// the U-label. The grammar below refuses that host, so such a server never
+	// enters the set. What the reference's runtime does with that url under
+	// allow_mcp_servers is unrecorded (DIVERGENCES).
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return "", false

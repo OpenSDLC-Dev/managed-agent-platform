@@ -379,6 +379,16 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 			return nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
 		}
 		for i, h := range hosts {
+			// Recorded 2026-11-07 on create (managed-agents-wire-recordings
+			// 2026-11-07-empty-tools-followup idx 22). Update shares this
+			// parser, and its answer there is unrecorded. The sentence names a
+			// 63-character label bound the grammar below does not hold an
+			// ASCII entry to (DIVERGENCES).
+			if hasNonASCII(h) {
+				return nil, errInvalid("auth.networking.allowed_hosts.%d: entry is not a valid hostname — "+
+					"use dot-separated labels of letters, digits, and hyphens, each 1 to 63 characters "+
+					"and not starting or ending with a hyphen, for example api.example.com or *.example.com", i)
+			}
 			e, err := canonicalAllowedHost(h)
 			if err != nil {
 				return nil, err
@@ -417,11 +427,10 @@ func validateEndpointURL(raw, field string) error {
 // (IPv4 is hostname-shaped, so one label check covers both) — and returns the
 // form to store.
 //
-// An entry written as a Unicode name is stored as its A-label, so a credential
-// registered for "bücher.example" holds "xn--bcher-kva.example" and matches a
-// request however the sandbox spells that host. The reference's published
-// grammar names neither Unicode nor punycode, so both the acceptance and the
-// echo are ours and are registered in DIVERGENCES (plan 43, #609).
+// Both callers refuse a Unicode entry before it gets here, each in the
+// reference's words for its own list (#614), so what reaches this is ASCII and
+// is returned as written. The A-label conversion CanonicalEntry carries is the
+// executor's WEBTOOL_ALLOWED_DOMAINS's alone.
 func canonicalAllowedHost(h string) (string, error) {
 	// The grammar lives with its matcher (internal/egress, the shared
 	// HostSet); this wrapper only recasts the failure as a wire 400.
