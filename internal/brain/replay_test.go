@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 )
 
 func ev(seq int64, typ domain.EventType, body string) domain.Event {
@@ -176,6 +177,41 @@ func TestBuildRequestCustomToolResultID(t *testing.T) {
 	_ = json.Unmarshal(req.Messages[1].Content, &blocks)
 	if blocks[0]["tool_use_id"] != "sevt_abc" || blocks[0]["is_error"] != true {
 		t.Errorf("custom result block = %v", blocks)
+	}
+}
+
+// A turn whose history holds tool calls and whose agent offers no tools sends
+// no tools, and replays the history as a request with tools would. The
+// reference was recorded taking such a turn (docs/DIVERGENCES.md, the session
+// update entry); #1021's placeholder tool, reverted, sent one here.
+func TestBuildRequestSendsToolHistoryWithNoTools(t *testing.T) {
+	use := ev(2, domain.EventAgentToolUse, `{"name":"bash","input":{"command":"ls"}}`)
+	history := []domain.Event{
+		ev(1, domain.EventUserMessage, `{"content":"run ls"}`),
+		use,
+		ev(3, domain.EventUserToolResult, `{"tool_use_id":"`+use.ID.String()+`","content":[{"type":"text","text":"a.txt"}]}`),
+		ev(4, domain.EventUserMessage, `{"content":"thanks"}`),
+	}
+	build := func(tools []json.RawMessage) provider.Request {
+		t.Helper()
+		req, _, err := buildRequest("sys", tools, history, "", "", "", "", nil, replayThinking{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	req := build(nil)
+	if len(req.Tools) != 0 {
+		t.Fatalf("tools = %s, want none", req.Tools)
+	}
+	offered := build([]json.RawMessage{json.RawMessage(`{"name":"bash","description":"d","input_schema":{"type":"object"}}`)})
+	if len(req.Messages) != len(offered.Messages) {
+		t.Fatalf("messages = %d, want the %d a request with tools replays", len(req.Messages), len(offered.Messages))
+	}
+	for i := range req.Messages {
+		if string(req.Messages[i].Content) != string(offered.Messages[i].Content) {
+			t.Errorf("message %d = %s, want %s", i, req.Messages[i].Content, offered.Messages[i].Content)
+		}
 	}
 }
 
