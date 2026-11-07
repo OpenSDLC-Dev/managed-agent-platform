@@ -782,13 +782,15 @@ decisions above.
 
 ## Slices
 
-A suggested order. Each slice is one PR in this repository. When the console
-changes, a companion PR goes to managed-agent-console. No release is cut
-until slice 7 has landed (decision 1), but CD deploys each slice to staging,
-so each one must be safe to run as it lands. Slices 1 to 5 add the new
-paths, and make the narrower changes each one names (slice 1 drops viewer,
-slice 3 takes the human lane off `/v1`). Slice 6 moves every install onto
-the new paths, and slice 7 removes the old ones.
+A suggested order. Each slice is one PR in this repository, except slice 3:
+its backend safety checkpoint may land before owned issuance and admission.
+When the console changes, a companion PR goes to managed-agent-console.
+No release is cut until slice 7 has landed (decision 1). CD deploys every
+merge to staging, so each merge must be safe to run as it lands. Slices 1 to 5
+add the new paths and make the narrower changes each one names: slice 1
+drops viewer, and completing slice 3 takes the human lane off `/v1`.
+Slice 6 moves every install onto the new paths, and slice 7 removes the old
+ones.
 
 1. **Stored roles:**
    - user, developer and admin stored on principals; viewer goes, and reads
