@@ -174,7 +174,7 @@ func TestSessionUpdateValidatesResultingAgent(t *testing.T) {
 			got["agent"], created["agent"])
 	}
 
-	// Clearing both halves together leaves nothing stranded.
+	// A patch within the caps lands.
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"tools": []any{}, "mcp_servers": []any{}}}); status != http.StatusOK {
 		t.Fatalf("clearing both: status %d (body %v)", status, res)
@@ -267,9 +267,10 @@ func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
 // reference answered 200 to this body on an idle session whose one toolset named
 // the cleared server, and its response and the GET after it kept the toolset
 // (2026-11-07-empty-tools-followup `control.clear-mcp-servers`, `control.after`).
-// The same state reached by a tools patch is an inference from that sample
-// (docs/DIVERGENCES.md, the session-update edges under INFERRED). Session
-// create's override keeps the rung (TestSessionDanglingMCPToolsetRejected).
+// Rescheduling, and the same state reached by a tools patch, are inferences
+// from that sample (docs/DIVERGENCES.md, the session-update edges under
+// INFERRED). Session create's override keeps the rung
+// (TestSessionDanglingMCPToolsetRejected).
 func TestSessionUpdateTakesAPatchThatStrandsAToolset(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -289,37 +290,39 @@ func TestSessionUpdateTakesAPatchThatStrandsAToolset(t *testing.T) {
 		}
 	}
 
-	sid := createSession(t, s, map[string]any{"environment_id": envID,
-		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
-			"mcp_servers": []any{mcpServer("srv")}, "tools": []any{mcpToolset("srv")}}})["id"].(string)
-	setSessionStatus(t, s, sid, string(domain.SessionIdle))
-	if _, err := s.pool.Exec(context.Background(),
-		`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
-		 VALUES ($1, 'srv', 'https://mcp.example/srv', '[]'::jsonb, 'ready')`, sid); err != nil {
-		t.Fatalf("seed the listing: %v", err)
-	}
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
-		map[string]any{"agent": map[string]any{"mcp_servers": []any{}}})
-	if status != http.StatusOK {
-		t.Fatalf("clearing the servers: status %d (body %v)", status, res)
-	}
-	strandedToolset("the response", res["agent"], "srv")
-	_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
-	strandedToolset("the GET after", got["agent"], "srv")
-	// The listing goes with the server, as it does when the toolset goes too.
-	if rows := catalogRows(t, s, sid); len(rows) != 0 {
-		t.Errorf("catalog rows = %v, want the listing gone with the server", rows)
+	for _, stored := range []domain.SessionStatus{domain.SessionIdle, domain.SessionRescheduling} {
+		sid := createSession(t, s, map[string]any{"environment_id": envID,
+			"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+				"mcp_servers": []any{mcpServer("srv")}, "tools": []any{mcpToolset("srv")}}})["id"].(string)
+		setSessionStatus(t, s, sid, string(stored))
+		if _, err := s.pool.Exec(context.Background(),
+			`INSERT INTO mcp_catalogs (session_id, server_name, url, tools, status)
+			 VALUES ($1, 'srv', 'https://mcp.example/srv', '[]'::jsonb, 'ready')`, sid); err != nil {
+			t.Fatalf("%s: seed the listing: %v", stored, err)
+		}
+		status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
+			map[string]any{"agent": map[string]any{"mcp_servers": []any{}}})
+		if status != http.StatusOK {
+			t.Fatalf("%s: clearing the servers: status %d (body %v)", stored, status, res)
+		}
+		strandedToolset(string(stored)+": the response", res["agent"], "srv")
+		_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+		strandedToolset(string(stored)+": the GET after", got["agent"], "srv")
+		// The listing goes with the server, as it does when the toolset goes too.
+		if rows := catalogRows(t, s, sid); len(rows) != 0 {
+			t.Errorf("%s: catalog rows = %v, want the listing gone with the server", stored, rows)
+		}
 	}
 
 	// The same state by the other door: a tools patch names a server the session
 	// never declared.
-	sid = createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
-	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid,
+	sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
 		map[string]any{"agent": map[string]any{"tools": []any{mcpToolset("ghost")}}})
 	if status != http.StatusOK {
 		t.Fatalf("a toolset naming no server: status %d (body %v)", status, res)
 	}
-	_, got = s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
+	_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
 	strandedToolset("the other door", got["agent"], "ghost")
 }
 

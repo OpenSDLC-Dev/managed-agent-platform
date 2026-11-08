@@ -132,7 +132,9 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 // "a pre-#66 stored spec that violates a cap fails here too"): an agent whose
 // toolset cannot resolve fails loudly at session create rather than starting a
 // session whose brain would have no server to expand. The agent resource still
-// renders, so the message names what to repair.
+// renders, so the message names what to repair. A session update may still
+// leave a running session in that state, as the reference does (#1028); its
+// toolset then offers nothing.
 func TestStoredSpecsAreRevalidatedOnResolve(t *testing.T) {
 	s := newTestServer(t)
 	envID := createEnvironment(t, s, map[string]any{"name": "e"})["id"].(string)

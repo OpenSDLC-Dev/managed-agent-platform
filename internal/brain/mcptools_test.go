@@ -570,10 +570,13 @@ func TestTwoServersCanContestOneComposedName(t *testing.T) {
 // nothing. That is not a failed turn — the session keeps running without that
 // server's tools, and the next discovery pass re-attempts it.
 func TestAServerWithNoListingOffersNothing(t *testing.T) {
-	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
-		json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"bash"}]}`),
-		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
-	}}}
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"bash"}]}`),
+			json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+		},
+		MCPServers: []json.RawMessage{json.RawMessage(`{"type":"url","name":"docs","url":"https://docs.example.test/mcp"}`)},
+	}}
 
 	defs, class, notes, _, err := resolveTools(agent, mcpCatalog{}, delegationNone, time.Now())
 	if err != nil {
@@ -590,8 +593,32 @@ func TestAServerWithNoListingOffersNothing(t *testing.T) {
 	if _, ok := class["mcp__docs__search"]; ok {
 		t.Error("a tool from an undiscovered server has a class")
 	}
-	if !hasNote(notes, "docs") {
-		t.Errorf("notes = %v, want the server named", notes)
+	if len(notes) != 1 || !hasNote(notes, `"docs": it has no listing this turn`) {
+		t.Errorf("notes = %v, want the server named as one with no listing", notes)
+	}
+}
+
+// A toolset may name a server the agent does not declare, once a session update
+// clears mcp_servers and keeps the toolset (#1028). It offers nothing, as a
+// server with no listing does, but its note names the lasting cause: nothing
+// dials an undeclared server, so "this turn" would never pass.
+func TestAToolsetNamingNoDeclaredServerOffersNothing(t *testing.T) {
+	agent := domain.ResolvedAgent{AgentSpec: domain.AgentSpec{Tools: []json.RawMessage{
+		json.RawMessage(`{"type":"agent_toolset_20260401","configs":[{"name":"bash"}]}`),
+		json.RawMessage(`{"type":"mcp_toolset","mcp_server_name":"docs"}`),
+	}}}
+
+	defs, _, notes, _, err := resolveTools(agent, mcpCatalog{}, delegationNone, time.Now())
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if got := defNames(t, defs); !slices.Contains(got, "bash") || slices.ContainsFunc(got, func(n string) bool {
+		return strings.HasPrefix(n, "mcp__")
+	}) {
+		t.Errorf("offered = %v, want the built-ins and no MCP tool", got)
+	}
+	if len(notes) != 1 || !hasNote(notes, `"docs": the agent declares no server of that name`) {
+		t.Errorf("notes = %v, want the server named as undeclared", notes)
 	}
 }
 

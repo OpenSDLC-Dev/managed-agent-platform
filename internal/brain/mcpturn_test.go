@@ -79,6 +79,35 @@ func TestATurnWaitsForAServerNoToolsetNames(t *testing.T) {
 	}
 }
 
+// A toolset naming a server the agent does not declare holds no turn (#1028):
+// discovery walks the declared servers, so there is no listing to wait for. A
+// session update that clears mcp_servers alone leaves this state, and the turn
+// runs without that toolset's tools.
+func TestATurnRunsPastAToolsetNamingNoServer(t *testing.T) {
+	h := newHarness(t, [][]provider.Chunk{{textChunk(0, "done"), done("end_turn", 3)}}, nil)
+	agentJSON := `{"type":"agent","id":"agent_mcp","version":1,"name":"n",
+		"model":{"id":"fixture-model"},"system":"do the task","description":"",
+		"tools":[{"type":"mcp_toolset","mcp_server_name":"docs"}],
+		"mcp_servers":[],"skills":[],"multiagent":null}`
+	if _, err := h.pool.Exec(context.Background(),
+		`UPDATE sessions SET resolved_agent = $2 WHERE id = $1`, h.sessionID.String(), agentJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	h.wake(t, "search the docs")
+	h.runOnce(t)
+
+	if n := len(h.provider.calls); n != 1 {
+		t.Fatalf("model requests = %d, want 1 — no listing is owed", n)
+	}
+	if got := requestTools(t, h.provider.calls[0]); len(got) != 0 {
+		t.Errorf("offered tools = %v, want none", got)
+	}
+	if got := h.liveOf(t, queue.MCPExec); got != 0 {
+		t.Errorf("mcp_exec items = %d, want 0", got)
+	}
+}
+
 // A server this session has never listed has tools nobody can name, so the turn
 // is not assembled at all: no model call, the item comes back as mcp_exec, and
 // the session stays running while discovery runs. Sending the turn without the

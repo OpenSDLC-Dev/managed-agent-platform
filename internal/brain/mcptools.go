@@ -365,6 +365,17 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 	}
 
+	// A session update may leave a toolset naming a server the agent does not
+	// declare (#1028). Nothing dials such a server, so its toolset never has a
+	// listing, and its note says why rather than "this turn".
+	servers, err := declaredMCPServers(agent)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	declared := map[string]bool{}
+	for _, s := range servers {
+		declared[s.name] = true
+	}
 	spent, overBudget := 0, 0
 	for _, raw := range agent.Tools {
 		var probe struct {
@@ -378,6 +389,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			continue
 		}
 		stored, ok := cat[probe.Server]
+		if !ok && !declared[probe.Server] {
+			notes.add("no tools were offered from MCP server %q: the agent declares no server of that name",
+				noteLabel(probe.Server))
+			continue
+		}
 		if !ok {
 			notes.add("no tools were offered from MCP server %q: it has no listing this turn",
 				noteLabel(probe.Server))
