@@ -598,6 +598,21 @@ func TestFetchStatesStopsOnABrokenListing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `no closing ">"`) {
 		t.Errorf("err = %v, want the malformed Link named", err)
 	}
+
+	// A short page ends the listing even when it names a next page.
+	var fetched atomic.Int32
+	short := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetched.Add(1)
+		w.Header().Set("Link", `<http://`+r.Host+`/repositories/7/issues?after=c1>; rel="next"`)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer short.Close()
+	if _, err := fetchStates(context.Background(), short.URL, "o/r", nil); err != nil {
+		t.Errorf("a short page that names a next one: %v", err)
+	}
+	if n := fetched.Load(); n != 1 {
+		t.Errorf("pages fetched = %d, want 1 — a short page is the last", n)
+	}
 }
 
 // TestFetchStatesTellsAbsentFromUnreachable pins the trap the substring test
