@@ -67,6 +67,7 @@ func TestKindLoadRecordEvidence(t *testing.T) {
 	}{
 		{"no nodes", nil, ""},
 		{"the tag alone (kind v0.30.0 on node image v1.34.0)", [][]string{{l.ref, "docker.io/library/busybox:1"}}, ""},
+		{"a tag whose name starts import-, which is no record", [][]string{{l.ref, "import-unrelated:latest"}}, ""},
 		{"the tag and its record (kind v0.33.0 on node image v1.37.0)", [][]string{{l.ref, own}}, own},
 		{"its record on one node of two", [][]string{{l.ref}, {l.ref, own}}, own},
 		{"another load's record, not its own", [][]string{{l.ref, other}}, other},

@@ -124,9 +124,11 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 
 // recordEvidence is the reference in the nodes' containerd listings that says
 // the cluster's `kind load` leaves import records, or "" where none does: the
-// load's own record wherever a node holds it, or else another load's. On
-// another load's the load is still held to its own, so a record kind left
-// under a name the load does not know fails Missing rather than going unseen.
+// load's own record wherever a node holds it, or else another load's: an
+// `import-…@sha256:…` digest reference, not a tag whose name merely starts
+// import-. On another load's the load is still held to its own, so a record
+// kind left under a name the load does not know fails Missing rather than
+// going unseen.
 func (l *KindLoad) recordEvidence(listings [][]string) string {
 	other := ""
 	for _, refs := range listings {
@@ -134,7 +136,7 @@ func (l *KindLoad) recordEvidence(listings [][]string) string {
 			switch {
 			case ref != l.ref && l.names(ref):
 				return ref
-			case other == "" && strings.HasPrefix(ref, "import-"):
+			case other == "" && strings.HasPrefix(ref, "import-") && strings.Contains(ref, "@sha256:"):
 				other = ref
 			}
 		}
