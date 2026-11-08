@@ -453,13 +453,23 @@ func TestTheRegistryPassesTheOfflineRungs(t *testing.T) {
 	}
 }
 
-func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
+// The fake pages the way GitHub did on 2026-11-07 (#1029), scaled down: a page
+// number with no cursor is refused past page 1 (GitHub refused page 11), and the
+// Link header's next target carries the cursor under a path of its own,
+// /repositories/{id}. The last page still sends a Link, naming only prev.
+func TestFetchStatesFollowsTheLinkAndFillsGaps(t *testing.T) {
 	var listed, byNumber int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Query().Get("page") {
-		case "1":
+		q := r.URL.Query()
+		switch {
+		case q.Has("page") && q.Get("page") != "1" && !q.Has("after"):
+			http.Error(w, `{"message":"Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)"}`,
+				http.StatusUnprocessableEntity)
+			return
+		case r.URL.Path == "/repos/o/r/issues":
 			listed++
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?state=all&per_page=100&page=2&after=c1>; rel="next"`, r.Host))
 			var b strings.Builder
 			b.WriteString("[")
 			for i := 1; i <= 100; i++ {
@@ -471,8 +481,9 @@ func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
 			b.WriteString("]")
 			_, _ = w.Write([]byte(b.String()))
 			return
-		case "2":
+		case r.URL.Path == "/repositories/7/issues" && q.Get("after") == "c1":
 			listed++
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?state=all&per_page=100&page=1&before=c2>; rel="prev"`, r.Host))
 			_, _ = w.Write([]byte(`[{"number":242,"state":"open"}]`))
 			return
 		}
@@ -491,7 +502,7 @@ func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
 		t.Fatalf("fetchStates: %v", err)
 	}
 	if listed != 2 || byNumber != 1 {
-		t.Fatalf("listed=%d byNumber=%d, want 2 and 1 — the listing must paginate and only gaps may be fetched one by one", listed, byNumber)
+		t.Fatalf("listed=%d byNumber=%d, want 2 and 1 — the listing must follow its Link and only gaps may be fetched one by one", listed, byNumber)
 	}
 	for _, tc := range []struct {
 		n     int
@@ -502,6 +513,31 @@ func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
 		if open != tc.open || known != tc.known {
 			t.Errorf("lookup(%d) = (%v,%v), want (%v,%v)", tc.n, open, known, tc.open, tc.known)
 		}
+	}
+}
+
+// A next link is followed only on the API's own host, because each request
+// carries the token when the environment offers one.
+func TestFetchStatesKeepsTheTokenOnTheAPIHost(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var reached bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", fmt.Sprintf(`<%s/repositories/7/issues?after=c1>; rel="next"`, other.URL))
+		_, _ = w.Write([]byte(`[{"number":1,"state":"open"}]`))
+	}))
+	defer srv.Close()
+
+	_, err := fetchStates(context.Background(), srv.URL, "o/r", nil)
+	if err == nil || !strings.Contains(err.Error(), other.URL) {
+		t.Errorf("err = %v, want a refusal naming the off-host link", err)
+	}
+	if reached {
+		t.Error("the listing followed a next link to another host, token and all")
 	}
 }
 
