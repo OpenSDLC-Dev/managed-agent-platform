@@ -365,13 +365,12 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 	}
 
-	// A session update may leave a toolset naming a server the agent does not
-	// declare (#1028). Nothing dials such a server, so its toolset never has a
-	// listing, and its note says why rather than "this turn".
-	servers, err := declaredMCPServers(agent)
-	if err != nil {
-		return nil, nil, nil, nil, err
-	}
+	// A session update that sends mcp_servers alone may leave a toolset naming
+	// a server the agent does not declare (#1028). Nothing dials such a server,
+	// so its toolset never has a listing, and its note says why rather than
+	// "this turn". The error is the turn's caller's: it already failed the turn
+	// on a spec whose servers it cannot read (declaredMCPServers in brain.go).
+	servers, _ := declaredMCPServers(agent)
 	declared := map[string]bool{}
 	for _, s := range servers {
 		declared[s.name] = true

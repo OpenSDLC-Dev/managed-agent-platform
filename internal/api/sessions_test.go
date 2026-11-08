@@ -267,10 +267,10 @@ func TestSessionUpdateTakesAPatchThatStrandsAServer(t *testing.T) {
 // reference answered 200 to this body on an idle session whose one toolset named
 // the cleared server, and its response and the GET after it kept the toolset
 // (2026-11-07-empty-tools-followup `control.clear-mcp-servers`, `control.after`).
-// Rescheduling, and the same state reached by a tools patch, are inferences
-// from that sample (docs/DIVERGENCES.md, the session-update edges under
-// INFERRED). Session create's override keeps the rung
-// (TestSessionDanglingMCPToolsetRejected).
+// Rescheduling is an inference from that sample (docs/DIVERGENCES.md, the
+// session-update edges under INFERRED). A toolset the patch sends is still held
+// to the rung, because the SDK states it on the toolset param this route embeds;
+// TestSessionDanglingMCPToolsetRejected pins a tools patch alone.
 func TestSessionUpdateTakesAPatchThatStrandsAToolset(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -314,16 +314,14 @@ func TestSessionUpdateTakesAPatchThatStrandsAToolset(t *testing.T) {
 		}
 	}
 
-	// The same state by the other door: a tools patch names a server the session
-	// never declared.
-	sid := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})["id"].(string)
-	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid,
-		map[string]any{"agent": map[string]any{"tools": []any{mcpToolset("ghost")}}})
-	if status != http.StatusOK {
-		t.Fatalf("a toolset naming no server: status %d (body %v)", status, res)
-	}
-	_, got := s.do(http.MethodGet, "/v1/sessions/"+sid, nil)
-	strandedToolset("the other door", got["agent"], "ghost")
+	// The same state is refused when the patch sends the toolset beside the
+	// cleared servers.
+	sid := createSession(t, s, map[string]any{"environment_id": envID,
+		"agent": map[string]any{"type": "agent_with_overrides", "id": agentID,
+			"mcp_servers": []any{mcpServer("srv")}, "tools": []any{mcpToolset("srv")}}})["id"].(string)
+	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"mcp_servers": []any{}, "tools": []any{mcpToolset("srv")}}})
+	wantRejected(t, status, res, `mcp_toolset references mcp_server "srv"`)
 }
 
 // The SDK documents session metadata with the same sentence as agents and

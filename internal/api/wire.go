@@ -775,28 +775,33 @@ func capOverrideRunes(path, val string, limit int) error {
 // the reference's update wording ("the agent's resulting tools"). Entry
 // shapes were already checked one-by-one (parseTools, parseMCPServers).
 func validateAgentSpec(spec agentSpec) error {
-	return checkAgentSpec(spec, true)
+	return checkAgentSpec(spec, true, true)
 }
 
 // validatePatchedSessionAgent is validateAgentSpec for what a session update
-// leaves behind, which is held to neither half of the MCP pairing. The SDK
-// states the pairing on agent create and update and not on this route's params,
-// and the reference took a patch that broke each half:
-//   - a declared server that no mcp_toolset references (2026-10-31-mcp-listing
+// leaves behind. The two halves of the MCP pairing bind it differently:
+//   - A declared server that no mcp_toolset references is allowed. The SDK
+//     states that rule on agent create and update and not on this route's
+//     params, and the reference took such a patch (2026-10-31-mcp-listing
 //     `null-retry.attempt.1.tools.update`; #1018). The server stays declared,
 //     so discovery still dials it, and it offers no tools, because tools come
 //     from the toolsets.
-//   - an mcp_toolset that names no declared server (2026-11-07-empty-tools-followup
+//   - A toolset the patch sends must name a declared server, because the SDK
+//     states that rule on the toolset param this route's tools embed (checked
+//     against anthropic-sdk-go v1.70.1 — betaagent.go
+//     BetaManagedAgentsMCPToolsetParams.MCPServerName). A patch that sends
+//     mcp_servers alone may leave a stored toolset naming no server, as the
+//     reference did (2026-11-07-empty-tools-followup
 //     `control.clear-mcp-servers`; #1028). Nothing dials a server no spec
-//     declares, so the toolset has no listing, and the brain offers no tools
+//     declares, so that toolset has no listing, and the brain offers no tools
 //     from it.
-func validatePatchedSessionAgent(spec agentSpec) error {
-	return checkAgentSpec(spec, false)
+func validatePatchedSessionAgent(spec agentSpec, toolsSent bool) error {
+	return checkAgentSpec(spec, toolsSent, false)
 }
 
-// checkAgentSpec holds spec to both halves of the MCP pairing when paired is
-// true.
-func checkAgentSpec(spec agentSpec, paired bool) error {
+// checkAgentSpec holds spec to the dangling-toolset rung when toolsetsNamed is
+// true, and to the unreferenced-server rung when serversReferenced is true.
+func checkAgentSpec(spec agentSpec, toolsetsNamed, serversReferenced bool) error {
 	if len(spec.Tools) > maxAgentTools {
 		return errInvalid("tools lists at most %d entries", maxAgentTools)
 	}
@@ -838,8 +843,9 @@ func checkAgentSpec(spec agentSpec, paired bool) error {
 			// the unreferenced-server direction checked below — so a toolset
 			// naming a server this spec does not declare is a 400 rather than a
 			// toolset the brain would have no server to expand. A session update
-			// is not held to it (validatePatchedSessionAgent).
-			if paired && !seen[probe.MCPServerName] {
+			// is held to it only for the toolsets it sends
+			// (validatePatchedSessionAgent).
+			if toolsetsNamed && !seen[probe.MCPServerName] {
 				return errInvalid("mcp_toolset references mcp_server %q, which is not declared in mcp_servers",
 					probe.MCPServerName)
 			}
@@ -875,7 +881,7 @@ func checkAgentSpec(spec agentSpec, paired bool) error {
 			toolNames[name] = true
 		}
 	}
-	if !paired {
+	if !serversReferenced {
 		return nil
 	}
 	for _, name := range serverNames {

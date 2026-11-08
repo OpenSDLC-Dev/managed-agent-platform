@@ -22,8 +22,9 @@ import (
 
 // TestAgentDanglingMCPToolsetRejected covers the direction #66 left open on
 // agent create and update's merged result. TestSessionDanglingMCPToolsetRejected
-// covers a session's agent_with_overrides. A session-update agent patch is held
-// to neither direction (#1018, #1028).
+// covers a session's agent_with_overrides and the toolsets a session-update
+// patch sends. A session-update patch that sends mcp_servers alone is not held
+// to it (#1028).
 func TestAgentDanglingMCPToolsetRejected(t *testing.T) {
 	s := newTestServer(t)
 
@@ -71,13 +72,13 @@ func wantRejected(t *testing.T, status int, res map[string]any, frag string) {
 	}
 }
 
-// TestSessionDanglingMCPToolsetRejected pins the same rung on a session
-// create's override, which resolves the agent spec through the identical
-// validator, in both directions: a toolset naming a server the spec lacks, and
-// the mirror image — clearing mcp_servers while the toolset that referenced them
-// stays. A session update is held to neither direction (#1018, #1028; see
-// TestSessionUpdateTakesAPatchThatStrandsAToolset), so it appears here only for
-// the patch that replaces both sides.
+// TestSessionDanglingMCPToolsetRejected pins the same rung on the session
+// surfaces, which resolve the agent spec through the identical validator. A
+// session create's override is held to it in both directions: a toolset naming a
+// server the spec lacks, and the mirror image — clearing mcp_servers while the
+// toolset that referenced them stays. A session update is held to it for the
+// toolsets it sends, which the SDK's toolset param states; a patch that sends
+// mcp_servers alone is not (#1028; TestSessionUpdateTakesAPatchThatStrandsAToolset).
 func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -88,6 +89,13 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 			"tools": []any{mcpToolset("ghost")},
 		},
 		"environment_id": envID,
+	})
+	wantRejected(t, status, res, "ghost")
+
+	session := createSession(t, s, map[string]any{"agent": agentID, "environment_id": envID})
+	sid := session["id"].(string)
+	status, res = s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
+		"agent": map[string]any{"tools": []any{mcpToolset("ghost")}},
 	})
 	wantRejected(t, status, res, "ghost")
 
@@ -132,9 +140,9 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 // "a pre-#66 stored spec that violates a cap fails here too"): an agent whose
 // toolset cannot resolve fails loudly at session create rather than starting a
 // session whose brain would have no server to expand. The agent resource still
-// renders, so the message names what to repair. A session update may still
-// leave a running session in that state, as the reference does (#1028); its
-// toolset then offers nothing.
+// renders, so the message names what to repair. A session update that sends
+// mcp_servers alone may still leave a live session in that state, as the
+// reference does (#1028); its toolset then offers nothing.
 func TestStoredSpecsAreRevalidatedOnResolve(t *testing.T) {
 	s := newTestServer(t)
 	envID := createEnvironment(t, s, map[string]any{"name": "e"})["id"].(string)

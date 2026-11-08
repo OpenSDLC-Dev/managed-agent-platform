@@ -1248,6 +1248,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		if err := json.Unmarshal(row.agentJSON, &agent); err != nil {
 			return nil, err
 		}
+		toolsSent := false
 		for key, val := range patch {
 			switch key {
 			case "tools":
@@ -1259,6 +1260,7 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 					return nil, err
 				}
 				agent.Tools = items
+				toolsSent = true
 			case "mcp_servers":
 				// The path and words this route was recorded refusing a
 				// custom tool name's length in (idx 13 above); for the
@@ -1273,9 +1275,11 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 			}
 		}
 		// Validate the merged result, as agent update does: a patch that grows
-		// past a cap rejects (#287). One that leaves a server no toolset names
-		// (#1018), or a toolset naming no server (#1028), lands.
-		if err := validatePatchedSessionAgent(agent.AgentSpec); err != nil {
+		// past a cap, or sends a toolset naming no server, rejects (#287). One
+		// that leaves a server no toolset names (#1018), or that sends
+		// mcp_servers alone and leaves a stored toolset naming no server
+		// (#1028), lands.
+		if err := validatePatchedSessionAgent(agent.AgentSpec, toolsSent); err != nil {
 			return nil, err
 		}
 		// A patch that names servers meets the check session create runs, in the

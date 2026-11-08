@@ -262,9 +262,9 @@ func TestSessionUpdateRefusesAnMCPHostItsEnvironmentBlocks(t *testing.T) {
 	refused(inStatus(envID, domain.SessionTerminated), "Cannot modify archived session")
 	// The merged-result check answers ahead of it, in the order create runs them.
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+inStatus(envID, domain.SessionIdle),
-		map[string]any{"agent": map[string]any{"mcp_servers": []any{server, server}}})
+		map[string]any{"agent": map[string]any{"mcp_servers": []any{server}, "tools": []any{mcpToolset("ghost")}}})
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error",
-		`mcp_servers names must be unique: "rec32_context7" appears twice`)
+		`mcp_toolset references mcp_server "ghost", which is not declared in mcp_servers`)
 
 	// A cleared list has no host to judge (`idle.mcp_empty`, on this same policy).
 	if status, res := s.do(http.MethodPost, "/v1/sessions/"+inStatus(envID, domain.SessionIdle),
