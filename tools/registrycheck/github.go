@@ -40,23 +40,30 @@ type issueState struct {
 // The listing follows each page's Link header rather than counting pages.
 // Once the repository passed 1,000 issues and pull requests, GitHub refused
 // `page=11` to an unauthenticated request and served the cursor URL its Link
-// header names for the same page (#1029).
+// header names for the same page (#1029). A short page still ends the listing,
+// as it did before.
 func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (bool, bool), error) {
 	states := map[int]bool{}
-	next := fmt.Sprintf("%s/repos/%s/issues?state=all&per_page=100", api, repo)
-	for pages := 0; next != ""; pages++ {
+	next, err := url.Parse(fmt.Sprintf("%s/repos/%s/issues?state=all&per_page=100", api, repo))
+	if err != nil {
+		return nil, err
+	}
+	for pages := 0; next != nil; pages++ {
 		if pages == 50 {
 			return nil, fmt.Errorf("issue listing did not terminate after 50 pages")
 		}
 		var batch []issueState
-		header, err := getJSON(ctx, next, &batch)
+		header, err := getJSON(ctx, next.String(), &batch)
 		if err != nil {
 			return nil, err
 		}
 		for _, is := range batch {
 			states[is.Number] = is.State == "open"
 		}
-		if next, err = nextLink(header.Get("Link"), api); err != nil {
+		if len(batch) < 100 {
+			break
+		}
+		if next, err = nextLink(header.Values("Link"), next); err != nil {
 			return nil, err
 		}
 	}
@@ -89,50 +96,49 @@ func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (
 	}, nil
 }
 
-// nextLink is the rel="next" target of a Link header, or "" when the header
-// names none. A target must be on the API's own scheme and host, because every
-// request carries the token when the environment offers one.
-func nextLink(header, api string) (string, error) {
-	for rest := header; ; {
+// nextLink is the rel="next" target of a response's Link fields, resolved
+// against the page that sent them, or nil when they name none. A target must
+// stay on that page's scheme and host, because every request carries the token
+// when the environment offers one. The first page is on the API's own, so every
+// page is.
+func nextLink(fields []string, page *url.URL) (*url.URL, error) {
+	for rest := strings.Join(fields, ","); ; {
 		open := strings.IndexByte(rest, '<')
 		if open < 0 {
-			return "", nil
+			return nil, nil
 		}
 		target, after, ok := strings.Cut(rest[open+1:], ">")
 		if !ok {
-			return "", nil
+			return nil, fmt.Errorf("issue listing: a Link header with no closing \">\": %q", strings.Join(fields, ","))
 		}
 		rest = after
 		params, _, _ := strings.Cut(rest, "<")
-		next := false
+		isNext := false
 		for _, p := range strings.FieldsFunc(params, func(r rune) bool { return r == ';' || r == ',' }) {
 			key, val, _ := strings.Cut(p, "=")
 			if strings.EqualFold(strings.TrimSpace(key), "rel") &&
 				slices.Contains(strings.Fields(strings.ToLower(strings.Trim(strings.TrimSpace(val), `"`))), "next") {
-				next = true
+				isNext = true
 			}
 		}
-		if !next {
+		if !isNext {
 			continue
 		}
-		t, err := url.Parse(target)
+		ref, err := url.Parse(target)
 		if err != nil {
-			return "", fmt.Errorf("issue listing: the next link %q: %w", target, err)
+			return nil, fmt.Errorf("issue listing: the next link %q: %w", target, err)
 		}
-		base, err := url.Parse(api)
-		if err != nil {
-			return "", err
+		next := page.ResolveReference(ref)
+		if next.Scheme != page.Scheme || next.Host != page.Host {
+			return nil, fmt.Errorf("issue listing: the next link %q leaves %s://%s", target, page.Scheme, page.Host)
 		}
-		if t.Scheme != base.Scheme || t.Host != base.Host {
-			return "", fmt.Errorf("issue listing: the next link %q leaves %s", target, api)
-		}
-		return target, nil
+		return next, nil
 	}
 }
 
 // getJSON decodes a 200 answer into `into` and returns the answer's header.
-func getJSON(ctx context.Context, url string, into any) (http.Header, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func getJSON(ctx context.Context, addr string, into any) (http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +162,9 @@ func getJSON(ctx context.Context, url string, into any) (http.Header, error) {
 		// the registry having rotted.
 		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining == "0" {
 			return nil, &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s — the GitHub rate limit is exhausted (reset at %s); set GITHUB_TOKEN to raise it",
-				url, resp.Status, resp.Header.Get("X-RateLimit-Reset"))}
+				addr, resp.Status, resp.Header.Get("X-RateLimit-Reset"))}
 		}
-		return nil, &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))}
+		return nil, &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s: %s", addr, resp.Status, strings.TrimSpace(string(body)))}
 	}
 	return resp.Header, json.Unmarshal(body, into)
 }
