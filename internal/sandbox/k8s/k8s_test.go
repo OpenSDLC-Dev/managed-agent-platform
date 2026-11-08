@@ -200,9 +200,7 @@ func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 		var load [8]byte
 		_, _ = rand.Read(load[:])
 		image = dockertest.ImageFrom(t, "gate", "FROM "+image+"\nLABEL map.gate.load="+hex.EncodeToString(load[:])+"\n")
-		if l := sandboxtest.LoadIntoKind(t, kubeCtx, image); l != nil {
-			t.Cleanup(func() { l.Remove(t) })
-		}
+		sandboxtest.LoadIntoKind(t, kubeCtx, image)
 	}
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{

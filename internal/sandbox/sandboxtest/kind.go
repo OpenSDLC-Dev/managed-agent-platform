@@ -53,10 +53,13 @@ type KindLoad struct {
 }
 
 // LoadIntoKind makes a locally built image visible to a kind cluster's nodes,
-// whose containerd cannot see the Docker daemon's images, and answers what it
-// loaded, or nil for a context that is not kind's. Such a context is taken to
-// share the daemon's image store, as Docker Desktop's does; any other cluster
-// (minikube, k3d, remote) needs the image loaded by hand. `docker save
+// whose containerd cannot see the Docker daemon's images, takes it off them
+// again when the test ends (Remove), and answers what it loaded, or nil for a
+// context that is not kind's. Such a context is taken to share the daemon's
+// image store, as Docker Desktop's does; any other cluster (minikube, k3d,
+// remote) needs the image loaded by hand. The removal is in place before
+// LoadIntoKind first looks at the nodes, so a look that fails the test leaves
+// nothing of the load behind. `docker save
 // --platform` keeps the archive single-platform (a multi-arch manifest breaks
 // `kind load` on darwin; an older docker without the flag falls back to a
 // plain save, as one without an index.json in its archive — before Docker
@@ -95,6 +98,7 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 		t.Fatalf("kind load image-archive: %v\n%s", err, out)
 	}
 	l := &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker}
+	t.Cleanup(func() { l.Remove(t) })
 	// Some kind setups leave no import record at all: kind v0.30.0 on node
 	// image v1.34.0 left the tag alone, where kind v0.33.0 on v1.37.0 leaves
 	// both (#1025). A record no node holds is none for Missing to ask for or

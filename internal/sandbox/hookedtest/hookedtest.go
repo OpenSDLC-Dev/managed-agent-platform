@@ -99,7 +99,6 @@ func Image(t *testing.T, hook string, env ...string) string {
 	image := DockerImage(t, hook, env...)
 	if l := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, "--host", docker.DaemonHost()); l != nil {
 		loads.Store(image, l)
-		t.Cleanup(func() { l.Remove(t) })
 	}
 	return image
 }
