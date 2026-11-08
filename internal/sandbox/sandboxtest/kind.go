@@ -34,7 +34,7 @@ func KubeContext(t testing.TB) string {
 }
 
 // KindLoad is an image LoadIntoKind put on a kind cluster's nodes: under its
-// tag, and under the record `kind load` leaves beside it,
+// tag, and, where `kind load` leaves one, under the record beside it,
 // `import-<date>@sha256:<digest>`, named for the archive's own index.json,
 // which removing the tag leaves behind (Remove). Every image loaded is the
 // loading test's own — built for it, a nonce label making its ID, and so its
@@ -53,15 +53,20 @@ type KindLoad struct {
 }
 
 // LoadIntoKind makes a locally built image visible to a kind cluster's nodes,
-// whose containerd cannot see the Docker daemon's images, and answers what it
-// loaded, or nil for a context that is not kind's. Such a context is taken to
-// share the daemon's image store, as Docker Desktop's does; any other cluster
-// (minikube, k3d, remote) needs the image loaded by hand. `docker save
-// --platform` keeps the archive single-platform (a multi-arch manifest breaks
-// `kind load` on darwin; an older docker without the flag falls back to a
-// plain save, as one without an index.json in its archive — before Docker
-// 25 — falls back to a load whose import record cannot be named, and so stays
-// on the nodes). docker is the docker CLI's global flags — "--host" and the
+// whose containerd cannot see the Docker daemon's images, takes it off them
+// again when the test ends (Remove), and answers what it loaded, or nil for a
+// context that is not kind's. Such a context is taken to share the daemon's
+// image store, as Docker Desktop's does; any other cluster (minikube, k3d,
+// remote) needs the image loaded by hand. `docker save --platform` keeps the
+// archive single-platform (a multi-arch manifest breaks `kind load` on darwin;
+// an older docker without the flag falls back to a plain save, as one without
+// an index.json in its archive — before Docker 25 — falls back to a load whose
+// import record cannot be named, and so stays on the nodes). After loading an
+// archive that has an index.json, LoadIntoKind lists every node's images: on a
+// cluster none of whose nodes holds an import record at all, the load is one
+// with no record to hold or remove (recordEvidence). The removal is registered
+// before that listing, so a listing that fails the test still has the removal
+// attempted. docker is the docker CLI's global flags — "--host" and the
 // daemon's address — as dockertest.ImageFrom takes them.
 func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLoad {
 	t.Helper()
@@ -94,7 +99,49 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 	if out, err := exec.Command("kind", "load", "image-archive", archive, "--name", cluster).CombinedOutput(); err != nil {
 		t.Fatalf("kind load image-archive: %v\n%s", err, out)
 	}
-	return &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker}
+	l := &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker}
+	t.Cleanup(func() { l.Remove(t) })
+	// Some kind setups leave no import record at all: kind 0.30.0 on node
+	// image 1.34.0 left the tag alone, where kind 0.33.0 on node image 1.37.0
+	// leaves both (#1025). On a cluster none of whose nodes holds an import record,
+	// the load is one whose record cannot be named, as an archive with no
+	// index.json makes it.
+	if index != "" {
+		var listings [][]string
+		for _, node := range l.nodes(t) {
+			listings = append(listings, l.containerdRefs(t, node))
+		}
+		switch ref := l.recordEvidence(listings); {
+		case ref == "":
+			t.Logf("no kind node holds an import record, of the load of %s or of any other: there is none to hold or remove", image)
+			l.index = ""
+		case !l.names(ref):
+			t.Logf("no kind node holds the import record @%s of the load of %s, but one holds %s: the cluster's kind leaves records, so the load is held to its own", index, image, ref)
+		}
+	}
+	return l
+}
+
+// recordEvidence is the reference in the nodes' containerd listings that says
+// the cluster's `kind load` leaves import records, or "" where none does: the
+// load's own record wherever a node holds it, or else another load's: an
+// `import-…@sha256:…` digest reference, not a tag whose name merely starts
+// import-. On another load's the load is still held to its own, so a record
+// kind left under a name the load does not know fails Missing rather than
+// going unseen.
+func (l *KindLoad) recordEvidence(listings [][]string) string {
+	other := ""
+	for _, refs := range listings {
+		for _, ref := range refs {
+			switch {
+			case ref != l.ref && l.names(ref):
+				return ref
+			case other == "" && strings.HasPrefix(ref, "import-") && strings.Contains(ref, "@sha256:"):
+				other = ref
+			}
+		}
+	}
+	return other
 }
 
 // archiveIndex is the digest of a saved image archive's index.json, which is
@@ -142,8 +189,9 @@ func (l *KindLoad) Refs(t testing.TB) []string {
 }
 
 // Missing is what of the load a node of the cluster does not hold, each as
-// "node: what": its tag, and its import record where the archive named one
-// (LoadIntoKind) — none while the load is in place.
+// "node: what": its tag, and its import record where the archive named one and
+// the cluster's kind leaves records (LoadIntoKind) — none while the load is in
+// place.
 func (l *KindLoad) Missing(t testing.TB) []string {
 	t.Helper()
 	var missing []string

@@ -99,7 +99,6 @@ func Image(t *testing.T, hook string, env ...string) string {
 	image := DockerImage(t, hook, env...)
 	if l := sandboxtest.LoadIntoKind(t, sandboxtest.KubeContext(t), image, "--host", docker.DaemonHost()); l != nil {
 		loads.Store(image, l)
-		t.Cleanup(func() { l.Remove(t) })
 	}
 	return image
 }
@@ -123,7 +122,8 @@ func KindRefs(t *testing.T, image string) (refs []string, loaded bool) {
 
 // KindMissing is what of an image Image built a kind node does not hold
 // (sandboxtest.KindLoad.Missing) — its tag, and its import record where the
-// archive named one — with loaded as KindRefs has it.
+// archive named one and the cluster's kind leaves records — with loaded as
+// KindRefs has it.
 func KindMissing(t *testing.T, image string) (missing []string, loaded bool) {
 	t.Helper()
 	l, ok := loads.Load(image)
