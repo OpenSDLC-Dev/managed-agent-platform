@@ -64,8 +64,8 @@ type KindLoad struct {
 // import record cannot be named, and so stays on the nodes). After the load
 // LoadIntoKind lists every node's images: on a cluster none of whose nodes
 // holds an import record at all, the load is one with no record to hold or
-// remove (leavesRecords). The removal is in place before that listing, so a
-// listing that fails the test leaves nothing of the load behind. docker is the
+// remove (recordEvidence). The removal is registered before that listing, so a
+// listing that fails the test still has the removal attempted. docker is the
 // docker CLI's global flags — "--host" and the daemon's address — as
 // dockertest.ImageFrom takes them.
 func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLoad {
@@ -111,28 +111,35 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 		for _, node := range l.nodes(t) {
 			listings = append(listings, l.containerdRefs(t, node))
 		}
-		if !l.leavesRecords(listings) {
+		switch ref := l.recordEvidence(listings); {
+		case ref == "":
 			t.Logf("no kind node holds an import record, of the load of %s or of any other: there is none to hold or remove", image)
 			l.index = ""
+		case !l.names(ref):
+			t.Logf("no kind node holds the import record @%s of the load of %s, but one holds %s: the cluster's kind leaves records, so the load is held to its own", index, image, ref)
 		}
 	}
 	return l
 }
 
-// leavesRecords reports whether the nodes' containerd listings say the
-// cluster's `kind load` leaves import records: one holds the load's own, or
-// another load's. In the second case the load is still held to its own, so a
-// record kind left under a name the load does not know fails Missing rather
-// than going unseen.
-func (l *KindLoad) leavesRecords(listings [][]string) bool {
+// recordEvidence is the reference in the nodes' containerd listings that says
+// the cluster's `kind load` leaves import records, or "" where none does: the
+// load's own record wherever a node holds it, or else another load's. On
+// another load's the load is still held to its own, so a record kind left
+// under a name the load does not know fails Missing rather than going unseen.
+func (l *KindLoad) recordEvidence(listings [][]string) string {
+	other := ""
 	for _, refs := range listings {
 		for _, ref := range refs {
-			if strings.HasPrefix(ref, "import-") || ref != l.ref && l.names(ref) {
-				return true
+			switch {
+			case ref != l.ref && l.names(ref):
+				return ref
+			case other == "" && strings.HasPrefix(ref, "import-"):
+				other = ref
 			}
 		}
 	}
-	return false
+	return other
 }
 
 // archiveIndex is the digest of a saved image archive's index.json, which is

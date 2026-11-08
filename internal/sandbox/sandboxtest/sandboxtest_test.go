@@ -53,26 +53,28 @@ func TestArchiveIndex(t *testing.T) {
 }
 
 // A load is held to its import record wherever the cluster's kind leaves
-// records: the load's own on any node, or another load's, says it does. Only a
-// cluster none of whose nodes holds an import record at all is one whose
-// loads' records cannot be held (#1025).
-func TestKindLoadLeavesRecords(t *testing.T) {
+// records: the load's own on any node, or another load's, says it does, and is
+// named as the evidence, the load's own first. Only a cluster none of whose
+// nodes holds an import record at all is one whose loads' records cannot be
+// held (#1025).
+func TestKindLoadRecordEvidence(t *testing.T) {
 	l := &KindLoad{ref: "docker.io/library/map-hooked-test:aa", index: "sha256:11"}
 	own, other := "import-2026-11-08@sha256:11", "import-2026-11-08@sha256:22"
 	for _, c := range []struct {
 		name     string
 		listings [][]string
-		want     bool
+		want     string
 	}{
-		{"no nodes", nil, false},
-		{"the tag alone (kind v0.30.0 on node image v1.34.0)", [][]string{{l.ref, "docker.io/library/busybox:1"}}, false},
-		{"the tag and its record (kind v0.33.0 on node image v1.37.0)", [][]string{{l.ref, own}}, true},
-		{"its record on one node of two", [][]string{{l.ref}, {l.ref, own}}, true},
-		{"another load's record, not its own", [][]string{{l.ref, other}}, true},
-		{"its record under another prefix", [][]string{{l.ref, "imported-2026-11-08@sha256:11"}}, true},
+		{"no nodes", nil, ""},
+		{"the tag alone (kind v0.30.0 on node image v1.34.0)", [][]string{{l.ref, "docker.io/library/busybox:1"}}, ""},
+		{"the tag and its record (kind v0.33.0 on node image v1.37.0)", [][]string{{l.ref, own}}, own},
+		{"its record on one node of two", [][]string{{l.ref}, {l.ref, own}}, own},
+		{"another load's record, not its own", [][]string{{l.ref, other}}, other},
+		{"another load's record before its own", [][]string{{other, l.ref}, {l.ref, own}}, own},
+		{"its record under another prefix", [][]string{{l.ref, "imported-2026-11-08@sha256:11"}}, "imported-2026-11-08@sha256:11"},
 	} {
-		if got := l.leavesRecords(c.listings); got != c.want {
-			t.Errorf("%s: leavesRecords = %v, want %v", c.name, got, c.want)
+		if got := l.recordEvidence(c.listings); got != c.want {
+			t.Errorf("%s: recordEvidence = %q, want %q", c.name, got, c.want)
 		}
 	}
 }
