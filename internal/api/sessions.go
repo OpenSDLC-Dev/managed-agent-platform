@@ -1272,9 +1272,9 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 				return nil, errInvalid("only agent.tools and agent.mcp_servers can be updated on a session")
 			}
 		}
-		// Validate the merged result, as agent update does: a patch that leaves a
-		// toolset naming no server or grows past a cap rejects (#287). One that
-		// leaves a server no toolset names lands (#1018).
+		// Validate the merged result, as agent update does: a patch that grows
+		// past a cap rejects (#287). One that leaves a server no toolset names
+		// (#1018), or a toolset naming no server (#1028), lands.
 		if err := validatePatchedSessionAgent(agent.AgentSpec); err != nil {
 			return nil, err
 		}
