@@ -61,13 +61,13 @@ type KindLoad struct {
 // archive single-platform (a multi-arch manifest breaks `kind load` on darwin;
 // an older docker without the flag falls back to a plain save, as one without
 // an index.json in its archive — before Docker 25 — falls back to a load whose
-// import record cannot be named, and so stays on the nodes). After the load
-// LoadIntoKind lists every node's images: on a cluster none of whose nodes
-// holds an import record at all, the load is one with no record to hold or
-// remove (recordEvidence). The removal is registered before that listing, so a
-// listing that fails the test still has the removal attempted. docker is the
-// docker CLI's global flags — "--host" and the daemon's address — as
-// dockertest.ImageFrom takes them.
+// import record cannot be named, and so stays on the nodes). After loading an
+// archive that has an index.json, LoadIntoKind lists every node's images: on a
+// cluster none of whose nodes holds an import record at all, the load is one
+// with no record to hold or remove (recordEvidence). The removal is registered
+// before that listing, so a listing that fails the test still has the removal
+// attempted. docker is the docker CLI's global flags — "--host" and the
+// daemon's address — as dockertest.ImageFrom takes them.
 func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLoad {
 	t.Helper()
 	cluster, ok := strings.CutPrefix(kubeCtx, "kind-")
@@ -101,9 +101,9 @@ func LoadIntoKind(t testing.TB, kubeCtx, image string, docker ...string) *KindLo
 	}
 	l := &KindLoad{cluster: cluster, ref: ref, index: index, docker: docker}
 	t.Cleanup(func() { l.Remove(t) })
-	// Some kind setups leave no import record at all: kind v0.30.0 on node
-	// image v1.34.0 left the tag alone, where kind v0.33.0 on v1.37.0 leaves
-	// both (#1025). On a cluster none of whose nodes holds an import record,
+	// Some kind setups leave no import record at all: kind 0.30.0 on node
+	// image 1.34.0 left the tag alone, where kind 0.33.0 on node image 1.37.0
+	// leaves both (#1025). On a cluster none of whose nodes holds an import record,
 	// the load is one whose record cannot be named, as an archive with no
 	// index.json makes it.
 	if index != "" {

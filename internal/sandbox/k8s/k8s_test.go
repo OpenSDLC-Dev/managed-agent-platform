@@ -187,10 +187,10 @@ func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	kubeCtx := sandboxtest.KubeContext(t)
 	// On kind, the pods run this run's own image of the gate: the suite's
 	// shared tag with a nonce label on top, its layers shared through the
-	// build cache, its ID — and so the digest the import record `kind load`
+	// build cache, its ID — and so the digest any import record `kind load`
 	// leaves is named for — this run's alone. Removing it when the test is
-	// done takes its tag and its record and nothing another run or package
-	// is running pods from; loading the shared tag instead left a dated
+	// done takes its tag, and its record where kind leaves one, and nothing
+	// another run or package is running pods from; loading the shared tag instead left a dated
 	// record on the nodes that no later run could tell from one a concurrent
 	// run still needed, so none removed it. A context that is not kind's
 	// must share the daemon's image store or have the image loaded by hand —
