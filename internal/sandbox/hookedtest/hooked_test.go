@@ -141,8 +141,8 @@ func TestBackendScriptsAnswerThroughAnImageHook(t *testing.T) {
 // one package's image from a kind node — crictl removes an image by its ID,
 // every tag with it — would take the others' out from under their running
 // pods. A package that finished, its image removed from the daemon and the
-// nodes — its tag and its import record both — leaves another package's image
-// working on both backends.
+// nodes — its tag, and its import record where kind leaves one — leaves
+// another package's image working on both backends.
 func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 	kept := hookedtest.Backends(t)
 	id := func(image string) string {
@@ -159,16 +159,16 @@ func TestHookedImagesOfParallelPackagesAreTheirOwn(t *testing.T) {
 			t.Errorf("two builds made one image, %s", id(finished))
 		}
 	})
-	// What the finished package loaded onto the kind nodes is gone — its tag
-	// and the import record `kind load` leaves beside it — and what the
-	// running one loaded is all there.
+	// What the finished package loaded onto the kind nodes is gone — its tag,
+	// and the import record `kind load` leaves beside it where it leaves one —
+	// and what the running one loaded is all there.
 	if refs, _ := hookedtest.KindRefs(t, finished); len(refs) > 0 {
 		t.Errorf("a finished package's image left %v on the kind nodes", refs)
 	}
 	if missing, loaded := hookedtest.KindMissing(t, kept[0].Image); !loaded {
 		t.Logf("%s is not a kind cluster: no node records to check", sandboxtest.KubeContext(t))
 	} else if len(missing) > 0 {
-		t.Errorf("a running package's image is missing %v on the kind nodes, want its tag and its import record held", missing)
+		t.Errorf("a running package's image is missing %v on the kind nodes, want its tag, and its import record where kind leaves one, held", missing)
 	}
 	for _, b := range kept {
 		sb, _ := b.Provision(t, sandbox.Hardening{})
