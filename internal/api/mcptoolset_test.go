@@ -20,9 +20,11 @@ import (
 // direction, and #66 recorded the omission as deliberate on that basis. The
 // public docs settle it, so the dangling direction is a 400 too.
 
-// TestAgentDanglingMCPToolsetRejected covers the direction #66 left open, on
-// every surface that resolves a whole agent spec: create, update's merged
-// result, a session's agent_with_overrides, and a session-update agent patch.
+// TestAgentDanglingMCPToolsetRejected covers the direction #66 left open on
+// agent create and update's merged result. TestSessionDanglingMCPToolsetRejected
+// covers a session's agent_with_overrides and the toolsets a session-update
+// patch sends. A session-update patch that sends mcp_servers alone is not held
+// to it (#1028).
 func TestAgentDanglingMCPToolsetRejected(t *testing.T) {
 	s := newTestServer(t)
 
@@ -71,12 +73,12 @@ func wantRejected(t *testing.T, status int, res map[string]any, frag string) {
 }
 
 // TestSessionDanglingMCPToolsetRejected pins the same rung on the session
-// surfaces, which resolve the agent spec through the identical validator, in
-// both directions: a toolset naming a server the spec lacks, and the mirror
-// image — clearing mcp_servers while the toolset that referenced them stays.
-// The reference states both halves, and clearing one side of the pair was
-// already a 400 in the unreferenced-server direction before this slice, so a
-// client turning MCP off for one session replaces both sides or neither.
+// surfaces, which resolve the agent spec through the identical validator. A
+// session create's override is held to it in both directions: a toolset naming a
+// server the spec lacks, and the mirror image — clearing mcp_servers while the
+// toolset that referenced them stays. A session update is held to it for the
+// toolsets it sends, which the SDK's toolset param states; a patch that sends
+// mcp_servers alone is not (#1028; TestSessionUpdateTakesAPatchThatStrandsAToolset).
 func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -97,8 +99,8 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 	})
 	wantRejected(t, status, res, "ghost")
 
-	// The other direction, on both session surfaces: an agent whose pair is
-	// intact, overridden to drop the servers alone.
+	// The other direction: an agent whose pair is intact, overridden to drop
+	// the servers alone.
 	paired := createAgent(t, s, agentBody(map[string]any{
 		"mcp_servers": []any{mcpServer("srv")},
 		"tools":       []any{mcpToolset("srv")},
@@ -113,10 +115,6 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 	wantRejected(t, status, res, "srv")
 
 	paired2 := createSession(t, s, map[string]any{"agent": pairedID, "environment_id": envID})
-	status, res = s.do(http.MethodPost, "/v1/sessions/"+paired2["id"].(string), map[string]any{
-		"agent": map[string]any{"mcp_servers": []any{}},
-	})
-	wantRejected(t, status, res, "srv")
 
 	// Replacing both sides at once is accepted, which is how a client moves an
 	// MCP-configured session off one server and onto another.
@@ -142,7 +140,9 @@ func TestSessionDanglingMCPToolsetRejected(t *testing.T) {
 // "a pre-#66 stored spec that violates a cap fails here too"): an agent whose
 // toolset cannot resolve fails loudly at session create rather than starting a
 // session whose brain would have no server to expand. The agent resource still
-// renders, so the message names what to repair.
+// renders, so the message names what to repair. A session update that sends
+// mcp_servers alone may still leave a live session in that state, as the
+// reference does (#1028); its toolset then offers nothing.
 func TestStoredSpecsAreRevalidatedOnResolve(t *testing.T) {
 	s := newTestServer(t)
 	envID := createEnvironment(t, s, map[string]any{"name": "e"})["id"].(string)
@@ -552,8 +552,7 @@ func TestSessionAgentPatchInvalidatesTheMCPCatalog(t *testing.T) {
 	}
 
 	// "keep" is unchanged, "move" is repointed, "drop" and "alias" are gone.
-	// The tools move with them, since a dangling toolset would reject the patch
-	// outright.
+	// The tools move with them.
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{
 			"mcp_servers": []any{
@@ -596,9 +595,8 @@ func TestSessionAgentPatchClearingMCPServersEmptiesTheCatalog(t *testing.T) {
 		}
 	}
 
-	// The toolsets go with the servers; a toolset naming a server the patch
-	// removed would be dangling and the patch would be rejected before it
-	// reached the catalog.
+	// The toolsets go with the servers here. A patch that clears the servers
+	// alone empties the catalog too (TestSessionUpdateTakesAPatchThatStrandsAToolset).
 	status, res := s.do(http.MethodPost, "/v1/sessions/"+sid, map[string]any{
 		"agent": map[string]any{"mcp_servers": []any{}, "tools": []any{}}})
 	if status != http.StatusOK {

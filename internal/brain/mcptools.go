@@ -365,6 +365,16 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 		}
 	}
 
+	// A session update that sends mcp_servers alone may leave a toolset naming
+	// a server the agent does not declare (#1028). Nothing dials such a server,
+	// so its toolset never has a listing, and its note says why rather than
+	// "this turn". The error is the turn's caller's: it already failed the turn
+	// on a spec whose servers it cannot read (declaredMCPServers in brain.go).
+	servers, _ := declaredMCPServers(agent)
+	declared := map[string]bool{}
+	for _, s := range servers {
+		declared[s.name] = true
+	}
 	spent, overBudget := 0, 0
 	for _, raw := range agent.Tools {
 		var probe struct {
@@ -378,6 +388,11 @@ func resolveTools(agent domain.ResolvedAgent, cat mcpCatalog, role delegationRol
 			continue
 		}
 		stored, ok := cat[probe.Server]
+		if !ok && !declared[probe.Server] {
+			notes.add("no tools were offered from MCP server %q: the agent declares no server of that name",
+				noteLabel(probe.Server))
+			continue
+		}
 		if !ok {
 			notes.add("no tools were offered from MCP server %q: it has no listing this turn",
 				noteLabel(probe.Server))
