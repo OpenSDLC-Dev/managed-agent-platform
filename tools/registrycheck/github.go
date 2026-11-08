@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -34,12 +36,25 @@ type issueState struct {
 // raises the ceiling and is used when the environment offers one, but is not
 // required: this repository is public, and a scheduled run that could only work
 // with a credential is one more thing to rot.
+//
+// The listing follows each page's Link header rather than counting pages.
+// Once the repository passed 1,000 issues and pull requests, GitHub refused
+// `page=11` to an unauthenticated request and served the cursor URL its Link
+// header names for the same page (#1029). A short page still ends the listing,
+// as it did before.
 func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (bool, bool), error) {
 	states := map[int]bool{}
-	for page := 1; ; page++ {
-		url := fmt.Sprintf("%s/repos/%s/issues?state=all&per_page=100&page=%d", api, repo, page)
+	next, err := url.Parse(fmt.Sprintf("%s/repos/%s/issues?state=all&per_page=100", api, repo))
+	if err != nil {
+		return nil, err
+	}
+	for pages := 0; next != nil; pages++ {
+		if pages == 50 {
+			return nil, fmt.Errorf("issue listing did not terminate after 50 pages")
+		}
 		var batch []issueState
-		if err := getJSON(ctx, url, &batch); err != nil {
+		header, err := getJSON(ctx, next.String(), &batch)
+		if err != nil {
 			return nil, err
 		}
 		for _, is := range batch {
@@ -48,8 +63,8 @@ func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (
 		if len(batch) < 100 {
 			break
 		}
-		if page > 50 {
-			return nil, fmt.Errorf("issue listing did not terminate after 50 pages")
+		if next, err = nextLink(header.Values("Link"), next); err != nil {
+			return nil, err
 		}
 	}
 	for _, n := range want {
@@ -57,7 +72,7 @@ func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (
 			continue
 		}
 		var one issueState
-		err := getJSON(ctx, fmt.Sprintf("%s/repos/%s/issues/%d", api, repo, n), &one)
+		_, err := getJSON(ctx, fmt.Sprintf("%s/repos/%s/issues/%d", api, repo, n), &one)
 		if err != nil {
 			// A number the registry cites that GitHub will not serve is a
 			// finding, not a crash: Check reports it as unknown-issue with the
@@ -81,10 +96,51 @@ func fetchStates(ctx context.Context, api, repo string, want []int) (func(int) (
 	}, nil
 }
 
-func getJSON(ctx context.Context, url string, into any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// nextLink is the rel="next" target of a response's Link fields, resolved
+// against the page that sent them, or nil when they name none. A target must
+// stay on that page's scheme and host, because every request carries the token
+// when the environment offers one. The first page is on the API's own, so every
+// page is.
+func nextLink(fields []string, page *url.URL) (*url.URL, error) {
+	for rest := strings.Join(fields, ","); ; {
+		open := strings.IndexByte(rest, '<')
+		if open < 0 {
+			return nil, nil
+		}
+		target, after, ok := strings.Cut(rest[open+1:], ">")
+		if !ok {
+			return nil, fmt.Errorf("issue listing: a Link header with no closing \">\": %q", strings.Join(fields, ","))
+		}
+		rest = after
+		params, _, _ := strings.Cut(rest, "<")
+		isNext := false
+		for _, p := range strings.FieldsFunc(params, func(r rune) bool { return r == ';' || r == ',' }) {
+			key, val, _ := strings.Cut(p, "=")
+			if strings.EqualFold(strings.TrimSpace(key), "rel") &&
+				slices.Contains(strings.Fields(strings.ToLower(strings.Trim(strings.TrimSpace(val), `"`))), "next") {
+				isNext = true
+			}
+		}
+		if !isNext {
+			continue
+		}
+		ref, err := url.Parse(target)
+		if err != nil {
+			return nil, fmt.Errorf("issue listing: the next link %q: %w", target, err)
+		}
+		next := page.ResolveReference(ref)
+		if next.Scheme != page.Scheme || next.Host != page.Host {
+			return nil, fmt.Errorf("issue listing: the next link %q leaves %s://%s", target, page.Scheme, page.Host)
+		}
+		return next, nil
+	}
+}
+
+// getJSON decodes a 200 answer into `into` and returns the answer's header.
+func getJSON(ctx context.Context, addr string, into any) (http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -93,24 +149,24 @@ func getJSON(ctx context.Context, url string, into any) error {
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Name the rate limit when that is what happened: it is the one
 		// failure a reader of a red scheduled run would otherwise misread as
 		// the registry having rotted.
 		if remaining := resp.Header.Get("X-RateLimit-Remaining"); remaining == "0" {
-			return &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s — the GitHub rate limit is exhausted (reset at %s); set GITHUB_TOKEN to raise it",
-				url, resp.Status, resp.Header.Get("X-RateLimit-Reset"))}
+			return nil, &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s — the GitHub rate limit is exhausted (reset at %s); set GITHUB_TOKEN to raise it",
+				addr, resp.Status, resp.Header.Get("X-RateLimit-Reset"))}
 		}
-		return &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))}
+		return nil, &statusError{resp.StatusCode, fmt.Sprintf("GET %s: %s: %s", addr, resp.Status, strings.TrimSpace(string(body)))}
 	}
-	return json.Unmarshal(body, into)
+	return resp.Header, json.Unmarshal(body, into)
 }
 
 // statusError carries the HTTP status alongside the message, so a caller can

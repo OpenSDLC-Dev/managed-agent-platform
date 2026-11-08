@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
@@ -453,32 +454,55 @@ func TestTheRegistryPassesTheOfflineRungs(t *testing.T) {
 	}
 }
 
-func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
-	var listed, byNumber int
+// fullPage is a listing page of 100 closed issues numbered from first.
+func fullPage(first int) string {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := first; i < first+100; i++ {
+		if i > first {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"number":%d,"state":"closed"}`, i)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// The fake pages the way GitHub did on 2026-11-07 (#1029), scaled down: a page
+// number with no cursor is refused past page 1 (GitHub refused page 11), and the
+// Link header's next target carries the cursor under a path of its own,
+// /repositories/{id}. Page 2 names prev and next, in two Link fields, the next
+// one relative. The last page still sends a Link, naming only prev.
+func TestFetchStatesFollowsTheLinkAndFillsGaps(t *testing.T) {
+	var listed, byNumber atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Query().Get("page") {
-		case "1":
-			listed++
-			var b strings.Builder
-			b.WriteString("[")
-			for i := 1; i <= 100; i++ {
-				if i > 1 {
-					b.WriteString(",")
-				}
-				fmt.Fprintf(&b, `{"number":%d,"state":"closed"}`, i)
-			}
-			b.WriteString("]")
-			_, _ = w.Write([]byte(b.String()))
+		q := r.URL.Query()
+		switch {
+		case q.Has("page") && q.Get("page") != "1" && !q.Has("after"):
+			http.Error(w, `{"message":"Pagination with the page parameter is not supported for large datasets, please use cursor based pagination (after/before)"}`,
+				http.StatusUnprocessableEntity)
 			return
-		case "2":
-			listed++
+		case r.URL.Path == "/repos/o/r/issues":
+			listed.Add(1)
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?state=all&per_page=100&page=2&after=c1>; rel="next"`, r.Host))
+			_, _ = w.Write([]byte(fullPage(1)))
+			return
+		case r.URL.Path == "/repositories/7/issues" && q.Get("after") == "c1":
+			listed.Add(1)
+			w.Header().Add("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?state=all&per_page=100&page=1&before=c0>; rel="prev"`, r.Host))
+			w.Header().Add("Link", `</repositories/7/issues?state=all&per_page=100&page=3&after=c2>; rel="next"`)
+			_, _ = w.Write([]byte(fullPage(101)))
+			return
+		case r.URL.Path == "/repositories/7/issues" && q.Get("after") == "c2":
+			listed.Add(1)
+			w.Header().Set("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?state=all&per_page=100&page=2&before=c1>; rel="prev"`, r.Host))
 			_, _ = w.Write([]byte(`[{"number":242,"state":"open"}]`))
 			return
 		}
 		// A number the listing never carried, fetched individually.
 		if strings.HasSuffix(r.URL.Path, "/issues/900") {
-			byNumber++
+			byNumber.Add(1)
 			_, _ = w.Write([]byte(`{"number":900,"state":"open"}`))
 			return
 		}
@@ -486,22 +510,108 @@ func TestFetchStatesPaginatesAndFillsGaps(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	lookup, err := fetchStates(context.Background(), srv.URL, "o/r", []int{1, 242, 900, 901})
+	lookup, err := fetchStates(context.Background(), srv.URL, "o/r", []int{1, 150, 242, 900, 901})
 	if err != nil {
 		t.Fatalf("fetchStates: %v", err)
 	}
-	if listed != 2 || byNumber != 1 {
-		t.Fatalf("listed=%d byNumber=%d, want 2 and 1 — the listing must paginate and only gaps may be fetched one by one", listed, byNumber)
+	if listed.Load() != 3 || byNumber.Load() != 1 {
+		t.Fatalf("listed=%d byNumber=%d, want 3 and 1 — the listing must follow its Link and only gaps may be fetched one by one",
+			listed.Load(), byNumber.Load())
 	}
 	for _, tc := range []struct {
 		n     int
 		open  bool
 		known bool
-	}{{1, false, true}, {242, true, true}, {900, true, true}, {901, false, false}} {
+	}{{1, false, true}, {150, false, true}, {242, true, true}, {900, true, true}, {901, false, false}} {
 		open, known := lookup(tc.n)
 		if open != tc.open || known != tc.known {
 			t.Errorf("lookup(%d) = (%v,%v), want (%v,%v)", tc.n, open, known, tc.open, tc.known)
 		}
+	}
+}
+
+// A next link is followed only on the API's own scheme and host, because each
+// request carries the token when the environment offers one.
+func TestFetchStatesKeepsTheTokenOnTheAPIHost(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "tok")
+	var reached atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Store(true)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer other.Close()
+
+	for _, tc := range []struct {
+		name string
+		link func(addr string) string
+	}{
+		{"another host", func(string) string { return other.URL + "/repositories/7/issues?after=c1" }},
+		{"another scheme", func(addr string) string { return "https://" + addr + "/repositories/7/issues?after=c1" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var link string
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Link", "<"+link+`>; rel="next"`)
+				_, _ = w.Write([]byte(fullPage(1)))
+			}))
+			link = tc.link(srv.Listener.Addr().String())
+			srv.Start()
+			defer srv.Close()
+
+			// "leaves" is the guard's word: a dial to an https link on this
+			// plain-http server fails too, and quotes the same URL.
+			_, err := fetchStates(context.Background(), srv.URL, "o/r", nil)
+			if err == nil || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "leaves") {
+				t.Errorf("err = %v, want the guard's refusal naming the link", err)
+			}
+		})
+	}
+	if reached.Load() {
+		t.Error("the listing followed a next link to another host, token and all")
+	}
+}
+
+// A listing whose every page names a next one stops at the cap, and a Link
+// header that cannot be read fails the listing rather than ending it early.
+func TestFetchStatesStopsOnABrokenListing(t *testing.T) {
+	var pages atomic.Int32
+	looping := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := pages.Add(1)
+		w.Header().Set("Link", fmt.Sprintf(`<http://%s/repositories/7/issues?after=c%d>; rel="next"`, r.Host, n))
+		_, _ = w.Write([]byte(fullPage(1)))
+	}))
+	defer looping.Close()
+	_, err := fetchStates(context.Background(), looping.URL, "o/r", nil)
+	if err == nil || !strings.Contains(err.Error(), "did not terminate after 50 pages") {
+		t.Errorf("err = %v, want the page cap", err)
+	}
+	if n := pages.Load(); n != 50 {
+		t.Errorf("pages fetched = %d, want 50", n)
+	}
+
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `<http://`+r.Host+`/repositories/7/issues?after=c1; rel="next"`)
+		_, _ = w.Write([]byte(fullPage(1)))
+	}))
+	defer malformed.Close()
+	_, err = fetchStates(context.Background(), malformed.URL, "o/r", nil)
+	if err == nil || !strings.Contains(err.Error(), `no closing ">"`) {
+		t.Errorf("err = %v, want the malformed Link named", err)
+	}
+
+	// A short page ends the listing even when it names a next page.
+	var fetched atomic.Int32
+	short := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetched.Add(1)
+		w.Header().Set("Link", `<http://`+r.Host+`/repositories/7/issues?after=c1>; rel="next"`)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer short.Close()
+	if _, err := fetchStates(context.Background(), short.URL, "o/r", nil); err != nil {
+		t.Errorf("a short page that names a next one: %v", err)
+	}
+	if n := fetched.Load(); n != 1 {
+		t.Errorf("pages fetched = %d, want 1 — a short page is the last", n)
 	}
 }
 
