@@ -1552,8 +1552,30 @@ Migration 0061 refuses new human-unowned INSERTs from old replicas, including
 prepared statements. Historical rows and allowed metadata updates survive.
 Removing an owner archives every owned key; restoring the owner restores no key.
 Removing a human issuer does not archive keys owned by a service account.
-Console integration and integrated acceptance remain pending; the release hold
-continues through slice 7.
+The Console source task is independently verified. Published-image pairing and
+packaged Compose acceptance remain pending. The release hold continues through slice 7.
+
+#### Owned-key rollout and rollback
+
+Deploy and validate slice 2's native cookie routing before removing public human
+admission. A legacy SSO resource BFF forwards an IdP token to public `/v1`; that
+path no longer works. Verify login and private resource access on the deployed
+origin. Source support alone is not deployment evidence. No key fallback is added.
+
+- Old native Console requests that omit `principal_id` create self-owned keys on
+  the new control plane. New explicit-owner forms receive 404 from an old receiver;
+  they do not retry without ownership.
+- Old control-plane replicas cannot authenticate owned digests. Migration 0061
+  also refuses their human-unowned issuer. Use a coordinated maintenance or drain
+  window: safe refusal is not uninterrupted availability.
+- Keep migrations 0060/0061 during binary rollback. Never copy owned digests to
+  `key_hash`, clear owners, undo tombstones or restore archived keys. An old binary
+  is not a working owned-key service or human-issuance rollback. Restore the
+  corrected new control plane to recover that functionality.
+- Existing no-login deployments retain their separate unowned `x-api-key` lane
+  until slice 7. Never configure an owned key as an old server's preset credential.
+
+#### Legacy unowned credentials
 
 A legacy unowned management `x-api-key` authenticates every **management** `/v1`
 route and the existing private key-management routes — the work API is the exception, taking a worker's

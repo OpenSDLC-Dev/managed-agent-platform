@@ -49,6 +49,41 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 3 prepublication client checks
+
+On 2026-11-08, model-free native client checks passed independent verification
+against platform `158aa61eac22848907880be9a969a19499184941`.
+The Console working candidate starts at `e9a383a990e7d04682a97b1911b03839a4d097e4`.
+These are local source checks, not published-image acceptance:
+
+- Real human and service-account form reveals fed the pinned Go SDK v1.70.1
+  through stdin, with both headers. Independent cookie reads confirmed selected-key
+  Memory actors and the redacted, deleted, basic and empty-content contracts.
+- Role demotion, key inactivity, owner removal and service-account archival refused
+  subsequent requests. SQL restoration of disposable owners revived no archived key.
+- The pre-change Console failed the explicit-owner assertion. Isolated actor,
+  nullable-field, role and key-state mutants failed semantically and passed after restoration.
+- Old Console `97d6c9507542517618d69f882fbb19d0fe64b72e` omitted the principal;
+  the new receiver still issued an owned, usable key. New explicit-owner forms
+  received one 404 from old receiver `d010e68d0d2a6547a71b3d7899f206ab347ac554`, without an unowned retry.
+- That old binary refused owned keys on the forward-migrated database. Its human
+  unowned issuer failed without a durable key. The no-login legacy Console still worked.
+- Installed Chrome walked 27 native surfaces in each theme. Reveal images stayed
+  masked. No authenticated-reference fidelity claim follows from these local shots.
+
+Each native runtime removed its recorded processes, container and volumes. Resource
+snapshots retained the pre-existing containers, volumes and pod identities. Process
+sampling cannot prove that it saw every short-lived descendant.
+
+The separately built `ant` checkout was `46211ed98946c02aaf803d40404d3e697d0dd8b9`:
+CLI version 1.42.0, using SDK v1.82.0. Its loopback isolation self-test exercised both
+stdin flags with a new empty configuration directory per invocation. This is not
+packaged acceptance. The platform SDK pin remains v1.70.1.
+
+The Console merge SHA, scanned multi-architecture image, literal platform CI pin
+and fresh published-image Compose plus real-`ant` acceptance remain pending.
+No native fixture, rendered configuration or local candidate image substitutes for that run.
+
 ## Plan 69 slice 2 browser acceptance
 
 On 2026-11-05, acceptance passed for [platform #1016](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1016)

@@ -705,7 +705,9 @@ and holds the two OS-touching adapters `gaterun/` declares.
   paths and by gateway inference. Audit and Memory attribution still name the
   selected key, not its owner or issuer. Human key mutations hold current authority
   through commit in the principal-first fence. Mixed receivers can refuse issuance
-  or owned-key use until old receivers are drained.
+  or owned-key use until old receivers are drained. This is safe refusal, not
+  uninterrupted availability; [the rollout contract](./self-hosted-security.md#owned-key-rollout-and-rollback)
+  keeps the native cookie route ahead of public human-lane removal.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

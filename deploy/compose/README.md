@@ -53,6 +53,9 @@ LAN, set real keys and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
 The `console` profile adds the published Console image and an application Caddy edge.
 Both images have independent immutable pins. Platform builds do not rebuild Console.
+The current Console pin is the slice 2 artifact, not the pending owned-key companion.
+Before a slice 3 upgrade, follow the [native-routing and rollback contract](../../docs/self-hosted-security.md#owned-key-rollout-and-rollback).
+Legacy SSO resource BFF calls cannot replace the required native cookie route.
 The edge binds only `127.0.0.1:${CONSOLE_PORT:-3000}`. Existing API listeners stay on
 8080 and 8090. Identity remains disabled by default.
 
