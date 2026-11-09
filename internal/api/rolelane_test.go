@@ -75,9 +75,10 @@ func (r matrixRoute) request() string {
 
 // roleMatrix mirrors docs/plan/69_principal-bound-auth.md's table, route for
 // route: developer reads every resource and creates, changes and deletes them,
-// vault credentials included; admin adds memory redaction and the
-// environment-key and API-key surfaces, which have their own tests. user
-// reaches none of these routes: there is no read-only role.
+// vault credentials included; admin adds memory redaction. Environment-key
+// management stays admin; private API-key routes admit developers for their own
+// keys. Both key surfaces have separate tests. user reaches none of these routes:
+// there is no read-only role.
 func roleMatrix() []matrixRoute {
 	const (
 		agent   = "/v1/agents/{id}"

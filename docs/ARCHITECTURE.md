@@ -417,11 +417,13 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Authentication is not a namespace-wide rule. Existing key-management routes retain
 legacy management-key and IdP credentials beside native cookies during rollout.
-Their human callers require admin. New member and service-account routes require
-human admin cookies; the resource proxy requires developer and preserves each
-resource's role floor. New private routes must declare their own admission policy,
-not inherit the legacy lane. [Security invariants](#security-invariants) describes
-native login, cookie-only boundaries and the credentials that remain on `/v1`.
+Human developers can manage only their own API keys; admins can manage all
+non-preset API keys. Environment-key management and the workspace read retain
+their admin floor. New member and service-account routes require human admin
+cookies; the resource proxy requires developer and preserves each resource's role
+floor. New private routes must declare their own admission policy, not inherit the
+legacy lane. [Security invariants](#security-invariants) describes native login,
+cookie-only boundaries and the credentials that remain on `/v1`.
 
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a

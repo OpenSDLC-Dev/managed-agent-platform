@@ -600,7 +600,7 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 			t.Errorf("update %s as a user: status %d, error type %q, want 403 permission_error", path, status, errType)
 		}
 	}
-	// The workspace read sits in the same admin section.
+	// The workspace read keeps its separate admin floor.
 	status, errType := laneStatus(t, s.bearer(http.MethodGet,
 		"/api/console/organizations/default/workspaces/default", s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
