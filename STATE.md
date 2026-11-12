@@ -19,4 +19,5 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 - [x] Verify owned HTTP issuance and fenced per-row mutations ([issuer tests](./internal/api/ownedkeys_test.go), [fence tests](./internal/api/ownedkeymutation_test.go)). Migration 0061 rejects new human-unowned INSERTs; 0060 is unchanged.
 - [x] Verify and review the native Console source task for ownership and row permissions ([Console e9a383a](https://github.com/OpenSDLC-Dev/managed-agent-console/commit/e9a383a990e7d04682a97b1911b03839a4d097e4)).
 - [x] Verify native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
+- [x] Independently verify the Docker context's exact local hook-cache exclusion ([COPY guard](./internal/sandbox/sandboxtest/buildcontext_test.go)).
 - [ ] Verify real `ant` on fresh packaged Compose; pair the Console source/image and add executable CI coverage.
