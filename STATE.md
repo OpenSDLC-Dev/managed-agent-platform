@@ -21,4 +21,5 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 - [x] Verify prepublication native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
 - [x] Independently verify the Docker context's exact local hook-cache exclusion ([COPY guard](./internal/sandbox/sandboxtest/buildcontext_test.go)).
 - [x] Pair the merged Console source/image, add executable native CI coverage and independently verify both local client tiers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)).
+- [ ] Independently verify the gateway mixed-credential follow-up, rebuild the affected image and repeat fresh packaged acceptance against the final product/configuration manifest.
 - [ ] Pass hosted CI, obtain final dual review, settle the platform PR's review threads and complete paired delivery.

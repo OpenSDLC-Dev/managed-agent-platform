@@ -137,7 +137,7 @@ Deployments and Services. It does not create or adopt an Ingress, hostname or IA
 resource. The separately managed staging Console remains outside this chart.
 `console.image` and `appEdge.image` require independent immutable digest references;
 platform `image.tag` overrides never change them.
-The current Console pin is the slice 2 artifact; the owned-key companion is not paired yet.
+The current Console pin is the published slice 3 owned-key companion.
 Follow the [native-routing and rollback contract](../../../docs/self-hosted-security.md#owned-key-rollout-and-rollback) before a slice 3 upgrade.
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 

@@ -1552,8 +1552,11 @@ Migration 0061 refuses new human-unowned INSERTs from old replicas, including
 prepared statements. Historical rows and allowed metadata updates survive.
 Removing an owner archives every owned key; restoring the owner restores no key.
 Removing a human issuer does not archive keys owned by a service account.
-The Console source task is independently verified. Published-image pairing and
-packaged Compose acceptance remain pending. The release hold continues through slice 7.
+Compose and Helm pin the published owned-key Console image. Both local client tiers
+passed [independent verification](./HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)
+for the candidate named in that record, not later source changes.
+Final-source packaged acceptance, hosted CI, final reviews and platform PR delivery
+remain pending. The release hold continues through slice 7.
 
 #### Owned-key rollout and rollback
 
