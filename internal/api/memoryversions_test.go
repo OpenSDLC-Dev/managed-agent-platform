@@ -144,6 +144,37 @@ func TestMemoryVersionIsStampedAfterTheLockWait(t *testing.T) {
 	}
 }
 
+// A redaction is stamped when it is made, not when its transaction began
+// (#989): a redaction that waits on the store lock is stamped after the writer
+// it waited on commits. now(), frozen at the redaction's BEGIN, would stamp it
+// at least hold earlier. The assertion gives back half of hold for the reason
+// the test above gives.
+func TestMemoryVersionRedactionIsStampedAfterTheLockWait(t *testing.T) {
+	const hold = 200 * time.Millisecond
+	s := newTestServer(t)
+	store := createMemoryStore(t, s, "notes")
+	created := createMemory(t, s, store, "/a.md", "first")
+	id, older := created["id"].(string), created["memory_version_id"].(string)
+	// A head version cannot be redacted, so the create's version is superseded
+	// first.
+	if status, body := s.do(http.MethodPost, "/v1/memory_stores/"+store+"/memories/"+id,
+		map[string]any{"content": "second"}); status != http.StatusOK {
+		t.Fatalf("update: status %d (%v)", status, body)
+	}
+
+	released := sendPastTheStoreLock(t, s, store, hold,
+		"/v1/memory_stores/"+store+"/memory_versions/"+older+"/redact", map[string]any{})
+	var redacted time.Time
+	if err := s.pool.QueryRow(t.Context(),
+		`SELECT redacted_at FROM memory_versions WHERE id = $1`, older).Scan(&redacted); err != nil {
+		t.Fatalf("read the redaction stamp of %s: %v", older, err)
+	}
+	if !redacted.After(released.Add(-hold / 2)) {
+		t.Errorf("the version is redacted at %s, before the lock the redaction waited on was released at %s",
+			redacted.Format(time.RFC3339Nano), released.Format(time.RFC3339Nano))
+	}
+}
+
 func TestMemoryVersionsPerOperation(t *testing.T) {
 	s := newTestServer(t)
 	store := createMemoryStore(t, s, "history")

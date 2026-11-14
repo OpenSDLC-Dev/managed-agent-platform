@@ -315,10 +315,15 @@ func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 	if actor := memoryActor(ctx); actor != nil {
 		redactedBy = actor
 	}
+	// redacted_at is clock_timestamp(), the time of this update, which comes
+	// after the store lock. now() is frozen at BEGIN, which comes before the
+	// lock, so it would date a redaction that waited on the lock before rows
+	// committed while it waited (#989). insertMemoryVersion stamps created_at the
+	// same way, for the same reason.
 	err = row.scan(tx.QueryRow(ctx,
 		`UPDATE memory_versions
 		    SET content = NULL, content_sha256 = NULL, content_size_bytes = NULL, path = NULL,
-		        redacted_at = now(), redacted_by = $2
+		        redacted_at = clock_timestamp(), redacted_by = $2
 		  WHERE id = $1
 		  RETURNING `+memoryVersionColumns, versionID, redactedBy))
 	if err != nil {
