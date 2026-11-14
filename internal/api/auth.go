@@ -198,9 +198,9 @@ func retireAPIKeyIn(ctx context.Context, tx pgx.Tx, name string) (int64, error) 
 	return tag.RowsAffected(), nil
 }
 
-// requireAPIKey is the management-auth middleware: every /v1 route needs a
-// valid, unrevoked x-api-key. The authenticated key's ID is stored in the
-// request context as the audit principal (sessions.created_by).
+// requireAPIKey admits owned keys on public /v1, and legacy unowned keys via
+// x-api-key on both management surfaces. Only owned keys may use Bearer.
+// The selected key's ID remains the audit principal (sessions.created_by).
 func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A repeated field is refused before the value is read. HTTP allows one,
@@ -214,6 +214,16 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			return
 		}
 		key := r.Header.Get("x-api-key")
+		requestedPublic, routedPublic := publicAPIPaths(r)
+		public := requestedPublic && routedPublic
+		ownedBearer := key == "" && public && issuedAPIKeyBearer(r)
+		if ownedBearer {
+			if len(r.Header.Values("Authorization")) > 1 {
+				writeError(w, r, errAuth("multiple Authorization headers"))
+				return
+			}
+			key, _ = bearerToken(r)
+		}
 		if key == "" {
 			// The reference's words for a request offering no key (2026-09-19
 			// self-hosted-docker worker-network idx 0; #540), and its
@@ -221,17 +231,27 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, noRetry(errAuth("x-api-key header is required")))
 			return
 		}
-		principal, err := apikey.Authenticate(r.Context(), pool, key)
+		var authority apiKeyAuthority
+		var err error
+		if public {
+			authority, err = authenticateManagementKey(r.Context(), pool, key)
+		} else {
+			authority.KeyID, err = apikey.Authenticate(r.Context(), pool, key)
+		}
 		if err != nil {
 			writeError(w, r, err)
 			return
 		}
-		if principal == "" {
+		if authority.KeyID == "" || ownedBearer && authority.OwnerID == "" {
 			writeError(w, r, errAuth("invalid x-api-key"))
 			return
 		}
 		markVerified(r.Context())
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyPrincipal, principal)))
+		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, authority.KeyID)
+		if authority.OwnerID != "" {
+			ctx = context.WithValue(ctx, ownedKeyContextKey{}, authority)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

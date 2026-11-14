@@ -51,6 +51,9 @@ type ManagementKey struct {
 	CreatedBy *string
 	// ExpiresAt is nil for a key that never expires: the console's own "Never".
 	ExpiresAt *time.Time
+	// Owner and creator are independent. OwnerKind comes from the principal row.
+	OwnerPrincipalID *string
+	OwnerKind        string
 }
 
 // managementKeyColumns is the single spelling of a key's projection, shared by
@@ -72,23 +75,24 @@ type ManagementKey struct {
 const managementKeyColumns = `id, name,
 	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= clock_timestamp()
 	     THEN 'expired' ELSE status END,
-	partial_key_hint, created_at, created_by, expires_at`
+	partial_key_hint, created_at, created_by, expires_at, owner_principal_id,
+	coalesce((SELECT kind FROM principals WHERE principals.id = api_keys.owner_principal_id), '')`
 
 func scanManagementKey(row pgx.Row) (ManagementKey, error) {
 	var k ManagementKey
 	err := row.Scan(&k.ID, &k.Name, &k.Status, &k.PartialKeyHint,
-		&k.CreatedAt, &k.CreatedBy, &k.ExpiresAt)
+		&k.CreatedAt, &k.CreatedBy, &k.ExpiresAt, &k.OwnerPrincipalID, &k.OwnerKind)
 	return k, err
 }
 
-// IssueManagementKey mints a management credential and returns it in plaintext —
+// IssueManagementKey mints an unowned management credential and returns it in plaintext —
 // the only moment it exists anywhere but the caller's memory, since the database
 // receives nothing but its hash — alongside the row a caller renders.
 //
-// createdBy must be non-empty, and every caller is an authenticated route, so it
-// always is: it is the `principal_` id of the human who issued the key over SSO,
-// or the `apikey_` id of the machine credential that did. Beyond audit it is
-// load-bearing, because non-NULL is exactly what puts this row **outside**
+// createdBy must be non-empty. This legacy helper never derives ownership from
+// it. Migration 0061 refuses new unowned rows with a principal_ issuer; humans
+// use the private HTTP issuer instead. A machine issuer uses its apikey_ ID.
+// Beyond audit it is load-bearing, because non-NULL puts this row **outside**
 // api_keys_one_live_unissued — issued keys may share a name, as the reference
 // allows, while EnsureAPIKey keeps one-live-per-name over the rows it owns.
 //
@@ -97,11 +101,11 @@ func scanManagementKey(row pgx.Row) (ManagementKey, error) {
 // and it is the reference's: an operator issuing a management credential picks
 // its lifetime; a worker credential's lifetime is the platform's business.
 func IssueManagementKey(ctx context.Context, pool *pgxpool.Pool, name string, expiresAt *time.Time, createdBy string) (string, ManagementKey, error) {
-	return issueManagementKey(ctx, pool, name, expiresAt, createdBy)
+	return issueManagementKey(ctx, pool, name, expiresAt, createdBy, nil)
 }
 
 // issueManagementKey also accepts the transaction holding the issuer's authority.
-func issueManagementKey(ctx context.Context, db principal.Querier, name string, expiresAt *time.Time, createdBy string) (string, ManagementKey, error) {
+func issueManagementKey(ctx context.Context, db principal.Querier, name string, expiresAt *time.Time, createdBy string, ownerID *string) (string, ManagementKey, error) {
 	// Enforced rather than asserted, because two code paths read this field for
 	// the same fact and would disagree about a blank one: the listing renders an
 	// empty issuer as `created_by: null`, which is the documented signal for "this
@@ -134,12 +138,19 @@ func issueManagementKey(ctx context.Context, db principal.Querier, name string, 
 	// resource already reporting `expired`. Nothing needs guarding once the value
 	// is allowed to be in the past — the row is simply born in the derived state,
 	// which the credential path refuses exactly as it refuses any lapsed key.
+	digest := apikey.Hash(key)
+	var legacyHash, ownedHash *string
+	if ownerID == nil {
+		legacyHash = &digest
+	} else {
+		ownedHash = &digest
+	}
 	row := db.QueryRow(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO api_keys (id, name, key_hash, partial_key_hint, created_by, expires_at, owner_principal_id, owned_key_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING `+managementKeyColumns,
-		domain.NewID(domain.PrefixAPIKey).String(), name, apikey.Hash(key), partialKeyHint(key),
-		createdBy, expiresAt)
+		domain.NewID(domain.PrefixAPIKey).String(), name, legacyHash, partialKeyHint(key),
+		createdBy, expiresAt, ownerID, ownedHash)
 	k, err := scanManagementKey(row)
 	if err != nil {
 		return "", ManagementKey{}, err
@@ -175,27 +186,25 @@ func updateManagementKey(ctx context.Context, tx pgx.Tx, id string, status, name
 // can reach this API. It renders with a null issuer, which is the honest answer
 // to "who created this" for a key an environment variable did.
 //
-// No paging. The reference's console list is a bare array with no pagination at
-// all, and this table holds one row per issued credential plus the bootstrap
-// one — an operator-paced count, not a growing log.
-//
-// And no index, which settles a question migration 0024 left open. Its closing
-// comment declined `api_keys (created_at DESC)` as build-ahead and said "the
-// listing that would want one lands in slice 2"; the listing has landed and does
-// not want one. A migration is immutable once merged, so the reconsideration has
-// to be recorded where a reader will meet it rather than by editing that file:
-// the sort is over an operator-paced table with no growth driver — issuance is a
-// deliberate admin action, and nothing else writes rows — so an index would be
-// paid for on every write to speed a read that has nothing to scan. If a
-// deployment ever does accumulate keys, the missing bound is the *response size*,
-// which an index does not fix; that would be paging, and the reference's own
-// surface has none to mirror.
+// No paging: the reference's console list is a bare array with no pagination.
+// Developers and admins can issue keys, so neither table nor response size is
+// bounded. Owner filtering limits the developer query, not the admin response.
 func ListManagementKeys(ctx context.Context, pool *pgxpool.Pool) ([]ManagementKey, error) {
+	return listManagementKeys(ctx, pool, "")
+}
+
+// An empty ownerID preserves the full administrative/legacy listing.
+func listManagementKeys(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]ManagementKey, error) {
+	query := `SELECT ` + managementKeyColumns + ` FROM api_keys`
+	var args []any
+	if ownerID != "" {
+		query += ` WHERE owner_principal_id = $1`
+		args = append(args, ownerID)
+	}
 	// id breaks ties so the order is total rather than merely partial: two keys
 	// issued inside one clock tick would otherwise sort arbitrarily, and the same
 	// listing taken twice could show them in either order.
-	rows, err := pool.Query(ctx,
-		`SELECT `+managementKeyColumns+` FROM api_keys ORDER BY created_at DESC, id DESC`)
+	rows, err := pool.Query(ctx, query+` ORDER BY created_at DESC, id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

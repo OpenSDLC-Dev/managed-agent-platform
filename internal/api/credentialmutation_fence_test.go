@@ -90,7 +90,7 @@ func TestNativeCredentialMutationCommitFence(t *testing.T) {
 				caller := seedMember(t, s, "fenced-issuer", "admin", "console")
 				cookie, session := s.issue(caller)
 				headers := nativeHeaders(cookie, session.CSRFToken)
-				target := prepareCredentialTarget(t, ctx, s, h, caller, operation)
+				target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
 				blockerConn := credentialFenceConnection(t, ctx, s)
 				observer := credentialFenceConnection(t, ctx, s)
 				blocker, err := blockerConn.Begin(ctx)
@@ -201,7 +201,7 @@ func TestNativeCredentialMutationCommitFence(t *testing.T) {
 				if err := observer.QueryRow(ctx, `SELECT role,status,(SELECT count(*) FROM browser_sessions WHERE principal_id=$1) FROM principals WHERE id=$1`, caller).Scan(&role, &status, &sessions); err != nil || role != wantRole || status != wantStatus || sessions != wantSessions {
 					t.Errorf("committed caller state: role=%q status=%q sessions=%d; want %q/%q/%d: %v", role, status, sessions, wantRole, wantStatus, wantSessions, err)
 				}
-				target.assertState(t, ctx, s, h, rr, true, caller)
+				target.assertState(t, ctx, s, h, rr, true, caller, withdrawal == "deactivate")
 			})
 		}
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
@@ -287,8 +288,8 @@ func TestIdentityLaneProvisionsOnceAndRefreshes(t *testing.T) {
 
 // TestIdentityLaneDefaultDenies is default-deny at the caller's end. A person
 // the deployment's role map does not recognise is stored as a user, and a user
-// is refused on the most permissive route there is, while the same route still
-// serves the management key. The route's end, a RoleNone route refusing even
+// is refused on the retained private key surface, while a legacy unowned key
+// still reaches it. The route's end, a RoleNone route refusing even
 // an admin, is TestAnEncodedPathCannotSlipPastTheWorkLane's.
 //
 // This is what an unmapped group looks like in practice — a real person, a valid
@@ -300,15 +301,15 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 	s := newLaneServer(t)
 
 	for _, claim := range []string{"unmapped-group", "Platform-Read", "platform-read-only"} {
-		status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", s.token(claim), nil))
+		status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(claim), nil))
 		if status != http.StatusForbidden {
-			t.Errorf("GET /v1/agents as %q: status %d, want 403 — an unmapped claim value is not a role", claim, status)
+			t.Errorf("GET api_keys as %q: status %d, want 403 — an unmapped claim value is not a role", claim, status)
 		}
 		if errType != "permission_error" {
-			t.Errorf("GET /v1/agents as %q: error type %q, want permission_error", claim, errType)
+			t.Errorf("GET api_keys as %q: error type %q, want permission_error", claim, errType)
 		}
-		if msg := laneMessage(t, body); msg != requiresDeveloper {
-			t.Errorf("GET /v1/agents as %q: message %q, want %q", claim, msg, requiresDeveloper)
+		if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+			t.Errorf("GET api_keys as %q: message %q, want %q", claim, msg, "this route requires the developer role")
 		}
 		if role, source := storedRole(t, s); role != "user" || source != "console" {
 			t.Errorf("after %q: stored (role, role_source) = (%q, %q), want (user, console)", claim, role, source)
@@ -316,13 +317,13 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 	}
 
 	// A token carrying no role claim at all is the same case, reached differently.
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token(), nil)); status != http.StatusForbidden {
-		t.Errorf("GET /v1/agents with no role claim: status %d, want 403", status)
+	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(), nil)); status != http.StatusForbidden {
+		t.Errorf("GET api_keys with no role claim: status %d, want 403", status)
 	}
 
 	// The control: the same route, the same server, the machine key.
-	if status, _ := s.do(http.MethodGet, "/v1/agents", nil); status != http.StatusOK {
-		t.Errorf("GET /v1/agents with x-api-key: status %d, want 200 — the key lane has no role to check", status)
+	if status, _ := s.do(http.MethodGet, consoleAPIKeysPath, nil); status != http.StatusOK {
+		t.Errorf("GET api_keys with x-api-key: status %d, want 200 — the key lane has no role to check", status)
 	}
 }
 
@@ -332,12 +333,12 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 func TestAFirstSignInWithoutAMappingIsAUser(t *testing.T) {
 	s := newLaneServer(t)
 
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", s.token("unmapped-group"), nil))
+	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
-		t.Fatalf("GET /v1/agents at a first, unmapped sign-in: status %d, error %q, want 403 permission_error", status, errType)
+		t.Fatalf("GET api_keys at a first, unmapped sign-in: status %d, error %q, want 403 permission_error", status, errType)
 	}
-	if msg := laneMessage(t, body); msg != requiresDeveloper {
-		t.Errorf("message = %q, want %q", msg, requiresDeveloper)
+	if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+		t.Errorf("message = %q, want %q", msg, "this route requires the developer role")
 	}
 	if role, source := storedRole(t, s); role != "user" || source != "console" {
 		t.Errorf("stored (role, role_source) = (%q, %q), want (user, console)", role, source)
@@ -367,8 +368,8 @@ func checkTheMappingIsStoredAndFollowed(t *testing.T, s *laneServer, send func(m
 	if status, errType := laneStatus(t, send(http.MethodGet, path, "platform-devs")); status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET tokens mapped to developer: status %d, error %q, want 403 permission_error", status, errType)
 	}
-	if status, errType := laneStatus(t, send(http.MethodGet, "/v1/agents", "platform-devs")); status != http.StatusOK {
-		t.Errorf("GET /v1/agents mapped to developer: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, send(http.MethodGet, consoleAPIKeysPath, "platform-devs")); status != http.StatusOK {
+		t.Errorf("GET api_keys mapped to developer: status %d, error %q, want 200", status, errType)
 	}
 	if role, source := storedRole(t, s); role != "developer" || source != "idp" {
 		t.Errorf("after a developer mapping: stored (role, role_source) = (%q, %q), want (developer, idp)", role, source)
@@ -410,14 +411,14 @@ func TestAMappedRoleIsStoredAndFollowsTheIdPBehindAProxy(t *testing.T) {
 func TestAnUnmappedFormerIdPRoleFallsToUser(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token("platform-admins"), nil)); status != http.StatusOK {
-		t.Fatalf("GET /v1/agents mapped to admin: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
+		t.Fatalf("GET api_keys mapped to admin: status %d, error %q, want 200", status, errType)
 	}
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", s.token("unmapped-group"), nil))
+	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
-		t.Errorf("GET /v1/agents no longer mapped: status %d, error %q, want 403 permission_error", status, errType)
-	} else if msg := laneMessage(t, body); msg != requiresDeveloper {
-		t.Errorf("message = %q, want %q", msg, requiresDeveloper)
+		t.Errorf("GET api_keys no longer mapped: status %d, error %q, want 403 permission_error", status, errType)
+	} else if msg := laneMessage(t, body); msg != "this route requires the developer role" {
+		t.Errorf("message = %q, want %q", msg, "this route requires the developer role")
 	}
 	if role, source := storedRole(t, s); role != "user" || source != "console" {
 		t.Errorf("stored (role, role_source) = (%q, %q), want (user, console)", role, source)
@@ -432,16 +433,16 @@ func TestAConsoleRoleSurvivesAnUnmappedSignIn(t *testing.T) {
 	unmapped := s.token("unmapped-group")
 
 	// The first sign-in creates the row, as a user.
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", unmapped, nil)); status != http.StatusForbidden {
-		t.Fatalf("GET /v1/agents at the first sign-in: status %d, want 403", status)
+	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusForbidden {
+		t.Fatalf("GET api_keys at the first sign-in: status %d, want 403", status)
 	}
-	setPrincipal(t, s, `role = 'developer', role_source = 'console'`)
+	setPrincipal(t, s, `role = 'admin', role_source = 'console'`)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", unmapped, nil)); status != http.StatusOK {
-		t.Errorf("GET /v1/agents as a console developer: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusOK {
+		t.Errorf("GET api_keys as a console admin: status %d, error %q, want 200", status, errType)
 	}
-	if role, source := storedRole(t, s); role != "developer" || source != "console" {
-		t.Errorf("stored (role, role_source) = (%q, %q), want (developer, console)", role, source)
+	if role, source := storedRole(t, s); role != "admin" || source != "console" {
+		t.Errorf("stored (role, role_source) = (%q, %q), want (admin, console)", role, source)
 	}
 }
 
@@ -451,8 +452,8 @@ func TestAConsoleRoleSurvivesAnUnmappedSignIn(t *testing.T) {
 func TestAMappingTakesOverAConsoleRole(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token("unmapped-group"), nil)); status != http.StatusForbidden {
-		t.Fatalf("GET /v1/agents at the first sign-in: status %d, want 403", status)
+	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil)); status != http.StatusForbidden {
+		t.Fatalf("GET api_keys at the first sign-in: status %d, want 403", status)
 	}
 	setPrincipal(t, s, `role = 'admin', role_source = 'console'`)
 
@@ -473,8 +474,8 @@ func TestAMappingTakesOverAConsoleRole(t *testing.T) {
 func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, "/v1/agents", s.token("platform-admins"), nil)); status != http.StatusOK {
-		t.Fatalf("GET /v1/agents as an admin: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
+		t.Fatalf("GET api_keys as an admin: status %d, error %q, want 200", status, errType)
 	}
 	lastSeen := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	setPrincipal(t, s, `status = 'deactivated', last_seen_at = '2026-01-01T00:00:00Z'`)
@@ -482,9 +483,9 @@ func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	changed := s.claims("platform-admins")
 	changed["email"] = "ada.byron@corp.example"
 	changed["name"] = "Ada L. Byron"
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, "/v1/agents", s.idp.Mint(t, changed), nil))
+	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.idp.Mint(t, changed), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
-		t.Errorf("GET /v1/agents as a removed admin: status %d, error %q, want 403 permission_error", status, errType)
+		t.Errorf("GET api_keys as a removed admin: status %d, error %q, want 403 permission_error", status, errType)
 	} else if msg := laneMessage(t, body); msg != "this account has been removed from the organization" {
 		t.Errorf("message = %q, want the removal refusal", msg)
 	}
@@ -559,13 +560,9 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 	}
 }
 
-// TestIdentityLaneAPIKeyRoutesRequireAdmin is the environment-key section's twin
-// for management keys (plan 32 slice 2, #378), and gated the same way and for a
-// sharper reason: this surface mints the credential that reaches every /v1 route,
-// so a developer who could issue one would hold admin by another name. The
-// listing is gated with the mutations because which credentials exist, what they
-// are named and who issued them is itself the inventory an attacker would want.
-func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
+// Human developers issue self-owned keys; user stays denied. Environment keys
+// and workspace reads retain their independent admin floor.
+func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 	s := newLaneServer(t)
 
 	for _, tc := range []struct {
@@ -573,7 +570,7 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		want int
 	}{
 		{role: "platform-read", want: http.StatusForbidden},
-		{role: "platform-devs", want: http.StatusForbidden},
+		{role: "platform-devs", want: http.StatusOK},
 		{role: "platform-admins", want: http.StatusOK},
 	} {
 		status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
@@ -597,22 +594,21 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 		consoleAPIKey("apikey_" + strings.Repeat("a", 24)),
 		consoleOrgAPIKey("apikey_" + strings.Repeat("a", 24)),
 	} {
-		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-devs"),
+		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-read"),
 			map[string]any{"status": "archived"}))
 		if status != http.StatusForbidden || errType != "permission_error" {
-			t.Errorf("update %s as a developer: status %d, error type %q, want 403 permission_error", path, status, errType)
+			t.Errorf("update %s as a user: status %d, error type %q, want 403 permission_error", path, status, errType)
 		}
 	}
-	// The workspace read sits in the same admin section.
+	// The workspace read keeps its separate admin floor.
 	status, errType := laneStatus(t, s.bearer(http.MethodGet,
 		"/api/console/organizations/default/workspaces/default", s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("workspace read as a developer: status %d, error type %q, want 403 permission_error", status, errType)
 	}
 
-	// An admin who issues a key over the identity lane is recorded as its creator
-	// by their stable principal_ id — the audit answer plan 31 shipped principals
-	// for, and the reason created_by is not merely decorative.
+	// New owned resources expose the human creator alias, separate from the
+	// unchanged internal principal_ audit identifier stored in SQL.
 	_, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token("platform-admins"),
 		map[string]any{"name": "issued-by-a-human"}))
 	var issued struct {
@@ -621,8 +617,8 @@ func TestIdentityLaneAPIKeyRoutesRequireAdmin(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &issued); err != nil {
 		t.Fatalf("decode issuance: %v (body %s)", err, raw)
 	}
-	if issued.CreatedBy.Type != "principal" || !strings.HasPrefix(issued.CreatedBy.ID, "principal_") {
-		t.Errorf("created_by = %+v, want the issuing human's principal_ id", issued.CreatedBy)
+	if issued.CreatedBy.Type != "user" || !strings.HasPrefix(issued.CreatedBy.ID, "user_") {
+		t.Errorf("created_by = %+v, want the issuing human's user_ alias", issued.CreatedBy)
 	}
 }
 
@@ -708,11 +704,11 @@ func TestIdentityLaneRejectionsAreUniform401(t *testing.T) {
 	}
 }
 
-// TestIdentityDisabledIsUnchanged is the contract IDENTITY_MODE=disabled
-// carries: a Bearer on a management path 401s exactly as it did before this
-// slice existed, and nothing in the response says a human lane was considered.
-// The one Bearer answered otherwise is an environment key, whose answer is the
-// reference's in every mode (#840).
+// TestIdentityDisabledIsUnchanged pins the IDENTITY_MODE=disabled refusals:
+// an arbitrary JWT-like Bearer retains the missing-key 401, with no indication
+// that a human lane was considered. Environment keys keep the reference's
+// answers in every mode (#840). Issued owned Bearer keys can authenticate;
+// the owned-key tests cover that behavior separately.
 func TestIdentityDisabledIsUnchanged(t *testing.T) {
 	s := newTestServer(t) // built with a nil verifier
 
@@ -748,10 +744,9 @@ func TestIdentityDisabledIsUnchanged(t *testing.T) {
 		t.Errorf("environment key with identity disabled: message %q, want the reference's %q", msg, "Authentication failed")
 	}
 
-	// The one request shape that is NOT what it was, and the only behaviour this
-	// slice changes in a default deployment: a repeated x-api-key field. The
-	// refusal in requireAPIKey is unconditional, so it fires with no verifier at
-	// all. Gating it on one would leave the same malformed request answered
+	// Repeated x-api-key fields are refused even without an IdP. The refusal in
+	// requireAPIKey is unconditional, so it fires with no verifier at all.
+	// Gating it on one would leave the same malformed request answered
 	// differently in two deployments, and would let lane selection and
 	// authentication disagree about which value is the key — so this is pinned
 	// here rather than left to the enabled-mode test.
@@ -818,13 +813,16 @@ func TestManagementKeyWinsOverAHumanCredential(t *testing.T) {
 // is the credential class's, not a role's, and the same human still posts a
 // user.message.
 func TestIdentityLaneCannotPostAToolResult(t *testing.T) {
-	s := newLaneServer(t)
+	s := newNativeServer(t, login.ModePassword)
 	sid := selfHostedSession(t, s.tserver)
 	useID := appendToolUse(t, s.tserver, sid, domain.EventAgentToolUse)
-	path := "/v1/sessions/" + sid + "/events"
-	admin := s.token("platform-admins")
+	path := "/api/organizations/default/proxy/v1/sessions/" + sid + "/events"
+	owner := s.seedLocal("tool-result-admin", "admin", "active")
+	cookie, session := s.issue(owner)
+	headers := map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken}
+	send := func(method, path string, body any) *http.Response { return s.doRaw(method, path, body, headers) }
 
-	status, errType, body := laneRead(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{
+	status, errType, body := laneRead(t, send(http.MethodPost, path, map[string]any{"events": []any{
 		map[string]any{"type": "user.tool_result", "tool_use_id": useID,
 			"content": []any{map[string]any{"type": "text", "text": "from a human"}}}}}))
 	if status != http.StatusForbidden || errType != "permission_error" {
@@ -835,7 +833,7 @@ func TestIdentityLaneCannotPostAToolResult(t *testing.T) {
 	}
 	// Behind the interrupt that answers the call, as a message beside an
 	// unanswered one is refused whoever sends it.
-	if status, errType := laneStatus(t, s.bearer(http.MethodPost, path, admin, map[string]any{"events": []any{
+	if status, errType := laneStatus(t, send(http.MethodPost, path, map[string]any{"events": []any{
 		map[string]any{"type": "user.interrupt"}, userMessage("hi")}})); status != http.StatusOK {
 		t.Errorf("a human's user.message: status %d, error %q, want 200", status, errType)
 	}
@@ -920,23 +918,14 @@ func TestEnvironmentKeyCannotReachAConsoleRoute(t *testing.T) {
 	}
 }
 
-// TestDualAuthDiscriminatesByCredentialShape covers the branch that now carries
-// two different Bearer credentials. An environment key is sk-map-env01- plus
-// base64url and holds no dots, so it can never be read as a JWT; a JWT goes to
-// the human lane and is role-checked there.
-//
-// The human token deliberately carries an UNMAPPED claim value, so the caller is
-// a user, whom no route here admits (TestNoRouteAdmitsUserExceptRedemption): the
-// 403 that proves which lane served the request comes from the caller's tier
-// rather than from these routes' own requirement. That keeps this test about
-// credential shape, which is its subject, and leaves the matrix to
-// TestRoleMatrixIsEnforcedOnEveryRoute — otherwise annotating these two routes
-// would silently turn the lane assertion below into a tautology.
+// TestDualAuthDiscriminatesByCredentialShape separates owned and worker Bearers.
 func TestDualAuthDiscriminatesByCredentialShape(t *testing.T) {
 	s := newLaneServer(t)
 	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
 	envID := s.env()
 	key := issueKey(t, s.pool, envID, "worker-1")
+	owner := ownedPrincipalFixture(t, s.pool, "user", "user")
+	owned, _ := ownedKeyFixture(t, s.pool, owner, owner)
 
 	status, body := s.do(http.MethodPost, "/v1/sessions", map[string]any{
 		"agent": agent["id"], "environment_id": envID,
@@ -953,15 +942,13 @@ func TestDualAuthDiscriminatesByCredentialShape(t *testing.T) {
 			t.Errorf("environment key on %s: status %d, error %q, want 200", route, status, errType)
 		}
 
-		// A human token on the same route takes the identity lane, and is refused
-		// there as a user rather than being mistaken for a worker credential —
-		// which would have served it.
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, route, s.token("unmapped-group"), nil))
+		// An issued owned key selects management auth and its current user role.
+		status, errType := laneStatus(t, s.bearer(http.MethodGet, route, owned, nil))
 		if status != http.StatusForbidden {
-			t.Errorf("human token on %s: status %d, want 403", route, status)
+			t.Errorf("owned user key on %s: status %d, want 403", route, status)
 		}
 		if errType != "permission_error" {
-			t.Errorf("human token on %s: error type %q, want permission_error", route, errType)
+			t.Errorf("owned user key on %s: error type %q, want permission_error", route, errType)
 		}
 	}
 }

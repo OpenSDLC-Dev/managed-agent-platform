@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -198,7 +199,7 @@ func TestAPIKeyValueRepointsToAnotherName(t *testing.T) {
 // its inverse is pinned by TestSecondLiveEnvironmentKeyIsAccepted.
 func TestSchemaForbidsASecondLiveAPIKey(t *testing.T) {
 	ctx := context.Background()
-	pool := pgtest.NewPool(t)
+	pool := preIssuerPool(t)
 
 	if err := api.EnsureAPIKey(ctx, pool, "boot", "ak-first"); err != nil {
 		t.Fatalf("EnsureAPIKey: %v", err)
@@ -225,6 +226,9 @@ func TestSchemaForbidsASecondLiveAPIKey(t *testing.T) {
 		`INSERT INTO api_keys (id, name, key_hash, created_by) VALUES ($1, $2, $3, $4)`,
 		"apikey_issued", "boot", "fourth-hash", "principal_someone"); err != nil {
 		t.Errorf("a console-issued row sharing a live name was rejected: %v", err)
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	if err := api.EnsureAPIKey(ctx, pool, "other", "ak-other"); err != nil {
 		t.Errorf("a second logical name was refused its own live key: %v", err)

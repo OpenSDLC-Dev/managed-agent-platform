@@ -116,7 +116,11 @@ func newCredentialHandler(t *testing.T) (*nativeServer, http.Handler) {
 	pool := newPoolWithKey(t)
 	m := login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})
 	s := &nativeServer{tserver: &tserver{t: t, pool: pool}, manager: m}
-	return s, api.NewHandler(pool, nil, nil, nil, api.WithLogin(m, nil))
+	h := api.NewHandler(pool, nil, nil, nil, api.WithLogin(m, nil))
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	s.url = srv.URL
+	return s, h
 }
 
 // Every withdrawal is committed while the admitted mutation is still in Read.
@@ -135,9 +139,10 @@ func withdrawCredentialCaller(t *testing.T, ctx context.Context, s *nativeServer
 		return 401, "1"
 	}
 	query := map[string]string{
-		"demote":     `UPDATE principals SET role='developer' WHERE id=$1`,
-		"deactivate": `UPDATE principals SET status='deactivated' WHERE id=$1`,
-		"expire":     `UPDATE browser_sessions SET created_at=clock_timestamp()-interval '13 hours',expires_at=clock_timestamp()-interval '1 second' WHERE principal_id=$1`,
+		"demote":      `UPDATE principals SET role='developer' WHERE id=$1`,
+		"demote-user": `UPDATE principals SET role='user' WHERE id=$1`,
+		"deactivate":  `UPDATE principals SET status='deactivated' WHERE id=$1`,
+		"expire":      `UPDATE browser_sessions SET created_at=clock_timestamp()-interval '13 hours',expires_at=clock_timestamp()-interval '1 second' WHERE principal_id=$1`,
 	}[withdrawal]
 	// Exec completes the autocommit before a separate read proves its effect.
 	tag, err := s.pool.Exec(ctx, query, caller)
@@ -146,9 +151,10 @@ func withdrawCredentialCaller(t *testing.T, ctx context.Context, s *nativeServer
 	}
 	var committed bool
 	verify := map[string]string{
-		"demote":     `SELECT role='developer' FROM principals WHERE id=$1`,
-		"deactivate": `SELECT status='deactivated' FROM principals WHERE id=$1`,
-		"expire":     `SELECT expires_at<clock_timestamp() FROM browser_sessions WHERE principal_id=$1`,
+		"demote":      `SELECT role='developer' FROM principals WHERE id=$1`,
+		"demote-user": `SELECT role='user' FROM principals WHERE id=$1`,
+		"deactivate":  `SELECT status='deactivated' FROM principals WHERE id=$1`,
+		"expire":      `SELECT expires_at<clock_timestamp() FROM browser_sessions WHERE principal_id=$1`,
 	}[withdrawal]
 	if err := s.pool.QueryRow(ctx, verify, caller).Scan(&committed); err != nil || !committed {
 		t.Fatalf("%s was not committed: effect=%v err=%v", withdrawal, committed, err)
@@ -167,26 +173,26 @@ type credentialTarget struct {
 	managementRows                              int
 }
 
-func prepareCredentialTarget(t *testing.T, ctx context.Context, s *nativeServer, h http.Handler, caller, operation string) credentialTarget {
+func prepareCredentialTarget(t *testing.T, ctx context.Context, s *nativeServer, h http.Handler, caller, operation string, headers http.Header) credentialTarget {
 	t.Helper()
 	target := credentialTarget{operation: operation, path: consoleAPIKeysPath, body: `{"name":"delayed-issued"}`}
 	switch operation {
 	case "reactivate-org", "reactivate-workspace":
 		expires := time.Now().Add(time.Hour)
-		secret, row, err := api.IssueManagementKey(ctx, s.pool, "delayed-target", &expires, caller)
-		if err != nil {
+		secret, keyID := issueOwnedHTTP(t, s, headers, "delayed-target", nil)
+		if _, err := s.pool.Exec(ctx, `UPDATE api_keys SET expires_at=$2 WHERE id=$1`, keyID, expires); err != nil {
 			t.Fatal(err)
 		}
-		target.keyID, target.secret, target.body = row.ID, secret, `{"status":"active"}`
-		target.path = consoleOrgAPIKey(row.ID)
+		target.keyID, target.secret, target.body = keyID, secret, `{"status":"active"}`
+		target.path = consoleOrgAPIKey(keyID)
 		if operation == "reactivate-workspace" {
-			target.path = consoleAPIKey(row.ID)
+			target.path = consoleAPIKey(keyID)
 		}
-		if tag, err := s.pool.Exec(ctx, `UPDATE api_keys SET status='inactive' WHERE id=$1`, row.ID); err != nil || tag.RowsAffected() != 1 {
+		if tag, err := s.pool.Exec(ctx, `UPDATE api_keys SET status='inactive' WHERE id=$1`, keyID); err != nil || tag.RowsAffected() != 1 {
 			t.Fatalf("disable target: rows=%d err=%v", tag.RowsAffected(), err)
 		}
 		var valid bool
-		if err := s.pool.QueryRow(ctx, `SELECT status='inactive' AND created_by IS NOT NULL AND expires_at>clock_timestamp() FROM api_keys WHERE id=$1`, row.ID).Scan(&valid); err != nil || !valid {
+		if err := s.pool.QueryRow(ctx, `SELECT status='inactive' AND created_by IS NOT NULL AND expires_at>clock_timestamp() FROM api_keys WHERE id=$1`, keyID).Scan(&valid); err != nil || !valid {
 			t.Fatalf("reactivation target is not issued, inactive and unexpired: valid=%v err=%v", valid, err)
 		}
 		assertCredentialLane(t, ctx, h, secret, "", 401)
@@ -218,7 +224,7 @@ func assertCredentialLane(t *testing.T, ctx context.Context, h http.Handler, sec
 	}
 }
 
-func (target credentialTarget) assertState(t *testing.T, ctx context.Context, s *nativeServer, h http.Handler, rr *httptest.ResponseRecorder, changed bool, issuer string) {
+func (target credentialTarget) assertState(t *testing.T, ctx context.Context, s *nativeServer, h http.Handler, rr *httptest.ResponseRecorder, changed bool, issuer string, removed bool) {
 	t.Helper()
 	var managementRows, workerRows int
 	if err := s.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM api_keys),(SELECT count(*) FROM environment_keys)`).Scan(&managementRows, &workerRows); err != nil {
@@ -238,6 +244,9 @@ func (target credentialTarget) assertState(t *testing.T, ctx context.Context, s 
 		want, lane := "inactive", 401
 		if changed {
 			want, lane = "active", 200
+		}
+		if removed {
+			want, lane = "archived", 401
 		}
 		var status string
 		if err := s.pool.QueryRow(ctx, `SELECT status FROM api_keys WHERE id=$1`, target.keyID).Scan(&status); err != nil || status != want {
@@ -262,10 +271,18 @@ func (target credentialTarget) assertState(t *testing.T, ctx context.Context, s 
 		if issued.ID == "" || issued.RawKey == "" {
 			t.Fatal("successful management issuance returned no id or synthetic key")
 		}
-		if err := s.pool.QueryRow(ctx, `SELECT name='delayed-issued' AND status='active' AND created_by=$2 AND key_hash=$3 FROM api_keys WHERE id=$1`, issued.ID, issuer, apikey.Hash(issued.RawKey)).Scan(&stored); err != nil || !stored {
+		wantStatus, wantLane := "active", 200
+		if removed {
+			wantStatus, wantLane = "archived", 401
+		}
+		var owner *string
+		if strings.HasPrefix(issuer, "principal_") {
+			owner = &issuer
+		}
+		if err := s.pool.QueryRow(ctx, `SELECT name='delayed-issued' AND status=$4 AND created_by=$2 AND coalesce(key_hash,owned_key_hash)=$3 AND owner_principal_id IS NOT DISTINCT FROM $5::text FROM api_keys WHERE id=$1`, issued.ID, issuer, apikey.Hash(issued.RawKey), wantStatus, owner).Scan(&stored); err != nil || !stored {
 			t.Fatalf("issued management row=%v err=%v", stored, err)
 		}
-		assertCredentialLane(t, ctx, h, issued.RawKey, "", 200)
+		assertCredentialLane(t, ctx, h, issued.RawKey, "", wantLane)
 	} else {
 		if issued.AccessToken == "" {
 			t.Fatal("successful worker issuance returned no synthetic access token")
@@ -289,13 +306,17 @@ func TestNativeCredentialMutationDelayedBody(t *testing.T) {
 				caller := seedMember(t, s, "credential-caller", "admin", "console")
 				cookie, session := s.issue(caller)
 				headers := nativeHeaders(cookie, session.CSRFToken)
-				target := prepareCredentialTarget(t, ctx, s, h, caller, operation)
+				target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
 				body := newCredentialBody(ctx, target.body)
 				call := startCredentialRequest(t, ctx, h, "POST", target.path, body, headers)
 				call.await(t, body.entered, "partial body after admin admission")
 				want, marker := 200, ""
 				if withdrawal != "unchanged" {
-					want, marker = withdrawCredentialCaller(t, ctx, s, h, caller, withdrawal, headers)
+					actualWithdrawal := withdrawal
+					if withdrawal == "demote" && operation != "worker-issue" {
+						actualWithdrawal = "demote-user"
+					}
+					want, marker = withdrawCredentialCaller(t, ctx, s, h, caller, actualWithdrawal, headers)
 				}
 				body.unblock()
 				rr := call.result(t)
@@ -307,7 +328,7 @@ func TestNativeCredentialMutationDelayedBody(t *testing.T) {
 				if rr.Code != want || rr.Header().Get("x-platform-signed-out") != marker {
 					t.Errorf("post-body authority: status=%d marker=%q want=%d/%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), want, marker, rr.Body.String())
 				}
-				target.assertState(t, ctx, s, h, rr, withdrawal == "unchanged", caller)
+				target.assertState(t, ctx, s, h, rr, withdrawal == "unchanged", caller, withdrawal == "deactivate")
 				if withdrawal == "unchanged" && !t.Failed() {
 					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
 				}
@@ -327,7 +348,7 @@ func TestNativeCredentialMutationLegacyPrecedence(t *testing.T) {
 			caller := seedMember(t, s, "legacy-cookie", "admin", "console")
 			cookie, session := s.issue(caller)
 			headers := nativeHeaders(cookie, session.CSRFToken)
-			target := prepareCredentialTarget(t, ctx, s, h, caller, operation)
+			target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
 			offered := headers.Clone()
 			offered.Set("X-Api-Key", testKey)
 			body := newCredentialBody(ctx, target.body)
@@ -348,7 +369,7 @@ func TestNativeCredentialMutationLegacyPrecedence(t *testing.T) {
 			if err := s.pool.QueryRow(ctx, `SELECT id FROM api_keys WHERE key_hash=$1`, apikey.Hash(testKey)).Scan(&issuer); err != nil {
 				t.Fatal(err)
 			}
-			target.assertState(t, ctx, s, h, rr, true, issuer)
+			target.assertState(t, ctx, s, h, rr, true, issuer, false)
 			if !t.Failed() {
 				fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
 			}
@@ -367,7 +388,7 @@ func TestNativeCredentialMutationRejectsManagementBearer(t *testing.T) {
 			caller := seedMember(t, s, "bearer-cookie", "admin", "console")
 			cookie, session := s.issue(caller)
 			headers := nativeHeaders(cookie, session.CSRFToken)
-			target := prepareCredentialTarget(t, ctx, s, h, caller, operation)
+			target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
 			cookieOnly := credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
 			if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
 				t.Fatalf("cookie-only control was not authenticated: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
@@ -391,7 +412,7 @@ func TestNativeCredentialMutationRejectsManagementBearer(t *testing.T) {
 			if rr.Code != 401 || rr.Header().Get("x-platform-signed-out") != "" {
 				t.Errorf("management Bearer was not rejected independently of its cookie: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
 			}
-			target.assertState(t, ctx, s, h, rr, false, "")
+			target.assertState(t, ctx, s, h, rr, false, "", false)
 			cookieOnly = credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
 			if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
 				t.Errorf("management Bearer rejection invalidated its cookie: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())

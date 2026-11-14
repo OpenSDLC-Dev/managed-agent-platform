@@ -4,15 +4,22 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 3: backend safety preparation, not owned HTTP issuance.
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 3: principal-owned key delivery.
+Implementation and client acceptance are verified for the sources in the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance).
+Delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
 Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance).
-**no release until plan 69 slice 7**. The slice 3 backend safety checkpoint may merge separately; owned issuance and admission remain pending.
+**no release until plan 69 slice 7**.
 
 ## Tasks
 
 - [x] Isolate owned digests; constrain identity, removal and old policy writes. Verified and reviewed in [PR #1022](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1022).
 - [x] Reject owned preset values at both servers' startup; add typed gateway-policy refusal. Verified and reviewed in [PR #1022](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1022).
-- [ ] Obtain private owned-key response/assignment evidence ([recordings #82](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/82)); keep lower-role visibility and `can_manage:false` in [#40](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/40).
-- [ ] Obtain service-account direct-key memory attribution evidence ([recordings #83](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/83)).
-- [ ] Complete owned issuance/authorization and its mutation fence. Activate legacy human INSERT refusal in a new numbered migration in the issuer cutover PR. Never edit migration 0060 after merge.
-- [ ] Complete owned public role/Bearer admission, remove IdP/proxy admission from `/v1`, update Console and run integrated acceptance.
+- [x] Obtain owned-key response/assignment evidence ([recordings #82](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/blob/a7fa9c0715c92f85ffbdf6f9d595e7d014d6a4d8/2026-11-07-owned-key-memory-actors/README.md)). Lower-role visibility and `can_manage:false` remain unconfirmed in [#40](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/issues/40).
+- [x] Confirm both owners' direct-key Memory attribution ([recordings #83](https://github.com/OpenSDLC-Dev/managed-agents-wire-recordings/blob/a7fa9c0715c92f85ffbdf6f9d595e7d014d6a4d8/2026-11-07-owned-key-memory-actors/README.md)).
+- [x] Verify owned public role/Bearer admission and remove public IdP/proxy sign-in, including cleaning redirects ([admission tests](./internal/api/ownedkeyauth_test.go), [redirect tests](./internal/api/ownedkeyredirect_test.go)).
+- [x] Verify owned HTTP issuance and fenced per-row mutations ([issuer tests](./internal/api/ownedkeys_test.go), [fence tests](./internal/api/ownedkeymutation_test.go)). Migration 0061 rejects new human-unowned INSERTs; 0060 is unchanged.
+- [x] Verify and review the native Console source task for ownership and row permissions ([Console e9a383a](https://github.com/OpenSDLC-Dev/managed-agent-console/commit/e9a383a990e7d04682a97b1911b03839a4d097e4)).
+- [x] Verify prepublication native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
+- [x] Independently verify the Docker context's exact local hook-cache exclusion ([COPY guard](./internal/sandbox/sandboxtest/buildcontext_test.go)).
+- [x] Pair the merged Console source/image, add executable native CI coverage and independently verify both local client tiers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)).
+- [x] Verify the gateway mixed-credential follow-up and repeat packaged acceptance with rebuilt final-source images; accept completed native CI on its recorded integration tree ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance)).

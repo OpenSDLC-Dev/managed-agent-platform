@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 )
 
 // captureWarnings routes WARN-and-above logging into a buffer for one test and
@@ -256,7 +257,7 @@ func TestEnsureAPIKeyRecordsAMaskedHint(t *testing.T) {
 // (#72, reopened); an inherited expires_at lets a control plane boot reporting
 // success over a bootstrap key that apikey.Authenticate already refuses.
 func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
-	s := newTestServer(t)
+	s := preIssuerServer(t)
 	ctx := context.Background()
 
 	const key = "ak-adopted"
@@ -268,6 +269,9 @@ func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
 		t.Fatalf("stage issued key: %v", err)
 	}
 
+	if err := store.Migrate(ctx, s.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := api.EnsureAPIKey(ctx, s.pool, "boot", key); err != nil {
 		t.Fatalf("EnsureAPIKey: %v", err)
 	}
@@ -309,7 +313,7 @@ func TestEnsureAPIKeyAdoptsAnIssuedRowAsEnvManaged(t *testing.T) {
 // archived key out of an old runbook resurrects it. Adoption stays, and this
 // asserts it is announced, because a boot-time event nothing logs is invisible.
 func TestEnsureAPIKeyAnnouncesAnAdoption(t *testing.T) {
-	s := newTestServer(t)
+	s := preIssuerServer(t)
 	ctx := context.Background()
 	warnings := captureWarnings(t)
 
@@ -328,6 +332,9 @@ func TestEnsureAPIKeyAnnouncesAnAdoption(t *testing.T) {
 		sha256Hex(key)); err != nil {
 		t.Fatalf("stage archived issued key: %v", err)
 	}
+	if err := store.Migrate(ctx, s.pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := api.EnsureAPIKey(ctx, s.pool, "boot", key); err != nil {
 		t.Fatalf("EnsureAPIKey: %v", err)
 	}
@@ -345,7 +352,7 @@ func TestEnsureAPIKeyAnnouncesAnAdoption(t *testing.T) {
 // env-var-managed rows of that name — a key an admin issued under the same name
 // is the admin's, and keeps working — and touches no other name.
 func TestRetireAPIKeyEndsOnlyTheRowsItOwns(t *testing.T) {
-	s := newTestServer(t)
+	s := preIssuerServer(t)
 	ctx := context.Background()
 
 	const managed, issued, other = "ak-retire-managed", "ak-retire-issued", "ak-retire-other"
@@ -359,6 +366,9 @@ func TestRetireAPIKeyEndsOnlyTheRowsItOwns(t *testing.T) {
 		`INSERT INTO api_keys (id, name, key_hash, created_by) VALUES ('apikey_retire_issued', 'retiring', $1, 'principal_admin')`,
 		sha256Hex(issued)); err != nil {
 		t.Fatalf("stage issued key: %v", err)
+	}
+	if err := store.Migrate(ctx, s.pool); err != nil {
+		t.Fatal(err)
 	}
 	call := func(key string) int {
 		res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": key})
@@ -397,7 +407,7 @@ func TestRetireAPIKeyEndsOnlyTheRowsItOwns(t *testing.T) {
 // created_by, so this is the test that fails if the index is ever rebuilt on the
 // name alone.
 func TestConsoleIssuedKeysAreOutsideTheOneLiveRule(t *testing.T) {
-	s := newTestServer(t)
+	s := preIssuerServer(t)
 	ctx := context.Background()
 
 	if err := api.EnsureAPIKey(ctx, s.pool, "shared", "ak-shared-bootstrap"); err != nil {
@@ -409,6 +419,9 @@ func TestConsoleIssuedKeysAreOutsideTheOneLiveRule(t *testing.T) {
 			"apikey_issued_"+issuer, "hash-shared-"+issuer, issuer); err != nil {
 			t.Fatalf("issued key %d sharing a live name was rejected: %v", i, err)
 		}
+	}
+	if err := store.Migrate(ctx, s.pool); err != nil {
+		t.Fatal(err)
 	}
 	// ...while a second *unissued* live row under that name is still impossible.
 	if _, err := s.pool.Exec(ctx,

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // The role matrix over real HTTP. TestEveryIdentityReachableRouteDeclaresARole
@@ -74,9 +75,10 @@ func (r matrixRoute) request() string {
 
 // roleMatrix mirrors docs/plan/69_principal-bound-auth.md's table, route for
 // route: developer reads every resource and creates, changes and deletes them,
-// vault credentials included; admin adds memory redaction and the
-// environment-key and API-key surfaces, which have their own tests. user
-// reaches none of these routes: there is no read-only role.
+// vault credentials included; admin adds memory redaction. Environment-key
+// management stays admin; private API-key routes admit developers for their own
+// keys. Both key surfaces have separate tests. user reaches none of these routes:
+// there is no read-only role.
 func roleMatrix() []matrixRoute {
 	const (
 		agent   = "/v1/agents/{id}"
@@ -170,56 +172,29 @@ func roleMatrix() []matrixRoute {
 func TestRoleMatrixIsEnforcedOnEveryRoute(t *testing.T) {
 	s := newLaneServer(t)
 
-	// One token per tier, minted once: the matrix is about routes, not tokens.
-	//
-	// RoleNone and RoleUser are real callers here, not placeholders: a person the
-	// deployment authenticated whose IdP groups map to nothing, and one it mapped
-	// to user. Both are denied on EVERY route, which makes them the denied-case
-	// controls for the developer minimum: without them, every tier under test
-	// would satisfy it, and a developer check that stopped running entirely would
-	// still see each row pass on the handler's own 404.
-	tokens := map[identity.Role]string{
-		identity.RoleNone:      s.token("unmapped-group"),
-		identity.RoleUser:      s.token("platform-read"),
-		identity.RoleDeveloper: s.token("platform-devs"),
-		identity.RoleAdmin:     s.token("platform-admins"),
-	}
-	callers := []identity.Role{identity.RoleNone, identity.RoleUser, identity.RoleDeveloper, identity.RoleAdmin}
-
-	for _, route := range roleMatrix() {
-		for _, caller := range callers {
-			res := s.bearer(route.method, route.request(), tokens[caller], nil)
-			status, errType, raw := laneRead(t, res)
-			allowed := caller.AtLeast(route.min)
-			who := string(caller)
-			if caller == identity.RoleNone {
-				who = "a caller with no mapped role"
-			}
-
-			switch {
-			case allowed && status == http.StatusForbidden:
-				t.Errorf("%s: %s was denied, but the matrix puts this route at %s",
-					route.pattern(), who, route.min)
-			case allowed && status == http.StatusUnauthorized:
-				t.Errorf("%s: %s got 401; a verified token must never read as no credential",
-					route.pattern(), who)
-			case allowed && status >= 500:
-				t.Errorf("%s: %s got %d — the role check passed but the handler failed (%v)",
-					route.pattern(), who, status, laneMessage(t, raw))
-			case !allowed && status != http.StatusForbidden:
-				t.Errorf("%s: %s got %d, want 403 — the matrix puts this route at %s",
-					route.pattern(), who, status, route.min)
-			case !allowed:
-				if errType != "permission_error" {
-					t.Errorf("%s: %s denied with error type %q, want permission_error",
-						route.pattern(), who, errType)
-				}
-				// The denial names the ROUTE's requirement, never the caller's
-				// own role: an operator's real question is "what does this need",
-				// and echoing the caller's role back leaks nothing useful.
-				if msg := laneMessage(t, raw); !strings.Contains(msg, string(route.min)) {
-					t.Errorf("%s: %s denied with %q, which does not name the required %s role",
-						route.pattern(), who, msg, route.min)
+	issuer := ownedPrincipalFixture(t, s.pool, "user", "admin")
+	for _, kind := range []string{"user", "service_account"} {
+		// SQL forbids a service account with the user role. Human user is the
+		// denied control on every developer row; developer also tests redaction.
+		roles := []identity.Role{identity.RoleDeveloper, identity.RoleAdmin}
+		if kind == "user" {
+			roles = append([]identity.Role{identity.RoleUser}, roles...)
+		}
+		for _, role := range roles {
+			owner := ownedPrincipalFixture(t, s.pool, kind, string(role))
+			key, _ := ownedKeyFixture(t, s.pool, owner, issuer)
+			for _, header := range []string{"x-api-key", "Bearer"} {
+				for _, route := range roleMatrix() {
+					t.Run(kind+"/"+string(role)+"/"+header+"/"+route.pattern(), func(t *testing.T) {
+						status, errType, raw := laneRead(t, s.doRaw(route.method, route.request(), nil, ownedHeaders(header, key)))
+						if role.AtLeast(route.min) {
+							if status == 401 || status == 403 || status >= 500 {
+								t.Fatalf("allowed owned caller: status=%d body=%s", status, raw)
+							}
+						} else if status != 403 || errType != "permission_error" || laneMessage(t, raw) != "this route requires the "+string(route.min)+" role" {
+							t.Fatalf("denied owned caller: status=%d body=%s want role-floor 403", status, raw)
+						}
+					})
 				}
 			}
 		}
@@ -291,23 +266,22 @@ func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 	}
 }
 
-// TestAHumanCreatedSessionRecordsThePrincipal closes the loop slice 2 could only
-// test in-package. Its note there said the audit column could not be observed
-// over HTTP because every mutation sat at RoleNone, so no human could create a
-// session — and that slice 3 would make it reachable. It does: POST /v1/sessions
-// is developer now, so the column can be watched from outside, and this asserts
-// what principalFrom actually wrote.
+// TestAHumanCreatedSessionRecordsThePrincipal reads the audit column after a
+// real cookie-authenticated resource-proxy write. Forwarding must retain the
+// human principal without substituting an API key or dropping attribution.
 //
 // The failure it guards is silent by construction: created_by is nullable and
 // nothing downstream reads it, so a human-created session that recorded nobody
 // would look exactly like a working one until someone needed the audit trail.
 func TestAHumanCreatedSessionRecordsThePrincipal(t *testing.T) {
-	s := newLaneServer(t)
+	s := newNativeServer(t, login.ModePassword)
 	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
-	envID := s.env()
+	envID := selfHostedEnv(t, s.tserver, "human-audit")
+	owner := s.seedLocal("session-writer", "developer", "active")
+	cookie, loginSession := s.issue(owner)
 
-	status, _, raw := laneRead(t, s.bearer(http.MethodPost, "/v1/sessions", s.token("platform-devs"),
-		map[string]any{"agent": agent["id"], "environment_id": envID}))
+	status, _, raw := laneRead(t, s.doRaw(http.MethodPost, "/api/organizations/default/proxy/v1/sessions",
+		map[string]any{"agent": agent["id"], "environment_id": envID}, map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": loginSession.CSRFToken}))
 	if status != http.StatusOK {
 		t.Fatalf("a developer creating a session: status %d (%v)", status, laneMessage(t, raw))
 	}

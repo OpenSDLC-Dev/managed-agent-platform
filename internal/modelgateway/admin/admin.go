@@ -88,6 +88,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -243,6 +244,21 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 	}
 	if v := h.cfg.Verifier; v != nil {
 		if tok, ok := v.Credential(r); ok {
+			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && strings.HasPrefix(bearer, "sk-map-api01-") {
+				// Match the private control-plane lane's immutable-shape check.
+				// A known unowned companion supplies no authority, even after
+				// expiry/archive. Owned or unknown keys cannot select an assertion.
+				var legacy bool
+				err := h.cfg.Principals.QueryRow(r.Context(), `SELECT EXISTS (
+					SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
+					apikey.Hash(bearer)).Scan(&legacy)
+				if err != nil {
+					return "", false, err
+				}
+				if !legacy {
+					return "", false, unauthenticated("the admin API does not accept this issued API key")
+				}
+			}
 			id, err := v.Verify(r.Context(), tok)
 			if err != nil {
 				// As the control plane's identity lane: the caller is told

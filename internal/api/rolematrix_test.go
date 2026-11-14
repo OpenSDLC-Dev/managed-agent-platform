@@ -28,9 +28,9 @@ import (
 // It would be comfortable to say identity can never reach them, and that is what
 // an earlier draft of this comment said. It is not true. dispatchAuth classifies
 // r.URL.EscapedPath(), while ServeMux unescapes each segment before matching, so
-// a request for /v1/environments/{id}/%77ork misses isWorkPath, takes the human
-// lane, and then matches the work registration once ServeMux decodes it. Nothing
-// is open — requireRole(RoleNone) refuses every human before the handler runs —
+// a request for /v1/environments/{id}/%77ork misses isWorkPath, takes management
+// lane for an owned key, and then matches the work registration once ServeMux
+// decodes it. Nothing is open — requireRole(RoleNone) refuses the owned caller —
 // but that is the point: RoleNone is load-bearing on those routes, not
 // decorative, and TestAnEncodedPathCannotSlipPastTheWorkLane pins it.
 
@@ -189,48 +189,35 @@ func TestTheMatrixCoversEveryAnnotatedRoute(t *testing.T) {
 	}
 }
 
-// TestAnEncodedPathCannotSlipPastTheWorkLane pins the reason the work routes
-// keep RoleNone. dispatchAuth classifies the escaped path and ServeMux matches
-// on the unescaped one, so these spellings take the HUMAN lane and then land on
-// a machine-lane handler. RoleNone is what closes them, and it closes them for
-// an admin — the strongest role there is — because RoleNone is satisfied by
-// nothing.
-//
-// This also keeps a property TestIdentityLaneDefaultDenies used to hold and can
-// no longer reach: that a mapped, maximally-privileged human is still refused by
-// a route whose minimum is RoleNone.
+// Encoded literals can miss machine dispatch but still match its ServeMux route.
+// RoleNone must deny an owned admin on public work paths and a human admin on
+// the off-/v1 gate path. The message distinguishes this guard from workScope's
+// unrelated 403 for a missing environment.
 func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 	s := newLaneServer(t)
 	envID := s.env()
 	admin := s.token("platform-admins")
+	owner := ownedPrincipalFixture(t, s.pool, "user", "admin")
+	owned, _ := ownedKeyFixture(t, s.pool, owner, owner)
 
 	for _, path := range []string{
 		"/v1/environments/" + envID + "/%77ork",
 		"/v1/environments/" + envID + "/%77ork/poll",
 		"/internal/v1/gate/%63onfig",
 	} {
-		// 403 permission_error carrying the identity lane's OWN message, not
-		// merely "some refusal": that triple is requireRole turning the request
-		// away on the identity lane. A 401 authentication_error would mean a
-		// machine lane answered, and a 404 that no route matched — either would
-		// mean this test is no longer exercising the path it was written for, and
-		// the invariant would go unguarded while the test still passed.
-		//
-		// The message is asserted because the status pair stopped discriminating:
-		// workScope now refuses a wrong-environment caller with 403
-		// permission_error too (recorded 2026-09-02, #78), and nothing on the
-		// identity lane sets the request's environment, so dropping RoleNone from
-		// these routes would let the admin token reach workScope and be refused
-		// there with the identical pair — green test, unguarded invariant. Only
-		// the message tells the two refusals apart.
-		status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, admin, nil))
+		credential, refusal := owned, "this route is not available to principal-owned API keys"
+		if strings.HasPrefix(path, "/internal/") {
+			credential, refusal = admin, "this route is not available to SSO-authenticated callers"
+		}
+		// Pin requireRole's refusal, not merely some authentication or scope denial.
+		status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, credential, nil))
 		if status != http.StatusForbidden || errType != "permission_error" {
-			t.Errorf("GET %s as an admin: status %d, error %q; want 403 permission_error — the encoded spelling takes the human lane, and RoleNone is what closes it",
+			t.Errorf("GET %s as an admin: status %d, error %q; want 403 permission_error — RoleNone must refuse the encoded spelling",
 				path, status, errType)
 			continue
 		}
-		if msg := laneMessage(t, body); msg != "this route is not available to SSO-authenticated callers" {
-			t.Errorf("GET %s as an admin: message %q; want the identity lane's own refusal — another 403 here means the request got past requireRole and was turned away deeper in",
+		if msg := laneMessage(t, body); msg != refusal {
+			t.Errorf("GET %s as an admin: message %q; want requireRole's own refusal, not a downstream scope check",
 				path, msg)
 		}
 	}
