@@ -21,7 +21,7 @@ func TestNativeLegacyCredentialPrecedence(t *testing.T) {
 		headers    http.Header
 		want       int
 	}{
-		{"JWT remains on public", "/v1/agents", http.Header{"Authorization": {"Bearer " + token}}, 403},
+		{"JWT is refused on public", "/v1/agents", http.Header{"Authorization": {"Bearer " + token}}, 401},
 		{"JWT outranks cookie on private", keys, http.Header{"Cookie": {cookie}, "Authorization": {"Bearer " + token}}, 403},
 		{"JWT cannot reach session", "/api/%61uth/session", http.Header{"Authorization": {"Bearer " + token}}, 401},
 		{"JWT beside cookie cannot reach session", "/api/auth/session", http.Header{"Cookie": {cookie}, "Authorization": {"Bearer " + token}}, 401},
@@ -43,14 +43,14 @@ func TestNativeLegacyCredentialPrecedence(t *testing.T) {
 			}
 		})
 	}
-	// Stored authority is still used by the public verifier lane in slice 2.
-	_, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='developer' WHERE issuer=$1 AND subject='user-1'`, s.idp.Issuer())
+	// Stored authority still applies on the retained private verifier lane.
+	_, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='admin' WHERE issuer=$1 AND subject='user-1'`, s.idp.Issuer())
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, raw := s.request("GET", "/v1/agents", "", http.Header{"Authorization": {"Bearer " + token}})
+	res, raw := s.request("GET", keys, "", http.Header{"Authorization": {"Bearer " + token}})
 	if res.StatusCode != 200 {
-		t.Fatalf("removed public JWT lane early: %d %s", res.StatusCode, raw)
+		t.Fatalf("retained private JWT lane refused admin: %d %s", res.StatusCode, raw)
 	}
 }
 

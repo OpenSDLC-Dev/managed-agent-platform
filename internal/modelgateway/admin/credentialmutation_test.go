@@ -202,7 +202,7 @@ type grantTarget struct {
 func prepareGrantTarget(t *testing.T, ctx context.Context, f *grantFixture, state string) grantTarget {
 	t.Helper()
 	expires := time.Now().Add(time.Hour)
-	secret, row, err := api.IssueManagementKey(ctx, f.e.pool, "grant-target", &expires, f.caller)
+	secret, row, err := api.IssueManagementKey(ctx, f.e.pool, "grant-target", &expires, "apikey_fixture_issuer")
 	if err != nil {
 		t.Fatal(err)
 	}

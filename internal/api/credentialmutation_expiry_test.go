@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -41,15 +42,10 @@ func TestNativeCredentialTargetExpiryAfterAuthorityWait(t *testing.T) {
 				var keyID, secret string
 				patch := map[string]any{"name": name}
 				if operation != "management-issue" {
-					var row api.ManagementKey
-					var err error
-					secret, row, err = api.IssueManagementKey(ctx, s.pool, name, nil, caller)
-					if err != nil {
-						t.Fatal(err)
-					}
-					keyID, path = row.ID, consoleOrgAPIKey(row.ID)
+					secret, keyID = issueOwnedHTTP(t, s, headers, name, nil)
+					path = consoleOrgAPIKey(keyID)
 					if strings.HasSuffix(operation, "-workspace") {
-						path = consoleAPIKey(row.ID)
+						path = consoleAPIKey(keyID)
 					}
 					patch = map[string]any{"name": "target-after"}
 					if strings.HasPrefix(operation, "reactivate-") {
@@ -170,7 +166,7 @@ func TestNativeCredentialTargetExpiryAfterAuthorityWait(t *testing.T) {
 					if resource.Status != wantRendered {
 						t.Errorf("post-wait returned status=%q want=%q", resource.Status, wantRendered)
 					}
-					if resource.Name != wantName || resource.CreatedBy == nil || resource.CreatedBy.ID != caller || resource.CreatedBy.Type != "principal" {
+					if resource.Name != wantName || resource.CreatedBy == nil || resource.CreatedBy.ID != principal.PublicID(caller, "user") || resource.CreatedBy.Type != "user" {
 						t.Error("target-expiry response has the wrong name or human issuer")
 					}
 					if (resource.ExpiresAt == nil) != (expiresAt == nil) || expiresAt != nil && !resource.ExpiresAt.Equal(*expiresAt) {
@@ -180,7 +176,7 @@ func TestNativeCredentialTargetExpiryAfterAuthorityWait(t *testing.T) {
 				var status, storedName, issuer string
 				var storedExpiry *time.Time
 				var matchesHash bool
-				if err := observer.QueryRow(ctx, `SELECT status,name,created_by,expires_at,key_hash=$2 FROM api_keys WHERE id=$1`, keyID, apikey.Hash(secret)).Scan(&status, &storedName, &issuer, &storedExpiry, &matchesHash); err != nil {
+				if err := observer.QueryRow(ctx, `SELECT status,name,created_by,expires_at,owned_key_hash=$2 FROM api_keys WHERE id=$1`, keyID, apikey.Hash(secret)).Scan(&status, &storedName, &issuer, &storedExpiry, &matchesHash); err != nil {
 					t.Fatalf("read durable target-expiry key metadata: %v", err)
 				}
 				if status != wantStatus || storedName != wantName || issuer != caller || !matchesHash {

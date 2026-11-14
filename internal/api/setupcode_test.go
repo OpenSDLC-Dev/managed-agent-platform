@@ -224,7 +224,7 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 	token := s.token()
 	code := mintSetupCode(t, s.pool)
 	mintSetupCode(t, s.pool)
-	if status, typ := laneStatus(t, s.bearer("GET", "/v1/agents", token, nil)); status != 403 || typ != "permission_error" {
+	if status, typ := laneStatus(t, s.bearer("GET", consoleAPIKeysPath, token, nil)); status != 403 || typ != "permission_error" {
 		t.Fatalf("before bootstrap read = %d/%s, want 403", status, typ)
 	}
 	body := setupResponse(t, s.bearer("POST", setupCodeURL, token, map[string]any{"code": code}), 200, "")
@@ -250,7 +250,7 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 	for _, replay := range []any{map[string]any{"code": code}, map[string]any{"code": "wrong"}, map[string]any{}, `{"code":`} {
 		setupResponse(t, s.bearer("POST", setupCodeURL, token, replay), 409, "an admin already exists")
 	}
-	if status, typ := laneStatus(t, s.bearer("GET", "/v1/agents", token, nil)); status != 200 {
+	if status, typ := laneStatus(t, s.bearer("GET", consoleAPIKeysPath, token, nil)); status != 200 {
 		t.Fatalf("after bootstrap read = %d/%s, want 200", status, typ)
 	}
 	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role = 'user', status = 'deactivated' WHERE id = $1`, got.ID); err != nil {
@@ -287,7 +287,7 @@ func TestTheManagementKeyCannotRedeemASetupCode(t *testing.T) {
 	s := newSetupServer(t)
 	code := mintSetupCode(t, s.pool)
 	// A real person already exists, so a mistaken machine promotion has a target.
-	laneStatus(t, s.bearer("GET", "/v1/agents", s.token(), nil))
+	laneStatus(t, s.bearer("GET", consoleAPIKeysPath, s.token(), nil))
 	setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 403,
 		"only a signed-in person can redeem a setup code")
 	setupCounts(t, s.pool, 1, 0, 0)

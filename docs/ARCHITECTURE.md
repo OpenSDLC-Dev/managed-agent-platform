@@ -25,7 +25,7 @@ server unchanged. An agent is three independently-swappable pieces:
   not pets: a dying container is one tool-call error, not a lost session.
 
 ```
-  ant CLI / Anthropic SDK ──REST(x-api-key)──▶ ┌── controlplane ───────────────────────────┐
+  ant CLI / Anthropic SDK ──REST(API key)──▶ ┌── controlplane ───────────────────────────┐
   (wire-compatible)                            │  /v1/agents /environments /sessions       │
                                                │  /sessions/{id}/events  (POST + SSE)      │
                                                │  /environments/{id}/work/* (BYOC worker)  │
@@ -62,7 +62,7 @@ Postgres, all coordination through it:
 
 | Binary | Role |
 |---|---|
-| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (management `x-api-key`, worker environment keys), and the session state machine. It also runs the five background sweeps no request drives — memory-version retention (#476), at startup and then hourly; expired-file retention (#655), at startup and then hourly, which removes a file's row once the published 30-day grace window past `expires_at` has elapsed — unless an open dream owns it, the manual delete route's own refusal — and enqueues its object in the same transaction rather than deleting it; the deployment scheduler (plan 37), at startup and then every 30 seconds; the object-delete drain (plan 50), at startup and then every minute or on the in-process wake a remover raises after its own commit, the one remover of what a transaction wrote down as owed — keys a commit recorded as it removed the rows that referred to them, which is now every path that deletes a row naming an object: session delete, the file sweep, the file, skill, skill-version and dream deletes, and the executor's harvest replacing a snapshot (#703). The queue counts references: a session's mounted file is a copy sharing its upload's object (#578), so migration 0046's trigger drops a key some `files` row still names, and the object is owed once the last row naming it goes. Every one of those but the harvest wakes it; the harvest runs in a binary that hosts no drain and so waits out the interval, which costs nothing on a path with no client behind it. The reference count refuses a `files/` key under REPEATABLE READ and SERIALIZABLE, so each remover names READ COMMITTED when it begins rather than inheriting the database's default, and SQL run by hand is held to the same ([the Helm chart's Database section](../deploy/helm/managed-agent-platform/README.md#database)). What a path still deletes for itself is the object whose row never committed — owed to nothing, and actively wrong to queue — and the session checkpoint the reaper removes a second time, whose key the session delete has already enqueued; and the dream runner (plan 41), at startup and then every `DREAM_TICK_INTERVAL` — all cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. The runner needs no such index and keeps no lease renewal and no owner column: a tick takes one dream's row `FOR UPDATE SKIP LOCKED`, advances it by one step and commits, so one replica works a dream at a time and a replica that dies mid-tick costs the step it was in. The one claim that does span ticks is the start's — a constant against `updated_at` that keeps a claimed dream out of every replica's scan, and that a crashed claimant burns rather than renews. |
+| `controlplane` | The wire-compatible REST surface: resource CRUD, the event log endpoints (POST/list/SSE), the work API for BYOC workers, auth (principal-owned and legacy management keys, worker environment keys), and the session state machine. It also runs the five background sweeps no request drives — memory-version retention (#476), at startup and then hourly; expired-file retention (#655), at startup and then hourly, which removes a file's row once the published 30-day grace window past `expires_at` has elapsed — unless an open dream owns it, the manual delete route's own refusal — and enqueues its object in the same transaction rather than deleting it; the deployment scheduler (plan 37), at startup and then every 30 seconds; the object-delete drain (plan 50), at startup and then every minute or on the in-process wake a remover raises after its own commit, the one remover of what a transaction wrote down as owed — keys a commit recorded as it removed the rows that referred to them, which is now every path that deletes a row naming an object: session delete, the file sweep, the file, skill, skill-version and dream deletes, and the executor's harvest replacing a snapshot (#703). The queue counts references: a session's mounted file is a copy sharing its upload's object (#578), so migration 0046's trigger drops a key some `files` row still names, and the object is owed once the last row naming it goes. Every one of those but the harvest wakes it; the harvest runs in a binary that hosts no drain and so waits out the interval, which costs nothing on a path with no client behind it. The reference count refuses a `files/` key under REPEATABLE READ and SERIALIZABLE, so each remover names READ COMMITTED when it begins rather than inheriting the database's default, and SQL run by hand is held to the same ([the Helm chart's Database section](../deploy/helm/managed-agent-platform/README.md#database)). What a path still deletes for itself is the object whose row never committed — owed to nothing, and actively wrong to queue — and the session checkpoint the reaper removes a second time, whose key the session delete has already enqueued; and the dream runner (plan 41), at startup and then every `DREAM_TICK_INTERVAL` — all cancelled and drained before the pool closes. The scheduler's at-most-one-run-per-occurrence guarantee across replicas is the partial unique index on `(deployment_id, scheduled_at)` — the reference's own published idempotency key — not leader election, which this platform has nowhere; and its clock is Postgres's, one `SELECT now()` per tick, so a replica with a skewed clock cannot shift what fires. The runner needs no such index and keeps no lease renewal and no owner column: a tick takes one dream's row `FOR UPDATE SKIP LOCKED`, advances it by one step and commits, so one replica works a dream at a time and a replica that dies mid-tick costs the step it was in. The one claim that does span ticks is the start's — a constant against `updated_at` that keeps a claimed dream out of every replica's scan, and that a crashed claimant burns rather than renews. |
 | `brain` | The harness pool. Claims `model_turn` work, replays the session's event log to rebuild context, calls the model provider, writes the resulting events, enqueues tool work, suspends. |
 | `executor` | The built-in sandbox worker for platform-managed (`cloud`) environments. Claims `tool_exec` work, runs the tool inside the session's sandbox container, posts `agent.tool_result`. Also claims `web_exec` work — web_fetch/web_search, run in its own process with no sandbox, for **both** environment kinds — `outputs_harvest` work, the deliverables snapshot of `/mnt/session/outputs/` a cloud session takes when an outcome-grading cycle begins and when a brain settlement folds the session idle, and `mcp_exec` work — both halves of the MCP path, likewise in its own process with no sandbox and for **both** environment kinds: the discovery that fills `mcp_catalogs`, enqueued when a turn suspends for a declared server with no row, and the tool call itself, enqueued when the brain routes an `mcp__{server}__{tool}` the model asked for. |
 | `worker` | The distributable BYOC worker for `self_hosted` environments. Same pull protocol as the executor, run on customer compute, posting `user.tool_result` — the real `ant beta:worker` works against the same API. |
@@ -417,11 +417,13 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Authentication is not a namespace-wide rule. Existing key-management routes retain
 legacy management-key and IdP credentials beside native cookies during rollout.
-Their human callers require admin. New member and service-account routes require
-human admin cookies; the resource proxy requires developer and preserves each
-resource's role floor. New private routes must declare their own admission policy,
-not inherit the legacy lane. [Security invariants](#security-invariants) describes
-native login, cookie-only boundaries and the credentials that remain on `/v1`.
+Human developers can manage only their own API keys; admins can manage all
+non-preset API keys. Environment-key management and the workspace read retain
+their admin floor. New member and service-account routes require human admin
+cookies; the resource proxy requires developer and preserves each resource's role
+floor. New private routes must declare their own admission policy, not inherit the
+legacy lane. [Security invariants](#security-invariants) describes native login,
+cookie-only boundaries and the credentials that remain on `/v1`.
 
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
@@ -588,8 +590,10 @@ and holds the two OS-touching adapters `gaterun/` declares.
   member runs and *what* it is asked to do, never what it is allowed to do: the unit of
   trust is the session, and a roster should hold only agents you would have run in it
   directly.
-- **Auth is scoped.** Management calls carry `x-api-key` (hashed at rest,
-  rotation-by-restart); workers carry an environment key scoped to exactly one
+- **Auth is scoped.** Public management calls take owned keys through `x-api-key`
+  or Bearer, with the owner's current stored role. Legacy unowned keys use
+  `x-api-key` only. Keys are hashed at rest; preset rotation is by restart.
+  Workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
   sessions. A `cloud` environment's key, which the console issues as the reference
   does, has no worker to serve and reaches nothing of its own environment either: the
@@ -604,13 +608,13 @@ and holds the two OS-touching adapters `gaterun/` declares.
   compromised host is revoked alone, and expire a year after issue; expired and
   unknown are one indistinguishable 401, and a revoked key this platform minted gets
   the reference's own 401 on every public route (a management key beside it is
-  served wherever the route takes one, and on a management route so is a human
-  credential); a revoked pre-0021 key stays one of the
+  served wherever the route takes one; public IdP/assertion credentials cannot
+  replace that refusal); a revoked pre-0021 key stays one of the
   indistinguishable dead, for the reason docs/DIVERGENCES.md's *Environment key
   revocation and expiry* gives (#840). Issuing and revoking them is
   a **management** operation on the off-wire console API, so an environment key
   can never mint or retire another — but equally, that surface delegates no
-  authority the management key did not already hold, and is not a separate
+  authority a legacy unowned management key did not already hold, and is not a separate
   permission tier. A work item whose session attaches a memory store is handed out
   with a per-item **sessions token** besides (`wtk_`, plan 36 decision 15): minted in
   the claim's own transaction, hashed at rest, rendered once in the poll response's
@@ -641,34 +645,20 @@ and holds the two OS-touching adapters `gaterun/` declares.
   both deployment points — the executor's pull-only sync, the reference worker's
   read-only roots — rather than by the token: it reaches an attached store whatever
   the attachment's access.
-- **Humans authenticate through the deployment's own IdP; the platform stores
-  their roles** (plan 69 slice 1). Off by default: with `IDENTITY_MODE` unset or `disabled`
-  no JWT is accepted anywhere and the surface is the machine-credential platform
-  above — byte-for-byte on every request shape but two, each answered the same in
-  every mode: a repeated `x-api-key` field, which is refused as ambiguous rather than
-  resolved by header order, and an environment key offered as a Bearer on a
-  management route, which draws the reference's own refusal (#840; `server.go`). Configured, a human's token is verified against its issuer's JWKS —
-  algorithm allowlist, exact `iss`, `aud` containment plus `azp`, required `sub`/`exp`,
-  keys only from the key set and only while its bounded lifetime holds — and never
-  minted here; every **credential** rejection is one indistinguishable 401, which is
-  what makes the 500 from a failed principal provisioning meaningful rather than
-  noise: it says the credential was good and the database was not, so an operator is
-  not sent hunting the IdP for an outage. The management key always resolves first,
-  and a worker's environment key resolves before a human's credential on the routes
-  where it admits; on a management route, where it is only ever refused, it is
-  answered only when no human credential is offered. So a second credential can
-  never change which lane, and so which role check, a request takes.
-  `internal/principal` resolves the stored `user`, `developer` or `admin` role.
+- **Human sign-in stays off public `/v1`.** IdP Bearers and proxy assertions
+  remain on existing private routes until plan 69 slice 7. Public requests with
+  those credentials neither provision nor refresh a principal. With identity
+  disabled, no IdP credential is accepted. Signature, issuer, audience and expiry
+  checks belong to `internal/identity`; credential rejection is 401, and a failed
+  principal lookup/write remains a database error rather than a bad credential.
+  `internal/principal` resolves stored `user`, `developer` or `admin` roles.
   First sign-in without a mapping gets `user`; reads require `developer`, and
-  no read-only role exists. `user` reaches auth/session routes and setup, not resources.
-  In both OIDC and trusted-proxy modes, every verified IdP request counts as a
-  sign-in and applies the optional mapping. A match sets the mapped role; a
-  formerly mapped person with no match returns to `user`. A never-mapped person
-  keeps their stored role. Older unexpired assertions can reapply an old mapped
-  role, so IdP changes are not immediate revocation. A deactivated row is refused,
-  never re-created; the database rejects principal deletion and truncation.
-  The gateway's operator-token lane shares this resolver. Route minimums fail
-  closed: an unannotated route denies every human.
+  no read-only role exists. Every admitted IdP request applies the optional
+  mapping, including the gateway's operator-token lane. A match sets the mapped
+  role; a former match now absent returns to `user`. A never-mapped person keeps
+  their stored role. Older unexpired assertions can reapply an old mapped role.
+  A deactivated row is refused, never re-created; principal deletion and
+  truncation are prohibited. Owned-key lookups never apply this sign-in mapping.
 - **Native browser login stays private.** A canonical browser-serialized
   `CONSOLE_PUBLIC_ORIGIN` enables password, OIDC code-flow or signed-proxy login. Password
   mode also requires declared development. `internal/login` owns shared opaque
@@ -681,10 +671,12 @@ and holds the two OS-touching adapters `gaterun/` declares.
   members and service accounts require actual cookie identity, not merely the old
   role annotation. Member and service-account mutations take the principal table
   lock before rechecking the caller's session and current admin authority.
-  Cookie-selected management-key issuance and updates, worker-key issuance, and
-  gateway grant creation or replacement use the same principal-first order.
-  They read the body before taking locks and recheck human admin authority in
-  the write transaction. The principal and session locks last until commit.
+  Key issuance and updates use a separate developer-or-admin fence in the same
+  principal-first order. They finish reading the body before taking locks.
+  Cookie callers recheck the session; retained IdP callers re-read stored authority
+  without replaying the mapping. Owner assignment and row permission are checked
+  in that transaction. Principal and session locks last until commit.
+  Worker-key issuance and gateway grant writes retain their human admin fence.
   Manual demotion/removal protects the last active human admin; mapping is exempt.
   The cookie-only resource proxy re-enters management dispatch with the same
   role floors, audit actor and trace context. It cannot enter machine or inference
@@ -692,21 +684,32 @@ and holds the two OS-touching adapters `gaterun/` declares.
   authority loss or store failure cancels them within 15 seconds.
   Gateway administration accepts current-session developer reads and admin writes.
   Its offered legacy credentials keep precedence; inference never gains cookie authority.
-  Public `/v1`, worker and gate paths never accept cookies. Owned-key HTTP issuance
-  and admission remain later work.
+  Public `/v1`, worker and gate paths never accept raw cookies. Public key
+  authority is checked per request; withdrawal does not end already-open public
+  streams. That lifetime is separate from the cookie proxy's bounded recheck.
 - **Owned digests stay outside legacy database authentication.** Slice 3's preparatory
   migration separates owned digests from the legacy authentication column.
   One uniqueness rule spans both columns; credential identity cannot change.
-  Existing keys remain unowned, regardless of their issuer audit ID.
+  Existing keys remain unowned, regardless of their issuer audit ID. New human
+  issuance binds the caller, or an active service account an admin cookie names.
+  A legacy unowned credential still issues only unowned keys. Migration 0061
+  refuses old human-unowned INSERTs, including prepared statements and dangling
+  human issuer IDs; historical rows and metadata updates remain valid.
   Principal deactivation archives owned keys transactionally; restoration revives none.
   Old gateway policy writes reject owned or invisible targets. The store also
   returns a typed invalid-request error for owned targets, after authorization.
   Both servers check configured bootstrap and brain values before exposing handlers.
   Any owned match stops startup, regardless of status or expiry. The control plane
   checks both values before preparing their rows in one READ COMMITTED transaction.
-  These safeguards do not enable owned HTTP issuance or current-role API admission.
-  The new issuer must share the principal-first mutation fence and refuse legacy
-  human INSERTs at activation. This is not a complete rolling-issuance protocol.
+  The control plane's public lookup joins the key to its current active owner in
+  the default organization. It enforces route roles for both humans and service
+  accounts, including when login is disabled. Owned keys are refused on private
+  paths and by gateway inference. Audit and Memory attribution still name the
+  selected key, not its owner or issuer. Human key mutations hold current authority
+  through commit in the principal-first fence. Mixed receivers can refuse issuance
+  or owned-key use until old receivers are drained. This is safe refusal, not
+  uninterrupted availability; [the rollout contract](./self-hosted-security.md#owned-key-rollout-and-rollback)
+  keeps the native cookie route ahead of public human-lane removal.
 - **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
   (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.

@@ -22,8 +22,8 @@ func agentRowCounts(t *testing.T, s *tserver) [2]int {
 	return counts
 }
 
-// A real proxy assertion can be ambient authority even without map_session.
-// Public agent creation accepts valid JSON carried as a browser-simple body.
+// Public agent creation refuses assertions even with a browser-simple body.
+// The retained private human lane must still check ambient assertion origins.
 func TestNativeProxyPublicManagementOrigin(t *testing.T) {
 	s := newNativeServer(t, login.ModeTrustedProxy)
 	token := s.idp.Mint(t, s.idp.Claims(laneAudience, time.Now()))
@@ -32,7 +32,7 @@ func TestNativeProxyPublicManagementOrigin(t *testing.T) {
 	res, raw := s.request("POST", "/api/auth/login", "", h)
 	revoked, session := sessionReply(t, res, raw)
 	var id string
-	if err := s.pool.QueryRow(context.Background(), `UPDATE principals SET role='developer' WHERE issuer=$1 RETURNING id`, s.idp.Issuer()).Scan(&id); err != nil {
+	if err := s.pool.QueryRow(context.Background(), `UPDATE principals SET role='admin' WHERE issuer=$1 RETURNING id`, s.idp.Issuer()).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	valid, _ := s.issue(id)
@@ -63,11 +63,19 @@ func TestNativeProxyPublicManagementOrigin(t *testing.T) {
 				}
 				before := agentRowCounts(t, s.tserver)
 				res, raw := s.request("POST", "/v1/agents", proxyOriginAgentBody, headers)
-				if res.StatusCode != 403 {
-					t.Errorf("asserted public browser mutation=%d %s, want 403", res.StatusCode, raw)
+				if res.StatusCode != 401 {
+					t.Errorf("asserted public browser mutation=%d %s, want 401", res.StatusCode, raw)
 				}
 				if after := agentRowCounts(t, s.tserver); after != before {
 					t.Errorf("refused browser mutation wrote agent/version rows: before=%v after=%v", before, after)
+				}
+				privateBefore := ownedDurableSnapshot(t, s.pool)
+				res, raw = s.request("POST", consoleAPIKeysPath, `{"name":"must-not-issue"}`, headers)
+				if res.StatusCode != 403 {
+					t.Errorf("private ambient assertion origin=%d %s, want 403", res.StatusCode, raw)
+				}
+				if ownedDurableSnapshot(t, s.pool) != privateBefore {
+					t.Error("refused private origin changed keys/principals")
 				}
 			})
 		}
@@ -86,6 +94,8 @@ func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='developer'`); err != nil {
 		t.Fatal(err)
 	}
+	owner := ownedPrincipalFixture(t, s.pool, "user", "developer")
+	owned, _ := ownedKeyFixture(t, s.pool, owner, owner)
 	_, envID, _, _, worker := storeWorker(t, s.tserver, "proxy-origin")
 	_, _, workToken := pollItem(t, s.tserver, envID, worker)
 	if workToken == "" {
@@ -96,18 +106,19 @@ func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 		headers http.Header
 		want    int
 	}{
-		{"same-origin", http.Header{"Origin": {nativeOrigin}, "Sec-Fetch-Site": {"same-origin"}}, 200},
-		{"signalless", http.Header{}, 200},
+		{"same-origin", http.Header{"Origin": {nativeOrigin}, "Sec-Fetch-Site": {"same-origin"}}, 401},
+		{"signalless", http.Header{}, 401},
+		{"owned-bearer", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + owned}}, 200},
 		{"valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {testKey}}, 200},
 		{"invalid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {"invalid-key"}}, 401},
 		{"repeated-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {testKey, testKey}}, 401},
 		{"empty-then-valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {"", testKey}}, 401},
-		{"single-empty-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {""}}, 403},
-		{"single-empty-key-same-origin", http.Header{"Origin": {nativeOrigin}, "X-Api-Key": {""}}, 200},
-		{"inadmissible-worker", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + worker}}, 403},
-		{"inadmissible-worker-signalless", http.Header{"Authorization": {"Bearer " + worker}}, 200},
-		{"inadmissible-invalid-worker", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer sk-map-env01-invalid"}}, 403},
-		{"inadmissible-work-token", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + workToken}}, 403},
+		{"single-empty-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {""}}, 401},
+		{"single-empty-key-same-origin", http.Header{"Origin": {nativeOrigin}, "X-Api-Key": {""}}, 401},
+		{"inadmissible-worker", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + worker}}, 401},
+		{"inadmissible-worker-signalless", http.Header{"Authorization": {"Bearer " + worker}}, 401},
+		{"inadmissible-invalid-worker", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer sk-map-env01-invalid"}}, 401},
+		{"inadmissible-work-token", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + workToken}}, 401},
 		{"cookie-only", http.Header{"Origin": {nativeOrigin}, "Cookie": {cookie}}, 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,10 +209,15 @@ func TestNativeDisabledProxyOriginLegacyCompatibility(t *testing.T) {
 		"X-Goog-IAP-JWT-Assertion": s.token("platform-devs"),
 	})
 	code, _, raw := laneRead(t, res)
-	if code != 200 {
+	if code != 401 {
 		t.Errorf("native-disabled legacy assertion=%d %s", code, raw)
 	}
-	if after := agentRowCounts(t, s.tserver); after != [2]int{before[0] + 1, before[1] + 1} {
-		t.Errorf("legacy assertion did not create agent/version rows: before=%v after=%v", before, after)
+	if after := agentRowCounts(t, s.tserver); after != before {
+		t.Errorf("public assertion changed agent/version rows: before=%v after=%v", before, after)
 	}
+	// Native-disabled legacy private assertions retain their old origin policy.
+	assertOwnedResponse(t, s.doRaw("GET", consoleAPIKeysPath, nil, map[string]string{
+		"Origin": "https://foreign.example", "Sec-Fetch-Site": "cross-site",
+		"X-Goog-IAP-JWT-Assertion": s.token("platform-admins"),
+	}), 200)
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -119,13 +120,16 @@ func TestRetirementWarningsRequireCommit(t *testing.T) {
 	ctx := context.Background()
 	for _, wrapper := range []string{"RetireAPIKey", "EnsureManagementPresets"} {
 		t.Run(wrapper, func(t *testing.T) {
-			pool := pgtest.NewPool(t)
+			pool := preIssuerPool(t)
 			ownedPreset(t, pool, "brain", "active", false)
 			if err := api.EnsureManagementPresets(ctx, pool, "old-bootstrap", "old-brain"); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id,name,key_hash,created_by)
 				VALUES ('apikey_issued','brain',$1,'principal_owner')`, apikey.Hash("issued-brain")); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Migrate(ctx, pool); err != nil {
 				t.Fatal(err)
 			}
 			before := presetRows(t, pool)
@@ -195,7 +199,7 @@ func TestRetirementWarningsRequireCommit(t *testing.T) {
 
 func TestPresetPreparationPreservesUnownedLifecycle(t *testing.T) {
 	ctx := context.Background()
-	pool := pgtest.NewPool(t)
+	pool := preIssuerPool(t)
 	pgtest.DefaultRepeatableRead(t, pool)
 	// The install's default must not change this transaction's isolation level.
 	if _, err := pool.Exec(ctx, `CREATE FUNCTION require_preset_read_committed() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -209,7 +213,7 @@ func TestPresetPreparationPreservesUnownedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Expired, archived legacy issued rows still support adoption. The storage
-	// guard intentionally admits an unowned principal-issued row in this batch.
+	// fixture stages them before the INSERT cutover, then tests current adoption.
 	for _, name := range []string{"bootstrap", "brain"} {
 		err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO api_keys (id,name,key_hash,created_by,status,expires_at)
@@ -219,6 +223,9 @@ func TestPresetPreparationPreservesUnownedLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	if err := api.EnsureManagementPresets(ctx, pool, "adopted-bootstrap", "adopted-brain"); err != nil {
 		t.Fatal(err)

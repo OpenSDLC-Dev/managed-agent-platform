@@ -21,7 +21,7 @@ class ComposeConfig(unittest.TestCase):
                 result = subprocess.run(["docker", "compose", "--env-file", "/dev/null", "-f", str(ROOT / "docker-compose.yml"), "-p", project, "--profile", "console", "--profile", "iam", "config", "--format", "json"], env=env, capture_output=True, text=True, check=True)
                 services = json.loads(result.stdout)["services"]
                 cp, gw, console, edge = [services[key] for key in ["controlplane", "modelgateway", "console", "app-edge"]]
-                self.assertIn("@sha256:", console["image"])
+                self.assertEqual(console["image"], "ghcr.io/opensdlc-dev/managed-agent-console@sha256:a6a7285c3aef10bd12f62d0c1fb51a1b878e654b4c09416af0891833941b4987")
                 self.assertIn("@sha256:", edge["image"])
                 for service in [console, edge]:
                     self.assertNotIn("build", service)

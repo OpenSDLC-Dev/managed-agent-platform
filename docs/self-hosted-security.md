@@ -62,8 +62,9 @@ tests and the reference design commits to.
   Live on both gate-wired backends; BYOC delivery is a
   [Reserved seam](#reserved-seams-and-tracked-gaps).
 
-- **Auth is scoped and hashed at rest.** Management calls carry `x-api-key`;
-  workers carry an environment key as `Authorization: Bearer`. Both are stored as
+- **Auth is scoped and hashed at rest.** Public management calls take owned keys
+  as `x-api-key` or Bearer; legacy unowned keys use `x-api-key` only.
+  Workers carry an environment key as `Authorization: Bearer`. Both are stored as
   SHA-256 hashes, never in the clear (`internal/api/auth.go`,
   `internal/api/envauth.go`; `environment_keys.key_hash` in migration `0001`). An
   environment key resolves to exactly one environment's work queue: a worker can
@@ -1016,27 +1017,20 @@ never had the platform's 256-bit generation guarantee, and it now never expires
 either. Issue a replacement for each host and revoke the old key — the list
 shows them with an empty name and no expiry, which is how you find them.
 
-**Reissue them before you turn on single sign-on (§9), not after.** With OIDC
-identity enabled, two different credentials arrive in the same `Authorization:
-Bearer` header, and the platform tells them apart by shape: a compact-JWS
-silhouette goes to the human lane, anything else stays a worker's environment
-key. The predicate is exact — **three non-empty segments separated by two dots,
-every byte of all three in the base64url alphabet** (`identity.LooksLikeJWT`) —
-so most operator-chosen values are unaffected even if they contain dots. Every
-key this platform minted is `sk-map-env01-` plus base64url and carries no dot
-at all, so it can never be misread. A grandfathered key is the residual case:
-if the value **you** chose happens to satisfy that predicate, it is routed to
-the human lane and fails verification there. That is a 401 — fail-closed, never
-an over-authorization — and it is what a worker that authenticated yesterday
-would start returning the moment SSO goes live. Reissuing removes the case
-entirely, and you cannot tell by eye which grandfathered values qualify.
+Public worker-facing routes no longer treat JWT-shaped Bearers as human sign-in.
+On dual-auth resource reads, `sk-map-api01-` selects owned-key authentication.
+**Before upgrading, reissue any grandfathered environment key whose value starts
+with this reserved prefix.** Such a key is refused on skill, file-content and
+session/event reads even though work polling still accepts it through environment-key authentication.
+Work and gate routes keep their existing credential boundaries. Reissue grandfathered
+keys to remove their guessable values and missing expiry, not to enable SSO.
 
 What you own:
 
 - **Provisioning.** Treat key creation as a privileged, audited operation. The
   operator surface is the console API — off the `/v1` wire, under
   `/api/oauth/organizations/default/environments/{environment_id}/tokens`, and
-  authenticated with the management `x-api-key` like any other management call.
+  authenticated with a legacy unowned management `x-api-key` or an admin human. Owned keys are refused here.
   The managed-agent-console drives it from an environment's page, so a key is
   generated, shown once and copied without anyone touching the control-plane
   database; a headless operator calls it directly:
@@ -1224,8 +1218,10 @@ sign-in with no matching mapping gets `user`. No playground is built yet, so
 that role reaches authentication/session routes and setup redemption, not
 resources. The mapping rules are below. Native browser login is available
 when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account management
-requires a human admin cookie. Owned API keys remain later work.
-Existing management keys still work unchanged on their existing routes.
+requires a human admin cookie. Public owned-key admission enforces the owner's
+current stored role. Human developers issue and manage their own owned keys;
+admins may also assign service accounts and manage other keys. Legacy unowned keys
+keep their existing authority. Public `/v1` refuses human JWTs and assertions.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1331,7 +1327,7 @@ archival keeps the service-account name reserved. No restoration endpoint exists
 These routes issue no API keys. Slice 3's preparatory database guard archives
 any owned keys when their principal is deactivated; restoring the principal restores no key.
 Existing keys remain unowned and are not archived merely because their issuer is removed.
-Owned-key HTTP issuance is not enabled. Environment keys remain independent and require separate revocation.
+Owned keys are issued through the separate private key routes. Environment keys remain independent and require separate revocation.
 
 #### Native browser login
 
@@ -1395,7 +1391,8 @@ not sign anyone out.
 Existing private key-management routes and gateway administration retain legacy
 credentials beside cookies. An offered legacy credential keeps precedence and
 cannot fall back to a cookie when invalid. Gateway cookie reads require developer;
-writes require admin. Key-management routes retain their admin floor.
+writes require admin. API-key routes admit developer under the owner rules in §10;
+environment-key routes retain their admin floor.
 In native mode, a selected proxy assertion on an unsafe private/admin request
 requires exact Origin when cookies, Origin or Fetch Metadata identify browser traffic.
 Cross-site Fetch Metadata is refused. Signalless nonbrowser assertion clients and
@@ -1514,13 +1511,14 @@ could be handed over.
   the render entirely, and `built-in/admin`'s password comes from the required
   `casdoor.adminPassword` rather than this file — so on Kubernetes there is no committed
   credential to replace, only one you supply.
-- **The optional role mapping.** `IDENTITY_ROLE_MAP` applies on every verified
-  request in both OIDC and trusted-proxy modes. A match sets the stored role and
+- **The optional role mapping.** `IDENTITY_ROLE_MAP` applies on each admitted IdP
+  sign-in in both OIDC and trusted-proxy modes. A match sets the stored role and
   makes the IdP its source. A formerly mapped person with no match returns to
   `user`; a never-mapped person keeps the stored role. Legacy `viewer` entries
   now mean `user`, so map people to `developer` if they must read. A wrong claim
   name can therefore demote mapped people to `user`. The IdP reaches the platform
-  only at sign-in, which in this slice means every verified request. An older
+  only at sign-in: native login, retained private IdP requests and gateway
+  operator tokens. Public `/v1` never signs a human in. An older
   unexpired token can reapply its old mapped role after a newer token demotes it;
   IdP changes are not immediate revocation. Local deactivation refuses the
   principal regardless of mapping. There is no automatic IdP synchronization.
@@ -1531,9 +1529,13 @@ Numbered last because it shipped last (plan 32,
 [#378](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/378)); read it
 beside §6, whose environment-key lifecycle it parallels.
 
-Plan 69 slice 3 adds storage and startup safeguards. Existing and newly HTTP-issued
-keys remain unowned. Owned digests are isolated from legacy authentication;
-gateway policy writes refuse owned targets. Owner and issuer are different facts.
+Plan 69 slice 3 separates key ownership from the issuer's audit identity.
+New human-issued keys belong to the caller, or an active service account an admin
+names with a browser cookie. Omitted or null `principal_id` means the human caller,
+including on retained private IdP/assertion lanes. An unowned machine credential
+still creates only unowned keys and cannot name an owner. Existing rows are not
+backfilled. Owned digests stay outside legacy authentication, and gateway policy
+writes refuse owned targets.
 Both servers stop at startup if either configured preset matches an owned key,
 including inactive, archived or expired rows. The control plane checks both values
 before preparing bootstrap and brain in one transaction, before setup-code delivery.
@@ -1542,12 +1544,47 @@ brain retirement keep their existing behavior.
 
 These safeguards cover normal rolling deploys with consistent preset configuration.
 They cannot constrain an old gateway manually reconfigured with a new owned raw bootstrap value.
-Owned HTTP issuance and current-role admission are still pending. Before enabling
-owned issuance, its replacement issuer must also close the legacy human INSERT path.
-This batch alone is not a complete rolling rollout.
+Public owned-key admission now reads the active owner's current stored role.
+Both `x-api-key` and issued-prefix Bearer work on public management `/v1` routes.
+Owned keys cannot enter private key/member/service-account/proxy routes or gateway inference.
+Demotion changes new requests' permissions; a removed or foreign-organization owner gets 401.
+Already-open public streams keep their existing lifetime; key withdrawal does not
+close them. The private cookie proxy's 15-second withdrawal bound is separate.
+API-key use never refreshes IdP mapping, profile or last-seen fields.
+Migration 0061 refuses new human-unowned INSERTs from old replicas, including
+prepared statements. Historical rows and allowed metadata updates survive.
+Removing an owner archives every owned key; restoring the owner restores no key.
+Removing a human issuer does not archive keys owned by a service account.
+Compose and Helm pin the published owned-key Console image.
+The [final-candidate acceptance record](./HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance)
+separates fresh packaged execution from completed native CI on a different platform tree.
+Delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
+The release hold continues through slice 7.
 
-The management `x-api-key` authenticates every **management** `/v1` route and the
-console API behind it — the work API is the exception, taking a worker's
+#### Owned-key rollout and rollback
+
+Deploy and validate slice 2's native cookie routing before removing public human
+admission. A legacy SSO resource BFF forwards an IdP token to public `/v1`; that
+path no longer works. Verify login and private resource access on the deployed
+origin. Source support alone is not deployment evidence. No key fallback is added.
+
+- Old native Console requests that omit `principal_id` create self-owned keys on
+  the new control plane. New explicit-owner forms receive 404 from an old receiver;
+  they do not retry without ownership.
+- Old control-plane replicas cannot authenticate owned digests. Migration 0061
+  also refuses their human-unowned issuer. Use a coordinated maintenance or drain
+  window: safe refusal is not uninterrupted availability.
+- Keep migrations 0060/0061 during binary rollback. Never copy owned digests to
+  `key_hash`, clear owners, undo tombstones or restore archived keys. An old binary
+  is not a working owned-key service or human-issuance rollback. Restore the
+  corrected new control plane to recover that functionality.
+- Existing no-login deployments retain their separate unowned `x-api-key` lane
+  until slice 7. Never configure an owned key as an old server's preset credential.
+
+#### Legacy unowned credentials
+
+A legacy unowned management `x-api-key` authenticates every **management** `/v1`
+route and the existing private key-management routes — the work API is the exception, taking a worker's
 environment key instead — so it is the credential with the widest blast radius in
 the platform. Two things write it, and they are deliberately different.
 
@@ -1610,8 +1647,8 @@ archive is an error rather than a no-op, which is worth knowing if you script
 against this surface — as is the fact that an empty patch, which succeeds
 harmlessly on a live key, becomes an error once the row is archived or lapsed.
 `expired` is not settable — it is computed at read time from `expires_at`
-**against the database's clock**, so a lapsed key stops authenticating the
-instant it lapses and no sweeper can be down when it does.
+**against the database's clock**, so new requests cannot authenticate a lapsed
+key. No sweeper is involved. Already-open public streams are not reauthenticated.
 
 Where those overlap, the precedence is **`archived` > `expired` > what you set**.
 A key you disabled and then let lapse reads `expired`, not `inactive` — the clock
@@ -1633,23 +1670,25 @@ stated this precisely.
 
 What you own:
 
-- **Who may mint one.** The five console routes are gated at the **admin** role —
-  create and list at `…/workspaces/{workspace}/api_keys`, update at
-  `…/api_keys/{key_id}` (the reference's route) and at its workspace-scoped
-  alias `…/workspaces/{workspace}/api_keys/{key_id}`, and the workspace read
-  `…/workspaces/{workspace}`. Environment-key administration and memory-version
-  redaction also stay admin-only. Vault and credential reads, writes and
-  validation now require `developer`; writing a secret is not a universal
-  admin boundary. Read the key gate precisely: it
-  binds the *human* lane. `requireRole` applies only to identity-authenticated
-  requests, so with `IDENTITY_MODE` unset or `disabled` — the default — anyone
-  holding the management `x-api-key` reaches these routes, and **a management key
-  can mint management keys**. That is not an escalation, since the holder already
-  has every management capability, but it does mean the audit trail is only as
-  good as the identity lane: a key minted on the machine lane records the issuing
-  *key's* row id in `created_by`, not a human. If you want "which person issued
-  this credential" to have an answer, configure SSO (§9) and let admins act
-  through it.
+- **Who may mint and manage one.** Human developers see and manage only their
+  owned keys, not historical unowned keys they merely created. Admins see every
+  row and manage non-preset keys. Presets remain immutable; `can_manage` is a
+  list-only permission hint, not permission to bypass lifecycle guards.
+  These are conservative local rules; lower-human-role reference behavior is
+  still unconfirmed. The four key routes require developer, while workspace
+  reads, environment-key administration and Memory redaction retain admin.
+  An admin cookie may name an active service account, never another human.
+  Naming any principal requires the selected cookie lane; an extra cookie beside
+  a selected legacy credential does not authorize assignment. Owned keys cannot
+  authenticate these private routes. Legacy unowned keys retain their bypass
+  until slice 7 and may mint only unowned keys.
+- **Withdrawal during a key mutation.** The body is read before any authority
+  lock. The transaction then locks principals, rechecks current human authority
+  and any selected browser session, and holds these locks through commit.
+  Target key locks come last, followed by a separate database-clock expiry check.
+  A removal that commits first prevents issuance. If issuance commits first,
+  removal waits and then archives the newly owned key. Invalid update bodies
+  disclose their error only for a currently visible target, without locking it.
 - **Provisioning.** The operator surface is the console API — off the `/v1` wire,
   under `/api/console/organizations/default/workspaces/{workspace}/api_keys`.
   Note the prefix: `/api/console/`, not the `/api/oauth/` the environment-key

@@ -6,9 +6,13 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
-Plan 69 slice 2 acceptance passed; slice 3 backend safety preparation is in progress.
+Plan 69 slice 2 acceptance passed; slice 3 delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
 Both servers refuse owned preset values at startup. Gateway policy writes refuse owned targets.
-Owned-key HTTP issuance and admission are not enabled. This batch is not a complete rolling rollout.
+Public control-plane resources admit owned keys using the owner's current role.
+Owned-key HTTP issuance and fenced per-row mutations are independently verified.
+Fresh packaged Compose/`ant` acceptance passed at platform `45f5264` with the published Console image.
+Native browser/SDK acceptance uses completed CI on a different integration tree; the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) separates sources and limits.
+This is not a complete rolling rollout.
 Releases are held until slice 7; see [STATE.md](./STATE.md) for active work and the
 [slice 2 acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance) for its verification.
 
@@ -29,11 +33,11 @@ What runs today, end to end:
 - **Scheduled deployments** — a deployment binds an agent to an environment, credentials, resources and initial events; `POST /run` fires it by hand, and an optional 5-field POSIX cron schedule fires it on the clock — at most one run per occurrence across every control-plane replica, a bounded catch-up after downtime, and a classified fire failure recording an error-bearing run that auto-pauses the schedule (an unclassified one rolls back whole and retries — [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) registers the trade). `/v1/deployment_runs` reads the history back.
 - **Human authentication** — the control plane's private login routes issue revocable browser sessions through OIDC code flow, signed-proxy login or development-only passwords. OIDC uses no vendor SDK, with optional bundled [Casdoor](https://casdoor.org). The control plane and gateway administration share stored `user`, `developer` and `admin` roles. Mapping is optional; a first unmatched sign-in gets `user`, which reads nothing. Resource reads require `developer`; there is no read-only role. [The security guide](./docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider) covers native login, first-admin setup and recovery. Existing key-management surfaces retain legacy credentials during rollout.
 
-Public API and worker credentials keep their existing lanes with or without human login, so the real `ant` CLI still drives those machine flows. A grandfathered environment key whose operator-chosen value is JWT-shaped remains fail-closed; [the security guide](./docs/self-hosted-security.md) §6 says to reissue it before enabling SSO.
+Public `/v1` does not admit IdP JWTs or proxy assertions. Browser sessions reach resources through the private proxy, not raw `/v1` requests. Worker-facing public routes still admit valid environment keys, including grandfathered JWT-shaped values, without IdP sign-in. Reissue weak values or keys without expiry; enabling SSO alone does not require reissuance. See [the security guide](./docs/self-hosted-security.md) §6.
 
-The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Native platform login uses private routes when `CONSOLE_PUBLIC_ORIGIN` is configured. Without native login, OIDC and trusted-proxy installs retain verifier-only IdP admission. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
+The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Native platform login uses private routes when `CONSOLE_PUBLIC_ORIGIN` is configured. Without native login, OIDC and trusted-proxy installs retain verifier-only IdP admission on existing private credential-management routes, not public `/v1`. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
 
-Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Both offer an opt-in published Console and one-origin edge. Native login is explicit; default identity and legacy SDK listeners are unchanged. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
+Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Both offer an opt-in published Console and one-origin edge. Native login remains opt-in; legacy unowned management keys continue to work during rollout. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
 
 ## Why
 

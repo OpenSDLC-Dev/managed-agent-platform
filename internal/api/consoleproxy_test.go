@@ -58,8 +58,9 @@ func TestPrivateResourceProxy(t *testing.T) {
 		if res.StatusCode != 403 || !strings.Contains(string(raw), "admin role") {
 			t.Fatalf("redaction floor=%d %s", res.StatusCode, raw)
 		}
-		// Key management is not relaxed as a side effect of resource forwarding.
-		expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default/api_keys", "", nativeHeaders(devCookie, ""), 403)
+		// Key listing now admits developers; workspace reads retain an admin floor.
+		expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default/api_keys", "", nativeHeaders(devCookie, ""), 200)
+		expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default", "", nativeHeaders(devCookie, ""), 403)
 	})
 
 	t.Run("cookie-only-including-method-fallback", func(t *testing.T) {

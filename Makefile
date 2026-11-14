@@ -386,6 +386,8 @@ identifiers-test:
 # release in its tag and a digest — so CI tests the Go the release images ship.
 pins-test:
 	python3 .github/scripts/pins_test.py
+	# The native source pin and its credential-free launch are checked together.
+	python3 .github/scripts/native_console_test.py
 
 # And the third shape a reviewer was holding: a workflow pipeline whose reading
 # end stops early. Under `pipefail` the pipeline reports the RIGHTMOST non-zero

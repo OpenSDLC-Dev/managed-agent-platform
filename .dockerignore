@@ -9,6 +9,8 @@
 # depth-match, so nothing leaked — this is about context size and stale
 # artifacts (coverage.out below is root-only).
 .claude/worktrees
+# The local hook cache is not a build input.
+/.impeccable/hook.cache.json
 **/.env
 **/.env.*
 # google-github-actions/auth writes its federated credential into the workspace

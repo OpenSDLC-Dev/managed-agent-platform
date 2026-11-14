@@ -250,12 +250,12 @@ func TestAPIKeyListingIsABareArrayWithEveryRow(t *testing.T) {
 	if rows[len(rows)-1]["id"] != bootstrap["id"] {
 		t.Errorf("listing is not newest-first: %v", rows)
 	}
-	// A row carries no secret and no hash, and no can_manage — the field the
-	// reference's listing adds and we deliberately omit while the surface is
-	// admin-only.
-	wantExactFields(t, rows[0],
-		"id", "type", "name", "workspace_id", "created_at", "created_by",
-		"partial_key_hint", "status", "expires_at", "principal")
+	// List rows carry no secret or hash. The preset is listed but immutable.
+	wantExactFields(t, rows[0], "id", "type", "name", "workspace_id", "created_at", "created_by",
+		"partial_key_hint", "status", "expires_at", "principal", "can_manage")
+	if rows[0]["can_manage"] != true || bootstrap["can_manage"] != false {
+		t.Fatal("incorrect list permission hints")
+	}
 }
 
 // TestAPIKeyExpiryIsClientSuppliedAndDerived covers the expiry contract from both
@@ -915,16 +915,8 @@ func TestAPIKeyNameIsTheRecordedBound(t *testing.T) {
 	}
 }
 
-// TestAPIKeyPrincipalIDIsJudgedAsRecorded pins `principal_id` on create as far
-// as the recordings reach. Its shape is recorded: a value that is not a `user_`
-// or `svac_` id is a 400 with `{error_visibility}` (2026-09-05 batch5
-// `rec86.create.principal_id.bogus-string`, idx 26), whose message names the
-// two families. Reference behavior for a well-formed id is not recorded.
-// Principal-linked key ownership is not implemented in plan 69 slice 2, so
-// even an existing private user/service-account alias receives the namespace's
-// 404 with the same details, inferred. An absent or null field means no
-// principal. This platform currently issues only unowned keys. Nothing
-// refused mints a key.
+// Recorded shape validation precedes owner resolution. This machine-selected
+// fixture cannot name any principal; cookie assignment is tested separately.
 func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 	s := newTestServer(t)
 	before := len(listAPIKeys(t, s))
@@ -941,8 +933,8 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 		"not a string":                           {7, http.StatusBadRequest, "invalid_request_error", nil},
 		// The user id the reference stamped as a key's created_by (batch9
 		// `setup.keyC.create`), and a service account id in the same alphabet.
-		"a user id":            {"user_014nwQChpX4bYXrKwPAEUM47", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
-		"a service account id": {"svac_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
+		"a user id":            {"user_014nwQChpX4bYXrKwPAEUM47", http.StatusUnauthorized, "authentication_error", nil},
+		"a service account id": {"svac_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusUnauthorized, "authentication_error", nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, body := s.do(http.MethodPost, consoleAPIKeysPath,

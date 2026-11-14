@@ -1,0 +1,1 @@
+- **Exclude the local hook cache from Docker builds** — The build context now omits the repository-root `.impeccable/hook.cache.json` (plan 69, slice 3). The rule does not exclude its directory or same-named nested paths. A synthetic-context regression checks Docker's actual `COPY` behavior without reading the local cache.

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // The memory-version wire surface (plan 36 slice 2, #52): one immutable
@@ -589,12 +591,14 @@ func TestMemoryVersionRedactOnAnArchivedStore(t *testing.T) {
 // api_actor carrying its own row id, a human as user_actor carrying their
 // principal id — the reference's arms, with this platform's id shapes.
 func TestMemoryVersionActorsOnBothLanes(t *testing.T) {
-	s := newLaneServer(t)
+	s := newNativeServer(t, login.ModePassword)
+	owner := s.seedLocal("memory-writer", "developer", "active")
+	cookie, session := s.issue(owner)
 	store := createMemoryStore(t, s.tserver, "actors")
 	createMemory(t, s.tserver, store, "/machine.md", "written by a key")
 
-	status, _, raw := laneRead(t, s.bearer(http.MethodPost, "/v1/memory_stores/"+store+"/memories",
-		s.token("platform-devs"), map[string]any{"path": "/human.md", "content": "written by a person"}))
+	status, _, raw := laneRead(t, s.doRaw(http.MethodPost, "/api/organizations/default/proxy/v1/memory_stores/"+store+"/memories",
+		map[string]any{"path": "/human.md", "content": "written by a person"}, map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken}))
 	if status != http.StatusOK {
 		t.Fatalf("a developer creating a memory: status %d (%v)", status, laneMessage(t, raw))
 	}

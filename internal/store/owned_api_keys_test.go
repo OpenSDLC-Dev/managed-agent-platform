@@ -71,6 +71,73 @@ func seedKeyPrincipals(t *testing.T, pool *pgxpool.Pool) {
 		('principal_sa', 'local-service-account', 'sa', 'service_account', 'developer')`)
 }
 
+// A prepared old issuer must fail closed after cutover, without rewriting any
+// historical row or exposing an owned digest to its prepared legacy reader.
+func TestLegacyHumanIssuerCutover(t *testing.T) {
+	ctx := t.Context()
+	pool := rawPool(t, pgtest.FreshDB(t))
+	if err := store.MigrateThrough(ctx, pool, "0060_owned_api_keys.sql"); err != nil {
+		t.Fatal(err)
+	}
+	seedKeyPrincipals(t, pool)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	const insert = `INSERT INTO api_keys(id,name,key_hash,created_by) VALUES ($1,$1,$2,$3)`
+	if _, err := conn.Conn().Prepare(ctx, "old_issuer", insert); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Conn().Prepare(ctx, "old_auth", legacyKeyLookup); err != nil {
+		t.Fatal(err)
+	}
+	for _, issuer := range []string{"principal_human", "principal_dangling"} {
+		id := "apikey_existing_" + issuer
+		keyExec(t, conn, "old_issuer", id, apikey.Hash(id), issuer)
+	}
+	const snapshot = `SELECT jsonb_agg(to_jsonb(k) ORDER BY id)::text FROM api_keys k`
+	before := keySnapshot(t, pool, snapshot)
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if after := keySnapshot(t, pool, snapshot); after != before {
+		t.Fatal("cutover rewrote historical credential rows")
+	}
+	for _, issuer := range []string{"principal_human", "principal_dangling"} {
+		for _, prepared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/prepared=%v", issuer, prepared), func(t *testing.T) {
+				id := fmt.Sprintf("apikey_refused_%s_%v", issuer, prepared)
+				statement := insert
+				if prepared {
+					statement = "old_issuer"
+				}
+				_, err := conn.Exec(ctx, statement, id, apikey.Hash(id), issuer)
+				requireKeyPGError(t, err, "23514", "api_keys_human_issuer_requires_owner")
+				var count int
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE id=$1`, id).Scan(&count); err != nil || count != 0 {
+					t.Errorf("refused human INSERT left %d rows: %v", count, err)
+				}
+			})
+		}
+		id := "apikey_existing_" + issuer
+		var got string
+		if err := conn.QueryRow(ctx, "old_auth", apikey.Hash(id)).Scan(&got); err != nil || got != id {
+			t.Errorf("historical auth=%q err=%v", got, err)
+		}
+		keyExec(t, pool, `UPDATE api_keys SET name='renamed',status='inactive' WHERE id=$1`, id)
+	}
+	for i, issuer := range []any{nil, "apikey_machine"} {
+		id := fmt.Sprintf("apikey_allowed_%d", i)
+		keyExec(t, conn, "old_issuer", id, apikey.Hash(id), issuer)
+	}
+	keyExec(t, pool, `INSERT INTO api_keys(id,name,owned_key_hash,owner_principal_id,created_by) VALUES ('apikey_owned','owned',$1,'principal_sa','principal_human')`, apikey.Hash("owned-secret"))
+	var got string
+	if err := conn.QueryRow(ctx, "old_auth", apikey.Hash("owned-secret")).Scan(&got); !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("prepared legacy auth admitted owned digest: %q %v", got, err)
+	}
+}
+
 func TestOwnedKeyDigestMigration(t *testing.T) {
 	ctx := context.Background()
 	pool := rawPool(t, pgtest.FreshDB(t))
@@ -169,8 +236,8 @@ func TestKeyCredentialShapeRejectsMalformedInserts(t *testing.T) {
 	}{
 		{"owned-plus-legacy-hash", "principal_human", "legacy", nil, "principal_human"},
 		{"both-hashes", "principal_human", "legacy", "owned", "principal_human"},
-		{"ownerless-owned-hash", nil, nil, "owned", "principal_human"},
-		{"ownerless-both-hashes", nil, "legacy", "owned", "principal_human"},
+		{"ownerless-owned-hash", nil, nil, "owned", "apikey_issuer"},
+		{"ownerless-both-hashes", nil, "legacy", "owned", "apikey_issuer"},
 		{"neither-hash", nil, nil, nil, nil},
 		{"owned-neither-hash", "principal_human", nil, nil, "principal_human"},
 		{"owned-null-issuer", "principal_human", nil, "owned", nil},
@@ -190,9 +257,9 @@ func TestKeyCredentialShapeRejectsMalformedInserts(t *testing.T) {
 		_, err := pool.Exec(context.Background(), insert, "apikey_missing", "principal_missing", nil, "missing-owner", "principal_human")
 		requireKeyPGError(t, err, pgForeignKeyViolation, "api_keys_owner_principal_id_fkey")
 	})
-	// Human-issued unowned INSERTs stay valid until the replacement HTTP issuer
-	// exists. This preparatory batch must not break today's issuance path.
-	for i, issuer := range []any{nil, "apikey_issuer", "principal_human"} {
+	// Preset and machine unowned inserts remain valid. The cutover contract above
+	// checks that historical human rows survive and new human rows are refused.
+	for i, issuer := range []any{nil, "apikey_issuer"} {
 		t.Run(fmt.Sprintf("valid-unowned-%d", i), func(t *testing.T) {
 			id := fmt.Sprintf("apikey_valid_%d", i)
 			keyExec(t, pool, insert, id, nil, "fixture-"+id, nil, issuer)
@@ -211,7 +278,9 @@ func insertKeyFixture(t *testing.T, db interface {
 }, id, owner, state string) {
 	t.Helper()
 	var ownerID, legacyHash, ownedHash, expiry any
+	issuer := "principal_human"
 	if owner == "" {
+		issuer = "apikey_issuer"
 		legacyHash = apikey.Hash("fixture-" + id)
 	} else {
 		ownerID, ownedHash = owner, apikey.Hash("fixture-"+id)
@@ -221,7 +290,7 @@ func insertKeyFixture(t *testing.T, db interface {
 	}
 	keyExec(t, db, `INSERT INTO api_keys
 		(id,name,owner_principal_id,key_hash,owned_key_hash,created_by,status,expires_at)
-		VALUES ($1,$1,$2,$3,$4,'principal_human',$5,$6)`, id, ownerID, legacyHash, ownedHash, state, expiry)
+		VALUES ($1,$1,$2,$3,$4,$7,$5,$6)`, id, ownerID, legacyHash, ownedHash, state, expiry, issuer)
 }
 
 func TestOwnedKeysAreInvisibleToLegacyReaders(t *testing.T) {
@@ -348,13 +417,22 @@ func deactivateKeyOwner(t *testing.T, pool *pgxpool.Pool, id string) pgx.Tx {
 
 func TestPrincipalDeactivationArchivesOnlyOwnedKeys(t *testing.T) {
 	ctx := context.Background()
-	pool := open(t, pgtest.FreshDB(t))
+	pool := rawPool(t, pgtest.FreshDB(t))
+	if err := store.MigrateThrough(ctx, pool, "0060_owned_api_keys.sql"); err != nil {
+		t.Fatal(err)
+	}
 	requireOwnedKeyColumns(t, pool)
 	seedKeyPrincipals(t, pool)
 	for _, owner := range []string{"principal_human", "principal_sa", "principal_other", ""} {
 		for _, state := range []string{"active", "inactive", "archived", "expired"} {
 			insertKeyFixture(t, pool, "apikey_"+owner+"_"+state, owner, state)
+			if owner == "" {
+				keyExec(t, pool, `UPDATE api_keys SET created_by='principal_human' WHERE id=$1`, "apikey_"+owner+"_"+state)
+			}
 		}
+	}
+	if err := store.Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
 	}
 	keyExec(t, pool, `INSERT INTO environments (id,name,kind,config) VALUES ('env_owned_test','owned test','cloud','{"type":"cloud"}')`)
 	keyExec(t, pool, `INSERT INTO environment_keys (id,environment_id,key_hash) VALUES ('envkey_control','env_owned_test','environment-hash')`)

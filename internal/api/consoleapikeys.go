@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
 	"github.com/jackc/pgx/v5"
 )
@@ -46,36 +48,39 @@ const apiKeyNameMax = 500
 // names a workspace that does not exist.
 const reservedWorkspace = "default"
 
-// actorJSON renders the recorded private creator's `{id, type}` shape. That
-// recording uses `user`; this surface retains stored audit IDs and the existing
-// `principal`/`api_key` vocabulary, not member-management's private user_ aliases.
-// The divergence is registered in docs/DIVERGENCES.md.
+// actorJSON is the private creator, separate from the owner union. Historical
+// unowned rows keep their audit vocabulary; new owned rows render a user alias.
 type actorJSON struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 }
 
-// apiKeyJSON is a management key as both the listing and the update render it,
-// field-for-field from the recorded resource, in its order.
-//
-// `workspace_id` and `principal` remain null, as recorded in #378. That capture
-// establishes no non-null private principal shape. Owned-key issuance and its
-// DTO await managed-agents-wire-recordings#82; actorJSON is no evidence for it.
-// `can_manage`, which the listing carries and the created resource does not, is
-// omitted entirely: these routes are admin-only, so the field would be a
-// constant true — a per-row authorization hint for a permission split we have
-// not built. Both registered in docs/DIVERGENCES.md.
+// apiKeyOwnerJSON follows the recorded private owner union (recordings #82).
+// Actual principal kind, not the request alias, selects its sole ID field.
+type apiKeyOwnerJSON struct {
+	Type             string `json:"type"`
+	UserID           string `json:"user_id,omitempty"`
+	ServiceAccountID string `json:"service_account_id,omitempty"`
+}
+
+// Workspace remains a null tenancy seam; this surface has no scope field.
 type apiKeyJSON struct {
-	ID             string     `json:"id"`
-	Type           string     `json:"type"`
-	Name           string     `json:"name"`
-	WorkspaceID    *string    `json:"workspace_id"`
-	CreatedAt      time.Time  `json:"created_at"`
-	CreatedBy      *actorJSON `json:"created_by"`
-	PartialKeyHint string     `json:"partial_key_hint"`
-	Status         string     `json:"status"`
-	ExpiresAt      *time.Time `json:"expires_at"`
-	Principal      *actorJSON `json:"principal"`
+	ID             string           `json:"id"`
+	Type           string           `json:"type"`
+	Name           string           `json:"name"`
+	WorkspaceID    *string          `json:"workspace_id"`
+	CreatedAt      time.Time        `json:"created_at"`
+	CreatedBy      *actorJSON       `json:"created_by"`
+	PartialKeyHint string           `json:"partial_key_hint"`
+	Status         string           `json:"status"`
+	ExpiresAt      *time.Time       `json:"expires_at"`
+	Principal      *apiKeyOwnerJSON `json:"principal"`
+}
+
+// can_manage is a list-only permission hint, independent of lifecycle guards.
+type apiKeyListItemJSON struct {
+	apiKeyJSON
+	CanManage bool `json:"can_manage"`
 }
 
 // apiKeyIssuedJSON is the create response: the whole resource with one extra
@@ -118,17 +123,30 @@ func actorFor(id *string) *actorJSON {
 }
 
 func renderAPIKey(k ManagementKey) apiKeyJSON {
+	creator := actorFor(k.CreatedBy)
+	var owner *apiKeyOwnerJSON
+	if k.OwnerPrincipalID != nil {
+		alias := principal.PublicID(*k.OwnerPrincipalID, k.OwnerKind)
+		if k.OwnerKind == "service_account" {
+			owner = &apiKeyOwnerJSON{Type: "service_account_actor", ServiceAccountID: alias}
+		} else {
+			owner = &apiKeyOwnerJSON{Type: "user_actor", UserID: alias}
+		}
+		if k.CreatedBy != nil {
+			creator = &actorJSON{ID: principal.PublicID(*k.CreatedBy, "user"), Type: "user"}
+		}
+	}
 	return apiKeyJSON{
 		ID:             k.ID,
 		Type:           apiKeyResourceType,
 		Name:           k.Name,
 		WorkspaceID:    nil,
 		CreatedAt:      k.CreatedAt.UTC(),
-		CreatedBy:      actorFor(k.CreatedBy),
+		CreatedBy:      creator,
 		PartialKeyHint: k.PartialKeyHint,
 		Status:         k.Status,
 		ExpiresAt:      utcPtr(k.ExpiresAt),
-		Principal:      nil,
+		Principal:      owner,
 	}
 }
 
@@ -190,7 +208,8 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := apiKeyPrincipal(obj); err != nil {
+	alias, err := apiKeyPrincipal(obj)
+	if err != nil {
 		return nil, err
 	}
 	// The issuer, from whichever lane authenticated: a `principal_` id for a human
@@ -198,12 +217,16 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	// authenticated on both lanes, so it is never empty — and it must not be, since
 	// a NULL issuer is what marks a row env-var-managed.
 	ctx := r.Context()
-	tx, err := s.beginCredentialMutation(r)
+	tx, caller, err := s.beginAPIKeyMutation(r)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	key, row, err := issueManagementKey(ctx, tx, *name, expiresAt, principalFrom(ctx))
+	ownerID, err := resolveAPIKeyOwner(r, tx, caller, alias)
+	if err != nil {
+		return nil, err
+	}
+	key, row, err := issueManagementKey(ctx, tx, *name, expiresAt, principalFrom(ctx), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +236,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	return apiKeyIssuedJSON{apiKeyJSON: renderAPIKey(row), RawKey: key}, nil
 }
 
-// listAPIKeys renders every management key as a bare JSON array — no envelope,
+// listAPIKeys renders visible management keys as a bare JSON array — no envelope,
 // no paging, which is what the reference's console list returns. The wire
 // surface's `{data, next_page}` envelope stays on the wire surface, and the
 // public Admin API's `{data, first_id, has_more, last_id}` is a third shape for
@@ -222,13 +245,22 @@ func (s *server) listAPIKeys(r *http.Request) (any, error) {
 	if err := consoleWorkspace(r); err != nil {
 		return nil, err
 	}
-	keys, err := ListManagementKeys(r.Context(), s.pool)
+	caller, _ := identityFrom(r.Context())
+	ownerID := ""
+	if caller.ID != "" && caller.Role != identity.RoleAdmin {
+		ownerID = caller.ID
+	}
+	keys, err := listManagementKeys(r.Context(), s.pool, ownerID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]apiKeyJSON, 0, len(keys))
+	out := make([]apiKeyListItemJSON, 0, len(keys))
 	for _, k := range keys {
-		out = append(out, renderAPIKey(k))
+		manageable := canManageAPIKey(k, caller)
+		if caller.ID != "" && caller.Role != identity.RoleAdmin && !manageable {
+			continue
+		}
+		out = append(out, apiKeyListItemJSON{apiKeyJSON: renderAPIKey(k), CanManage: manageable})
 	}
 	return out, nil
 }
@@ -297,35 +329,37 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	notFound := withDetails(errNotFound("API Key `%s` not found.", keyID), userFacingDetails)
 	ctx := r.Context()
 	status, name, bodyErr := apiKeyPatch(raw)
-	if bodyErr != nil {
-		var exists bool
-		err := s.pool.QueryRow(ctx, `SELECT true FROM api_keys WHERE id = $1`, keyID).Scan(&exists)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, notFound
-		}
-		if err != nil {
-			return nil, err
-		}
-		return nil, bodyErr
-	}
-
-	tx, err := s.beginCredentialMutation(r)
+	tx, caller, err := s.beginAPIKeyMutation(r)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer tx.Rollback(ctx)
 
-	var createdBy *string
-	var current string
-	var rowName string
-	err = tx.QueryRow(ctx,
-		`SELECT created_by, status, name
-		 FROM api_keys WHERE id = $1 FOR UPDATE`, keyID).Scan(&createdBy, &current, &rowName)
+	// Visibility precedes body and lifecycle errors. This read never locks the
+	// target, so neither an invalid body nor a hidden row holds its row lock.
+	key, err := scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE id=$1`, keyID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if caller.ID != "" && caller.Role != identity.RoleAdmin && !canManageAPIKey(key, caller) {
+		return nil, notFound
+	}
+	if bodyErr != nil {
+		return nil, bodyErr
+	}
+
+	key, err = scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE id=$1 FOR UPDATE`, keyID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, notFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if caller.ID != "" && caller.Role != identity.RoleAdmin && !canManageAPIKey(key, caller) {
+		return nil, notFound
 	}
 	// An empty patch is NOT refused. It used to be — "at least one of status, name
 	// is required" — which read like a helpful guard and is not what the reference
@@ -351,9 +385,9 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// would survive the next rotation and leave two live credentials, which is
 	// exactly the race api_keys_one_live_unissued exists to prevent. The row is
 	// still listed — hiding it would be a worse lie than refusing to mutate it.
-	if createdBy == nil {
+	if key.CreatedBy == nil {
 		variable := "CONTROLPLANE_API_KEY"
-		if rowName == "brain" {
+		if key.Name == "brain" {
 			variable = "BRAIN_API_KEY"
 		}
 		return nil, errInvalid("api key %s is managed by %s; rotate it by restarting the control plane with a new value", keyID, variable)
@@ -381,7 +415,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// Both refusals are worded as the #389 probe measured them (docs/HISTORY.md),
 	// since #540 — they used to name the key and say "archived" for the
 	// reference's "deleted", on the argument that an operator could act on it.
-	if current == KeyStatusArchived {
+	if key.Status == KeyStatusArchived {
 		return nil, errInvalid("Archived API keys cannot be updated.")
 	}
 	// Sample the database clock after FOR UPDATE returns: its SELECT expressions
@@ -460,28 +494,22 @@ func apiKeyCreateName(obj map[string]json.RawMessage) (*string, error) {
 	return apiKeyName(obj, true)
 }
 
-// apiKeyPrincipal judges create's optional `principal_id`, the reference's way
-// to link a key to an identity, as far as the recordings reach. Its shape is
-// recorded: a `user_` or `svac_` id, anything else a 400 with
-// `{error_visibility}` (2026-09-05 batch5 `rec86.create.principal_id.bogus-string`).
-// Successful assignment and its private response await recording request #82
-// in managed-agents-wire-recordings. Storage preparation enables no HTTP
-// ownership assignment, so even an existing private user/service-account alias
-// receives the namespace's 404. An absent or null field means no principal.
-// HTTP issuance still creates only unowned keys.
-func apiKeyPrincipal(obj map[string]json.RawMessage) error {
+// apiKeyPrincipal parses shape only. Keep the permissive recorded shape test
+// before strict alias decoding: a well-shaped unknown alias is 404, not 400.
+// The selected cookie and owner are checked inside the mutation fence.
+func apiKeyPrincipal(obj map[string]json.RawMessage) (*string, error) {
 	raw, ok := obj["principal_id"]
 	if !ok || isNull(raw) {
-		return nil
+		return nil, nil
 	}
 	var id string
 	if err := json.Unmarshal(raw, &id); err != nil {
-		return errInvalid("principal_id must be a string")
+		return nil, errInvalid("principal_id must be a string")
 	}
 	if !consoleIDShape(id, "user") && !consoleIDShape(id, "svac") {
-		return withDetails(errInvalid("principal_id must be a user_... (user) or svac_... (service account) ID."), userFacingDetails)
+		return nil, withDetails(errInvalid("principal_id must be a user_... (user) or svac_... (service account) ID."), userFacingDetails)
 	}
-	return withDetails(errNotFound("principal %s not found", id), userFacingDetails)
+	return &id, nil
 }
 
 // consoleKeyName reads an operator's label on either console surface: present,
