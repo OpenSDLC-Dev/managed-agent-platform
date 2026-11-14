@@ -9,7 +9,9 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 Plan 69 slice 2 acceptance passed; slice 3 implementation is in progress.
 Both servers refuse owned preset values at startup. Gateway policy writes refuse owned targets.
 Public control-plane resources admit owned keys using the owner's current role.
-Owned-key HTTP issuance, fenced per-row mutations and the Console source task are independently verified. Published-image pairing and packaged Compose acceptance remain pending. This batch is not a complete rolling rollout.
+Owned-key HTTP issuance and fenced per-row mutations are independently verified.
+The pinned Console source and published image passed independent local [native browser/SDK and packaged Compose/`ant` acceptance](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance).
+The candidate includes executable native CI coverage. Hosted CI, final reviews, the platform PR and delivery remain pending. This is not a complete rolling rollout.
 Releases are held until slice 7; see [STATE.md](./STATE.md) for active work and the
 [slice 2 acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance) for its verification.
 

@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 3: principal-owned key delivery.
-Public admission, issuance, the Console source and native client checks are independently verified. Paired delivery remains pending.
+Public admission and issuance are independently verified. Both pinned-source native and published-image packaged client tiers passed independent local verification; paired delivery remains pending.
 Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance).
 **no release until plan 69 slice 7**.
 
@@ -18,6 +18,7 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 - [x] Verify owned public role/Bearer admission and remove public IdP/proxy sign-in, including cleaning redirects ([admission tests](./internal/api/ownedkeyauth_test.go), [redirect tests](./internal/api/ownedkeyredirect_test.go)).
 - [x] Verify owned HTTP issuance and fenced per-row mutations ([issuer tests](./internal/api/ownedkeys_test.go), [fence tests](./internal/api/ownedkeymutation_test.go)). Migration 0061 rejects new human-unowned INSERTs; 0060 is unchanged.
 - [x] Verify and review the native Console source task for ownership and row permissions ([Console e9a383a](https://github.com/OpenSDLC-Dev/managed-agent-console/commit/e9a383a990e7d04682a97b1911b03839a4d097e4)).
-- [x] Verify native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
+- [x] Verify prepublication native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
 - [x] Independently verify the Docker context's exact local hook-cache exclusion ([COPY guard](./internal/sandbox/sandboxtest/buildcontext_test.go)).
-- [ ] Verify real `ant` on fresh packaged Compose; pair the Console source/image and add executable CI coverage.
+- [x] Pair the merged Console source/image, add executable native CI coverage and independently verify both local client tiers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)).
+- [ ] Pass hosted CI, obtain final dual review, settle the platform PR's review threads and complete paired delivery.

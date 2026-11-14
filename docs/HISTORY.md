@@ -49,12 +49,60 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 3 paired local client acceptance
+
+Two local client tiers passed independent verification against platform
+`20c488c617a4a5844ee2e6538ee10b6e4581f672` plus seven uncommitted CI/pin changes.
+This identifies the tested candidate, not a final delivery commit.
+[Console #254](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/254) merged source
+`ba0673707c5c76b221124e1b805e0625ac589b75`. Its scanned multi-architecture
+[main publisher run](https://github.com/OpenSDLC-Dev/managed-agent-console/actions/runs/43531007273) produced
+`ghcr.io/opensdlc-dev/managed-agent-console@sha256:a6a7285c3aef10bd12f62d0c1fb51a1b878e654b4c09416af0891833941b4987`.
+Both architecture revision labels matched that source. Compose and Helm pin this index;
+the executable `native-console` CI job pins the same source. This was not a release publication.
+
+**Published-image Compose and real `ant`.** A fresh 12-service stack used the published
+Console and actual platform and storage services. Browser setup, sign-in and human and
+active service-account key forms passed; once-only raw reveals stayed in memory.
+`ant` v1.42.0 used source `46211ed98946c02aaf803d40404d3e697d0dd8b9` and SDK v1.82.0.
+Both owners used `--api-key-stdin` and `--auth-token-stdin` with an explicit loopback URL,
+`limit=1`, `max-items=1` and a fresh empty configuration directory per invocation.
+The matrix contained 24 CLI calls and four separate terminal-reactivation attempts, or 28 assertion rows:
+
+- All four initial owner/header combinations succeeded. The CLI totals were 10 HTTP 200, 12 HTTP 401 and 2 HTTP 403.
+- Next-request demotion and role restoration, inactivity and reactivation, and owner removal or archival produced the expected refusals and recoveries.
+- Restoring owners did not revive archived keys. All four terminal-reactivation attempts returned 400.
+
+The configured synthetic model target recorded `modelRequests=0` before and after the
+full flow, with the same counter boot and no restart. This is not a whole-machine egress measurement.
+
+**Pinned-source native browser and SDK.** The actual `test:e2e:native` run built Next
+and passed all 19 tests, with no failures or skips. These include browser/SDK flows
+and simulated dispatch/safety controls, not 19 full browser journeys. The platform SDK remained v1.70.1.
+
+- Both owners and headers retained selected-key `api_actor` attribution, checked through independent cookie reads, and the redacted, deleted, basic and full-empty contracts.
+- Current-authority and key-lifecycle assertions passed; developer Memory redaction returned 403. Browser credential-header observation was empty on the tested local origin.
+- Principal replacement cleared private/resource caches and closed the original two SSE connections while the old server session remained valid. Pending logout exposed no previous identity's cached data.
+
+The privacy negative control deliberately failed three assertions under a passing parent test;
+its summary recorded no secret writes or leaked artifacts. Model use would panic through
+`noModels`, with vendor credentials removed. This is a fail-closed guard, not a native request counter.
+This run did not repeat the earlier mixed-receiver matrix below.
+
+Both tiers confirmed their recorded original processes, groups and owned fixtures were gone.
+Baseline containers, networks and volume identities remained unchanged. Setup inputs,
+the packaged environment file and all 24 CLI configuration directories were removed. Sampling cannot certify every short-lived
+descendant; these checks are not whole-machine cleanup or private-artifact attestations.
+The independent Go gates passed at 91.76% coverage for the packaged run and 91.77% for the native run.
+At this checkpoint, hosted CI, final dual review, the platform PR, review-thread settlement
+and paired delivery remained pending.
+
 ## Plan 69 slice 3 prepublication client checks
 
 On 2026-11-08, model-free native client checks passed independent verification
 against platform `158aa61eac22848907880be9a969a19499184941`.
-The Console working candidate starts at `e9a383a990e7d04682a97b1911b03839a4d097e4`.
-These are local source checks, not published-image acceptance:
+The Console working candidate started at `e9a383a990e7d04682a97b1911b03839a4d097e4`.
+These were local source checks, not published-image acceptance:
 
 - Real human and service-account form reveals fed the pinned Go SDK v1.70.1
   through stdin, with both headers. Independent cookie reads confirmed selected-key
@@ -77,12 +125,12 @@ sampling cannot prove that it saw every short-lived descendant.
 
 The separately built `ant` checkout was `46211ed98946c02aaf803d40404d3e697d0dd8b9`:
 CLI version 1.42.0, using SDK v1.82.0. Its loopback isolation self-test exercised both
-stdin flags with a new empty configuration directory per invocation. This is not
-packaged acceptance. The platform SDK pin remains v1.70.1.
+stdin flags with a new empty configuration directory per invocation. This was not
+packaged acceptance. The platform SDK pin remained v1.70.1.
 
-The Console merge SHA, scanned multi-architecture image, literal platform CI pin
-and fresh published-image Compose plus real-`ant` acceptance remain pending.
-No native fixture, rendered configuration or local candidate image substitutes for that run.
+At that checkpoint, the Console merge SHA, scanned multi-architecture image, literal platform CI pin
+and fresh published-image Compose plus real-`ant` acceptance remained pending.
+Those checks did not substitute for the later paired acceptance recorded above.
 
 ## Plan 69 slice 2 browser acceptance
 
