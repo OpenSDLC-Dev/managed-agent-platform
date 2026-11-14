@@ -49,6 +49,65 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 3 final-candidate client acceptance
+
+On 2026-11-14, the user accepted completed native CI instead of another final local
+native run. Two local verification attempts remain **FAIL** after native-runner
+preparation was denied. Neither launched that tier; their Go gates passed at
+91.76% and 91.75% coverage. The CI decision does not rewrite those verdicts.
+
+The tested source identities differ:
+
+- Local packaged acceptance used platform `45f5264a895f676f27a1e847ae20c969a5ced285`,
+  with no dirty paths. Its 415 public product inputs have manifest digest
+  `5083f7c11c03da48462bf82fb68824717da976bd9f7886ffae009584d6d540ac`.
+- The completed `native-console` job in [CI run 43592330612](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/43592330612)
+  checked out integration commit `8cc4f9550cbd1094e6ec58919e57787b43d4e0a2`.
+  Its parents are upstream `33b316894006b3190723792d8dd5087f01f33c3a` and platform `45f5264a895f676f27a1e847ae20c969a5ced285`.
+  This is not the local packaged tree; packaged acceptance does not cover its additional upstream changes.
+- Both tiers used Console source `ba0673707c5c76b221124e1b805e0625ac589b75`.
+  The packaged tier used the same non-release index recorded below:
+  `ghcr.io/opensdlc-dev/managed-agent-console@sha256:a6a7285c3aef10bd12f62d0c1fb51a1b878e654b4c09416af0891833941b4987`.
+  Native CI consumed source, not that image.
+
+**Fresh packaged execution.** Actual local `linux/arm64` builds succeeded for both images:
+
+| Image | Local image ID |
+| --- | --- |
+| Server | `sha256:2a591c1f8367665072c4b191c631bd9b852f5f7f2c6ba45099104c5b3bb3ea2e` |
+| Gate | `sha256:53bef3c8b6cf2e73f4036ded0c8eff5f7cd4a5905cc95cb7bfd4ab58f8af1c5a` |
+
+Build cache was used and revision labels were absent. These receipts do not establish reproducible builds or supply-chain certification.
+The fresh 12-service stack passed browser setup, sign-in and both owner forms; one-time key reveals stayed in memory.
+`ant` v1.42.0 used source `46211ed98946c02aaf803d40404d3e697d0dd8b9` and SDK v1.82.0 for 24 calls with both headers.
+They returned 10 HTTP 200, 12 HTTP 401 and 2 HTTP 403. Four separate terminal-reactivation attempts returned 400, making 28 assertion rows.
+Role withdrawal/restoration, key inactivity/reactivation and owner removal/archival behaved as expected; restoring an owner did not restore archived keys.
+Browser errors, observed browser credential headers and blocked external requests were zero for this run, not a reclassification of earlier observations.
+
+The configured synthetic model target recorded `modelRequests=0` before and after, on the same counter boot without restart.
+This is not a whole-machine egress measurement. Exact-ID cleanup confirmed removal of 12 containers, two networks and eight volumes.
+All 24 per-invocation CLI configuration directories and the generated environment file were removed.
+The combined local receipt confirmed 214 recorded original process groups were gone.
+The 23 baseline containers, eight networks and 436 volumes retained their identities, including volume creation identities.
+The Go-gate observer did not capture every short-lived Docker API creation or baseline Kubernetes pod UID.
+These receipts establish cleanup of identified resources, not all resources the gate created or whole-machine cleanup.
+
+**Completed native CI.** The main suite passed **19/19** tests with one worker.
+It includes real browser/SDK flows and simulated dispatch/safety controls, not 19 full browser journeys.
+The five business flows covered password/setup, OIDC, Unicode-password/throttling, owned-key isolation and SDK actor/current-authority checks.
+The privacy control's three intentional child failures belong to a passing parent, not main-suite failures.
+The platform source pins SDK v1.70.1; the CI log does not attest to the runtime SDK version.
+The native `noModels` panic guard is not a numeric model-request counter.
+CI ran on a hosted runner and did not upload detailed resource-creation receipts; no fresh local native build or cleanup is implied.
+Neither final tier repeated the earlier mixed-receiver or fidelity checks below.
+
+**Evidence limits.** A prior full pin scan read protected tracked settings; that access was disclosed.
+No protected-files-unread or whole-machine privacy attestation follows from these checks.
+Verifier execution used the session-selected `gpt-6-astra/xhigh`, not the repository-default Fable backend; global model/settings provenance was not certified.
+Delivery remains tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
+This record does not claim final documentation-commit CI, resolved review threads or a platform merge.
+Plan 69 remains in progress, with no release until slice 7.
+
 ## Plan 69 slice 3 paired local client acceptance
 
 Two local client tiers passed independent verification against platform

@@ -6,12 +6,13 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
-Plan 69 slice 2 acceptance passed; slice 3 implementation is in progress.
+Plan 69 slice 2 acceptance passed; slice 3 delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
 Both servers refuse owned preset values at startup. Gateway policy writes refuse owned targets.
 Public control-plane resources admit owned keys using the owner's current role.
 Owned-key HTTP issuance and fenced per-row mutations are independently verified.
-The pinned Console source and published image passed independent local [native browser/SDK and packaged Compose/`ant` acceptance](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance).
-The candidate includes executable native CI coverage. Hosted CI, final reviews, the platform PR and delivery remain pending. This is not a complete rolling rollout.
+Fresh packaged Compose/`ant` acceptance passed at platform `45f5264` with the published Console image.
+Native browser/SDK acceptance uses completed CI on a different integration tree; the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) separates sources and limits.
+This is not a complete rolling rollout.
 Releases are held until slice 7; see [STATE.md](./STATE.md) for active work and the
 [slice 2 acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance) for its verification.
 

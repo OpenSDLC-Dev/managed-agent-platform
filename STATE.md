@@ -5,7 +5,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 3: principal-owned key delivery.
-Public admission and issuance are independently verified. Both pinned-source native and published-image packaged client tiers passed independent local verification; paired delivery remains pending.
+Implementation and client acceptance are verified for the sources in the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance).
+Delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
 Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance).
 **no release until plan 69 slice 7**.
 
@@ -21,5 +22,4 @@ Slice 2 acceptance passed; see the [acceptance record](./docs/HISTORY.md#plan-69
 - [x] Verify prepublication native browser/SDK clients and mixed receivers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-prepublication-client-checks)).
 - [x] Independently verify the Docker context's exact local hook-cache exclusion ([COPY guard](./internal/sandbox/sandboxtest/buildcontext_test.go)).
 - [x] Pair the merged Console source/image, add executable native CI coverage and independently verify both local client tiers ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)).
-- [ ] Independently verify the gateway mixed-credential follow-up, rebuild the affected image and repeat fresh packaged acceptance against the final product/configuration manifest.
-- [ ] Pass hosted CI, obtain final dual review, settle the platform PR's review threads and complete paired delivery.
+- [x] Verify the gateway mixed-credential follow-up and repeat packaged acceptance with rebuilt final-source images; accept completed native CI on its recorded integration tree ([acceptance record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance)).

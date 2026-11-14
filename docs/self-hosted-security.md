@@ -1019,6 +1019,9 @@ shows them with an empty name and no expiry, which is how you find them.
 
 Public worker-facing routes no longer treat JWT-shaped Bearers as human sign-in.
 On dual-auth resource reads, `sk-map-api01-` selects owned-key authentication.
+**Before upgrading, reissue any grandfathered environment key whose value starts
+with this reserved prefix.** Such a key is refused on skill, file-content and
+session/event reads even though work polling still accepts it through environment-key authentication.
 Work and gate routes keep their existing credential boundaries. Reissue grandfathered
 keys to remove their guessable values and missing expiry, not to enable SSO.
 
@@ -1552,11 +1555,11 @@ Migration 0061 refuses new human-unowned INSERTs from old replicas, including
 prepared statements. Historical rows and allowed metadata updates survive.
 Removing an owner archives every owned key; restoring the owner restores no key.
 Removing a human issuer does not archive keys owned by a service account.
-Compose and Helm pin the published owned-key Console image. Both local client tiers
-passed [independent verification](./HISTORY.md#plan-69-slice-3-paired-local-client-acceptance)
-for the candidate named in that record, not later source changes.
-Final-source packaged acceptance, hosted CI, final reviews and platform PR delivery
-remain pending. The release hold continues through slice 7.
+Compose and Helm pin the published owned-key Console image.
+The [final-candidate acceptance record](./HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance)
+separates fresh packaged execution from completed native CI on a different platform tree.
+Delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
+The release hold continues through slice 7.
 
 #### Owned-key rollout and rollback
 
