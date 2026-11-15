@@ -35,8 +35,8 @@ func TestDailyUsage(t *testing.T) {
 	e.record(bad)
 	// The default span is the 30 days ending today: 29 days ago is in it,
 	// 30 is not.
-	if _, err := e.pool.Exec(context.Background(), `INSERT INTO modelgateway.usage_daily (day, api_key_id, alias, deployment_id, requests)
-		SELECT (now() AT TIME ZONE 'UTC')::date - n, 'key_c', 'chat', 'gwdep_9', 9 FROM unnest(ARRAY[29, 30, 40]) n`); err != nil {
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO modelgateway.usage_actor_daily (day, actor_id, api_key_id, alias, deployment_id, requests)
+		SELECT (now() AT TIME ZONE 'UTC')::date - n, 'key_c', 'key_c', 'chat', 'gwdep_9', 9 FROM unnest(ARRAY[29, 30, 40]) n`); err != nil {
 		t.Fatal(err)
 	}
 	today := time.Now().UTC().Format(time.DateOnly)
@@ -92,6 +92,58 @@ func TestDailyUsage(t *testing.T) {
 	admin.SetMaxDailyRows(4)
 	e.refused(e.admin("GET", "/admin/v1/usage/daily?from="+old, nil), http.StatusBadRequest, "invalid_request_error", "narrow")
 	restore()
+}
+
+func TestUsageFiltersAndGroupsPrincipals(t *testing.T) {
+	for _, splitDay := range []bool{false, true} {
+		name := "current dates"
+		if splitDay {
+			name = "different UTC dates"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, false)
+			for i, key := range []string{"key_a", "key_b"} {
+				u := row(key, "chat", "gwdep_1", &store.Tokens{Input: 3})
+				u.PrincipalID = "principal_1"
+				e.record(u)
+				if splitDay && i == 0 {
+					if _, err := e.pool.Exec(context.Background(), `UPDATE modelgateway.usage SET created_at=created_at-interval '24 hours';
+				UPDATE modelgateway.usage_daily SET day=day-1;
+				UPDATE modelgateway.usage_actor_daily SET day=day-1`); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			e.record(row("key_legacy", "chat", "gwdep_1", nil))
+			ledger, more, err := e.store.ListUsage(context.Background(), store.UsageFilter{PrincipalID: "principal_1"}, 0, 10)
+			if err != nil || more || len(ledger) != 2 {
+				t.Fatalf("principal ledger: %+v %t %v", ledger, more, err)
+			}
+			want := map[string]float64{}
+			for _, request := range ledger {
+				want[request.CreatedAt.UTC().Format(time.DateOnly)]++
+			}
+			if splitDay && len(want) != 2 {
+				t.Fatalf("fixture did not span two UTC dates: %+v", ledger)
+			}
+			days := (reply{body: e.ok(e.admin("GET", "/admin/v1/usage/daily?principal_id=principal_1", nil), "principal rollup")}).list()
+			if len(days) != len(want) {
+				t.Fatalf("principal days: %v", days)
+			}
+			for _, day := range days {
+				date, _ := day["day"].(string)
+				requests, ok := want[date]
+				if !ok || day["principal_id"] != "principal_1" || day["api_key_id"] != "" || day["requests"] != requests {
+					t.Fatalf("principal days: %v, want %v", days, want)
+				}
+				delete(want, date)
+			}
+			rows := (reply{body: e.ok(e.admin("GET", "/admin/v1/usage/requests?principal_id=principal_1&api_key_id=key_b", nil), "principal key")}).list()
+			if len(rows) != 1 || rows[0]["principal_id"] != "principal_1" || rows[0]["api_key_id"] != "key_b" {
+				t.Fatalf("principal requests: %v", rows)
+			}
+		})
+	}
 }
 
 // The ledger answers newest first, a page at a time, filtered by key,

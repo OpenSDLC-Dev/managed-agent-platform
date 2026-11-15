@@ -49,6 +49,86 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 4 independent acceptance
+
+For the initial candidate committed as `9551b02`, the independent Codex verifier
+ran `make verify` under WSL on 2026-11-15
+with serial package scheduling (`GOFLAGS=-p=1`). All 80 test packages passed
+at 91.74% statement coverage. The gate's processes and fixtures were removed;
+the pre-existing Docker containers and Kubernetes namespaces remained.
+
+A fresh PostgreSQL fixture ran the slice 3 gateway at `14985f8`, the candidate
+control plane, and two candidate gateways together. All 65 runtime checks
+passed using `ant` v1.42.0, the pinned Anthropic Go SDK and a synthetic vendor.
+They covered current owner authority, shared alias budgets, principal usage,
+credential filtering, historical totals and mixed-version writers.
+Separate regression checks proved that expired sessions cannot widen budgets
+after advisory or row-lock waits. Live-session controls and 256-character
+Unicode aliases passed too.
+
+Claude returned `400 organization_on_hold`. The owner authorized separate
+Codex agents for the verifier and Claude review roles. The verifier ran
+`gpt-6.1-sol` at `xhigh`; the regular Codex review remains a separate pass.
+The PR records the completed review outcomes.
+
+The Console companion merged in [PR #255](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/255).
+[PR #256](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/256)
+then corrected two-second fixture startup assumptions exposed by macOS CI.
+Its final source is `bd59380a84779a6593c7e8462f8ed5f2ee8bdeba`.
+[Main CI run 43686473044](https://github.com/OpenSDLC-Dev/managed-agent-console/actions/runs/43686473044)
+passed all three operating systems, Docker checks, and both architecture scans
+before publishing the non-release SHA image. Anonymous registry inspection
+confirmed AMD64 and ARM64 children with that revision and version label under
+manifest `sha256:eb53ab4a6337957fba650c9c58b6d446f8de62be8cb65a6b54cdf934205347ad`.
+Compose and Helm pin that manifest; native Console CI pins the same source.
+
+Earlier local Console acceptance passed 20 native browser cases and inspected
+18 light/dark screenshots against the development candidate. It predates the
+final platform lock-expiry hardening and published image. The authenticated
+reference was unavailable, so those shots do not establish current reference
+fidelity. This record does not claim an independent final-source browser rerun
+or a published-image runtime test.
+
+Both code reviews found gaps outside that initial acceptance. Real row-lock
+probes reproduced stale-minute admissions, split completion buckets, and a
+counter timeout that prevented the ledger write. New regression tests failed
+before their fixes. The fixes recheck admission after the needed window locks
+and reuse one completion timestamp. Review of the first correction found the
+inverse timeout dependency and an unnecessary legacy-key wait for full budgets.
+Reciprocal lock tests reproduced both; the ledger and each counter now write
+independently under one deadline, and organization refusals skip the key lock.
+A combined-wait regression also reproduced an obsolete key-row wait after the
+model wait crossed a minute. Admission now checks the clock between those waits.
+The final local store and admin package runs passed in 93.439s and 84.124s.
+Proxy-cookie, redirect-side sign-in and ambiguous-field tests also failed before
+their fixes.
+The deployed edge matrix reproduced blocked valid alias names, then passed
+2,130 routing cases across Compose/Helm and native/legacy/gateway-disabled modes.
+The normal Codex companion could not access local execution (`registered Core
+launch requires an installed app`), so a fresh `gpt-6.1-sol`/`xhigh` agent reran
+that review separately from the authorized Claude-review replacement.
+
+After those corrections, a fresh independent verifier run for `81ac236` passed the canonical
+`make verify` on 2026-11-15: 80 test packages and 91.72% statement coverage.
+The Go and SQL fingerprint matched before and after the run, including the new
+window-wait tests. Focused lock and authentication reruns also passed.
+Rebuilt binaries passed 72 runtime assertions with the real SDK and `ant`, two
+candidate gateways, the old writer and a synthetic vendor. The new assertions
+cover duplicate replacement fields and token counting's shared budget with zero
+billed tokens. The independent Caddy run passed 16 tests and 2,130 routing cases.
+Source, Compose and Helm pin guards passed 4/4, 3/3 and 10/10. The pinned SDK
+report had 767 citations, no findings and no pending transitions. All owned
+processes and fixtures were removed; Docker inventories and Kubernetes namespaces
+matched their baselines. This fresh run supersedes the initial gate result for the
+review fixes and retains the reference and browser gaps stated above.
+
+A final review found a UTC-midnight assumption in the migration test. The
+test-only correction in `a0cf833` fixes the historical date and reads through the
+database's latest recorded timestamp. It preserves actor totals, the old prepared
+writer and migration idempotence. Its independent focused rerun passed all three
+repetitions in 3.995s; production code and migrations stayed at the full-gate
+candidate. Both committed reviews reported no open findings through `a0cf833`.
+
 ## Plan 69 slice 3 final-candidate client acceptance
 
 On 2026-11-14, the user accepted completed native CI instead of another final local

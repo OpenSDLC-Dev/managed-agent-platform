@@ -28,7 +28,7 @@ func catalogFor(t *testing.T, e *env) *catalog.Catalog {
 	return c
 }
 
-func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
+func TestUnusableOwnedKeysCannotUseStaleGrants(t *testing.T) {
 	e := newEnv(t)
 	p := e.provider("https://vendor.invalid")
 	e.credential(p, "synthetic-vendor-credential", 1)
@@ -48,7 +48,7 @@ func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
 	}
 	var keys []string
 	for _, owner := range []string{"principal_user", "principal_service"} {
-		for _, state := range []string{"active", "inactive", "archived", "expired"} {
+		for _, state := range []string{"inactive", "archived", "expired"} {
 			id := "key_" + owner + "_" + state
 			key := "sk-map-api01-synthetic-" + owner + "-" + state
 			keys = append(keys, key)
@@ -76,7 +76,7 @@ func TestOwnedKeysHaveNoSliceThreeInferenceAdmission(t *testing.T) {
 				return nil, errors.New("vendor calls are forbidden in the owned-key negative contract")
 			},
 		}}
-		if _, ok := cfg.Catalog.Snapshot().KeyPolicy("key_principal_user_active"); !ok {
+		if _, ok := cfg.Catalog.Snapshot().KeyPolicy("key_principal_user_inactive"); !ok {
 			t.Fatal("stale catalog fixture lacks the owned row's cached grant")
 		}
 	})

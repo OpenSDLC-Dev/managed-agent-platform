@@ -10,10 +10,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
-// dailyUsageView is one UTC day's rollup for a key, alias and deployment.
+// dailyUsageView is one UTC day's rollup for a principal (or legacy key),
+// alias and deployment. A key filter retains the credential breakdown.
 type dailyUsageView struct {
 	Day              string  `json:"day"`
 	APIKeyID         string  `json:"api_key_id"`
+	PrincipalID      *string `json:"principal_id"`
 	Alias            string  `json:"alias"`
 	DeploymentID     string  `json:"deployment_id"`
 	Requests         int64   `json:"requests"`
@@ -34,6 +36,7 @@ type usageView struct {
 	RequestID        string    `json:"request_id"`
 	CreatedAt        time.Time `json:"created_at"`
 	APIKeyID         string    `json:"api_key_id"`
+	PrincipalID      *string   `json:"principal_id"`
 	Model            string    `json:"model"`
 	Alias            string    `json:"alias"`
 	DeploymentID     string    `json:"deployment_id"`
@@ -97,7 +100,7 @@ func query(r *http.Request, allowed ...string) (url.Values, error) {
 }
 
 func usageFilter(q url.Values) store.UsageFilter {
-	return store.UsageFilter{APIKeyID: q.Get("api_key_id"), Alias: q.Get("alias"),
+	return store.UsageFilter{APIKeyID: q.Get("api_key_id"), PrincipalID: q.Get("principal_id"), Alias: q.Get("alias"),
 		DeploymentID: q.Get("deployment_id"), SessionID: q.Get("session_id")}
 }
 
@@ -105,7 +108,7 @@ func usageFilter(q url.Values) store.UsageFilter {
 // included and given as YYYY-MM-DD: to defaults to today and from to the 30
 // days ending at to, and the span is at most 366 days.
 func (h *handler) dailyUsage(r *http.Request) (any, error) {
-	q, err := query(r, "from", "to", "api_key_id", "alias", "deployment_id")
+	q, err := query(r, "from", "to", "api_key_id", "principal_id", "alias", "deployment_id")
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +146,7 @@ func (h *handler) dailyUsage(r *http.Request) (any, error) {
 	}
 	out := make([]dailyUsageView, 0, len(days))
 	for _, d := range days {
-		out = append(out, dailyUsageView{Day: d.Day.Format(time.DateOnly), APIKeyID: d.APIKeyID, Alias: d.Alias,
+		out = append(out, dailyUsageView{Day: d.Day.Format(time.DateOnly), APIKeyID: d.APIKeyID, PrincipalID: nonEmpty(d.PrincipalID), Alias: d.Alias,
 			DeploymentID: d.DeploymentID, Requests: d.Requests, Errors: d.Errors, InputTokens: d.Tokens.Input,
 			OutputTokens: d.Tokens.Output, CacheWriteTokens: d.Tokens.CacheWrite, CacheReadTokens: d.Tokens.CacheRead,
 			Cost: d.Cost})
@@ -154,7 +157,7 @@ func (h *handler) dailyUsage(r *http.Request) (any, error) {
 // listUsage answers a page of the ledger, newest first: up to limit rows
 // (default 100, at most 1000) older than the row whose id is before.
 func (h *handler) listUsage(r *http.Request) (any, error) {
-	q, err := query(r, "before", "limit", "api_key_id", "alias", "deployment_id", "session_id")
+	q, err := query(r, "before", "limit", "api_key_id", "principal_id", "alias", "deployment_id", "session_id")
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +179,7 @@ func (h *handler) listUsage(r *http.Request) (any, error) {
 	}
 	out := make([]usageView, 0, len(rows))
 	for _, u := range rows {
-		v := usageView{ID: u.ID, RequestID: u.RequestID, CreatedAt: u.CreatedAt, APIKeyID: u.APIKeyID, Model: u.Model,
+		v := usageView{ID: u.ID, RequestID: u.RequestID, CreatedAt: u.CreatedAt, APIKeyID: u.APIKeyID, PrincipalID: nonEmpty(u.PrincipalID), Model: u.Model,
 			Alias: u.Alias, DeploymentID: u.DeploymentID, CredentialID: u.CredentialID, SessionID: nonEmpty(u.SessionID),
 			Protocol: u.Protocol, Endpoint: u.Endpoint, Status: u.Status, ErrorType: nonEmpty(u.ErrorType), Cost: u.Cost,
 			LatencyMS: millis(u.Latency)}

@@ -229,7 +229,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, want := range []bool{true, true, false, false} {
-		a, err := s.Admit(ctx, "key_r", &rpm, nil)
+		a, err := s.AdmitModel(ctx, "x", "key_r", &rpm, nil)
 		if err != nil || a.Admitted != want || a.Tokens || a.RetryAfter < 1 || a.RetryAfter > 60 {
 			t.Errorf("request %d: %+v, %v; want admitted %t", i, a, err, want)
 		}
@@ -238,7 +238,7 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 		t.Errorf("the window counted %d requests, want the 2 admitted", r)
 	}
 
-	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || !a.Admitted {
+	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || !a.Admitted {
 		t.Fatalf("the first request: %+v, %v", a, err)
 	}
 	u := usage("key_t", "x", "dep_1", &store.Tokens{Input: 600, Output: 300, CacheWrite: 50, CacheRead: 50000})
@@ -248,13 +248,13 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	if _, tok := window(t, pool, "key_t"); tok != 950 {
 		t.Errorf("the window counted %d tokens, want 950 without the cache read", tok)
 	}
-	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || !a.Admitted {
+	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || !a.Admitted {
 		t.Errorf("under the limit: %+v, %v", a, err)
 	}
 	if _, err := s.RecordUsage(ctx, usage("key_t", "x", "dep_1", &store.Tokens{Input: 50}), true); err != nil {
 		t.Fatal(err)
 	}
-	if a, err := s.Admit(ctx, "key_t", nil, &tpm); err != nil || a.Admitted || !a.Tokens {
+	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || a.Admitted || !a.Tokens {
 		t.Errorf("at the limit: %+v, %v; want refused for tokens", a, err)
 	}
 	// With both limits set, the refusal names the one reached.
@@ -262,11 +262,11 @@ func TestAdmitCountsRequestsAndTokens(t *testing.T) {
 	if _, err := s.RecordUsage(ctx, usage("key_both", "x", "dep_1", &store.Tokens{Input: 1000}), true); err != nil {
 		t.Fatal(err)
 	}
-	if a, err := s.Admit(ctx, "key_both", &both, &tpm); err != nil || a.Admitted || !a.Tokens {
+	if a, err := s.AdmitModel(ctx, "x", "key_both", &both, &tpm); err != nil || a.Admitted || !a.Tokens {
 		t.Errorf("both limits, tokens reached: %+v, %v", a, err)
 	}
 	for i, want := range []bool{true, false} {
-		if a, err := s.Admit(ctx, "key_rpm", &one, &tpm); err != nil || a.Admitted != want || a.Tokens {
+		if a, err := s.AdmitModel(ctx, "x", "key_rpm", &one, &tpm); err != nil || a.Admitted != want || a.Tokens {
 			t.Errorf("both limits, request %d: %+v, %v; want admitted %t and never for tokens", i, a, err, want)
 		}
 	}
@@ -412,7 +412,7 @@ func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
 	pgtest.DefaultRepeatableRead(t, pool)
 	clearOfAMinute(t, pool)
 	rpm := int32(100)
-	if _, err := s.Admit(ctx, "key_rr", &rpm, nil); err != nil {
+	if _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); err != nil {
 		t.Fatal(err)
 	}
 	record := func(tpmLimited bool) error {
@@ -426,10 +426,16 @@ func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
 		name, lock string
 		run        func() error
 	}{
+		{"model admission", `UPDATE modelgateway.model_rate_windows SET requests = requests WHERE model = 'x'`,
+			func() error { _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); return err }},
 		{"admission", `UPDATE modelgateway.rate_windows SET requests = requests WHERE api_key_id = 'key_rr'`,
-			func() error { _, err := s.Admit(ctx, "key_rr", &rpm, nil); return err }},
+			func() error { _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); return err }},
+		{"model window", `UPDATE modelgateway.model_rate_windows SET input_tokens = input_tokens WHERE model = 'x'`,
+			func() error { return record(true) }},
 		{"window", `UPDATE modelgateway.rate_windows SET tokens = tokens WHERE api_key_id = 'key_rr'`,
 			func() error { return record(true) }},
+		{"actor rollup", `UPDATE modelgateway.usage_actor_daily SET requests = requests WHERE actor_id = 'key_rr'`,
+			func() error { return record(false) }},
 		{"rollup", `UPDATE modelgateway.usage_daily SET requests = requests WHERE api_key_id = 'key_rr'`,
 			func() error { return record(false) }},
 	} {

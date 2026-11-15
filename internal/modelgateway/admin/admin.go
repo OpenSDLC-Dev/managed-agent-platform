@@ -9,11 +9,12 @@
 // Native browser cookies and two legacy credentials reach it. A cookie reads
 // current active-human authority from the shared session database, without
 // replaying IdP mappings. Unsafe cookie requests require exact Origin and CSRF.
-// An explicitly offered legacy credential retains precedence and never falls
-// back to a cookie on failure. The bootstrap key — CONTROLPLANE_API_KEY, read
+// Existing routes retain explicitly offered legacy credential precedence.
+// The cookie-only rate-limit routes ignore incidental proxy assertions.
+// The bootstrap key — CONTROLPLANE_API_KEY, read
 // from the Secret the control plane reads it from — is compared in constant
-// time against what the request carries in x-api-key or as a Bearer, and may
-// do anything; a key an application issues under the name bootstrap is
+// time against what the request carries in x-api-key or as a Bearer, and reaches
+// the existing legacy admin routes; a key an application issues under the name bootstrap is
 // nothing to it, since it is never looked up in api_keys. An operator token,
 // verified by internal/identity under the same IDENTITY_* configuration the
 // control plane reads, is an identity lane that shares the control plane's
@@ -85,6 +86,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"path"
 	"slices"
 	"strings"
 
@@ -155,6 +158,8 @@ func (h *handler) routes() {
 		ep("GET", read, h.getKeyPolicy), ep("POST", write, h.putKeyPolicy), ep("DELETE", write, h.deleteKeyPolicy))
 	h.route("/admin/v1/usage/daily", ep("GET", read, h.dailyUsage))
 	h.route("/admin/v1/usage/requests", ep("GET", read, h.listUsage))
+	h.route("/admin/v1/rate_limits", ep("GET", read, h.listModelLimits))
+	h.route("/admin/v1/rate_limits/{model...}", ep("POST", write, h.putModelLimit))
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, notFound("no such path: %s", r.URL.Path))
 	})
@@ -206,12 +211,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m := h.cfg.Login; m != nil && m.NativeEnabled() {
 		w.Header().Set("Cache-Control", "no-store, private")
 	}
-	role, cookie, err := h.authenticate(r)
+	role, cookie, principalID, err := h.authenticate(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	ctx = context.WithValue(ctx, principalKey{}, principalID)
 	if cookie {
 		ctx = context.WithValue(ctx, cookieKey{}, true)
 	}
@@ -226,21 +232,29 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // An operator token shares the control plane's identity lane rule (plan 69
 // decision 4): principal.Resolve applies the mapping and rejects removed
 // members. A browser cookie instead reads current authority without a sign-in.
-// Offered legacy credentials retain precedence, including their failures.
+// Existing routes retain offered legacy credential precedence, including failures.
 // cookie is true only when a browser session actually authenticated the request.
-func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, err error) {
+func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, principalID string, err error) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
-		return "", false, unauthenticated("a credential header is repeated")
+		return "", false, "", unauthenticated("a credential header is repeated")
 	}
 	if len(keys) == 1 {
 		if h.isBootstrap(keys[0]) {
-			return identity.RoleAdmin, false, nil
+			return identity.RoleAdmin, false, "", nil
 		}
-		return "", false, unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
+		return "", false, "", unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
 	}
 	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && h.isBootstrap(tok) {
-		return identity.RoleAdmin, false, nil
+		return identity.RoleAdmin, false, "", nil
+	}
+	if modelLimitPath(r) {
+		// IAP can attach an assertion to every browser request. This namespace
+		// must neither authenticate it nor replay its sign-in side effects.
+		if len(r.Header.Values("Authorization")) > 0 || h.cfg.Login == nil || !h.cfg.Login.NativeEnabled() {
+			return "", false, "", unauthenticated("organization rate limits require a console cookie")
+		}
+		return h.authenticateCookie(r)
 	}
 	if v := h.cfg.Verifier; v != nil {
 		if tok, ok := v.Credential(r); ok {
@@ -253,10 +267,10 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 					SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
 					apikey.Hash(bearer)).Scan(&legacy)
 				if err != nil {
-					return "", false, err
+					return "", false, "", err
 				}
 				if !legacy {
-					return "", false, unauthenticated("the admin API does not accept this issued API key")
+					return "", false, "", unauthenticated("the admin API does not accept this issued API key")
 				}
 			}
 			id, err := v.Verify(r.Context(), tok)
@@ -269,21 +283,21 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 					reason = ie.Reason()
 				}
 				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
-				return "", false, unauthenticated("invalid operator token")
+				return "", false, "", unauthenticated("invalid operator token")
 			}
 			if m := h.cfg.Login; v.AssertionHeader() != "" && m != nil && m.NativeEnabled() && m.CheckProxyOrigin(r) != nil {
-				return "", false, forbidden("invalid browser origin")
+				return "", false, "", forbidden("invalid browser origin")
 			}
 			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
 			if errors.Is(err, principal.ErrDeactivated) {
 				// A 403 as on the control plane: the token is genuine, and the
 				// refusal is of the account.
-				return "", false, forbidden("this account has been removed from the organization")
+				return "", false, "", forbidden("this account has been removed from the organization")
 			}
 			if err != nil {
-				return "", false, err
+				return "", false, "", err
 			}
-			return p.Role, false, nil
+			return p.Role, false, p.ID, nil
 		}
 	}
 	legacyOffered := len(r.Header.Values("Authorization")) > 0
@@ -291,16 +305,43 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 		legacyOffered = true
 	}
 	if m := h.cfg.Login; !legacyOffered && m != nil && m.NativeEnabled() {
-		session, err := m.Authenticate(r.Context(), r)
-		if err != nil {
-			return "", false, err
-		}
-		if err := m.CheckCSRF(r, session); err != nil {
-			return "", false, forbidden("invalid browser origin or CSRF token")
-		}
-		return session.Role, true, nil
+		return h.authenticateCookie(r)
 	}
-	return "", false, unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
+	return "", false, "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
+}
+
+// Check both sides of ServeMux's cleaning redirect before legacy sign-in can
+// run. Encoded dots/slashes are segment data, not cleaning instructions.
+func modelLimitPath(r *http.Request) bool {
+	budget := func(p string) bool {
+		parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 4)
+		if len(parts) < 3 {
+			return false
+		}
+		for i, want := range []string{"admin", "v1", "rate_limits"} {
+			got, err := url.PathUnescape(parts[i])
+			if err != nil || got != want {
+				return false
+			}
+		}
+		return true
+	}
+	p := r.URL.EscapedPath()
+	if budget(p) {
+		return true
+	}
+	return r.Method != http.MethodConnect && budget(path.Clean("/"+strings.TrimPrefix(p, "/")))
+}
+
+func (h *handler) authenticateCookie(r *http.Request) (identity.Role, bool, string, error) {
+	session, err := h.cfg.Login.Authenticate(r.Context(), r)
+	if err != nil {
+		return "", false, "", err
+	}
+	if err := h.cfg.Login.CheckCSRF(r, session); err != nil {
+		return "", false, "", forbidden("invalid browser origin or CSRF token")
+	}
+	return session.Role, true, session.PrincipalID, nil
 }
 
 // isBootstrap compares digests, so the comparison is constant-time in the

@@ -1,7 +1,6 @@
-// Package apikey is the platform API key check, shared by the two servers a
-// key authenticates to: the control plane, and the model gateway that serves
-// inference to the same keys (docs/plan/59_model-gateway.md). One check in one
-// place means a key revoked or expired stops at the same instant on both.
+// Package apikey supplies API key hashing and legacy unowned-key checks.
+// Public management and gateway inference check owned credentials together
+// with the owner's current authority in their respective authentication paths.
 package apikey
 
 import (

@@ -27,6 +27,15 @@ type Prober interface {
 	TestDeployment(ctx context.Context, d store.Deployment, p store.Provider, cs []store.Credential) []DeploymentTest
 }
 
+type principalKey struct{}
+
+// PrincipalID returns the authenticated human for diagnostic usage, without
+// turning that audit value into inference authority. Legacy presets have none.
+func PrincipalID(ctx context.Context) string {
+	id, _ := ctx.Value(principalKey{}).(string)
+	return id
+}
+
 // CredentialCheck is one protocol's result of a credential check.
 type CredentialCheck struct {
 	Protocol  profile.Protocol `json:"protocol"`
