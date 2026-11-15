@@ -23,32 +23,69 @@ func (e *env) ownedKey(owner, kind, role, name string) string {
 }
 
 func TestOwnedUsageCombinesKeysByPrincipal(t *testing.T) {
-	e := newEnv(t)
-	up := newFake(t, message("ok"))
-	p := e.provider(up.URL)
-	e.credential(p, "sk-upstream-1", 1)
-	e.alias("fast", target(e.deployment(p, "m"), 0))
-	keys := []string{
-		e.ownedKey("principal_human", "user", "developer", "key_one"),
-		e.ownedKey("principal_human", "user", "developer", "key_two"),
-	}
-	e.start()
-	for _, key := range keys {
-		res, raw := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
-		if res.StatusCode != http.StatusOK {
-			t.Fatalf("inference: %d %s", res.StatusCode, raw)
+	for _, splitDay := range []bool{false, true} {
+		name := "current dates"
+		if splitDay {
+			name = "different UTC dates"
 		}
-	}
-	rows, more, err := e.s.ListUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_human"}, 0, 10)
-	e.must(err)
-	if more || len(rows) != 2 || rows[0].PrincipalID != "principal_human" || rows[0].APIKeyID != "key_two" || rows[1].APIKeyID != "key_one" {
-		t.Fatalf("principal ledger: %+v", rows)
-	}
-	today := time.Now().UTC()
-	days, more, err := e.s.ListDailyUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_human"}, today, today, 10)
-	e.must(err)
-	if more || len(days) != 1 || days[0].PrincipalID != "principal_human" || days[0].Requests != 2 || days[0].APIKeyID != "" {
-		t.Fatalf("principal rollup: %+v", days)
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			up := newFake(t, message("ok"))
+			p := e.provider(up.URL)
+			e.credential(p, "sk-upstream-1", 1)
+			e.alias("fast", target(e.deployment(p, "m"), 0))
+			keys := []string{
+				e.ownedKey("principal_human", "user", "developer", "key_one"),
+				e.ownedKey("principal_human", "user", "developer", "key_two"),
+			}
+			e.start()
+			for i, key := range keys {
+				res, raw := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
+				if res.StatusCode != http.StatusOK {
+					t.Fatalf("inference: %d %s", res.StatusCode, raw)
+				}
+				if splitDay && i == 0 {
+					// Move the first completion and its rollups together before the
+					// second request, so this exercises a day boundary on every run.
+					_, err := e.pool.Exec(e.ctx, `UPDATE modelgateway.usage SET created_at=created_at-interval '24 hours';
+				UPDATE modelgateway.usage_daily SET day=day-1;
+				UPDATE modelgateway.usage_actor_daily SET day=day-1`)
+					e.must(err)
+				}
+			}
+			rows, more, err := e.s.ListUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_human"}, 0, 10)
+			e.must(err)
+			if more || len(rows) != 2 || rows[0].PrincipalID != "principal_human" || rows[0].APIKeyID != "key_two" || rows[1].APIKeyID != "key_one" {
+				t.Fatalf("principal ledger: %+v", rows)
+			}
+			from, to := rows[0].CreatedAt, rows[0].CreatedAt
+			want := map[string]int64{}
+			for _, row := range rows {
+				if row.CreatedAt.Before(from) {
+					from = row.CreatedAt
+				}
+				if row.CreatedAt.After(to) {
+					to = row.CreatedAt
+				}
+				want[row.CreatedAt.UTC().Format(time.DateOnly)]++
+			}
+			if splitDay && len(want) != 2 {
+				t.Fatalf("fixture did not span two UTC dates: %+v", rows)
+			}
+			days, more, err := e.s.ListDailyUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_human"}, from, to, 10)
+			e.must(err)
+			if more || len(days) != len(want) {
+				t.Fatalf("principal rollup: %+v", days)
+			}
+			for _, day := range days {
+				date := day.Day.UTC().Format(time.DateOnly)
+				requests, ok := want[date]
+				if !ok || day.PrincipalID != "principal_human" || day.APIKeyID != "" || day.Requests != requests {
+					t.Fatalf("principal rollup: %+v, want %v", days, want)
+				}
+				delete(want, date)
+			}
+		})
 	}
 }
 
