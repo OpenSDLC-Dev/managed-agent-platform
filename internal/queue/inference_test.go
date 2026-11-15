@@ -195,3 +195,69 @@ func TestModelClaimDelegatesMemberAuthority(t *testing.T) {
 		t.Fatalf("completed claim retained authority: %+v %v", p, err)
 	}
 }
+
+func TestInferenceTokenDoesNotReviveWhenRenewalWaitsPastExpiry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	pool := pgtest.NewPool(t)
+	sid, eid := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+	if _, err := q.Enqueue(ctx, pool, eid, sid, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, 3*time.Second)
+	if err != nil || item == nil || item.InferenceToken == "" {
+		t.Fatalf("claim: %v %v", item, err)
+	}
+	lock, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Rollback(context.Background())
+	var pid int
+	if err := lock.QueryRow(ctx, `SELECT pg_backend_pid() FROM work_items WHERE id=$1 FOR UPDATE`, item.ID).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	renewed := make(chan error, 1)
+	go func() { renewed <- q.Extend(ctx, item, time.Minute) }()
+	// Observe the actual lock wait, rather than guessing that the goroutine
+	// issued its statement before the original lease expired.
+	for {
+		var blocked, live bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))),
+			(SELECT lease_expires_at>clock_timestamp() FROM work_items WHERE id=$2)`, pid, item.ID).Scan(&blocked, &live); err != nil {
+			t.Fatal(err)
+		}
+		if !live {
+			t.Fatal("lease expired before the renewal reached its lock barrier")
+		}
+		if blocked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for {
+		var live bool
+		if err := pool.QueryRow(ctx, `SELECT lease_expires_at>clock_timestamp() FROM work_items WHERE id=$1`, item.ID).Scan(&live); err != nil {
+			t.Fatal(err)
+		}
+		if !live {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p, err := inferencetoken.Authenticate(ctx, pool, item.InferenceToken)
+	if err != nil || p.WorkID != "" {
+		t.Fatalf("expired token still admitted: %+v %v", p, err)
+	}
+	if err := lock.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-renewed; err != nil {
+		t.Fatal(err)
+	}
+	p, err = inferencetoken.Authenticate(ctx, pool, item.InferenceToken)
+	if err != nil || p.WorkID != "" {
+		t.Fatalf("renewal revived expired authority: %+v %v", p, err)
+	}
+}

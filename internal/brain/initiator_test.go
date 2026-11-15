@@ -73,6 +73,32 @@ func TestRefusedInitiatorDoesNoModelTurnWork(t *testing.T) {
 	}
 }
 
+func TestRefusedInitiatorSettlementFaultIsLoggedWithoutModelSpans(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	ctx := t.Context()
+	if _, err := h.pool.Exec(ctx, `UPDATE sessions SET created_by=NULL,initiator_principal_id=NULL,initiator_api_key_id=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	h.wake(t, "refuse this turn")
+	if _, err := h.pool.Exec(ctx, `ALTER TABLE events ADD CONSTRAINT refuse_error CHECK(type<>'session.error') NOT VALID`); err != nil {
+		t.Fatal(err)
+	}
+	spans := recordBrainSpans(t)
+	logged := captureBrainLogs(t)
+	found, err := h.brain.RunOnce(ctx)
+	if !found || err == nil {
+		t.Fatalf("RunOnce=(%v,%v), want refused settlement fault", found, err)
+	}
+	if len(logged()) != 1 || !strings.Contains(logged()[0].message, "turn failed") {
+		t.Fatalf("refusal settlement fault was not logged: %v", logged())
+	}
+	for _, span := range spans() {
+		if span.Name() == "model_turn" || strings.Contains(span.Name(), "model_request") {
+			t.Fatalf("refused turn opened span %s", span.Name())
+		}
+	}
+}
+
 func TestMemberDemotionDoesNotStopModelTurns(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{done("end_turn", 1)}, {done("end_turn", 1)}}, nil)
 	if _, err := h.pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_member','test','member','developer');

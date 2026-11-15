@@ -19,6 +19,9 @@ type deploymentInitiatorJSON struct {
 
 func readDeploymentInitiator(r *http.Request, db principal.Querier) (deploymentInitiatorJSON, error) {
 	var out deploymentInitiatorJSON
+	if err := checkID(r.PathValue("id"), "deployment"); err != nil {
+		return out, err
+	}
 	var kind string
 	err := db.QueryRow(r.Context(), `SELECT d.initiator_principal_id,d.initiator_api_key_id,coalesce(p.kind,'user')
 		FROM deployments d LEFT JOIN principals p ON p.id=d.initiator_principal_id
@@ -44,6 +47,9 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	if _, err := requireHumanAdmin(r); err != nil {
 		return nil, err
 	}
+	if err := checkID(r.PathValue("id"), "deployment"); err != nil {
+		return nil, err
+	}
 	obj, err := managementBody(r, "principal_id")
 	if err != nil {
 		return nil, err
@@ -62,6 +68,9 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	}
 	ctx := r.Context()
 	defer tx.Rollback(ctx)
+	if err := setDeploymentLockWait(ctx, tx); err != nil {
+		return nil, err
+	}
 	// Principal first, then deployment: the membership setting and scheduling
 	// snapshot cannot interleave. Session initiators are never rewritten.
 	var deploymentID string

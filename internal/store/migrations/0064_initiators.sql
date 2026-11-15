@@ -49,6 +49,9 @@ UPDATE dreams SET (initiator_principal_id,initiator_api_key_id)=
 -- This also resolves a rolling upgrade's old writer. In particular, an old
 -- dream runner links its session only after inserting it. The claim uses
 -- this view without repairing the session under its work-item lock.
+-- Deployment fallback uses its original creator, never a later replacement:
+-- an unresolved historical session must not acquire authority on a repoint.
+-- The insert trigger below snapshots configured initiators for future runs.
 CREATE VIEW session_initiators AS
 SELECT s.id AS session_id, chosen.principal_id, chosen.api_key_id
   FROM sessions s
@@ -62,7 +65,6 @@ SELECT s.id AS session_id, chosen.principal_id, chosen.api_key_id
         FROM (VALUES
             (0,s.initiator_principal_id,s.initiator_api_key_id),
             (1,actor.principal_id,actor.api_key_id),
-            (2,d.initiator_principal_id,d.initiator_api_key_id),
             (3,da.principal_id,da.api_key_id),
             (4,dr.initiator_principal_id,dr.initiator_api_key_id),
             (5,dra.principal_id,dra.api_key_id)

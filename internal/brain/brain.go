@@ -138,6 +138,12 @@ func (b *Brain) RunOnce(ctx context.Context) (found bool, err error) {
 	if item.InferenceToken == "" {
 		// Refuse before a consumer span, replay, discovery or grading. The
 		// liveness gate may still settle tools accepted by a previous turn.
+		defer func() {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				slog.ErrorContext(ctx, "brain: refused turn failed, its output was not committed",
+					"item", item.ID, "session", item.SessionID, "error", err)
+			}
+		}()
 		_, _, _, envKind, live, err := b.claimLiveSession(ctx, item)
 		if err != nil || !live {
 			return true, err

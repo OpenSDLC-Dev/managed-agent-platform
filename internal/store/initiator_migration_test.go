@@ -38,6 +38,10 @@ func TestInitiatorsPreserveCreatorsAcrossMigration(t *testing.T) {
 		SELECT 'depl_initiator','fixture',agent_id,agent_version,environment_id,'apikey_owned' FROM sessions WHERE id=$1`, sessions[0])
 	scheduled, _ := pgtest.NewSession(t, pool, "cloud")
 	keyExec(t, pool, `UPDATE sessions SET created_by=NULL,deployment_id='depl_initiator' WHERE id=$1`, scheduled)
+	unresolved, _ := pgtest.NewSession(t, pool, "cloud")
+	keyExec(t, pool, `INSERT INTO deployments(id,name,agent_id,agent_version,environment_id)
+		SELECT 'depl_unresolved','fixture',agent_id,agent_version,environment_id FROM sessions WHERE id=$1`, unresolved)
+	keyExec(t, pool, `UPDATE sessions SET created_by=NULL,deployment_id='depl_unresolved' WHERE id=$1`, unresolved)
 	dreamSession, _ := pgtest.NewSession(t, pool, "cloud")
 	keyExec(t, pool, `UPDATE sessions SET created_by=NULL WHERE id=$1`, dreamSession)
 	keyExec(t, pool, `INSERT INTO dreams(id,status,inputs,input_memory_store_id,input_session_ids,model,output_behavior,created_by,session_id)
@@ -74,9 +78,15 @@ func TestInitiatorsPreserveCreatorsAcrossMigration(t *testing.T) {
 	}
 	check(scheduled, "principal_owner", "", true)
 	check(dreamSession, "principal_owner", "", true)
+	check(unresolved, "", "", false)
+	// Giving the deployment an initiator cannot authorize a historical session
+	// whose missing creator could not be resolved during backfill.
+	keyExec(t, pool, `UPDATE deployments SET initiator_principal_id='principal_owner' WHERE id='depl_unresolved'`)
+	check(unresolved, "", "", false)
 	for _, tc := range []struct{ actor, deployment, principal, key string }{
 		{"apikey_owned", "", "principal_owner", ""},
 		{"", "depl_initiator", "principal_owner", ""},
+		{"", "depl_unresolved", "principal_owner", ""},
 		{"apikey_old", "depl_initiator", "", "apikey_old"},
 	} {
 		sid := domain.NewID(domain.PrefixSession)

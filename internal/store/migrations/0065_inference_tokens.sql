@@ -5,8 +5,10 @@ ALTER TABLE work_items ADD COLUMN inference_generation bigint NOT NULL DEFAULT 0
 CREATE FUNCTION advance_inference_generation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+    -- A renewal can start before expiry, then wait on a row lock past it.
+    -- Judge after that wait so an expired token cannot regain authority.
     IF NEW.kind='model_turn' AND NEW.state='active'
-       AND (OLD.state<>'active' OR OLD.lease_expires_at<=statement_timestamp()) THEN
+       AND (OLD.state<>'active' OR OLD.lease_expires_at<=clock_timestamp()) THEN
         NEW.inference_generation := OLD.inference_generation+1;
     END IF;
     RETURN NEW;

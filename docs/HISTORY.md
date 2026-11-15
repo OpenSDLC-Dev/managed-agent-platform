@@ -49,6 +49,28 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 5 review hardening
+
+On 2026-11-15, two independent Codex reviews of `9890051` ran at
+`gpt-6.1-sol` / `xhigh`, without a finding cap. The owner authorized Codex
+substitution because Claude returned `400 organization_on_hold`.
+
+Six behavior regressions failed before their fixes:
+
+- A renewal blocked across expiry revived an inference token that authentication had already refused.
+- Repointing an unattributed deployment authorized an unresolved historical session.
+- An initiator write held the principal mutation fence beyond the deployment lock deadline.
+- A decoded NUL in a private deployment path returned 500 instead of 404.
+- An empty key header or repeated Bearers let a live delegated token fall through to a separate IAP assertion.
+- A refused turn's failed error-event insert produced no infrastructure error log.
+
+The focused queue, store, API, brain and gateway runs passed after correction.
+The IAP regression also preserves legacy prefix-like values without a live inference token.
+The registry now names the local Responses, embeddings and rerank scope extension.
+The earlier verifier also caught a refused grader leaving its outcome at `evaluating`;
+its regression passed after the failure settlement restored `running` atomically.
+Full candidate verification and final delivery acceptance remain pending.
+
 ## Plan 69 slice 4 independent acceptance
 
 For the initial candidate committed as `9551b02`, the independent Codex verifier

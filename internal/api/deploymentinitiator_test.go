@@ -35,6 +35,11 @@ func TestDeploymentInitiatorCookieAdminAndFutureSchedules(t *testing.T) {
 	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"scheduler"}`, headers, 200), &account)
 	accountID := account["id"].(string)
 	change := fmt.Sprintf(`{"principal_id":%q}`, accountID)
+	for _, malformed := range []string{"%00", "depl_%00", "not-an-id"} {
+		for _, method := range []string{"GET", "POST"} {
+			expectManagement(t, s, method, "/api/console/organizations/default/deployments/"+malformed+"/initiator", change, headers, 404)
+		}
+	}
 	for _, role := range []string{"user", "developer"} {
 		member := seedMember(t, s, role, role, "console")
 		c, se := s.issue(member)
@@ -208,5 +213,49 @@ func TestDeploymentInitiatorRechecksCookieAfterDeploymentLock(t *testing.T) {
 	}
 	if principalID != nil {
 		t.Fatal("expired cookie changed initiator")
+	}
+}
+
+func TestDeploymentInitiatorBoundsItsLockWait(t *testing.T) {
+	restore := api.SetDeploymentLockWaitForTest(300 * time.Millisecond)
+	defer restore()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	s, h := newCredentialHandler(t)
+	admin := seedMember(t, s, "admin", "admin", "console")
+	cookie, session := s.issue(admin)
+	headers := nativeHeaders(cookie, session.CSRFToken)
+	agentID, envID := fixture(t, s.tserver)
+	id := createDeployment(t, s.tserver, deploymentBody(agentID, envID))["id"].(string)
+	var account map[string]any
+	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"schedule"}`, headers, 200), &account)
+	blockerConn := credentialFenceConnection(t, ctx, s)
+	observer := credentialFenceConnection(t, ctx, s)
+	blocker, err := blockerConn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(context.Background())
+	var pid int
+	if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid() FROM deployments WHERE id=$1 FOR SHARE`, id).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/console/organizations/default/deployments/" + id + "/initiator"
+	call := startCredentialRequest(t, ctx, h, "POST", path, io.NopCloser(strings.NewReader(fmt.Sprintf(`{"principal_id":%q}`, account["id"]))), headers)
+	waitCredentialWrite(t, ctx, observer, pid, "%SELECT id FROM deployments%", call)
+	select {
+	case <-call.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initiator write held the principal fence past the deployment lock timeout")
+	}
+	if rr := call.result(t); rr.Code != 500 {
+		t.Fatalf("blocked write: %d %s", rr.Code, rr.Body.String())
+	}
+	// The deployment remains locked, but the failed setter must release its
+	// organization-wide principal fence so member removal can proceed.
+	bounded, release := context.WithTimeout(ctx, time.Second)
+	defer release()
+	if _, err := observer.Exec(bounded, `UPDATE principals SET status='deactivated' WHERE id=$1`, admin); err != nil {
+		t.Fatalf("blocked deployment still prevents principal withdrawal: %v", err)
 	}
 }
