@@ -610,5 +610,6 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	return s.createSessionInTx(ctx, tx, createSessionIn{
 		id: sessionID, internal: true, envID: dreamEnvID, agentRaw: agentRaw,
 		resourceInputs: inputs, rawInitial: []json.RawMessage{initial},
+		initiatorPrincipalID: d.initiatorPrincipalID, initiatorAPIKeyID: d.initiatorAPIKeyID,
 	})
 }

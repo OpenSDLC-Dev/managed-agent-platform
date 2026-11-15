@@ -290,7 +290,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.getServiceAccount)))
 	mux.HandleFunc("POST "+consoleServiceAccountPath, noStore(s.handle(identity.RoleAdmin, s.updateServiceAccount)))
 	mux.HandleFunc("POST "+consoleServiceAccountArchivePath, noStore(s.handle(identity.RoleAdmin, s.archiveServiceAccount)))
-	for _, pattern := range []string{consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath} {
+	mux.HandleFunc("GET "+consoleDeploymentInitiatorPath, noStore(s.handle(identity.RoleAdmin, s.getDeploymentInitiator)))
+	mux.HandleFunc("POST "+consoleDeploymentInitiatorPath, noStore(s.handle(identity.RoleAdmin, s.setDeploymentInitiator)))
+	for _, pattern := range []string{consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleDeploymentInitiatorPath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, errMethodNotAllowed)
 		})

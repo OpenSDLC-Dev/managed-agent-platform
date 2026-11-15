@@ -220,7 +220,9 @@ type dreamRow struct {
 	// sessionStop is the primary thread's stop reason, which is how an idle
 	// session says whether its last turn succeeded. Empty before the first
 	// turn settles.
-	sessionStop string
+	sessionStop          string
+	initiatorPrincipalID *string
+	initiatorAPIKeyID    *string
 }
 
 // inPlace is the update_existing dream: one whose output store is its input.
@@ -422,14 +424,15 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 	var d dreamRow
 	err := tx.QueryRow(ctx, `
 		SELECT id, status, stage, attempts, created_at, session_id, input_memory_store_id,
-		       input_session_ids, instructions, model, outputs, target_memory_store_id
+		       input_session_ids, instructions, model, outputs, target_memory_store_id,
+		       initiator_principal_id, initiator_api_key_id
 		  FROM dreams
 		 WHERE id = $1 AND closed_at IS NULL
 		   AND NOT (status = 'pending' AND attempts > 0 AND updated_at > $2)
 		 FOR UPDATE SKIP LOCKED`, id, now.Add(-dreamStartLease)).
 		Scan(&d.id, &d.status, &d.stage, &d.attempts, &d.createdAt, &d.sessionID,
 			&d.inputStoreID, &d.inputSessionIDs, &d.instructions, &d.model, &d.outputs,
-			&d.targetStoreID)
+			&d.targetStoreID, &d.initiatorPrincipalID, &d.initiatorAPIKeyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, false, nil
 	}

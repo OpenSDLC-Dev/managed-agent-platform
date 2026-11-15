@@ -85,7 +85,13 @@ they point at is a committed row the listener re-reads for itself.
 
 1. A client POSTs `user.message`; the session goes `running` and a `model_turn` work
    item is enqueued.
-2. A brain claims it, replays the log into provider messages, and streams the model's
+2. A brain claims it and checks the session initiator's current membership, including
+   grading turns. A refusal settles the waking input through `session.error` before
+   replay, MCP discovery or model spans. An admitted claim mints an internal
+   `workspace:inference` token whose subject is the initiator and actor is the brain.
+   The gateway accepts it while that claim and membership remain live. The brain
+   still sends `BRAIN_API_KEY` until plan 69 slice 6 switches the outbound credential.
+   The admitted brain replays the log into provider messages and streams the model's
    response — through the model gateway by default, where the agent's model names an
    alias and the gateway picks the vendor deployment — writing `agent.message` / `agent.thinking` events (with opt-in
    `event_start`/`event_delta` SSE previews) and `span.model_request_start/_end`.
@@ -419,11 +425,20 @@ Authentication is not a namespace-wide rule. Existing key-management routes reta
 legacy management-key and IdP credentials beside native cookies during rollout.
 Human developers can manage only their own API keys; admins can manage all
 non-preset API keys. Environment-key management and the workspace read retain
-their admin floor. New member and service-account routes require human admin
+their admin floor. New member, service-account and deployment-initiator routes require human admin
 cookies; the resource proxy requires developer and preserves each resource's role
 floor. New private routes must declare their own admission policy, not inherit the
 legacy lane. [Security invariants](#security-invariants) describes native login,
 cookie-only boundaries and the credentials that remain on `/v1`.
+
+Initiators are internal columns on sessions, deployments and dreams, separate from
+audit `created_by`. Insert triggers preserve old writers; the claim resolves missing
+session attribution without acquiring a session lock under its work-item lock.
+Scheduled sessions inherit the deployment's initiator; manual runs use their caller.
+An admin can select an active service account through the cookie-only private API.
+That changes future scheduled sessions only. A missing member causes a failed
+scheduled run with `unknown_error` and an automatic pause. Dream sessions inherit
+their creator and use the existing session-failure path to `internal_error`.
 
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
@@ -493,6 +508,7 @@ Layout order is by layer, as the repo is.
 | `gaterun/` | That gate's runtime — firewall, privilege drop, the config fetch-and-swap loop. The OS-touching adapters live in `cmd/gate` behind seams declared here, so everything with logic stays testable off a container. |
 | `gateconfig/` · `gatetoken/` | The internal gate-config endpoint's client and shared wire contract, and the per-session `gtk_` tokens that authenticate to it. Off the public wire, and registered as a divergence. `gatetoken`'s mint and hash are the one implementation every internal bearer uses, `worktoken`'s included. |
 | `worktoken/` | The per-item sessions token (plan 36 decision 15): minted in the poll's claim transaction for an item whose session attaches a memory store, hash-only at rest, rendered as the item's `secret` in the envelope the reference worker decodes, and valid by join conditions on the live item — the id it names, the lease, the state, the session's archive — rather than a revocation column. The lane that admits it is `internal/api`'s. |
+| `inferencetoken/` | The brain's internal per-claim bearer: minting shares the model-turn claim transaction; gateway authentication joins the live claim, session and current initiator membership. |
 | `vaultresolve/` | Credential resolution at read time: a session's vault ids become the sandbox's placeholder bindings and the gate's decrypted secrets, under one selection rule so the two halves can never disagree, plus a third lane resolving an MCP endpoint's bearer by URL. Current rows every time, so rotation needs no session restart. It also performs the **one write** in this area — the OAuth refresh grant reseals the rotated token onto the credential row under a compare-and-set. |
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |

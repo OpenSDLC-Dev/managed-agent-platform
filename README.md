@@ -6,11 +6,13 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
-Plan 69 slice 3 merged in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041); slice 4 extends the gateway.
+Principal-bound authentication is being rolled out under [plan 69](./docs/plan/69_principal-bound-auth.md).
 Both servers refuse owned preset values at startup. Gateway policy writes refuse owned targets.
 Public control-plane resources admit owned keys using the owner's current role.
 Gateway inference admits active developer/admin owners without a model grant.
 Organization budgets share each public model alias across keys and protocols; usage groups owned calls by principal.
+Model turns check the session initiator's membership; scheduled deployments can use an admin-selected service account.
+The gateway accepts claim-bound inference tokens. The brain's outbound credential switches in slice 6.
 Slice 3's owned-key HTTP issuance and fenced per-row mutations are independently verified.
 Fresh packaged Compose/`ant` acceptance passed at platform `45f5264` with the published Console image.
 Native browser/SDK acceptance uses completed CI on a different integration tree; the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) separates sources and limits.

@@ -516,12 +516,23 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	}
 	var created createdSession
 	fireErr := error(nil)
+	var member bool
+	if err := tx.QueryRow(ctx, `SELECT d.initiator_api_key_id IS NOT NULL OR
+		coalesce(p.org_id='default' AND p.status='active' AND p.kind IN ('user','service_account'),false)
+		FROM deployments d LEFT JOIN principals p ON p.id=d.initiator_principal_id WHERE d.id=$1`, f.deploymentID).Scan(&member); err != nil {
+		return "", "", err
+	}
+	if !member {
+		fireErr = &runError{typ: "unknown_error", err: errors.New("deployment initiator is no longer an active organization member")}
+	}
 	if h := deploymentFireHookInFire; h != nil {
-		fireErr = h()
+		if fireErr == nil {
+			fireErr = h()
+		}
 	}
 	if fireErr == nil {
 		// The ticker's ctx carries no principal, so the session is created
-		// unattributed — plan §9's NULL created_by is the schedule's own.
+		// audit-unattributed. The insert trigger copies the deployment initiator.
 		created, fireErr = s.createSessionInTx(ctx, tx, in)
 	}
 	if fireErr != nil {
@@ -530,8 +541,8 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 			// Unclassified: roll the whole transaction back (the deferred
 			// Rollback). The claim is released, and a later tick retries the
 			// occurrence while it is still the most recent due one. The
-			// reference's unknown_error is deliberately not recorded — it is
-			// one of the fourteen pausing types, and emitting it would
+			// unknown_error is reserved here for a missing initiator. Emitting
+			// that pausing type for an unclassified error would
 			// auto-pause a healthy deployment on a transient database blip,
 			// with no auto-resume shipped to undo it (§8.1 entry 28).
 			return "", "", fireErr

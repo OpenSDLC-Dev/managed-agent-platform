@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/jackc/pgx/v5"
 )
@@ -18,6 +19,8 @@ type caller struct {
 	keyID       string // its api_keys id
 	principalID string // empty for legacy unowned keys
 	policy      store.KeyPolicy
+	sessionID   string // delegated calls use the claim's session, never a caller header
+	delegated   bool
 }
 
 // may reports whether the caller's grant covers the configured alias name.
@@ -48,6 +51,16 @@ func (h *handler) authenticate(r *http.Request) (caller, *apiError) {
 	}
 	if key == "" {
 		return caller{}, unauthenticated("x-api-key header is required")
+	}
+	if strings.HasPrefix(key, inferencetoken.TokenPrefix) {
+		p, err := inferencetoken.Authenticate(r.Context(), h.cfg.Keys, key)
+		if err != nil {
+			return caller{}, internal(r, "inference token lookup failed", err)
+		}
+		if p.WorkID != "" {
+			return caller{keyID: p.APIKeyID, principalID: p.PrincipalID, sessionID: p.SessionID, delegated: true}, nil
+		}
+		// Arbitrary legacy key values keep their old authority until slice 7.
 	}
 	// Read credential and current owner authority in one database snapshot.
 	// Leave apikey.Authenticate legacy-only: private receivers still use it.

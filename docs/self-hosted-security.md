@@ -1597,6 +1597,39 @@ compatible after that schema expansion.
 Keep migrations 0062/0063 during binary rollback. Old gateway replicas refuse owned
 keys and do not enforce organization budgets; drain them before relying on those budgets.
 
+#### Initiators and delegated inference
+
+A session keeps the initiator that authorized its creation. Removing that member
+or archiving its service account stops the next model turn, including grading and
+direct-provider calls. Demotion alone does not stop it. Already queued tool calls
+can finish. Session history stays readable under the existing resource permissions.
+No route changes a session's initiator. Start long-lived work under a service account
+when it must outlive a person's membership.
+
+Native administrators can read or replace a deployment initiator at
+`/api/console/organizations/default/deployments/{id}/initiator` with a browser cookie.
+POST requires Origin and CSRF, and a body containing `principal_id` with an active
+`svac_...` ID. Only future scheduled sessions inherit that setting. Manual runs use
+their caller. A removed scheduled initiator produces `unknown_error` and pauses the
+deployment; selecting a service account does not unpause it. Dreams retain their
+creator and fail through their session's normal `internal_error` path.
+
+The brain mints one `itk_` bearer per admitted model-turn claim. Its hash is stored
+separately from API keys. Claim completion, expiry or reclaim invalidates it; timely
+lease renewal preserves it. The gateway rechecks membership on every call and binds
+usage to the claim's session. Its only scope is inference, including model listings
+and token counting. Management and worker routes refuse it. It shares public-alias
+organization budgets. The brain still sends `BRAIN_API_KEY` until slice 6.
+
+Migration 0064 backfills from `created_by`: principals remain principals, owned keys
+resolve to owners, and historical unowned or deleted-principal IDs remain legacy
+initiators through slice 6. Scheduled and dream sessions inherit their parent when
+their own creator is absent. Unresolvable initiators fail their next model turn.
+Insert triggers and the claim fallback cover old writers during a rolling upgrade.
+Keep migrations 0064/0065 during binary rollback. Old brains do not enforce the new
+membership check, and old gateways reject delegated tokens; drain old replicas before
+relying on these controls. This slice does not switch outbound brain credentials.
+
 #### Owned-key rollout and rollback
 
 Deploy and validate slice 2's native cookie routing before removing public human

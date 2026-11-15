@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
@@ -108,6 +109,19 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 	legacy := dispatchAuthWithLogin(s.pool, s.verifier, s.login, next)
 	cookie := s.requireCookie(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A delegated credential cannot select another lane, including an IAP
+		// assertion or an accompanying cookie, nor follow a cleaning redirect.
+		if token := inferencetoken.Credential(r); token != "" {
+			p, err := inferencetoken.Authenticate(r.Context(), s.pool, token)
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			if p.WorkID != "" {
+				writeError(w, r, errForbidden("this token permits inference only"))
+				return
+			}
+		}
 		_, pattern := next.Handler(r)
 		if s.nativeLogin() && privateCookiePath(r) {
 			w.Header().Set("Cache-Control", "no-store, private")
@@ -144,7 +158,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			privatePattern = pattern
 		}
 		switch privatePattern {
-		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleProxyPath, consoleProxyRootPath:
+		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleDeploymentInitiatorPath, consoleProxyPath, consoleProxyRootPath:
 			cookieOnly = true
 		}
 		if cookieOnly {
