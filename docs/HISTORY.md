@@ -73,6 +73,9 @@ The registry now names the local Responses, embeddings and rerank scope extensio
 The earlier verifier also caught a refused grader leaving its outcome at `evaluating`;
 its regression passed after the failure settlement restored `running` atomically.
 Full candidate verification and final delivery acceptance remain pending.
+The first PR coverage run caught an omitted private-route exception in the revoked-environment-key matrix.
+Its four new initiator cases expected the legacy revoked-key sentence instead of the cookie-required 401.
+The matrix now asserts the cookie boundary for both environment kinds; production behavior did not change.
 
 ## Plan 69 slice 4 independent acceptance
 

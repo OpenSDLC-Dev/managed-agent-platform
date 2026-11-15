@@ -95,7 +95,7 @@ func sendBounded(t *testing.T, s *tserver, method, path string, headers map[stri
 // off the public wire, no reference route, and takes a gate
 // token and nothing else, so any other credential there is an invalid gate
 // token and is answered as one. Native session/logout also require their own
-// cookie, as do members, service accounts and the private resource proxy, while
+// cookie, as do members, service accounts, deployment initiators and the private resource proxy, while
 // GET auth config is anonymous. Each has an explicit check below.
 func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.T) {
 	s := newTestServer(t)
@@ -145,7 +145,8 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 					}
 				case request == "GET /api/auth/session" || request == "POST /api/auth/logout" ||
 					path == membersPath || strings.HasPrefix(path, membersPath+"/") ||
-					path == serviceAccountsPath || strings.HasPrefix(path, serviceAccountsPath+"/"):
+					path == serviceAccountsPath || strings.HasPrefix(path, serviceAccountsPath+"/") ||
+					strings.HasPrefix(path, "/api/console/organizations/default/deployments/") && strings.HasSuffix(path, "/initiator"):
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
 				default:
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
