@@ -71,21 +71,27 @@ func Mint(ctx context.Context, db writer, workID string, generation int64, princ
 	return token, nil
 }
 
-// Authenticate checks the lease, claim generation, session and membership in
-// one snapshot. Role is deliberately absent: demotion does not stop work
+// Authenticate checks candidates' lease, claim generation, session and membership
+// in one snapshot. Multiple candidates support the control plane's management
+// rejection without one database round trip per repeated header. Inference
+// admission passes only its single selected credential. Role is absent: demotion does not stop work
 // started while the initiator could create it. Legacy key state is ignored.
-func Authenticate(ctx context.Context, db Querier, token string) (Principal, error) {
+func Authenticate(ctx context.Context, db Querier, tokens ...string) (Principal, error) {
+	hashes := make([]string, len(tokens))
+	for i, token := range tokens {
+		hashes[i] = gatetoken.HashToken(token)
+	}
 	var p Principal
 	err := db.QueryRow(ctx, `SELECT coalesce(t.principal_id,''),coalesce(t.api_key_id,''),w.session_id,w.id
 		FROM inference_tokens t
 		JOIN work_items w ON w.id=t.work_id AND w.inference_generation=t.claim_generation
 		JOIN sessions s ON s.id=w.session_id
 		LEFT JOIN principals p ON p.id=t.principal_id
-		WHERE t.token_hash=$1 AND w.kind='model_turn' AND w.state='active'
+		WHERE t.token_hash=ANY($1) AND w.kind='model_turn' AND w.state='active'
 		AND w.lease_expires_at>clock_timestamp() AND s.archived_at IS NULL
 		AND (t.api_key_id IS NOT NULL OR
-		     (p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'))`,
-		gatetoken.HashToken(token)).Scan(&p.PrincipalID, &p.APIKeyID, &p.SessionID, &p.WorkID)
+		     (p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active')) LIMIT 1`,
+		hashes).Scan(&p.PrincipalID, &p.APIKeyID, &p.SessionID, &p.WorkID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

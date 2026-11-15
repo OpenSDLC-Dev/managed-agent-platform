@@ -111,23 +111,23 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A delegated credential cannot select another lane, including an IAP
 		// assertion or an accompanying cookie, nor follow a cleaning redirect.
-		tokens := []string{inferencetoken.Credential(r)}
-		if !apiKeyOffered(r) {
+		var tokens []string
+		if apiKeyOffered(r) {
+			if keys := r.Header.Values("x-api-key"); len(keys) == 1 && strings.HasPrefix(keys[0], inferencetoken.TokenPrefix) {
+				tokens = keys
+			}
+		} else {
 			// The control plane treats one empty x-api-key as absent. Its
 			// retained IAP lane ignores Authorization, even repeated fields;
 			// none of those fields may conceal a live delegated credential.
-			tokens = nil
 			for _, value := range r.Header.Values("Authorization") {
 				if token, ok := strings.CutPrefix(value, "Bearer "); ok && strings.HasPrefix(token, inferencetoken.TokenPrefix) {
 					tokens = append(tokens, token)
 				}
 			}
 		}
-		for _, token := range tokens {
-			if token == "" {
-				continue
-			}
-			p, err := inferencetoken.Authenticate(r.Context(), s.pool, token)
+		if len(tokens) != 0 {
+			p, err := inferencetoken.Authenticate(r.Context(), s.pool, tokens...)
 			if err != nil {
 				writeError(w, r, err)
 				return

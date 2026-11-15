@@ -66,6 +66,9 @@ Six behavior regressions failed before their fixes:
 
 The focused queue, store, API, brain and gateway runs passed after correction.
 The IAP regression also preserves legacy prefix-like values without a live inference token.
+Follow-up review found that repeated headers could cause one lookup per candidate.
+A traced request reproduced 129 database calls; the guard now checks all hashes in one joined lookup.
+A separate regression caught repeated Bearers hiding a selected `X-Api-Key` token from that guard.
 The registry now names the local Responses, embeddings and rerank scope extension.
 The earlier verifier also caught a refused grader leaving its outcome at `evaluating`;
 its regression passed after the failure settlement restored `running` atomically.

@@ -1,9 +1,13 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +17,54 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+type inferenceLookupCounter struct{ calls atomic.Int32 }
+
+func (c *inferenceLookupCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.calls.Add(1)
+	return ctx
+}
+func (*inferenceLookupCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func TestDelegatedCandidatesUseOneLookup(t *testing.T) {
+	ctx := t.Context()
+	pool := newPoolWithKey(t)
+	sid, eid := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+	if _, err := q.Enqueue(ctx, pool, eid, sid, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil || item.InferenceToken == "" {
+		t.Fatalf("claim: %v %v", item, err)
+	}
+	counter := &inferenceLookupCounter{}
+	cfg := pool.Config()
+	cfg.ConnConfig.Tracer = counter
+	traced, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traced.Close()
+	h := api.NewHandler(traced, nil, nil, nil)
+	r := httptest.NewRequest("GET", "/api/auth/config", nil)
+	for i := range 128 {
+		r.Header.Add("Authorization", fmt.Sprintf("Bearer itk_nonlive%d", i))
+	}
+	r.Header.Add("Authorization", "Bearer "+item.InferenceToken)
+	rr := httptest.NewRecorder()
+	counter.calls.Store(0)
+	h.ServeHTTP(rr, r)
+	if rr.Code != 403 {
+		t.Fatalf("live trailing token: %d %s", rr.Code, rr.Body.String())
+	}
+	if n := counter.calls.Load(); n != 1 {
+		t.Fatalf("one request with repeated credentials made %d database lookups, want 1", n)
+	}
+}
 
 func TestDelegatedTokenCannotFallThroughToPrivateIAP(t *testing.T) {
 	s := newLaneServerWith(t, func(c *identity.Config) {
@@ -39,6 +90,7 @@ func TestDelegatedTokenCannotFallThroughToPrivateIAP(t *testing.T) {
 		{"empty key", http.Header{"Authorization": {bearer}, "X-Api-Key": {""}}, 403},
 		{"duplicate first", http.Header{"Authorization": {bearer, "Bearer itk_not_issued"}}, 403},
 		{"duplicate last", http.Header{"Authorization": {"Bearer itk_not_issued", bearer}}, 403},
+		{"selected key with duplicate bearers", http.Header{"X-Api-Key": {item.InferenceToken}, "Authorization": {"Bearer one", "Bearer two"}}, 403},
 		{"legacy prefix", http.Header{"Authorization": {"Bearer itk_not_issued", "Bearer legacy"}}, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
