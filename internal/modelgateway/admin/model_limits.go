@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
@@ -42,29 +44,15 @@ func (h *handler) putModelLimit(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var req struct {
-		RPM  *int64 `json:"requests_per_minute"`
-		ITPM *int64 `json:"input_tokens_per_minute"`
-		OTPM *int64 `json:"output_tokens_per_minute"`
-	}
-	if err := strict(b, &req); err != nil {
+	limit, err := decodeModelLimit(b)
+	if err != nil {
 		return nil, err
-	}
-	var named patch
-	if err := json.Unmarshal(b, &named); err != nil {
-		return nil, invalid("invalid JSON: %s", err)
-	}
-	for _, field := range []string{"requests_per_minute", "input_tokens_per_minute", "output_tokens_per_minute"} {
-		if _, ok := named[field]; !ok {
-			return nil, invalid("%s is required; use null for no limit", field)
-		}
 	}
 	if err := checkAliasName(r.PathValue("model")); err != nil {
 		return nil, err
 	}
-	limit, err := h.cfg.Store.PutModelLimit(r.Context(), store.ModelLimit{
-		Model: r.PathValue("model"), RPM: req.RPM, ITPM: req.ITPM, OTPM: req.OTPM,
-	}, func(tx pgx.Tx) error {
+	limit.Model = r.PathValue("model")
+	limit, err = h.cfg.Store.PutModelLimit(r.Context(), limit, func(tx pgx.Tx) error {
 		// Same principal-first mutation fence as key grants. An admin who loses
 		// authority while this waits cannot widen the organization's budget.
 		if _, err := tx.Exec(r.Context(), `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
@@ -80,4 +68,44 @@ func (h *handler) putModelLimit(r *http.Request) (any, error) {
 		return nil, err
 	}
 	return modelLimitView{limit.Model, limit.RPM, limit.ITPM, limit.OTPM}, nil
+}
+
+// Budget replacement requires each exact field once. Struct decoding accepts
+// case variants and duplicate keys, which can silently turn a budget into null.
+func decodeModelLimit(b []byte) (store.ModelLimit, error) {
+	var limit store.ModelLimit
+	fields := map[string]**int64{
+		"requests_per_minute": &limit.RPM, "input_tokens_per_minute": &limit.ITPM, "output_tokens_per_minute": &limit.OTPM,
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if token, err := dec.Token(); err != nil || token != json.Delim('{') {
+		return limit, invalid("rate limits must be a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		token, err := dec.Token()
+		if err != nil {
+			return limit, invalid("invalid JSON: %s", err)
+		}
+		name, ok := token.(string)
+		if !ok || fields[name] == nil || seen[name] {
+			return limit, invalid("unknown or repeated rate-limit field %q", token)
+		}
+		seen[name] = true
+		if err := dec.Decode(fields[name]); err != nil {
+			return limit, invalid("%s: %s", name, err)
+		}
+	}
+	if token, err := dec.Token(); err != nil || token != json.Delim('}') {
+		return limit, invalid("invalid rate-limit JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return limit, invalid("invalid JSON: data after the value")
+	}
+	for _, name := range []string{"requests_per_minute", "input_tokens_per_minute", "output_tokens_per_minute"} {
+		if !seen[name] {
+			return limit, invalid("%s is required; use null for no limit", name)
+		}
+	}
+	return limit, nil
 }

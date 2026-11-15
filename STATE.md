@@ -5,15 +5,15 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 4: gateway authority, organization model budgets and principal usage.
-Implementation and independent acceptance are verified in the [acceptance record](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance).
+Implementation and independent [acceptance](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) are complete; final committed review is in progress.
 Slice 3 merged in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041); its [client acceptance record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) remains the baseline.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
 - [x] Admit owned inference keys by current owner role; retain unowned grants and all private credential boundaries.
-- [x] Enforce organization RPM, input TPM and output TPM by public alias, with cookie-only management and current-admin mutation fences.
-- [x] Attribute usage to principals; preserve historical totals, credential filtering and mixed-version writers.
+- [x] Enforce organization model budgets across replicas, including row waits, proxy cookies, strict replacement bodies and packaged routes.
+- [x] Attribute usage to principals; preserve history and mixed writers, one completion timestamp and independent bounded writes.
 - [x] Deliver the Console companion's principal usage, owner-role access and model budget controls.
-- [x] Complete contract tests, runtime acceptance, `make verify` and independent verification.
+- [x] Repeat contract tests, runtime acceptance, `make verify` and independent verification after review fixes.
 - [ ] Complete dual code review.

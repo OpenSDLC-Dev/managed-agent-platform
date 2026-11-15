@@ -51,7 +51,8 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ## Plan 69 slice 4 independent acceptance
 
-On 2026-11-15, the independent Codex verifier ran `make verify` under WSL
+For the initial candidate committed as `9551b02`, the independent Codex verifier
+ran `make verify` under WSL on 2026-11-15
 with serial package scheduling (`GOFLAGS=-p=1`). All 80 test packages passed
 at 91.74% statement coverage. The gate's processes and fixtures were removed;
 the pre-existing Docker containers and Kubernetes namespaces remained.
@@ -87,6 +88,39 @@ final platform lock-expiry hardening and published image. The authenticated
 reference was unavailable, so those shots do not establish current reference
 fidelity. This record does not claim an independent final-source browser rerun
 or a published-image runtime test.
+
+Both code reviews found gaps outside that initial acceptance. Real row-lock
+probes reproduced stale-minute admissions, split completion buckets, and a
+counter timeout that prevented the ledger write. New regression tests failed
+before their fixes. The fixes recheck admission after the needed window locks
+and reuse one completion timestamp. Review of the first correction found the
+inverse timeout dependency and an unnecessary legacy-key wait for full budgets.
+Reciprocal lock tests reproduced both; the ledger and each counter now write
+independently under one deadline, and organization refusals skip the key lock.
+A combined-wait regression also reproduced an obsolete key-row wait after the
+model wait crossed a minute. Admission now checks the clock between those waits.
+The final local store and admin package runs passed in 93.439s and 84.124s.
+Proxy-cookie, redirect-side sign-in and ambiguous-field tests also failed before
+their fixes.
+The deployed edge matrix reproduced blocked valid alias names, then passed
+2,130 routing cases across Compose/Helm and native/legacy/gateway-disabled modes.
+The normal Codex companion could not access local execution (`registered Core
+launch requires an installed app`), so a fresh `gpt-6.1-sol`/`xhigh` agent reran
+that review separately from the authorized Claude-review replacement.
+
+After those corrections, a fresh independent verifier run passed the canonical
+`make verify` on 2026-11-15: 80 test packages and 91.72% statement coverage.
+The Go and SQL fingerprint matched before and after the run, including the new
+window-wait tests. Focused lock and authentication reruns also passed.
+Rebuilt binaries passed 72 runtime assertions with the real SDK and `ant`, two
+candidate gateways, the old writer and a synthetic vendor. The new assertions
+cover duplicate replacement fields and token counting's shared budget with zero
+billed tokens. The independent Caddy run passed 16 tests and 2,130 routing cases.
+Source, Compose and Helm pin guards passed 4/4, 3/3 and 10/10. The pinned SDK
+report had 767 citations, no findings and no pending transitions. All owned
+processes and fixtures were removed; Docker inventories and Kubernetes namespaces
+matched their baselines. This fresh run supersedes the initial gate result for the
+review fixes and retains the reference and browser gaps stated above.
 
 ## Plan 69 slice 3 final-candidate client acceptance
 

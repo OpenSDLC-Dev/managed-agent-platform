@@ -714,10 +714,15 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Gateway inference shares organization budgets by public model alias.**
   PostgreSQL serializes admission across replicas. The organization budget and
   an unowned key's retained policy count the request in one transaction, or neither does.
+  Admission rechecks the minute after row-lock waits and retries a crossed window.
   Input and output token limits use completed usage; in-flight requests can overshoot.
   Input includes cache writes, but excludes cache reads. The wildcard shares one budget.
   Rate-limit management takes human cookies only, with developer reads and fenced admin writes.
+  Incidental proxy assertions cannot sign in or supply authority on those routes.
   Request usage retains the key ID and records its authenticated principal.
+  One database completion timestamp binds the ledger and both token windows.
+  Ledger and token counters use independent transactions under one deadline
+  and share the database connection pool.
   The canonical daily rollup combines a principal's keys. Migration 0062 preserves
   historical key attribution and lets old ledger writers feed that rollup too.
   The old per-key rollup remains for mixed-version writers and credential-filtered reads.

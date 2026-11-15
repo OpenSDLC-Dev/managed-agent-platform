@@ -1570,8 +1570,11 @@ Use a native admin cookie with Origin and CSRF to replace a budget at
 `POST /admin/v1/rate_limits/{model}`. Encode the alias in the URL, including slashes.
 The body must name `requests_per_minute`, `input_tokens_per_minute` and
 `output_tokens_per_minute`. Each value is a positive integer, or `null` for unlimited.
+Each field name must appear exactly once, with the spelling shown above.
 `GET /admin/v1/rate_limits` lists budgets for a human developer or admin cookie.
 Preset keys and operator tokens cannot use these new routes.
+Proxy assertions attached to native browser requests supply no authority here;
+the cookie still requires current membership, Origin and CSRF for writes.
 
 The database uses fixed minute windows. Token counts arrive when the response ends;
 requests already in flight can exceed the token limit. Cache writes count as input;
@@ -1579,10 +1582,18 @@ cache reads do not. A refusal returns 429 and `Retry-After`. Limits share one
 organization budget: no workspace boundary protects one credential from another.
 Published-model calls, including token counting, use these budgets. Deployment
 diagnostics address a deployment directly and have no public-alias budget.
+TPM counts only usage parsed from a supported upstream response shape. Missing
+or unsupported usage adds no tokens; RPM still applies.
 
 Usage requests retain `api_key_id` and add nullable `principal_id`. Daily reads
 combine a principal's keys unless `api_key_id` is explicitly filtered. Both usage
 routes accept `principal_id`. Historical calls remain attributed to their original key.
+Before starting the first updated platform service, pause new gateway inference
+and deployment diagnostics, then drain accepted calls. Migration 0062 holds
+exclusive locks on usage tables while it indexes and backfills retained totals.
+A long backfill can exceed live writers' ten-second ledger deadline and lose usage.
+Keep traffic paused until startup migrations finish. Mixed old/new writers are
+compatible after that schema expansion.
 Keep migrations 0062/0063 during binary rollback. Old gateway replicas refuse owned
 keys and do not enforce organization budgets; drain them before relying on those budgets.
 

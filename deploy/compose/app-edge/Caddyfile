@@ -7,14 +7,14 @@
 # HTTP in development. Never cache, compress or buffer event streams here.
 :8080 {
 	route {
-		# Match the original URI, not Caddy's cleaned path. Only literal alias
-		# prefixes admit escaped name data (also through the legacy Console BFF).
+		# Match the original URI, not Caddy's cleaned path. Only literal model-name
+		# prefixes admit escaped data (aliases also through the legacy Console BFF).
 		# Decode once: a literal percent is data, but empty/dot path segments and
 		# raw backslashes remain ambiguous. Query escaping remains allowed.
 		@ambiguous expression `
 			{http.request.orig_uri}.matches('(?i)^[^?]*(\\\\|//|(/|%2f)(\\.|%2e){1,2}(/|%2f|[?]|$)|/%2f|%2f(/|%2f|[?]|$))') ||
 			({http.request.orig_uri}.matches('(?i)^[^?]*(%25|%2e|%2f|%5c)') &&
-			 !{http.request.orig_uri}.matches('^/(admin/v1/aliases|api/gateway/admin/v1/aliases)/'))
+			 !{http.request.orig_uri}.matches('^/(admin/v1/(aliases|rate_limits)|api/gateway/admin/v1/aliases)/'))
 		`
 		respond @ambiguous "not found" 404
 		@internal path /internal /internal/*

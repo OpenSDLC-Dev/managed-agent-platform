@@ -388,7 +388,12 @@ class AliasNameRouting(unittest.TestCase):
                     "/api/gateway%2fadmin/v1/aliases/a", "/api/gateway/admin/v1/aliases%2fa",
                     "/api/gateway/admin/v1/aliases-extra/a%25b", "/api/%2567ateway/admin/v1/aliases/a",
                     "/admin//v1/aliases/a", "/admin/v1/./aliases/a", "/admin\\v1/aliases/a"]
+        prefixes += ["/admin%2fv1/rate_limits/a", "/admin/v1%2frate_limits/a", "/admin/v1/rate_limits%2fa",
+                     "/%61dmin/v1/rate_limits/a%25b", "/admin/v1/%72ate_limits/a%25b",
+                     "/admin/v1/rate_limits-extra/a%25b", "/admin//v1/rate_limits/a",
+                     "/admin/v1/./rate_limits/a", "/admin\\v1/rate_limits/a"]
         other = ["/admin/v1/providers/a%25b", "/api/gateway/admin/v1/providers/a%5Cb",
+                 "/api/gateway/admin/v1/rate_limits/a%25b",
                  "/v1/agents/a%2Fb", "/api/auth/a%252e", "/api/console/a%2Eb",
                  "/api/organizations/default/proxy/v1/agents/a%25b"]
         invalid_names = ["../providers", "a/../../providers", "%2e", ".%2E", "%2e%2E/providers",
@@ -396,6 +401,7 @@ class AliasNameRouting(unittest.TestCase):
                          "a/%2fb", "a%2F%2fb", "a%2f/b", "a%2f?query=%25", "a\\b"]
         sources = [("compose", ROOT / "app-edge"),
                    ("helm", ROOT.parent / "helm/managed-agent-platform/files/app-edge")]
+        model_paths = ["/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/", "/admin/v1/rate_limits/"]
         for source, directory in sources:
             for mode, gateway in [("", True), ("platform", True), ("platform", False)]:
                 label = f"{source}-{mode or 'legacy'}-{gateway}"
@@ -425,7 +431,7 @@ class AliasNameRouting(unittest.TestCase):
                     time.sleep(0.1)
                 else:
                     self.fail(self.command("logs", cid).stderr)
-                for prefix in ["/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/"]:
+                for prefix in model_paths:
                     paths = names + (["Qwen%2FQwen3-Coder"] if prefix.startswith("/admin/") else [])
                     for name in paths:
                         for method in ["GET", "POST", "DELETE"]:
@@ -442,8 +448,7 @@ class AliasNameRouting(unittest.TestCase):
                                     self.assertEqual(result, expected, "escaped alias data must arrive byte-for-byte")
                                 else:
                                     self.assertEqual(result[:2], (503 if mode else 404, None))
-                denied = internal + prefixes + other + [prefix + name for prefix in
-                         ["/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/"] for name in invalid_names]
+                denied = internal + prefixes + other + [prefix + name for prefix in model_paths for name in invalid_names]
                 for path in denied:
                     for method in ["GET", "POST", "DELETE"]:
                         case, result = self.request(port, method, path)
@@ -750,7 +755,7 @@ class AliasFixtureContracts(unittest.TestCase):
                         raise exception("after three completed fake requests")
                     path = self.path
                     # This only lets the fixture finish. It is not a routing oracle.
-                    alias = path.startswith(("/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/")) and path.endswith("?query=%252f")
+                    alias = path.startswith(("/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/", "/admin/v1/rate_limits/")) and path.endswith("?query=%252f")
                     if path == "/api/health" or alias and path.startswith("/api/"):
                         status, owner = 200, "console"
                     elif alias and state["env"].get("CONSOLE_AUTH_MODE"):
@@ -830,7 +835,7 @@ class AliasFixtureContracts(unittest.TestCase):
         creations = [args for args in transport.calls if args[0] == "create"]
         self.assertEqual(len(creations), 7)
         self.assertTrue(all("--pull=never" in args and IMAGE in args for args in creations))
-        self.assertEqual(len(fixture.receipt["requests"]), 1464)
+        self.assertEqual(len(fixture.receipt["requests"]), 2130)
         self.assert_cleaned(transport)
 
     def test_image_preparation_failure_allocates_no_resources(self):
@@ -1109,7 +1114,7 @@ class AliasFixtureContracts(unittest.TestCase):
                                         for mount in entry["mounts"])}, indent=2))
                 self.assertFalse(interrupted)
                 self.assert_cleaned(transport)
-                self.assertEqual(len(receipt["requests"]), 1464)
+                self.assertEqual(len(receipt["requests"]), 2130)
                 self.assertEqual(result.errors, [])
                 if failed_listing:
                     self.assertEqual(len(result.failures), 1)
@@ -1169,7 +1174,7 @@ class AliasFixtureContracts(unittest.TestCase):
                               "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"}, receipt.keys())
         self.assertEqual(receipt["requests"], fixture.receipt["requests"])
         count = len(receipt["requests"])
-        self.assertEqual(count, 1464, "fake readiness succeeds on its first request")
+        self.assertEqual(count, 2130, "fake readiness succeeds on its first request")
         self.assertEqual(len(receipt["expectedForwarded"]) + len(receipt["expectedRefused"]), count)
         serialized = sum(item["requests"] for item in snapshots)
         results = sum(item["results"] for item in snapshots)

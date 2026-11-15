@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -71,31 +72,43 @@ func (s *Store) exec(ctx context.Context, sql string, args ...any) error {
 }
 
 // RecordUsage writes u to the ledger and adds it to its day's rollup, in one
-// statement. Tokens also feed the model's window and, when limited, the
-// legacy key's window in separate statements — in the minute the request
-// ended by the database's clock — so a row the ledger refuses still counts
-// against the limits. Cost is computed here, at the prices the deployment has now, a
+// statement. The ledger and each token-window transaction start independently
+// under the caller's deadline. They share the connection pool. All writes reuse
+// one database completion timestamp, including across minute/day boundaries.
+// Tokens feed both windows even if the ledger rejects the row.
+// Cost is computed here, at the prices the deployment has now, a
 // missing price costing nothing and missing tokens making no cost; it is
 // returned, nil when the row has none, was not written, or holds one no
 // float64 can.
 func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*float64, error) {
+	var completed time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&completed); err != nil {
+		return nil, err
+	}
 	var in, out, cw, cr *int64
-	var windowErr error
 	if t := u.Tokens; t != nil {
 		in, out, cw, cr = &t.Input, &t.Output, &t.CacheWrite, &t.CacheRead
+	}
+	var windows sync.WaitGroup
+	var modelErr, keyErr error
+	if t := u.Tokens; t != nil {
 		if u.Alias != "" {
-			windowErr = s.exec(ctx, `INSERT INTO modelgateway.model_rate_windows AS w (model,minute,input_tokens,output_tokens)
-				VALUES ($1,date_trunc('minute',clock_timestamp()),$2,$3)
-				ON CONFLICT (model,minute) DO UPDATE SET
-				input_tokens=w.input_tokens+EXCLUDED.input_tokens,output_tokens=w.output_tokens+EXCLUDED.output_tokens`,
-				u.Alias, t.Input+t.CacheWrite, t.Output)
+			windows.Go(func() {
+				modelErr = s.exec(ctx, `INSERT INTO modelgateway.model_rate_windows AS w (model,minute,input_tokens,output_tokens)
+					VALUES ($1,date_trunc('minute',$4::timestamptz),$2,$3)
+					ON CONFLICT (model,minute) DO UPDATE SET
+					input_tokens=w.input_tokens+EXCLUDED.input_tokens,output_tokens=w.output_tokens+EXCLUDED.output_tokens`,
+					u.Alias, t.Input+t.CacheWrite, t.Output, completed)
+			})
 		}
 		if tpmLimited {
-			windowErr = errors.Join(windowErr, s.exec(ctx, `
-				INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, tokens)
-				VALUES ($1, date_trunc('minute', now()), $2)
-				ON CONFLICT (api_key_id, minute) DO UPDATE SET tokens = w.tokens + EXCLUDED.tokens`,
-				u.APIKeyID, t.limited()))
+			windows.Go(func() {
+				keyErr = s.exec(ctx, `
+					INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, tokens)
+					VALUES ($1, date_trunc('minute', $3::timestamptz), $2)
+					ON CONFLICT (api_key_id, minute) DO UPDATE SET tokens = w.tokens + EXCLUDED.tokens`,
+					u.APIKeyID, t.limited(), completed)
+			})
 		}
 	}
 	var ttft *int64
@@ -109,12 +122,12 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		WITH u AS (
 		  INSERT INTO modelgateway.usage (request_id, api_key_id, model, alias, deployment_id, credential_id,
 		      session_id, protocol, endpoint, status, error_type, input_tokens, output_tokens,
-		      cache_write_tokens, cache_read_tokens, cost, latency_us, ttft_us, principal_id)
+		      cache_write_tokens, cache_read_tokens, cost, latency_us, ttft_us, principal_id, created_at)
 		  SELECT $1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10, NULLIF($11, ''),
 		         $12::bigint, $13::bigint, $14::bigint, $15::bigint,
 		         (coalesce(d.price_input, 0) * $12 + coalesce(d.price_output, 0) * $13
 		          + coalesce(d.price_cache_write, 0) * $14 + coalesce(d.price_cache_read, 0) * $15) / 1000000,
-		         $16, $17, NULLIF($18, '')
+		         $16, $17, NULLIF($18, ''), $19
 		  FROM (VALUES (1)) one LEFT JOIN modelgateway.deployments d ON d.id = $5
 		  RETURNING created_at, api_key_id, principal_id, alias, deployment_id, error_type,
 		            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost
@@ -134,8 +147,10 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		  cost = t.cost + EXCLUDED.cost
 		RETURNING (SELECT cost::text FROM u)`,
 			u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
-			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, u.PrincipalID).Scan(&cost)
+			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, u.PrincipalID, completed).Scan(&cost)
 	})
+	windows.Wait()
+	windowErr := errors.Join(modelErr, keyErr)
 	if ledgerErr != nil || cost == nil {
 		return nil, errors.Join(windowErr, ledgerErr)
 	}
