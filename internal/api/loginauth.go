@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
@@ -108,6 +109,34 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 	legacy := dispatchAuthWithLogin(s.pool, s.verifier, s.login, next)
 	cookie := s.requireCookie(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A delegated credential cannot select another lane, including an IAP
+		// assertion or an accompanying cookie, nor follow a cleaning redirect.
+		var tokens []string
+		if apiKeyOffered(r) {
+			if keys := r.Header.Values("x-api-key"); len(keys) == 1 && strings.HasPrefix(keys[0], inferencetoken.TokenPrefix) {
+				tokens = keys
+			}
+		} else {
+			// The control plane treats one empty x-api-key as absent. Its
+			// retained IAP lane ignores Authorization, even repeated fields;
+			// none of those fields may conceal a live delegated credential.
+			for _, value := range r.Header.Values("Authorization") {
+				if token, ok := strings.CutPrefix(value, "Bearer "); ok && strings.HasPrefix(token, inferencetoken.TokenPrefix) {
+					tokens = append(tokens, token)
+				}
+			}
+		}
+		if len(tokens) != 0 {
+			p, err := inferencetoken.Authenticate(r.Context(), s.pool, tokens...)
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			if p.WorkID != "" {
+				writeError(w, r, errForbidden("this token permits inference only"))
+				return
+			}
+		}
 		_, pattern := next.Handler(r)
 		if s.nativeLogin() && privateCookiePath(r) {
 			w.Header().Set("Cache-Control", "no-store, private")
@@ -144,7 +173,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			privatePattern = pattern
 		}
 		switch privatePattern {
-		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleProxyPath, consoleProxyRootPath:
+		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleDeploymentInitiatorPath, consoleProxyPath, consoleProxyRootPath:
 			cookieOnly = true
 		}
 		if cookieOnly {

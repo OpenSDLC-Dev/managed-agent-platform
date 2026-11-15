@@ -54,6 +54,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -206,6 +207,17 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("request-id", rid)
 	r = r.WithContext(context.WithValue(ctx, requestIDKey{}, rid))
 	if strings.HasPrefix(r.URL.Path, "/admin/") {
+		if token := inferencetoken.Credential(r); token != "" {
+			p, err := inferencetoken.Authenticate(r.Context(), h.cfg.Keys, token)
+			if err != nil {
+				writeError(w, r, internal(r, "inference token lookup failed", err))
+				return
+			}
+			if p.WorkID != "" {
+				writeError(w, r, forbidden("this token permits inference only"))
+				return
+			}
+		}
 		if h.cfg.Admin == nil {
 			writeError(w, r, notFound("no such path: %s", r.URL.Path))
 			return
@@ -236,6 +248,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, err)
 		return
+	}
+	if c.delegated {
+		if !(inferring && rt.servedUnder(prefix) || stored || models) {
+			writeError(w, r, forbidden("this token permits inference only"))
+			return
+		}
+		r.Header.Set(SessionHeader, c.sessionID)
 	}
 	switch {
 	case inferring && rt.servedUnder(prefix):

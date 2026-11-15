@@ -806,6 +806,10 @@ type createSessionIn struct {
 	vaultIDs       []string
 	rawInitial     []json.RawMessage
 	deploymentID   *string
+	// The dream runner supplies these before it links dreams.session_id.
+	// Public creates resolve their audit creator in the insert trigger.
+	initiatorPrincipalID *string
+	initiatorAPIKeyID    *string
 }
 
 // createdSession is what the committing caller still needs afterwards: the
@@ -949,10 +953,11 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
-		   status, title, metadata, resources, vault_ids, created_by, deployment_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		   status, title, metadata, resources, vault_ids, created_by, deployment_id,
+		   initiator_principal_id, initiator_api_key_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy, in.deploymentID).
+		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy, in.deploymentID, in.initiatorPrincipalID, in.initiatorAPIKeyID).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop

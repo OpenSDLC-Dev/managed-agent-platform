@@ -135,6 +135,40 @@ func (b *Brain) RunOnce(ctx context.Context) (found bool, err error) {
 	if err != nil || item == nil {
 		return false, err
 	}
+	if item.InferenceToken == "" {
+		// Refuse before a consumer span, replay, discovery or grading. The
+		// liveness gate may still settle tools accepted by a previous turn.
+		defer func() {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				slog.ErrorContext(ctx, "brain: refused turn failed, its output was not committed",
+					"item", item.ID, "session", item.SessionID, "error", err)
+			}
+		}()
+		_, _, _, envKind, live, err := b.claimLiveSession(ctx, item)
+		if err != nil || !live {
+			return true, err
+		}
+		head, err := b.threadHead(ctx, item.SessionID, item.ThreadID)
+		if err != nil {
+			return true, err
+		}
+		var opts events.AppendOptions
+		if item.ThreadID == "" {
+			// A refused grader has no verdict. Restore its outcome as the
+			// no-provider grader failure does, inside the same settlement,
+			// without replaying the session to discover the grading phase.
+			opts.MutateOutcomes = func(evals []domain.OutcomeEvaluation) ([]domain.OutcomeEvaluation, error) {
+				for i := range evals {
+					if evals[i].Result == domain.OutcomeResultEvaluating {
+						evals[i].Result = domain.OutcomeResultRunning
+					}
+				}
+				return evals, nil
+			}
+		}
+		return true, b.commitFailure(ctx, item.SessionID, item, nil, head,
+			"session initiator is no longer an active organization member", envKind, opts)
+	}
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "model_turn",
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
@@ -1244,14 +1278,14 @@ func (b *Brain) failTurn(ctx context.Context, sid domain.ID, item *queue.Item, s
 	if len(msg) > maxFailureMessage {
 		msg = toolset.TruncateRunes(msg, maxFailureMessage) + "[truncated]"
 	}
-	err := b.commitFailure(ctx, sid, item, span, watermark, msg, envKind)
+	err := b.commitFailure(ctx, sid, item, span, watermark, msg, envKind, events.AppendOptions{})
 	if span != nil {
 		span.Finish(ctx, true, err)
 	}
 	return err
 }
 
-func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg, envKind string) error {
+func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.Item, span *events.ModelRequest, watermark int64, msg, envKind string, opts events.AppendOptions) error {
 	var head []events.NewEvent
 	if span != nil {
 		endEv, err := span.EndEvent(true, domain.ModelUsage{})
@@ -1266,7 +1300,6 @@ func (b *Brain) commitFailure(ctx context.Context, sid domain.ID, item *queue.It
 	// failed) — where nothing else would ever stamp the thread's input and
 	// pendingInput would read it as queued forever. After a start there is
 	// nothing to stamp: the start did.
-	var opts events.AppendOptions
 	if span == nil {
 		opts.MarkProcessedThrough = watermark
 	}

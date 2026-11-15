@@ -4,16 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 4: gateway authority, organization model budgets and principal usage.
-Implementation, independent [acceptance](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) and dual code review are complete.
-Slice 3 merged in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041); its [client acceptance record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) remains the baseline.
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 5: initiators and per-claim delegated inference tokens.
+Implementation, independent [acceptance](./docs/HISTORY.md#plan-69-slice-5-independent-acceptance) and dual code review are complete.
+Slice 4 merged in [PR #1042](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1042); its [acceptance record](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) remains the baseline.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
-- [x] Admit owned inference keys by current owner role; retain unowned grants and all private credential boundaries.
-- [x] Enforce organization model budgets across replicas, including row waits, proxy cookies, strict replacement bodies and packaged routes.
-- [x] Attribute usage to principals; preserve history and mixed writers, one completion timestamp and independent bounded writes.
-- [x] Deliver the Console companion's principal usage, owner-role access and model budget controls.
-- [x] Repeat contract tests, runtime acceptance, `make verify` and independent verification after review fixes.
-- [x] Complete dual code review.
+- [x] Record and backfill session, deployment and dream initiators; preserve old-writer compatibility.
+- [x] Mint lease-bound inference tokens and enforce membership before every model turn, grading included.
+- [x] Admit delegated inference at the gateway with principal usage and organization budgets; preserve credential boundaries.
+- [x] Add cookie-only deployment service-account selection and scheduled-run refusal with automatic pause.
+- [x] Deliver the Console companion and update the wire registry and operator documentation.
+- [x] Complete contract and runtime tests, `make verify`, independent verification, dual review and CI.

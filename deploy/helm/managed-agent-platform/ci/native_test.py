@@ -11,7 +11,7 @@ from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[1]
 ROOT = CHART.parents[2]
-CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:eb53ab4a6337957fba650c9c58b6d446f8de62be8cb65a6b54cdf934205347ad"
+CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68"
 
 
 def render(values=None, release="native-test", success=True):

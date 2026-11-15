@@ -33,6 +33,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -133,6 +134,9 @@ type Item struct {
 	// context a BYOC worker gets from its poll response (see Work). Nil when
 	// the item was enqueued with no active span.
 	TraceContext map[string]string
+	// InferenceToken is minted only for an admitted model-turn claim. Empty
+	// means its initiator was refused. Never log it or expose it on the work API.
+	InferenceToken string
 }
 
 // Work is a work_items row projected for the wire work API (poll/get/list and
@@ -300,9 +304,26 @@ func traceContextArg(ctx context.Context) any {
 // driver (web_fetch/web_search) run on the platform regardless of where a
 // session's sandbox lives.
 func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item, error) {
+	if kind != ModelTurn {
+		return q.claim(ctx, q.pool, kind, ttl)
+	}
+	var item *Item
+	err := pgx.BeginTxFunc(ctx, q.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+		var err error
+		item, err = q.claim(ctx, tx, kind, ttl)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) (*Item, error) {
 	var it Item
 	var prevState string
-	err := q.pool.QueryRow(ctx,
+	var generation int64
+	err := db.QueryRow(ctx,
 		`WITH picked AS (
 		    SELECT w.id, w.state FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
@@ -324,9 +345,9 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		           w.lease_expires_at, p.state, w.trace_context,
 		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
 		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END,
-		           COALESCE((w.metadata->>'chain_grading')::bool, false)`,
+		           COALESCE((w.metadata->>'chain_grading')::bool, false), w.inference_generation`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
-		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading)
+		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading, &generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -334,6 +355,24 @@ func (q *Queue) Claim(ctx context.Context, kind Kind, ttl time.Duration) (*Item,
 		return nil, fmt.Errorf("queue: claim %s: %w", kind, err)
 	}
 	it.Reclaimed = prevState == "active"
+	if kind == ModelTurn {
+		var principalID, apiKeyID *string
+		var allowed bool
+		err := db.QueryRow(ctx, `SELECT i.principal_id,i.api_key_id,
+			coalesce(i.api_key_id IS NOT NULL OR
+			 (p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'),false)
+			FROM session_initiators i LEFT JOIN principals p ON p.id=i.principal_id
+			WHERE i.session_id=$1`, it.SessionID).Scan(&principalID, &apiKeyID, &allowed)
+		if err != nil {
+			return nil, fmt.Errorf("queue: resolve initiator: %w", err)
+		}
+		if allowed {
+			it.InferenceToken, err = inferencetoken.Mint(ctx, db, string(it.ID), generation, principalID, apiKeyID)
+			if err != nil {
+				return nil, fmt.Errorf("queue: mint inference token: %w", err)
+			}
+		}
+	}
 	return &it, nil
 }
 
