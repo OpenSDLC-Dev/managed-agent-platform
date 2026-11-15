@@ -49,6 +49,49 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 5 independent acceptance
+
+An independent Codex verifier ran the canonical `make verify` on `4ffbbed`
+under WSL on 2026-11-15, with serial package scheduling (`GOFLAGS=-p=1`).
+All 80 test packages passed at 91.74% statement coverage.
+The source and Go/SQL fingerprints matched before and after the gate.
+The later Console pins at `018fdb6` changed no Go or SQL.
+
+Fresh control-plane, brain and gateway processes passed 81 runtime assertions.
+An old `f28e2c9` control plane remained live through the migration and wrote afterward.
+The run used the pinned Anthropic SDK, stock `ant` v1.42.0, two gateway replicas
+and a synthetic model vendor. It checked immutable initiators, shared alias budgets,
+principal/session usage, claim expiry and reclaim, membership removal, scheduled
+refusal and recovery, and dream failure. It also confirmed the brain still sends
+its configured key. All owned processes and fixtures were removed; the 19-container
+inventory and Kubernetes namespaces matched their baselines.
+
+All five verifier rungs passed with no open findings. The field and error audit
+used SDK v1.70.1 and the registered deployment `budget` omission.
+The SDK report checked 767 citations with no findings or pending transitions.
+Independent source, Compose and Helm pin guards passed 4/4, 3/3 and 10/10.
+[CI run 43714828557](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/43714828557)
+passed the whole workflow at `018fdb6`, with 91.72% statement coverage.
+Registry, SDK transition and CodeQL checks passed too.
+The verifier and both separate reviewers ran `gpt-6.1-sol` at `xhigh`.
+The owner authorized the Claude-role substitutions after `400 organization_on_hold`.
+
+The Console companion merged in [PR #259](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/259)
+at `baee77aaf14336f08a5cde50da7ac396f78adb83`.
+[Main CI run 43712900486](https://github.com/OpenSDLC-Dev/managed-agent-console/actions/runs/43712900486)
+passed all three operating systems, Docker checks and both architecture scans
+before publishing the non-release SHA image. Independent anonymous registry reads
+verified the index, AMD64/ARM64 manifests and their source, revision and version labels.
+Compose and Helm pin `sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68`;
+native Console CI pins the same source.
+
+Local Console acceptance passed 2,125 Linux unit tests and 21 native browser cases
+against the final production Go changes, plus two standalone scenario repetitions.
+Two Chrome light/dark walkthroughs and two failure-artifact controls passed.
+Four fresh local screenshots were inspected. The authenticated reference supplied
+structural context, but a fresh reference capture was unavailable. This does not
+establish pixel-identical fidelity or a published-image runtime test.
+
 ## Plan 69 slice 5 review hardening
 
 On 2026-11-15, two independent Codex reviews of `9890051` ran at
@@ -72,7 +115,6 @@ A separate regression caught repeated Bearers hiding a selected `X-Api-Key` toke
 The registry now names the local Responses, embeddings and rerank scope extension.
 The earlier verifier also caught a refused grader leaving its outcome at `evaluating`;
 its regression passed after the failure settlement restored `running` atomically.
-Full candidate verification and final delivery acceptance remain pending.
 The first PR coverage run caught an omitted private-route exception in the revoked-environment-key matrix.
 Its four new initiator cases expected the legacy revoked-key sentence instead of the cookie-required 401.
 The matrix now asserts the cookie boundary for both environment kinds; production behavior did not change.
