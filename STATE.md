@@ -5,7 +5,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Active work
 
 [Plan 69](./docs/plan/69_principal-bound-auth.md) slice 4: gateway authority, organization model budgets and principal usage.
-Implementation and independent [acceptance](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) are complete; final committed review is in progress.
+Implementation, independent [acceptance](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) and dual code review are complete.
 Slice 3 merged in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041); its [client acceptance record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) remains the baseline.
 **no release until plan 69 slice 7**.
 
@@ -16,4 +16,4 @@ Slice 3 merged in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platf
 - [x] Attribute usage to principals; preserve history and mixed writers, one completion timestamp and independent bounded writes.
 - [x] Deliver the Console companion's principal usage, owner-role access and model budget controls.
 - [x] Repeat contract tests, runtime acceptance, `make verify` and independent verification after review fixes.
-- [ ] Complete dual code review.
+- [x] Complete dual code review.

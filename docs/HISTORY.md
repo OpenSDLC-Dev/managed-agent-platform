@@ -108,7 +108,7 @@ The normal Codex companion could not access local execution (`registered Core
 launch requires an installed app`), so a fresh `gpt-6.1-sol`/`xhigh` agent reran
 that review separately from the authorized Claude-review replacement.
 
-After those corrections, a fresh independent verifier run passed the canonical
+After those corrections, a fresh independent verifier run for `81ac236` passed the canonical
 `make verify` on 2026-11-15: 80 test packages and 91.72% statement coverage.
 The Go and SQL fingerprint matched before and after the run, including the new
 window-wait tests. Focused lock and authentication reruns also passed.
@@ -121,6 +121,13 @@ report had 767 citations, no findings and no pending transitions. All owned
 processes and fixtures were removed; Docker inventories and Kubernetes namespaces
 matched their baselines. This fresh run supersedes the initial gate result for the
 review fixes and retains the reference and browser gaps stated above.
+
+A final review found a UTC-midnight assumption in the migration test. The
+test-only correction in `a0cf833` fixes the historical date and reads through the
+database's latest recorded timestamp. It preserves actor totals, the old prepared
+writer and migration idempotence. Its independent focused rerun passed all three
+repetitions in 3.995s; production code and migrations stayed at the full-gate
+candidate. Both committed reviews reported no open findings through `a0cf833`.
 
 ## Plan 69 slice 3 final-candidate client acceptance
 
