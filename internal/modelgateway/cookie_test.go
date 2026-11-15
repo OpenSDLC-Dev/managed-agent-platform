@@ -7,6 +7,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
 // Mounting cookie-enabled administration must never add a cookie lane to inference or model discovery.
@@ -43,5 +44,35 @@ func TestGatewayCookieNeverAuthenticatesInference(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestGatewayDiagnosticUsageNamesCookiePrincipal(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-1", 1)
+	d := e.deployment(p, "m")
+	m := login.New(e.pool, login.Config{Mode: login.ModePassword, PublicOrigin: "https://console.example", Development: true})
+	_, err := e.pool.Exec(e.ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_admin','diagnostic','admin','admin')`)
+	e.must(err)
+	issued, err := m.Issue(e.ctx, "principal_admin")
+	e.must(err)
+	e.start(func(cfg *modelgateway.Config) {
+		prober, err := modelgateway.NewProber(*cfg)
+		e.must(err)
+		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap, Prober: prober, Login: m})
+		e.must(err)
+	})
+	res, raw := e.do("POST", "/admin/v1/deployments/"+d.ID+"/test", `{}`, map[string]string{
+		"Cookie": "map_session=" + issued.Token, "Origin": "https://console.example", "X-Csrf-Token": issued.CSRFToken,
+	})
+	if res.StatusCode != 200 {
+		t.Fatalf("diagnostic: %d %s", res.StatusCode, raw)
+	}
+	rows, _, err := e.s.ListUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_admin"}, 0, 10)
+	e.must(err)
+	if len(rows) != 1 || rows[0].APIKeyID != "" || rows[0].Endpoint != "deployment_test" {
+		t.Fatalf("diagnostic actor: %+v", rows)
 	}
 }

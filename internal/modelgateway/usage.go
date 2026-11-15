@@ -48,7 +48,7 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load()))) }()
 	u := store.Usage{
-		RequestID: requestID(r), APIKeyID: c.keyID, Model: ledgerText(model), Alias: alias,
+		RequestID: requestID(r), APIKeyID: c.keyID, PrincipalID: c.principalID, Model: ledgerText(model), Alias: alias,
 		SessionID: r.Header.Get(SessionHeader), Protocol: string(proto), Endpoint: routes[path].endpoint,
 		Status: out.status, ErrorType: ledgerText(out.errType), Tokens: out.tokens, Latency: time.Since(start), TTFT: out.ttft,
 	}
@@ -88,21 +88,29 @@ func cut(s string, n int) string {
 	return s[:n]
 }
 
-// admit counts the request against its key's limits, when the key has any,
+// admit counts the request against the model and any retained key limits,
 // and answers a refusal itself: 429 rate_limit_error with retry-after in
 // whole seconds, until the minute the refusal counted in ends.
-func (h *handler) admit(w http.ResponseWriter, r *http.Request, c caller) bool {
+func (h *handler) admit(w http.ResponseWriter, r *http.Request, c caller, model string) bool {
 	p := c.policy
-	if p.RPM == nil && p.TPM == nil {
-		return true
-	}
-	a, err := h.cfg.Store.Admit(r.Context(), c.keyID, p.RPM, p.TPM)
+	// Reading a complete body can observe a TCP half-close. net/http cancels
+	// its context then, although the caller can still read our answer. Match
+	// the upstream path's contract, with a separate bound for database waits.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordTimeout)
+	defer cancel()
+	a, err := h.cfg.Store.AdmitModel(ctx, model, c.keyID, p.RPM, p.TPM)
 	if err != nil {
 		writeError(w, r, internal(r, "rate limit check failed", err))
 		return false
 	}
 	if a.Admitted {
 		return true
+	}
+	if !strings.HasPrefix(a.Limit, "key_") {
+		w.Header().Set("Retry-After", strconv.Itoa(a.RetryAfter))
+		writeError(w, r, &apiError{http.StatusTooManyRequests, "rate_limit_error",
+			"the organization's " + a.Limit + " limit for model " + model + " is reached"})
+		return false
 	}
 	limit := strconv.Itoa(int(derefInt32(p.RPM))) + " requests"
 	if a.Tokens {

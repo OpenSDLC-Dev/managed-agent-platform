@@ -258,6 +258,9 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	}
 	u := store.Usage{RequestID: requestID(r), APIKeyID: testKeyID, Model: d.UpstreamModel, DeploymentID: d.ID, CredentialID: c.ID,
 		Protocol: string(in), Endpoint: testEndpoint, Status: status, ErrorType: ledgerText(errType), Tokens: out.tokens, Latency: latency}
+	if id := admin.PrincipalID(ctx); id != "" {
+		u.PrincipalID, u.APIKeyID = id, ""
+	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if _, err := p.h.cfg.Store.RecordUsage(rctx, u, false); err != nil {

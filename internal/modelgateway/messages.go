@@ -384,7 +384,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	// Only a request the key's limits admit counts, and is recorded: the
 	// refusals above are the gateway's own, made before any upstream was
 	// asked.
-	if !h.admit(w, r, c) {
+	if !h.admit(w, r, c, a.Name) {
 		return
 	}
 	out := &outcome{}

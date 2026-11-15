@@ -19,9 +19,9 @@
 //	GET  /v1/models/{id}
 //
 // A request authenticates with a platform API key in x-api-key or as a
-// Bearer, checked by internal/apikey exactly as the control plane checks it,
-// and calls a model only under the key policy an administrator wrote for the
-// key. The bootstrap key and the brain's — the values the control plane
+// Bearer. An owned key uses its active owner's current developer or admin
+// role and needs no grant. An unowned key calls a model under its retained
+// key policy. The bootstrap key and the brain's — the values the control plane
 // registers as "bootstrap" and "brain" — need no policy, being known by their
 // configured values; a policy written for either still applies, and like any
 // key each calls nothing once its row is archived or expired.

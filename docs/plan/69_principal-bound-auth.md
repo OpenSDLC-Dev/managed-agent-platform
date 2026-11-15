@@ -695,6 +695,9 @@ Notes on the table:
 - An admin sets rate limits per model for the whole organization: requests,
   input tokens and output tokens per minute. They apply to every call from
   slice 4, and replace the key policies' RPM and TPM limits when those go.
+  The model is the public alias, not the upstream model ID (owner,
+  2026-11-15). All keys, protocols and backends for that alias share its
+  budget. All names matched by the wildcard alias share one `*` budget.
 - **No limit isolates one credential from another** after slice 7. A
   runaway or leaked key can use a model's whole organization limit. The
   reference bounds use per workspace, and this plan has no workspaces.

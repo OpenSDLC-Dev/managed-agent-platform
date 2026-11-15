@@ -27,8 +27,9 @@ func ownedKeyFrom(ctx context.Context) (apiKeyAuthority, bool) {
 	return authority, ok
 }
 
-// authenticateManagementKey is control-plane-only. The shared apikey lookup
-// deliberately cannot admit owned digests to the gateway or private key API.
+// authenticateManagementKey is control-plane-only. The shared legacy apikey
+// lookup cannot admit owned digests to private APIs; gateway inference has its
+// own current-owner check.
 // Read the owner and credential in one snapshot; this is not an IdP sign-in.
 func authenticateManagementKey(ctx context.Context, db apikey.Querier, raw string) (apiKeyAuthority, error) {
 	var authority apiKeyAuthority

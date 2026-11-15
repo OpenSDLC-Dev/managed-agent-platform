@@ -646,7 +646,7 @@ console:
   authMode: ""
   publicOrigin: ""
   # Independent multi-architecture published image. Platform image.tag never changes it.
-  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:a6a7285c3aef10bd12f62d0c1fb51a1b878e654b4c09416af0891833941b4987
+  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:eb53ab4a6337957fba650c9c58b6d446f8de62be8cb65a6b54cdf934205347ad
   # Legacy only: keys platform-api-key and optional console-password.
   # Empty uses the release bootstrap key; native mode receives neither key.
   legacySecret: ""

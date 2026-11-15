@@ -49,6 +49,45 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 4 independent acceptance
+
+On 2026-11-15, the independent Codex verifier ran `make verify` under WSL
+with serial package scheduling (`GOFLAGS=-p=1`). All 80 test packages passed
+at 91.74% statement coverage. The gate's processes and fixtures were removed;
+the pre-existing Docker containers and Kubernetes namespaces remained.
+
+A fresh PostgreSQL fixture ran the slice 3 gateway at `14985f8`, the candidate
+control plane, and two candidate gateways together. All 65 runtime checks
+passed using `ant` v1.42.0, the pinned Anthropic Go SDK and a synthetic vendor.
+They covered current owner authority, shared alias budgets, principal usage,
+credential filtering, historical totals and mixed-version writers.
+Separate regression checks proved that expired sessions cannot widen budgets
+after advisory or row-lock waits. Live-session controls and 256-character
+Unicode aliases passed too.
+
+Claude returned `400 organization_on_hold`. The owner authorized separate
+Codex agents for the verifier and Claude review roles. The verifier ran
+`gpt-6.1-sol` at `xhigh`; the regular Codex review remains a separate pass.
+The PR records the completed review outcomes.
+
+The Console companion merged in [PR #255](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/255).
+[PR #256](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/256)
+then corrected two-second fixture startup assumptions exposed by macOS CI.
+Its final source is `bd59380a84779a6593c7e8462f8ed5f2ee8bdeba`.
+[Main CI run 43686473044](https://github.com/OpenSDLC-Dev/managed-agent-console/actions/runs/43686473044)
+passed all three operating systems, Docker checks, and both architecture scans
+before publishing the non-release SHA image. Anonymous registry inspection
+confirmed AMD64 and ARM64 children with that revision and version label under
+manifest `sha256:eb53ab4a6337957fba650c9c58b6d446f8de62be8cb65a6b54cdf934205347ad`.
+Compose and Helm pin that manifest; native Console CI pins the same source.
+
+Earlier local Console acceptance passed 20 native browser cases and inspected
+18 light/dark screenshots against the development candidate. It predates the
+final platform lock-expiry hardening and published image. The authenticated
+reference was unavailable, so those shots do not establish current reference
+fidelity. This record does not claim an independent final-source browser rerun
+or a published-image runtime test.
+
 ## Plan 69 slice 3 final-candidate client acceptance
 
 On 2026-11-14, the user accepted completed native CI instead of another final local

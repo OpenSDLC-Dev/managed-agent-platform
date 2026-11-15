@@ -155,6 +155,8 @@ func (h *handler) routes() {
 		ep("GET", read, h.getKeyPolicy), ep("POST", write, h.putKeyPolicy), ep("DELETE", write, h.deleteKeyPolicy))
 	h.route("/admin/v1/usage/daily", ep("GET", read, h.dailyUsage))
 	h.route("/admin/v1/usage/requests", ep("GET", read, h.listUsage))
+	h.route("/admin/v1/rate_limits", ep("GET", read, h.listModelLimits))
+	h.route("/admin/v1/rate_limits/{model...}", ep("POST", write, h.putModelLimit))
 	h.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, notFound("no such path: %s", r.URL.Path))
 	})
@@ -206,12 +208,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m := h.cfg.Login; m != nil && m.NativeEnabled() {
 		w.Header().Set("Cache-Control", "no-store, private")
 	}
-	role, cookie, err := h.authenticate(r)
+	role, cookie, principalID, err := h.authenticate(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
 	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	ctx = context.WithValue(ctx, principalKey{}, principalID)
 	if cookie {
 		ctx = context.WithValue(ctx, cookieKey{}, true)
 	}
@@ -228,19 +231,19 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // members. A browser cookie instead reads current authority without a sign-in.
 // Offered legacy credentials retain precedence, including their failures.
 // cookie is true only when a browser session actually authenticated the request.
-func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, err error) {
+func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, principalID string, err error) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
-		return "", false, unauthenticated("a credential header is repeated")
+		return "", false, "", unauthenticated("a credential header is repeated")
 	}
 	if len(keys) == 1 {
 		if h.isBootstrap(keys[0]) {
-			return identity.RoleAdmin, false, nil
+			return identity.RoleAdmin, false, "", nil
 		}
-		return "", false, unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
+		return "", false, "", unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
 	}
 	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && h.isBootstrap(tok) {
-		return identity.RoleAdmin, false, nil
+		return identity.RoleAdmin, false, "", nil
 	}
 	if v := h.cfg.Verifier; v != nil {
 		if tok, ok := v.Credential(r); ok {
@@ -253,10 +256,10 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 					SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
 					apikey.Hash(bearer)).Scan(&legacy)
 				if err != nil {
-					return "", false, err
+					return "", false, "", err
 				}
 				if !legacy {
-					return "", false, unauthenticated("the admin API does not accept this issued API key")
+					return "", false, "", unauthenticated("the admin API does not accept this issued API key")
 				}
 			}
 			id, err := v.Verify(r.Context(), tok)
@@ -269,21 +272,21 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 					reason = ie.Reason()
 				}
 				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
-				return "", false, unauthenticated("invalid operator token")
+				return "", false, "", unauthenticated("invalid operator token")
 			}
 			if m := h.cfg.Login; v.AssertionHeader() != "" && m != nil && m.NativeEnabled() && m.CheckProxyOrigin(r) != nil {
-				return "", false, forbidden("invalid browser origin")
+				return "", false, "", forbidden("invalid browser origin")
 			}
 			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
 			if errors.Is(err, principal.ErrDeactivated) {
 				// A 403 as on the control plane: the token is genuine, and the
 				// refusal is of the account.
-				return "", false, forbidden("this account has been removed from the organization")
+				return "", false, "", forbidden("this account has been removed from the organization")
 			}
 			if err != nil {
-				return "", false, err
+				return "", false, "", err
 			}
-			return p.Role, false, nil
+			return p.Role, false, p.ID, nil
 		}
 	}
 	legacyOffered := len(r.Header.Values("Authorization")) > 0
@@ -293,14 +296,14 @@ func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool
 	if m := h.cfg.Login; !legacyOffered && m != nil && m.NativeEnabled() {
 		session, err := m.Authenticate(r.Context(), r)
 		if err != nil {
-			return "", false, err
+			return "", false, "", err
 		}
 		if err := m.CheckCSRF(r, session); err != nil {
-			return "", false, forbidden("invalid browser origin or CSRF token")
+			return "", false, "", forbidden("invalid browser origin or CSRF token")
 		}
-		return session.Role, true, nil
+		return session.Role, true, session.PrincipalID, nil
 	}
-	return "", false, unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
+	return "", false, "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
 }
 
 // isBootstrap compares digests, so the comparison is constant-time in the
