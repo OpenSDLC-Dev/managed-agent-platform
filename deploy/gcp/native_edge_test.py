@@ -9,7 +9,6 @@ import textwrap
 import unittest
 
 import native_edge
-from native_edge import manifest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -121,7 +120,7 @@ class NativeEdge(unittest.TestCase):
                 native_edge.validate_existing("https://console.example.com", wrong)
 
     def test_keeps_tls_and_routes_all_paths_to_the_native_edge(self):
-        items = {item["kind"]: item for item in manifest("https://console.example.com", "map-managed-agent-platform-app-edge")["items"]}
+        items = {item["kind"]: item for item in native_edge.manifest("https://console.example.com", "map-managed-agent-platform-app-edge")["items"]}
         ingress = items["Ingress"]
         self.assertEqual(ingress["metadata"]["name"], "console")
         self.assertEqual(ingress["metadata"]["annotations"]["kubernetes.io/ingress.global-static-ip-name"], "console-ip")
@@ -141,10 +140,10 @@ class NativeEdge(unittest.TestCase):
     def test_refuses_an_origin_google_cannot_redirect_to_or_a_bad_service(self):
         for origin in ["", "http://console.example.com", "https://127.0.0.1", "https://[::1]", "https://console.example.com/", "https://console.example.com:443", "https://console.example.com:8443", "https://CONSOLE.example.com", "https://a@console.example.com", "https://console.example.com?x=1", "https://console.example.com#fragment"]:
             with self.subTest(origin=origin), self.assertRaises(ValueError):
-                manifest(origin, "map-app-edge")
+                native_edge.manifest(origin, "map-app-edge")
         for service in ["", "a/b", "a\nkind: Secret", "-bad", "a" * 64]:
             with self.subTest(service=service), self.assertRaises(ValueError):
-                manifest("https://console.example.com", service)
+                native_edge.manifest("https://console.example.com", service)
 
 
 if __name__ == "__main__":
