@@ -406,7 +406,8 @@ supply alongside it, and the render fails naming each one you miss:
 | Value | Why |
 | --- | --- |
 | `controlplane.apiKey` | the management API key |
-| `brain.apiKey` | the brain's key for the model gateway, which the chart runs by default; with `modelgateway.enabled=false`, `brain.modelProviders` instead: at least one model route, as a JSON array |
+| `brain.apiKey` | slice 6 receiver compatibility only; new brains send per-claim tokens. With `modelgateway.enabled=false`, supply `brain.modelProviders`: at least one direct model route, as a JSON array |
+| `identity.mode` / `console.publicOrigin` | required native login mode and HTTPS application origin; OIDC also needs issuer, matching client ID/audience, and client secret |
 | `postgresql.password` | bundled Postgres; must be URL-safe — it is embedded in `DATABASE_URL` |
 | `minio.rootUser` / `minio.rootPassword` | bundled object storage |
 | `openbao.staticSealKey` / `openbao.platformToken` | bundled OpenBao; the seal key is base64 of exactly 32 bytes |
@@ -505,11 +506,14 @@ instance name that `environment/`'s own public defaults already spell out. Why t
 the shape this deployment uses, and the one migration step that is not automatic, are under
 "Continuous delivery" below.
 
-The three credentials come from Secret Manager, two of the four remaining values are fixed
-strings and two are Terraform outputs, and the Secret is then
+Credential inputs come from Secret Manager; backend coordinates use fixed values and
+Terraform outputs. The Secret is assembled by
 [`mode2-secret.sh`](./mode2-secret.sh) — literally the file `deploy.yml` runs, which argues
 `--from-file`, the destination *names*, the namespace step and each of its three checks
 beside the code that makes them. What is left here is only what produces its inputs:
+
+For OIDC, also export `OIDC_CLIENT_SECRET_NAME` with the client secret's Secret Manager name
+before running this block; see [native sign-in](#native-google-sign-in-and-the-staging-https-edge).
 
 ```sh
 #!/bin/bash
@@ -553,12 +557,12 @@ export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name
 "$repo/deploy/gcp/mode2-secret.sh"
 ```
 
-The script fetches the three credentials into a mode-700 directory of its own and removes it
+The script fetches credentials into a mode-700 directory of its own and removes it
 however it exits — which is the reason it is a file rather than something to paste: pasted,
 the `trap` would fire when the *terminal* closes rather than when the work ends, leaving
-three credentials on disk for as long as that shell lives. Hand it `SECRET_DIR` and it keeps
+credentials on disk for as long as that shell lives. Hand it `SECRET_DIR` and it keeps
 them there instead, and leaves the directory to you; that is how CD re-reads the api key to
-smoke-test the deployment. The three secrets it reads are created by nothing in this
+smoke-test the deployment. Those secrets are created by nothing in this
 repository — ["Continuous delivery"](#continuous-delivery) says who owns them and what goes
 in each.
 
@@ -587,109 +591,89 @@ account is created here; the **annotation** on that KSA comes from the chart val
 `namespace` and `release_name` are what the binding names — install the chart somewhere
 else and ADC fails at pod startup rather than denying a permission later.
 
-## Single sign-on: Google's identity provider, not ours
+## Native Google sign-in and the staging HTTPS edge
 
-[docs/plan/31_console-sso-rbac.md](../../docs/plan/31_console-sso-rbac.md) bundles a
-hardened Casdoor as the self-host default IdP — in compose, and in the Helm chart behind
-`casdoor.enabled`. **This environment deploys none of it**, and that is the plan's decision
-rather than a gap: on GCP the identity provider is Google's, so Cloud Identity Platform or
-Workspace does the SSO behind Identity-Aware Proxy, `casdoor.enabled` stays `false`, and the
-human lane the platform runs here is `IDENTITY_MODE=trusted_proxy` with the `gcp-iap` preset
-— configured below, and left switched off until there is an IAP to switch it on behind.
+Staging uses Google OIDC with issuer `https://accounts.google.com`.
+The platform owns the callback, HttpOnly session cookie, CSRF and organization roles.
+The Console is served by the platform chart. Its repository publishes the pinned image;
+its old GKE deployment is a manual rollback path through plan 69 slice 6 only.
+Do not run that workflow alongside platform CD: GitHub concurrency groups do not span repositories.
 
-**The preset is most of the configuration, and it refuses to be talked out of any of it.**
-[`internal/identity/preset.go`](../../internal/identity/preset.go) fixes the assertion header
-(`x-goog-iap-jwt-assertion`), the issuer (`https://cloud.google.com/iap`), the key set
-(`https://www.gstatic.com/iap/verify/public_key-jwk`) and the algorithm (ES256).
-Supplying `IDENTITY_PROXY_HEADER`, `_ISSUER`, `_KEYS_URL` or `_ALGS` beside it is a **boot
-error** — `configureGCPIAP` in [`internal/identity/config.go`](../../internal/identity/config.go)
-answers `IDENTITY_PROXY_PRESET=gcp-iap supplies IDENTITY_PROXY_HEADER; unset it` — not a
-variable that is quietly ignored. So the chart's values carry exactly `identity.mode`,
-`identity.proxy.preset`, `identity.proxy.audience`, `identity.claims.roles` and
-`identity.roleMap`, and [`staging-values.yaml`](./staging-values.yaml) carries those five and
-no more — `mode` empty for now, the other four spelled as a working deployment wants them.
+Before deploying slice 6, the owner configures a Google Auth Platform Web application client:
 
-**The audience is the whole tenant boundary, and calling it configuration undersells it.**
-The gstatic key set is global across every Google Cloud customer, so every customer's IAP
-assertion is signed by a key this deployment trusts; what separates them is `aud`. An empty
-or wrong audience is not a broken login, it is cross-customer authentication — which is why
-`configureGCPIAP` requires the value and rejects anything not shaped `/projects/…`. This
-configuration therefore derives it rather than asking anyone to transcribe it:
+- Select the intended organization audience. Internal limits login to the project's Workspace organization.
+- Register exactly `${STAGING_PUBLIC_ORIGIN}/api/auth/callback`, with no trailing slash.
+- Use only `openid`, `email` and `profile`; no Google resource scopes are needed.
+- Put the client secret in Secret Manager and verify the deploy identity can read it.
+  If it needs a new accessor grant, scope the grant to this secret.
+- Set repository variables `STAGING_PUBLIC_ORIGIN`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET_NAME`.
 
-| Knob | Where | What it does |
-| --- | --- | --- |
-| `iap_backend_service` | `environment/terraform.tfvars` | Names the backend service IAP is enabled on. Empty (the default) wires nothing at all. |
-| `iap_members` | same | The IAM member strings admitted, each granted `roles/iap.httpsResourceAccessor` on that backend service. `allUsers`/`allAuthenticatedUsers` are refused by the variable's validation. |
-| `identity_proxy_audience` | `terraform output` → the chart's `identity.proxy.audience` | `/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID`, composed from the project's number and the backend service's server-assigned numeric id. |
+The origin must be canonical HTTPS with a DNS hostname and no path or port.
+`mode2-secret.sh` copies the named secret into `map-platform` as `oidc-client-secret`.
+The client secret reaches only the control plane. Terraform holds no credential values.
+The client ID is also the ID-token audience; a mismatched pair fails chart rendering.
+No admin-granting role map is installed. An authenticated first operator redeems the
+restricted-file setup code to become admin; see [the setup procedure](../../docs/self-hosted-security.md).
 
-Nothing here creates the backend service, because nothing here can: a GKE Ingress or Gateway
-creates it at admission time, under a generated name of the form
-`k8s1-HASH-NAMESPACE-SERVICE-PORT-HASH`. `gcloud compute backend-services list --global`
-names it, and **it changes when the Service behind it is recreated** — a stale value fails
-every human login while every machine credential keeps working, which is the quiet half of
-that failure. The audience is read back from the live backend service rather than taken as a
-second variable, so what the output prints and what the IAM bindings admit people to cannot
-name different backend services.
+[`native_edge.py`](./native_edge.py) renders the existing `console` Ingress,
+`console` certificate and FrontendConfig against the `console-ip` global static address.
+It routes every path to the chart's application edge; DNS and the certificate stay in place.
+CD first reads the existing Ingress and ManagedCertificate. It refuses a mismatched host,
+certificate domain or TLS resource attachment before deployment, and checks again before the edge apply.
+The new `map-native-edge` BackendConfig uses `/api/health` on port 8080 and a 3600-second timeout.
+Its IAP wrapper is off: the platform authenticates browser requests and public API keys directly.
+The old Kubernetes Service and BackendConfig remain, but their unused cloud backend
+can be garbage-collected. Its backend-scoped IAP access grant is not preserved by those objects.
+The optional Terraform IAP bindings and trusted-proxy preset remain available to other topologies;
+[the identity guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider)
+describes that alternative. They are not staging's native login configuration.
 
-**Terraform does not create the OAuth consent screen or the OAuth client, and as of March
-2026 it could not.** The provider says so itself — `terraform validate` on a
-`google_iap_brand` resource against `hashicorp/google` 7.42.0 answers:
+Deploy slice 5's token receiver before slice 6's Brain sender. Wake a parked environment
+only with the owner's approval, then deploy and check the receiver before this cutover.
+After slice 6 deployment, sign in as an admin through the HTTPS origin. In Console, create a
+service account with the developer role named for CD, and issue its API key there.
+CD only needs the public resource-read permission. Store that one-time key in a private
+local file, then add it to a dedicated Secret Manager secret using `--data-file`, never an argv literal.
+Verify the deploy identity can read that secret; scope any new accessor grant to it. Record its name as
+`CD_API_KEY_SECRET_NAME`. Slice 7 will make this key mandatory for the post-deploy API check.
+Do not use a database insert or the legacy bootstrap key to manufacture this credential.
 
-```text
-Warning: Deprecated Resource
-This resource is deprecated on Jan 22, 2025. After Jan 19, 2026 the
-`google_iap_brand` Terraform resource will no longer function as intended due to
-the deprecation of the IAP OAuth Admin APIs. New projects will not be able to use
-these APIs. March 19, 2026 The IAP OAuth Admin APIs will be permanently shut down.
-Access to this feature will no longer be available.
-```
+Slice 6 retains and checks the control-plane HTTP LoadBalancer for rollback, but CD sends its
+compatibility key only through the HTTPS origin. Human sign-in uses that origin too.
+Slice 7 replaces the smoke credential with the Console-issued service-account key and removes
+the HTTP listener with the preset keys. Prepare and perform a slice 6 rollback as follows:
 
-Two further reasons would have kept it out even before that date, and they are worth
-recording because "add the brand to Terraform" is the obvious-looking next step: an IAP
-brand has **no delete at all**, so it belongs to the durable half by the same argument the
-KMS key does; and `google_iap_client` exports its `secret`, which would put a live credential
-in a state file this configuration promises holds none ("No secret value is in either
-configuration", above). Configure the consent screen in the Cloud console, use IAP's
-Google-managed OAuth client where you can, and treat a custom client as an out-of-band
-credential like the Workload Identity Federation provider already is.
+1. Before cutover, save the current Ingress and the old cloud backend's IAP IAM policy.
+   Record its backend-scoped `roles/iap.httpsResourceAccessor` members; Kubernetes YAML does not contain that grant.
+2. Coordinate both repositories' deploys. Restore the prior platform release and dispatch
+   the Console's confirmed legacy rollback workflow to restore the ingress and old BFF.
+3. Resolve the rebuilt cloud backend from the restored Ingress and check its IAP policy.
+   With the owner's authorization, restore the recorded accessor bindings on that backend if missing.
+   Do not widen them to the project. GKE can recreate the backend with no access grant.
+4. Confirm anonymous requests receive IAP's own refusal, then sign in as an authorized Workspace member
+   and exercise the Console. A green legacy deploy checks refusal only; it does not prove member access.
 
-**The optional mapping reads email, not groups.** IAP assertions name the person.
-`identity.claims.roles: email` selects that claim. `identity.roleMap` maps addresses to `user`,
-`developer` or `admin`. It applies on every verified request: a match sets the
-stored role, a former match now absent resets to user, and a never-mapped person
-keeps the stored role. First unmatched sign-in gets user, which reads nothing;
-readers need developer. Legacy viewer entries now mean user. Older unexpired
-assertions can reapply their old mapped role.
+The rollback is not accepted until both refusal and authorized access work.
+The edge apply is outside Helm's atomic release. If its HTTPS smoke fails, CD reports
+failure and leaves that ingress applied; it does not restore the old IAP grant.
+Use the coordinated rollback above and verify both access paths before declaring recovery.
 
-A claim value may contain neither `,` nor `=`; email and Google group addresses
-are unaffected. **Admission is not authorization**: `iap_members` decides who
-reaches the control plane, not their stored role. An IdP with a group claim can
-name it in `identity.claims.roles` instead; nothing presumes `email`. The staging
-placeholder maps admin and therefore suppresses setup-code minting even without
-a match. Replace it with a real operator before enabling identity. Without an
-admin-granting map, a never-bootstrapped install delivers a restricted-file setup
-code; see [the security guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider).
+### Restoring the edge after a cluster rebuild
 
-**The topology is a requirement, not a diagram.** The proxy must front the *control plane's
-own* backend service, so that every human request carries an assertion audience-bound to it
-and the browser reaches the platform directly rather than through a server-to-server console
-hop — which would make IAP authenticate the console's workload identity and collapse every
-user onto one principal. Machine traffic (`/v1` keys, worker environment keys) rides a
-**separate, non-proxied backend** at the load balancer.
+CD upgrades an existing HTTPS origin; its preflight deliberately refuses missing edge objects.
+After an approved cluster rebuild, the owner restores these prerequisites before dispatching CD:
 
-**None of this is switched on here, and the reason is one line above it in this file.** IAP
-lives on an HTTPS load balancer; this environment publishes the control plane as a
-plain-HTTP L4 LoadBalancer with no domain, so there is no backend service to enable IAP on
-and nothing for a certificate to be issued against. Both variables default to empty and the
-audience output is then empty; `staging-values.yaml` carries the platform half spelled out
-but with `identity.mode` empty, so the lane is off. That is deliberate rather than
-unfinished: enabling it would grant no human anything without a proxy in front, while adding
-a dependency on an external key set to a boot that otherwise needs only Postgres — and the
-pipeline deploys with `--wait --atomic`, where a transient fetch failure becomes a rolled-back
-release. Turning it on once the front door exists is `mode: trusted_proxy` plus a real
-audience, with everything else in that block already in place. Building the front door is
-the GKE Gateway work [docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane)
-describes; these knobs are what configures IAP once it exists.
+1. Restore the namespace, mode-2 Secret and a known-good platform release using
+   [the manual Helm procedure](#handover-to-helm) and its saved values and image references.
+2. Restore the saved `console` Ingress, ManagedCertificate and FrontendConfig, and their
+   referenced Service and BackendConfig. Retain the `console-ip` global address and DNS record.
+   A legacy snapshot also needs the Console workload and Secrets from its repository's
+   confirmed legacy rollback workflow, or their saved equivalents; the Platform release does not supply that old Service.
+   A native snapshot needs the Platform release whose application-edge Service matches the saved Ingress.
+3. Wait for the certificate and HTTPS origin to serve correctly. If restoring the legacy
+   IAP topology, recheck its backend-scoped access grant and authorized member access as above.
+4. Confirm the Ingress host, certificate domain and TLS attachments match `STAGING_PUBLIC_ORIGIN`,
+   then dispatch CD. Its existing-edge preflight must pass before it builds or deploys.
 
 ## Continuous delivery
 
@@ -706,7 +690,9 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `brain-api-key` — `model-providers` in the last one's place while `staging-values.yaml` turns the model gateway off | a human, once — `bootstrap.sh` does not create these |
-| setting the eleven Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and a twelfth, `MODELGATEWAY_SERVICE_ACCOUNT`, while `staging-values.yaml` runs the model gateway, as it does |
+| setting the required Actions **variables** below | a human, before the first live run; core deployment coordinates are checked before authentication, native OIDC inputs after the parked check, and the gateway account after chart rendering |
+| creating the Google Web client and its Secret Manager secret | the owner, before slice 6; see [native sign-in](#native-google-sign-in-and-the-staging-https-edge) |
+| establishing or restoring the existing HTTPS edge | the owner, before live CD, including after a cluster rebuild; see [edge recovery](#restoring-the-edge-after-a-cluster-rebuild) |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 | adding the vendor key and an alias for the agents' model to the gateway's catalogue | a human, after CD's first deploy and after every `environment/` rebuild — the catalogue lives in Cloud SQL, and the gateway Service it is reached through comes with the release |
 
@@ -819,15 +805,18 @@ same against `foundation/`:
 | `KMS_KEY_NAME` | the CryptoKey resource name, written in as `gcpkms-key-name` | `E kms_key_name` (`F kms_key_name` is the same key) |
 | `CONTROLPLANE_SERVICE_ACCOUNT`, `BRAIN_SERVICE_ACCOUNT`, `EXECUTOR_SERVICE_ACCOUNT` | the three Workload-Identity Google service accounts the chart annotates each component's ServiceAccount with | `F controlplane_service_account`, `F brain_service_account`, `F executor_service_account` — bare emails. (`environment/`'s `*_service_account_annotation` outputs hold the same emails wrapped in the chart's annotation map, which is the wrong shape for a variable.) |
 | `MODELGATEWAY_SERVICE_ACCOUNT` | the model gateway's, the same way — needed only while `staging-values.yaml` runs the gateway | `F modelgateway_service_account` |
+| `STAGING_PUBLIC_ORIGIN` | canonical HTTPS application origin | the existing Console DNS name and managed certificate |
+| `OIDC_CLIENT_ID` | Google Web application's client ID and token audience | Google Auth Platform → Clients |
+| `OIDC_CLIENT_SECRET_NAME` | Secret Manager secret name holding that client's secret | owner-created secret; grant the deploy identity access |
 
 The two "not in Terraform" rows are not an oversight to be tidied away: the WIF provider is
 deliberately outside this configuration — see the attribute-condition command below, which
 exists here precisely because nothing in the repository would otherwise record it — and the
 deploy identity is created with it. They are named here so that setting up a fresh deployment
 is a list to work through rather than a guess, since the workflow's guard refuses to run
-until all eleven exist.
+until the required coordinates exist.
 
-The model gateway's account is a twelfth, outside the guard's eleven, because nothing reads
+The model gateway's account is conditional, outside the initial guard, because nothing reads
 it while `modelgateway.enabled` is off — `staging-values.yaml` leaves it on. The workflow reads that
 switch off the chart's render, before the build; while the gateway runs it requires the
 variable by the guard's rule, annotates the gateway's ServiceAccount with it and reads that
@@ -839,14 +828,14 @@ rather than an operator, and `K8S_SECRET` in particular has to equal `existingSe
 [`staging-values.yaml`](./staging-values.yaml), which is in git: a variable would let the two
 drift into a release bound to a Secret nothing creates, with no diff to notice it in.
 
-The workflow **asserts every one of the eleven** before it authenticates or builds anything,
+The workflow **asserts every required coordinate** before it authenticates or builds anything,
 in a step that runs second — after the ref guard, which refuses an unauthorised ref while telling
 it nothing. An unset variable renders as the empty string rather than failing, and
 `gcloud --project ""`, `get-credentials "" --zone ""` and an image tag with no repository all
 fail late and confusingly. Whitespace and commas are rejected as well as emptiness: a value
 of one space is no configuration while passing a `-z` test, and four of them —
 `ARTIFACT_REGISTRY` and the three service accounts — reach `helm --set-string`, whose
-assignment list is comma-separated. The twelfth, the gateway's account, is held to the same
+assignment list is comma-separated. The conditional gateway account, is held to the same
 rule after checkout, while the gateway runs, since the guard cannot read the chart.
 
 The cost of the move is that the deployment target is no longer reviewable in the diff that
@@ -880,7 +869,8 @@ Commands below name the variables as the table does. Load them into the shell fi
 ```bash
 vars='GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY WIF_PROVIDER
       DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME
-      CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT EXECUTOR_SERVICE_ACCOUNT'
+      CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT EXECUTOR_SERVICE_ACCOUNT
+      STAGING_PUBLIC_ORIGIN OIDC_CLIENT_ID OIDC_CLIENT_SECRET_NAME'
 
 unset $vars                       # clear FIRST — see below
 for v in $vars; do
@@ -905,15 +895,15 @@ commands further down operate on the wrong project or the wrong service account,
 nothing. Clearing every name before the load means a variable that does not arrive is
 absent rather than out of date, which is a state the assertion can see.
 
-**It reads the eleven by name rather than exporting the whole list.** `gh variable list`
+**It reads the required variables by name rather than exporting the whole list.** `gh variable list`
 piped into an `eval` would export whatever else is configured on the repository, under
 whatever name it has — including names the rest of this file reads for a different purpose.
 `PROJECT` is the sharp one: the table above hands it to `make gcp-bootstrap` and
 `make gcp-db-init`, so a repository variable of that name would silently redirect both, and
 `TF_VAR_*` is the same hazard aimed at Terraform. Naming what you want keeps the blast
-radius to this section's eleven.
+radius to this section's variables.
 
-All eleven are asserted, not the few any one command needs, because the commands below spend
+All required coordinates are asserted, not the few any one command needs, because the commands below spend
 `$DEPLOY_SERVICE_ACCOUNT` as well as `$GCP_PROJECT_ID`, and a half-loaded environment is
 exactly what turns a promised named stop into `--member="serviceAccount:"` and an argument
 parse error. `:?` names the first variable that did not load and stops there, without closing
@@ -1320,8 +1310,9 @@ across the switch finds its own, writes the four non-secret literals
 (`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
 and applies them all with `kubectl create secret generic … --from-file=… --dry-run=client
 -o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
-credential on the process's argv. Rotating `controlplane-api-key`, `model-providers` or
-`brain-api-key` is `gcloud secrets versions add` followed by a re-run of the workflow.
+credential on the process's argv. It also reads `OIDC_CLIENT_SECRET_NAME` into
+`oidc-client-secret`. Rotating any consumed credential is `gcloud secrets versions add`
+followed by a re-run of the workflow.
 
 **That re-run has to roll the pods, and it will not do so by itself.** Env from a
 `secretKeyRef` is read once, at process start; a `workflow_dispatch` after a rotation
@@ -1442,32 +1433,19 @@ profiles, and `GET /admin/v1/usage/requests` is the ledger to check a turn again
 per model call naming the alias, deployment and session: both GETs, with the same key, over a
 forward of their own.
 
-**What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
-external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
-which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
-check rather than a readiness probe restated — and to answer something *other* than 200
-without it, which is the check that an address on the public internet is not simply open. It
-does **not** run a session, so it says nothing about the model route (an empty catalogue
+**What the smoke step proves, and what it does not.** It checks that the compatibility
+LoadBalancer still has an IP, then sends `GET /v1/agents?limit=1` through the HTTPS edge.
+That request must answer 200 with the management key and exactly 401 without it.
+The authenticated request exercises the key and takes a round trip through Cloud SQL.
+It does **not** run a session, so it says nothing about the model route (an empty catalogue
 after a rebuild), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
-**That address is plain HTTP on a bare IP**, and
-[docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane) tells you not to
-do exactly this. It is a deliberate staging exception with a stated reason — there is no
-domain yet, so there is no name for a certificate to be issued against and nothing for a
-GKE Gateway to route — and a stated cost: the management key, every prompt and output, and
-the whole SSE stream cross the internet in cleartext. The moment this environment gets a
-domain, the fix is the Gateway in that section and `service.type` back to `ClusterIP`.
-
-The **web console** does not use that address. It is deployed from its own repository into
-this same cluster and this same namespace, and reaches the control plane over cluster DNS at
-`http://map-managed-agent-platform-controlplane.map.svc.cluster.local:8080` — so the
-management key never leaves the cluster, which is the one thing the cleartext external
-address would otherwise put on the wire on every console page load. What the console *does*
-publish is a second LoadBalancer of its own, for browsers, and its login gate
-(`CONSOLE_PASSWORD`, the project's `console-password` secret) is mandatory precisely because
-*that* address is public: an ungated console is an open door in front of a full-power
-management key it holds server-side.
+The bare-IP HTTP listener remains only for slice 6 compatibility and coordinated rollback;
+CD sends no credential to it. Use the native HTTPS origin for browser and SDK access.
+The platform chart serves Console through that edge, with Google OIDC sign-in and platform
+cookies. The [native staging runbook](#native-google-sign-in-and-the-staging-https-edge)
+defines its deployment and rollback procedure. Slice 7 removes the compatibility listener.
 
 ## Five settings that are not the provider's defaults
 

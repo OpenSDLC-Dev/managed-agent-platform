@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -20,10 +21,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 )
-
-// acceptanceKey is the management credential the rehearsal's SDK client sends
-// as x-api-key. A throwaway for a database that dies with the test.
-const acceptanceKey = "map-acceptance-local-key"
 
 // sandboxImage is the rehearsal's sandbox base — the platform default, already
 // pulled by every Docker suite in the gate, so the rehearsal adds no new pull.
@@ -73,6 +70,7 @@ func (s *scriptedStream) Close() error          { return nil }
 // model string to the scripted model above. Only main()'s glue is absent.
 type stack struct {
 	url string
+	key string
 
 	mu       sync.Mutex
 	sessions []string
@@ -102,15 +100,12 @@ func newStack(t *testing.T, scripts [][]provider.Chunk) *stack {
 	ctx := context.Background()
 
 	pool := pgtest.NewPool(t)
-	if err := api.EnsureAPIKey(ctx, pool, "acceptance", acceptanceKey); err != nil {
-		t.Fatalf("seed the management key: %v", err)
-	}
 
 	// One in-memory blob store shared by the API (file uploads, downloads),
 	// the brain (rubric snapshots) and the executor (deliverable harvest) —
 	// the same sharing the compose stack gets from MinIO.
 	blobs := blobtest.Mem()
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil, nil))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil, nil, apitest.PasswordLogin(pool)))
 	t.Cleanup(srv.Close)
 
 	scripted := &scriptedModel{scripts: scripts}
@@ -137,7 +132,7 @@ func newStack(t *testing.T, scripts [][]provider.Chunk) *stack {
 		t.Fatalf("the rehearsal requires Docker: %v", err)
 	}
 
-	s := &stack{url: srv.URL}
+	s := &stack{url: srv.URL, key: apitest.SetupKey(t, pool, srv.URL)}
 	// Registered before the loop-stop cleanup so LIFO runs it after the loops
 	// have stopped — when no executor can re-provision behind the reap.
 	t.Cleanup(s.reapAll)

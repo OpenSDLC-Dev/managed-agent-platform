@@ -52,7 +52,7 @@ func (s *stack) do(t *testing.T, method, path string, body any) map[string]any {
 	if err != nil {
 		t.Fatalf("new request %s %s: %v", method, path, err)
 	}
-	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("x-api-key", s.key)
 	if body != nil {
 		req.Header.Set("content-type", "application/json")
 	}
@@ -108,7 +108,7 @@ func (s *stack) uploadSkill(t *testing.T, sf SkillFixture, tr *Trial) string {
 	if err != nil {
 		t.Fatalf("new upload request: %v", err)
 	}
-	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("x-api-key", s.key)
 	req.Header.Set("content-type", mw.FormDataContentType())
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -155,7 +155,7 @@ func (s *stack) uploadFile(t *testing.T, ff FileFixture, tr *Trial) string {
 	if err != nil {
 		t.Fatalf("new file upload request: %v", err)
 	}
-	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("x-api-key", s.key)
 	req.Header.Set("content-type", mw.FormDataContentType())
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -349,7 +349,7 @@ func (s *stack) tryListEvents(sessionID string) []map[string]any {
 	if err != nil {
 		return nil
 	}
-	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("x-api-key", s.key)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil
@@ -403,7 +403,7 @@ func (s *stack) openStream(t *testing.T, sessionID string) *sseStream {
 		cancel()
 		t.Fatalf("new stream request: %v", err)
 	}
-	req.Header.Set("x-api-key", evalKey)
+	req.Header.Set("x-api-key", s.key)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cancel()

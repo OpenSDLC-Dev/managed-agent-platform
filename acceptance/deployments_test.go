@@ -10,6 +10,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
@@ -23,12 +24,10 @@ import (
 func TestDeploymentsSDK(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewPool(t)
-	if err := api.EnsureAPIKey(ctx, pool, "acceptance", acceptanceKey); err != nil {
-		t.Fatalf("seed the management key: %v", err)
-	}
-	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil))
+	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil, apitest.PasswordLogin(pool)))
 	t.Cleanup(srv.Close)
-	client := anthropic.NewClient(option.WithAPIKey(acceptanceKey), option.WithBaseURL(srv.URL))
+	key := apitest.SetupKey(t, pool, srv.URL)
+	client := anthropic.NewClient(option.WithAPIKey(key), option.WithBaseURL(srv.URL))
 
 	env, err := client.Beta.Environments.New(ctx, anthropic.BetaEnvironmentNewParams{
 		Name: "deployments-sdk",

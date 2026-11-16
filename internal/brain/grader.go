@@ -103,7 +103,7 @@ func (b *Brain) runGrading(ctx context.Context, item *queue.Item, agent domain.R
 			domain.ModelUsage{}, watermark, false)
 	}
 
-	p, err := b.registry.Provider(agent.Model.ID)
+	p, err := b.registry.ProviderForClaim(agent.Model.ID, item.InferenceToken)
 	if err != nil {
 		if err := keeper.Close(); err != nil {
 			return fmt.Errorf("grader lease keeper: %w", err)

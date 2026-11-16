@@ -394,7 +394,7 @@ func (b *Brain) runTurn(ctx context.Context, item *queue.Item, claimedAt time.Ti
 	}
 	logToolNotes(ctx, sid, notes)
 
-	p, err := b.registry.Provider(agent.Model.ID)
+	p, err := b.registry.ProviderForClaim(agent.Model.ID, item.InferenceToken)
 	if err != nil {
 		// A model with no route is a configuration error, not a transient
 		// fault: fail the turn visibly rather than retry forever. No request

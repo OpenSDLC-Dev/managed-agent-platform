@@ -28,6 +28,10 @@ type Config struct {
 	BaseURL  string            // endpoint base URL; required (no implicit default host)
 	APIKey   string            // credential for the endpoint
 	Headers  map[string]string // optional extra headers (gateway routing etc.)
+	// DelegatedInference selects the platform gateway's per-claim credential.
+	// Only these routes receive the token; direct vendor routes keep APIKey.
+	// It excludes static credentials, including authentication headers.
+	DelegatedInference bool
 	// StallTimeout is how long this endpoint may send nothing at all before its
 	// turn is abandoned (#121); zero takes DefaultStallTimeout. It is per route
 	// because the worst legitimate silence is a property of the endpoint — a
@@ -286,12 +290,18 @@ func NewRegistry(routes []Route, factories map[string]Factory) (*Registry, error
 		if route.Config.FlattenSearchResults && route.Config.Protocol != "anthropic" {
 			return nil, fmt.Errorf("route %q: flatten_search_results is only valid on protocol: anthropic routes", route.Model)
 		}
+		if route.Config.DelegatedInference && route.Config.APIKey != "" {
+			return nil, fmt.Errorf("route %q: delegated_inference excludes api_key", route.Model)
+		}
 		// Names that differ only in case are one HTTP header, and an adapter
 		// applies its headers from a map: which value went out would change
 		// between provider instances while the route's Route did not.
 		seen := make(map[string]bool, len(route.Config.Headers))
 		for k := range route.Config.Headers {
 			name := strings.ToLower(k)
+			if route.Config.DelegatedInference && (name == "authorization" || name == "x-api-key") {
+				return nil, fmt.Errorf("route %q: delegated_inference excludes authentication headers", route.Model)
+			}
 			if seen[name] {
 				return nil, fmt.Errorf("route %q sets header %q more than once, in different cases", route.Model, name)
 			}
@@ -355,6 +365,11 @@ func (r *Registry) Describe(model string) (Descriptor, bool) {
 func routeDigest(cfg Config) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%q %q %q %t", cfg.Protocol, cfg.BaseURL, cfg.APIKey, cfg.FlattenSearchResults)
+	if cfg.DelegatedInference {
+		// Keep static routes' identities unchanged. The credential mode matters,
+		// but a rotating claim token must never invalidate thinking replay.
+		fmt.Fprint(h, " delegated_inference")
+	}
 	names := make([]string, 0, len(cfg.Headers))
 	for k := range cfg.Headers {
 		names = append(names, k)
@@ -394,9 +409,22 @@ func (r *Registry) route(model string) (Config, bool) {
 // passes through (a gateway that understands the platform's model names).
 // Every call constructs a fresh instance; see the Registry doc for why.
 func (r *Registry) Provider(model string) (Provider, error) {
+	return r.ProviderForClaim(model, "")
+}
+
+// ProviderForClaim constructs a provider using the current claim's token only
+// when its route explicitly selects delegated inference. No token is retained
+// in the registry or included in Describe's stable route identity.
+func (r *Registry) ProviderForClaim(model, token string) (Provider, error) {
 	cfg, ok := r.route(model)
 	if !ok {
 		return nil, fmt.Errorf("no provider route for model %q", model)
+	}
+	if cfg.DelegatedInference {
+		if token == "" {
+			return nil, fmt.Errorf("route for model %q requires a delegated inference token", model)
+		}
+		cfg.APIKey = token
 	}
 	cfg.Headers = cloneHeaders(cfg.Headers)
 	return r.factories[cfg.Protocol](cfg)

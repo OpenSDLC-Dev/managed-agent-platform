@@ -37,7 +37,6 @@ spec:
           env:
             - name: MODEL_PROVIDERS_PATH
               value: /etc/managed-agent-platform/model-providers.json
-            {{- include "map.brainKeyEnv" . | nindent 12 }}
             {{- with .Values.brain.leaseTTL }}
             - name: BRAIN_LEASE_TTL
               value: {{ . | quote }}

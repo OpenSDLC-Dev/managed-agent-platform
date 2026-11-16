@@ -12,8 +12,10 @@ import (
 // principle 4: providers are constructed from configuration). `model` is the
 // agent-facing model string ("*" = default route); `upstream_model` is what
 // the endpoint receives (empty = pass the agent's string through). Exactly
-// one of `api_key` / `api_key_env` supplies the credential — the env
-// indirection keeps secrets out of config files. `stall_timeout` is a Go
+// one of `api_key` / `api_key_env` supplies a static credential — the env
+// indirection keeps secrets out of config files. A platform gateway route
+// instead selects `delegated_inference: true` and excludes both static fields.
+// Its current claim supplies the credential. `stall_timeout` is a Go
 // duration ("90s", "2m") bounding how long this endpoint may say nothing at
 // all before its turn is abandoned; absent takes DefaultStallTimeout.
 // `max_tokens` is the default output cap for turns that set none themselves;
@@ -28,6 +30,7 @@ type routeFile struct {
 	UpstreamModel        string            `json:"upstream_model"`
 	APIKey               string            `json:"api_key"`
 	APIKeyEnv            string            `json:"api_key_env"`
+	DelegatedInference   bool              `json:"delegated_inference"`
 	Headers              map[string]string `json:"headers"`
 	StallTimeout         string            `json:"stall_timeout"`
 	MaxTokens            *int64            `json:"max_tokens"`
@@ -67,6 +70,8 @@ func LoadRoutes(path string) ([]Route, error) {
 		}
 		key := rf.APIKey
 		switch {
+		case rf.DelegatedInference && (rf.APIKey != "" || rf.APIKeyEnv != ""):
+			return nil, fmt.Errorf("model providers config %s, entry %d: delegated_inference excludes api_key and api_key_env", path, i)
 		case rf.APIKey != "" && rf.APIKeyEnv != "":
 			return nil, fmt.Errorf("model providers config %s, entry %d: api_key and api_key_env are mutually exclusive", path, i)
 		case rf.APIKeyEnv != "":
@@ -103,6 +108,7 @@ func LoadRoutes(path string) ([]Route, error) {
 				Model:                rf.UpstreamModel,
 				BaseURL:              rf.BaseURL,
 				APIKey:               key,
+				DelegatedInference:   rf.DelegatedInference,
 				Headers:              rf.Headers,
 				StallTimeout:         stall,
 				MaxTokens:            maxTokens,

@@ -231,6 +231,15 @@ if [ "$gateway" = true ]; then
   verbatim+=(brain-api-key)
 fi
 
+# Native OIDC's confidential client belongs only to the control plane. The
+# caller names a Secret Manager secret; the chart names this fixed Secret key.
+oidc=()
+if [ -n "${OIDC_CLIENT_SECRET_NAME:-}" ]; then
+  fetch "$OIDC_CLIENT_SECRET_NAME" oidc-client-secret
+  verbatim+=(oidc-client-secret)
+  oidc=(--from-file="$d/oidc-client-secret")
+fi
+
 # A trailing newline is the classic way one of these gets stored (an `echo` where
 # bootstrap.sh uses `printf '%s'`), and each is embedded VERBATIM: an API key in
 # an x-api-key comparison, the DSN as a DSN. So the deploy would succeed and the
@@ -243,10 +252,12 @@ fi
 # below instead.
 for f in "${verbatim[@]}"; do
   if [ "$(wc -l < "$d/$f")" -ne 0 ]; then
-    fail "Secret Manager secret '$f' contains a newline"
+    secret_name=$f
+    if [ "$f" = oidc-client-secret ]; then secret_name=$OIDC_CLIENT_SECRET_NAME; fi
+    fail "Secret Manager secret '$secret_name' contains a newline"
     echo "It is used verbatim, so a trailing newline is part of the value." >&2
     echo "Re-add it without one: printf '%s' \"\$value\" | gcloud secrets" >&2
-    echo "versions add $f --project=$PROJECT --data-file=-" >&2
+    echo "versions add $secret_name --project=$PROJECT --data-file=-" >&2
     exit 1
   fi
 done
@@ -416,6 +427,7 @@ applied="$(kubectl create secret generic "$secret" \
   --from-file="$d/database-url" \
   --from-file="$d/$brain_file" \
   ${carried[@]+"${carried[@]}"} \
+  ${oidc[@]+"${oidc[@]}"} \
   --from-file="$d/blob-backend" \
   --from-file="$d/blob-bucket" \
   --from-file="$d/secrets-backend" \

@@ -4,16 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 5: initiators and per-claim delegated inference tokens.
-Implementation, independent [acceptance](./docs/HISTORY.md#plan-69-slice-5-independent-acceptance) and dual code review are complete.
-Slice 4 merged in [PR #1042](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1042); its [acceptance record](./docs/HISTORY.md#plan-69-slice-4-independent-acceptance) remains the baseline.
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 6: move installs and callers onto native login and delegated inference.
+Slice 5 merged in [PR #1043](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1043); its independent [acceptance](./docs/HISTORY.md#plan-69-slice-5-independent-acceptance) is the baseline.
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
-- [x] Record and backfill session, deployment and dream initiators; preserve old-writer compatibility.
-- [x] Mint lease-bound inference tokens and enforce membership before every model turn, grading included.
-- [x] Admit delegated inference at the gateway with principal usage and organization budgets; preserve credential boundaries.
-- [x] Add cookie-only deployment service-account selection and scheduled-run refusal with automatic pause.
-- [x] Deliver the Console companion and update the wire registry and operator documentation.
-- [x] Complete contract and runtime tests, `make verify`, independent verification, dual review and CI.
+- [x] Send per-claim credentials from Brain to configured gateway routes, including grading.
+- [x] Default Compose to password login and require a login mode in Helm.
+- [x] Obtain CI, acceptance and eval credentials through setup, login and private issuance.
+- [x] Deliver Console key management for both environment kinds ([Console PR #260](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/260)).
+- [ ] Configure staging HTTPS and Google OIDC; obtain its CD service-account key through Console.
+- [x] Complete local contract/runtime tests and independent `make verify` ([acceptance](./docs/HISTORY.md#plan-69-slice-6-independent-acceptance)).
+- [ ] Complete committed dual review, CI and live staging acceptance before slice 7.
