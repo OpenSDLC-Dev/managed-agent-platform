@@ -776,7 +776,7 @@ jobs:
           python3 deploy/gcp/native_smoke.py --origin "$STAGING_PUBLIC_ORIGIN" --modelgateway "$MODELGATEWAY"
 
       # Ready pods are not a working API. This step proves the compatibility
-      # compatibility LoadBalancer exists, that the deployed key is the key Secret Manager holds,
+      # LoadBalancer exists, that the deployed key is the key Secret Manager holds,
       # that the control plane can reach Cloud SQL — a 200 on a list endpoint is a
       # round trip through the database — and that the API is not answering
       # everyone.

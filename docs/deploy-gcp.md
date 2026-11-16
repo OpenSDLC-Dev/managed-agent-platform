@@ -76,10 +76,12 @@ The **last two lines are the only ones above that this project automates**.
 — on every push to `main` and on `workflow_dispatch`, reading
 [`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml), assembling the
 pre-created Secret from Secret Manager, rolling the pods when that Secret changed, ending
-with an authenticated smoke check against the LoadBalancer (200 with the management key, 401
+with an authenticated smoke check against the HTTPS edge (200 with the management key, 401
 without), and authenticating throughout by Workload Identity Federation rather than by any
 stored GitHub secret. Dispatch is for what a push cannot express: redeploying an unchanged
-commit onto a rebuilt cluster, or finishing a rotation a human made in Secret Manager.
+commit onto a rebuilt cluster after the owner restores its existing HTTPS edge, or finishing
+a rotation a human made in Secret Manager. The [staging edge recovery steps](../deploy/gcp/README.md#restoring-the-edge-after-a-cluster-rebuild)
+are a prerequisite of CD; the workflow does not bootstrap a missing hostname or certificate.
 
 **All five `make` targets above it stay human-driven, and all five are prerequisites of the
 pipeline rather than steps in it** — including `gcp-db-init`, which mode 2 genuinely depends
@@ -350,7 +352,8 @@ The plan 69 staging configuration serves native Google sign-in and application t
 through the existing HTTPS Console origin. The platform chart owns that application edge;
 [the staging runbook](../deploy/gcp/README.md#native-google-sign-in-and-the-staging-https-edge)
 covers the client, certificate, ingress and rollback order.
-Slice 6 retains its old plaintext control-plane LoadBalancer for CD compatibility only.
+Slice 6 retains its old plaintext control-plane LoadBalancer for coordinated rollback.
+CD checks that it has an IP, but sends authenticated requests only through the HTTPS edge.
 Slice 7 moves CD to an issued service-account key over HTTPS and retires that listener.
 Do not use the compatibility listener for human login or a new deployment.
 

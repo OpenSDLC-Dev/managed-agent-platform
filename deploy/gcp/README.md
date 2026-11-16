@@ -658,6 +658,23 @@ The edge apply is outside Helm's atomic release. If its HTTPS smoke fails, CD re
 failure and leaves that ingress applied; it does not restore the old IAP grant.
 Use the coordinated rollback above and verify both access paths before declaring recovery.
 
+### Restoring the edge after a cluster rebuild
+
+CD upgrades an existing HTTPS origin; its preflight deliberately refuses missing edge objects.
+After an approved cluster rebuild, the owner restores these prerequisites before dispatching CD:
+
+1. Restore the namespace, mode-2 Secret and a known-good platform release using
+   [the manual Helm procedure](#handover-to-helm) and its saved values and image references.
+2. Restore the saved `console` Ingress, ManagedCertificate and FrontendConfig, and their
+   referenced Service and BackendConfig. Retain the `console-ip` global address and DNS record.
+   A legacy snapshot also needs the Console workload and Secrets from its repository's
+   confirmed legacy rollback workflow, or their saved equivalents; the Platform release does not supply that old Service.
+   A native snapshot needs the Platform release whose application-edge Service matches the saved Ingress.
+3. Wait for the certificate and HTTPS origin to serve correctly. If restoring the legacy
+   IAP topology, recheck its backend-scoped access grant and authorized member access as above.
+4. Confirm the Ingress host, certificate domain and TLS attachments match `STAGING_PUBLIC_ORIGIN`,
+   then dispatch CD. Its existing-edge preflight must pass before it builds or deploys.
+
 ## Continuous delivery
 
 Everything above is the manual path, and it stays the manual path. What
@@ -673,8 +690,9 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
 | creating `controlplane-api-key`, `database-url` and `brain-api-key` — `model-providers` in the last one's place while `staging-values.yaml` turns the model gateway off | a human, once — `bootstrap.sh` does not create these |
-| setting the required Actions **variables** below | a human, once, and **before** the first run: until they exist the workflow stops at its second step, so every push to `main` in the meantime is a red run rather than a deployment — and `MODELGATEWAY_SERVICE_ACCOUNT`, while `staging-values.yaml` runs the model gateway, as it does |
+| setting the required Actions **variables** below | a human, before the first live run; core deployment coordinates are checked before authentication, native OIDC inputs after the parked check, and the gateway account after chart rendering |
 | creating the Google Web client and its Secret Manager secret | the owner, before slice 6; see [native sign-in](#native-google-sign-in-and-the-staging-https-edge) |
+| establishing or restoring the existing HTTPS edge | the owner, before live CD, including after a cluster rebuild; see [edge recovery](#restoring-the-edge-after-a-cluster-rebuild) |
 | build and push the five images → assemble the `map-platform` Secret → `helm upgrade --install` → smoke | **CD** |
 | adding the vendor key and an alias for the agents' model to the gateway's catalogue | a human, after CD's first deploy and after every `environment/` rebuild — the catalogue lives in Cloud SQL, and the gateway Service it is reached through comes with the release |
 
@@ -1415,32 +1433,19 @@ profiles, and `GET /admin/v1/usage/requests` is the ledger to check a turn again
 per model call naming the alias, deployment and session: both GETs, with the same key, over a
 forward of their own.
 
-**What the smoke step proves, and what it does not.** It waits for the LoadBalancer's
-external IP, then requires `GET /v1/agents?limit=1` to answer 200 with the management key —
-which exercises the key end to end and takes a round trip through Cloud SQL, so it is a real
-check rather than a readiness probe restated — and to answer something *other* than 200
-without it, which is the check that an address on the public internet is not simply open. It
-does **not** run a session, so it says nothing about the model route (an empty catalogue
+**What the smoke step proves, and what it does not.** It checks that the compatibility
+LoadBalancer still has an IP, then sends `GET /v1/agents?limit=1` through the HTTPS edge.
+That request must answer 200 with the management key and exactly 401 without it.
+The authenticated request exercises the key and takes a round trip through Cloud SQL.
+It does **not** run a session, so it says nothing about the model route (an empty catalogue
 after a rebuild), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
-**That address is plain HTTP on a bare IP**, and
-[docs/deploy-gcp.md](../../docs/deploy-gcp.md#exposing-the-control-plane) tells you not to
-do exactly this. It is a deliberate staging exception with a stated reason — there is no
-domain yet, so there is no name for a certificate to be issued against and nothing for a
-GKE Gateway to route — and a stated cost: the management key, every prompt and output, and
-the whole SSE stream cross the internet in cleartext. The moment this environment gets a
-domain, the fix is the Gateway in that section and `service.type` back to `ClusterIP`.
-
-The **web console** does not use that address. It is deployed from its own repository into
-this same cluster and this same namespace, and reaches the control plane over cluster DNS at
-`http://map-managed-agent-platform-controlplane.map.svc.cluster.local:8080` — so the
-management key never leaves the cluster, which is the one thing the cleartext external
-address would otherwise put on the wire on every console page load. What the console *does*
-publish is a second LoadBalancer of its own, for browsers, and its login gate
-(`CONSOLE_PASSWORD`, the project's `console-password` secret) is mandatory precisely because
-*that* address is public: an ungated console is an open door in front of a full-power
-management key it holds server-side.
+The bare-IP HTTP listener remains only for slice 6 compatibility and coordinated rollback;
+CD sends no credential to it. Use the native HTTPS origin for browser and SDK access.
+The platform chart serves Console through that edge, with Google OIDC sign-in and platform
+cookies. The [native staging runbook](#native-google-sign-in-and-the-staging-https-edge)
+defines its deployment and rollback procedure. Slice 7 removes the compatibility listener.
 
 ## Five settings that are not the provider's defaults
 
