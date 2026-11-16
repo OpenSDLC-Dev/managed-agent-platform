@@ -198,8 +198,7 @@ jobs:
           for v in GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY \
                    WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME \
                    CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT \
-                   EXECUTOR_SERVICE_ACCOUNT STAGING_PUBLIC_ORIGIN \
-                   OIDC_CLIENT_ID OIDC_CLIENT_SECRET_NAME; do
+                   EXECUTOR_SERVICE_ACCOUNT; do
             case "${!v}" in
               "" | *[[:space:],]*) bad="$bad $v" ;;
             esac
@@ -252,9 +251,6 @@ jobs:
           # checkout v6+ would otherwise leave it in a credentials file wired into
           # the job's git config, in a job that also holds a cloud impersonation.
           persist-credentials: false
-
-      - name: Validate the native HTTPS origin before cloud authentication
-        run: python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service validation-only > /dev/null
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -318,6 +314,38 @@ jobs:
               echo "Labels: \`$labels\`. Revive with \`PROJECT=… make gcp-env-start\`, then re-run this workflow to catch staging up to \`main\`."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # A parked install can await its owner-created OAuth client. Validate the
+      # new login inputs only for a live deploy, still before any build or write.
+      - name: Require native login settings for a live deployment
+        if: env.POWERED_OFF != 'true'
+        shell: bash
+        run: |
+          bad=""
+          for v in STAGING_PUBLIC_ORIGIN OIDC_CLIENT_ID OIDC_CLIENT_SECRET_NAME; do
+            case "${!v}" in
+              "" | *[[:space:],]*) bad="$bad $v" ;;
+            esac
+          done
+          if [ -n "$bad" ]; then
+            echo "::error::unset, empty or malformed native login variables:$bad — configure the Google client and HTTPS origin before deploying. See deploy/gcp/README.md."
+            exit 1
+          fi
+          python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service validation-only > /dev/null
+
+      - name: Cluster credentials
+        if: env.POWERED_OFF != 'true'
+        run: |
+          gcloud container clusters get-credentials "$GKE_CLUSTER" \
+            --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID"
+
+      - name: Preserve the existing HTTPS origin before deployment
+        if: env.POWERED_OFF != 'true'
+        run: |
+          kubectl get ingress/console managedcertificate/console --namespace "$K8S_NAMESPACE" \
+            -o json > "$RUNNER_TEMP/existing-edge.json"
+          python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service validation-only \
+            --existing-edge "$RUNNER_TEMP/existing-edge.json" > /dev/null
 
       # The chart's Cloud SQL Auth Proxy takes the instance's CONNECTION NAME,
       # which is an operator identifier — so staging-values.yaml carries only the
@@ -475,12 +503,6 @@ jobs:
           for component in controlplane brain executor modelgateway gate; do
             docker push "$ARTIFACT_REGISTRY/$component:$GITHUB_SHA"
           done
-
-      - name: Cluster credentials
-        if: env.POWERED_OFF != 'true'
-        run: |
-          gcloud container clusters get-credentials "$GKE_CLUSTER" \
-            --zone "$GCP_ZONE" --project "$GCP_PROJECT_ID"
 
       # Mode 2's Secret, assembled by deploy/gcp/mode2-secret.sh — the one copy
       # of that logic, which an operator runs by hand out of the same file
@@ -742,7 +764,10 @@ jobs:
           service="$(kubectl get svc --namespace "$K8S_NAMESPACE" \
             --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=app-edge" \
             -o jsonpath='{.items[*].metadata.name}')"
+          kubectl get ingress/console managedcertificate/console --namespace "$K8S_NAMESPACE" \
+            -o json > "$RUNNER_TEMP/existing-edge.json"
           python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service "$service" \
+            --existing-edge "$RUNNER_TEMP/existing-edge.json" \
             > "$RUNNER_TEMP/native-edge.json"
           kubectl apply --namespace "$K8S_NAMESPACE" -f "$RUNNER_TEMP/native-edge.json"
           got="$(kubectl get ingress console --namespace "$K8S_NAMESPACE" \
@@ -751,7 +776,7 @@ jobs:
           python3 deploy/gcp/native_smoke.py --origin "$STAGING_PUBLIC_ORIGIN" --modelgateway "$MODELGATEWAY"
 
       # Ready pods are not a working API. This step proves the compatibility
-      # LoadBalancer exists, that the deployed key is the key Secret Manager holds,
+      # compatibility LoadBalancer exists, that the deployed key is the key Secret Manager holds,
       # that the control plane can reach Cloud SQL — a 200 on a list endpoint is a
       # round trip through the database — and that the API is not answering
       # everyone.
@@ -801,13 +826,11 @@ jobs:
             printf '"\n'
           } >> "$cfg"
 
-          # Port 8080 on the LoadBalancer, not 80: the chart publishes the Service
-          # on controlplane.service.port, which is 8080, and a Service of type
-          # LoadBalancer forwards the port it declares.
-          url="http://$ip:8080/v1/agents?limit=1"
+          # Keep checking the compatibility listener above for slice 6 rollback,
+          # but send credentials only through the verified HTTPS application edge.
+          url="$STAGING_PUBLIC_ORIGIN/v1/agents?limit=1"
 
-          # The IP appears before the backend is healthy, so retry: a fresh GCP
-          # forwarding rule commonly answers nothing at all for a minute or two.
+          # Reconciliation can outlast pod readiness, so retry transient failures.
           code=000
           for _ in $(seq 1 30); do
             if ! code="$(curl -sS -K "$cfg" -o /dev/null -w '%{http_code}' \
@@ -818,7 +841,7 @@ jobs:
             sleep 10
           done
           if [ "$code" != "200" ]; then
-            echo "::error::GET /v1/agents?limit=1 on $ip:8080 answered $code, wanted 200"
+            echo "::error::GET /v1/agents?limit=1 on $STAGING_PUBLIC_ORIGIN answered $code, wanted 200"
             echo "000 means nothing answered — the load balancer's backend is still" >&2
             echo "unhealthy or the Service selects no ready pod. 401 means the" >&2
             echo "deployed controlplane-api-key is not the one this job read." >&2
@@ -842,13 +865,13 @@ jobs:
           # at all about whether the API is guarded, and is exactly what a
           # transient blip produces.
           if [ "$open" != "401" ]; then
-            echo "::error::$ip:8080 answered $open with NO api key, wanted 401"
+            echo "::error::$STAGING_PUBLIC_ORIGIN answered $open with NO api key, wanted 401"
             echo "200 means the API is unguarded. 000 means nothing answered, so" >&2
             echo "this check proved nothing about authentication." >&2
             exit 1
           fi
 
-          echo "deployed $GITHUB_SHA — http://$ip:8080 answers 200 with a key, $open without one"
+          echo "deployed $GITHUB_SHA — $STAGING_PUBLIC_ORIGIN answers 200 with a key, $open without one"
 
       # The runner is ephemeral, so this is hygiene rather than protection — but
       # it is the step that keeps that true if this workflow ever moves to a

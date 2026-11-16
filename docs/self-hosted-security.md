@@ -1344,11 +1344,13 @@ Native OIDC needs `IDENTITY_OIDC_CLIENT_ID` equal to `IDENTITY_OIDC_AUDIENCE`.
 Only the control plane reads the optional `IDENTITY_OIDC_CLIENT_SECRET`.
 
 Compose's `console` profile and Helm's `console.enabled` add the published Console
-and a Caddy application edge. Native routing is an explicit selection:
-`CONSOLE_AUTH_MODE=platform` in Compose, or `console.authMode=platform` in Helm.
+and a Caddy application edge. Helm enables both by default. Native routing defaults to
+`CONSOLE_AUTH_MODE=platform` in Compose and `console.authMode=platform` in Helm.
 The edge sends native login/private paths to CP, admin paths to the gateway,
 and pages/assets/health to Console. Empty mode preserves legacy BFF routing.
-Default identity remains disabled; no staging identity or hostname changes.
+Compose defaults to development password login; Helm requires a native login mode and origin.
+Slice 6 stages Google OIDC behind the existing staging HTTPS hostname.
+The Compose guide lists the explicit empty settings for a coordinated slice 6 rollback.
 Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional) or
 [the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
 for RP secrets, CA trust and the CP-owned `/api/auth/callback` registration.

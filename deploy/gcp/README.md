@@ -618,26 +618,45 @@ restricted-file setup code to become admin; see [the setup procedure](../../docs
 [`native_edge.py`](./native_edge.py) renders the existing `console` Ingress,
 `console` certificate and FrontendConfig against the `console-ip` global static address.
 It routes every path to the chart's application edge; DNS and the certificate stay in place.
+CD first reads the existing Ingress and ManagedCertificate. It refuses a mismatched host,
+certificate domain or TLS resource attachment before deployment, and checks again before the edge apply.
 The new `map-native-edge` BackendConfig uses `/api/health` on port 8080 and a 3600-second timeout.
 Its IAP wrapper is off: the platform authenticates browser requests and public API keys directly.
-The old IAP backend is left available for a slice 6 rollback.
+The old Kubernetes Service and BackendConfig remain, but their unused cloud backend
+can be garbage-collected. Its backend-scoped IAP access grant is not preserved by those objects.
 The optional Terraform IAP bindings and trusted-proxy preset remain available to other topologies;
 [the identity guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider)
 describes that alternative. They are not staging's native login configuration.
 
 Deploy slice 5's token receiver before slice 6's Brain sender. Wake a parked environment
 only with the owner's approval, then deploy and check the receiver before this cutover.
-After slice 6 deployment, sign in through the HTTPS origin, create an admin service account
-named for CD in Console, and issue its API key there. Store that one-time key in a private
+After slice 6 deployment, sign in as an admin through the HTTPS origin. In Console, create a
+service account with the developer role named for CD, and issue its API key there.
+CD only needs the public resource-read permission. Store that one-time key in a private
 local file, then add it to a dedicated Secret Manager secret using `--data-file`, never an argv literal.
 Verify the deploy identity can read that secret; scope any new accessor grant to it. Record its name as
 `CD_API_KEY_SECRET_NAME`. Slice 7 will make this key mandatory for the post-deploy API check.
 Do not use a database insert or the legacy bootstrap key to manufacture this credential.
 
-Slice 6 retains the control-plane HTTP LoadBalancer for its existing CD smoke and rollback.
-Human sign-in uses the HTTPS origin. Slice 7 moves the CD smoke to HTTPS and removes that listener
-with the preset keys. A slice 6 rollback restores the prior platform release and dispatches the
-Console's confirmed legacy rollback workflow; restore the ingress before relying on the old BFF.
+Slice 6 retains and checks the control-plane HTTP LoadBalancer for rollback, but CD sends its
+compatibility key only through the HTTPS origin. Human sign-in uses that origin too.
+Slice 7 replaces the smoke credential with the Console-issued service-account key and removes
+the HTTP listener with the preset keys. Prepare and perform a slice 6 rollback as follows:
+
+1. Before cutover, save the current Ingress and the old cloud backend's IAP IAM policy.
+   Record its backend-scoped `roles/iap.httpsResourceAccessor` members; Kubernetes YAML does not contain that grant.
+2. Coordinate both repositories' deploys. Restore the prior platform release and dispatch
+   the Console's confirmed legacy rollback workflow to restore the ingress and old BFF.
+3. Resolve the rebuilt cloud backend from the restored Ingress and check its IAP policy.
+   With the owner's authorization, restore the recorded accessor bindings on that backend if missing.
+   Do not widen them to the project. GKE can recreate the backend with no access grant.
+4. Confirm anonymous requests receive IAP's own refusal, then sign in as an authorized Workspace member
+   and exercise the Console. A green legacy deploy checks refusal only; it does not prove member access.
+
+The rollback is not accepted until both refusal and authorized access work.
+The edge apply is outside Helm's atomic release. If its HTTPS smoke fails, CD reports
+failure and leaves that ingress applied; it does not restore the old IAP grant.
+Use the coordinated rollback above and verify both access paths before declaring recovery.
 
 ## Continuous delivery
 

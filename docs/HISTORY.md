@@ -125,6 +125,19 @@ startup failure and a missing local zip utility; the rerun changed no product
 source or timeout and used Zip 3.0 from a temporary tool directory.
 The SDK report found zero unresolved transitions; the live registry check passed.
 
+Two independent committed reviews found deployment preflight and rollback gaps,
+an incorrect OIDC Secret repair name, and stale install and service-account guidance.
+After the fixes, independent replay passed 11 parked/live workflow scenarios and
+21 edge/smoke scenarios. Existing TLS identity is checked before deployment and again
+before applying the edge; both checks rejected a changed host or attachment.
+The saved staging objects passed. The CD smoke sent its compatibility key only over
+HTTPS in a mode-0600 curl configuration, and checked keyed 200 and anonymous 401.
+The legacy Compose rollback also ran successfully with its documented empty settings,
+the published Console and real Caddy. All owned resources were removed.
+Affected script gates passed; the frozen Go gate inputs did not change.
+The IAP rollback procedure now requires both restoring any missing backend-scoped
+access grant and proving signed-in Workspace access. This live rollback was not run.
+
 This local acceptance does not certify staging deployment. Staging was parked,
 Google client creation remained unsubmitted, and no staging service-account key had
 been issued. The native HTTPS/OIDC configuration needs the owner-controlled cutover

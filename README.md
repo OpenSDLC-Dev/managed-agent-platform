@@ -41,7 +41,7 @@ Public `/v1` does not admit IdP JWTs or proxy assertions. Browser sessions reach
 
 The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Native platform login uses private routes when `CONSOLE_PUBLIC_ORIGIN` is configured. Without native login, OIDC and trusted-proxy installs retain verifier-only IdP admission on existing private credential-management routes, not public `/v1`. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
 
-Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Both offer an opt-in published Console and one-origin edge. Native login remains opt-in; legacy unowned management keys continue to work during rollout. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
+Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Compose defaults to development password login; its `console` profile adds the published Console and one-origin edge. Helm enables both by default and requires a native login mode and public origin. Legacy unowned management keys continue to work during rollout. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
 
 ## Why
 

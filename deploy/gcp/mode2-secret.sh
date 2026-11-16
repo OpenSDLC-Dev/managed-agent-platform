@@ -252,10 +252,12 @@ fi
 # below instead.
 for f in "${verbatim[@]}"; do
   if [ "$(wc -l < "$d/$f")" -ne 0 ]; then
-    fail "Secret Manager secret '$f' contains a newline"
+    secret_name=$f
+    if [ "$f" = oidc-client-secret ]; then secret_name=$OIDC_CLIENT_SECRET_NAME; fi
+    fail "Secret Manager secret '$secret_name' contains a newline"
     echo "It is used verbatim, so a trailing newline is part of the value." >&2
     echo "Re-add it without one: printf '%s' \"\$value\" | gcloud secrets" >&2
-    echo "versions add $f --project=$PROJECT --data-file=-" >&2
+    echo "versions add $secret_name --project=$PROJECT --data-file=-" >&2
     exit 1
   fi
 done

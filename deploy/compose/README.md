@@ -74,9 +74,17 @@ Leave `CONSOLE_PLATFORM_API_KEY` and `CONSOLE_PASSWORD` unset. Start with
 Retrieve the first-admin code from the restricted file that the control-plane log names.
 Use the same host spelling throughout; `localhost` and `127.0.0.1` are different origins.
 
-Empty `CONSOLE_AUTH_MODE` retains legacy BFF routing. In that mode, set
-`CONSOLE_PLATFORM_API_KEY` to the control-plane key. An optional `CONSOLE_PASSWORD`
-protects that legacy console. Do not set a native public origin with legacy routing.
+For a slice 6 legacy rollback, explicitly set all three values to empty in `.env`;
+unsetting them restores the native defaults:
+
+```sh
+CONSOLE_AUTH_MODE=
+CONSOLE_PUBLIC_ORIGIN=
+IDENTITY_MODE=
+```
+
+Set `CONSOLE_PLATFORM_API_KEY` to the control-plane key. An optional `CONSOLE_PASSWORD`
+protects that legacy console. A native public origin is invalid with legacy routing.
 Other mode values fail startup. The Console never receives the RP client secret.
 
 For native bundled OIDC, add the `iam` profile and use the native OIDC block in
@@ -275,8 +283,8 @@ This block is the legacy verifier-only configuration. Native browser login uses
 the Console profile and HTTPS issuer described above.
 
 ```sh
-# in .env: uncomment all seven SSO lines — the six IDENTITY_* and SSL_CERT_FILE
-# (they ship commented out in .env.example)
+# In .env, use the legacy OIDC block in .env.example, including its explicit
+# empty CONSOLE_PUBLIC_ORIGIN and CONSOLE_AUTH_MODE. Do not use the native block.
 docker compose --profile iam up --build
 ```
 
@@ -284,10 +292,10 @@ Two services join the stack (docs/plan/31_console-sso-rbac.md,
 [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)): **casdoor**, a
 local-account OIDC provider, so "the platform's default IAM works out of the box" is true
 on a laptop; and **idp**, a small Caddy proxy that is the only published way to reach it.
-The sign-in page is `http://localhost:8000`. Nothing else about the stack changes — with
-the profile off, `IDENTITY_MODE` stays empty and management auth is `x-api-key` only.
+The sign-in page is `http://localhost:8000`. These legacy settings select IdP token
+verification without native browser login. The default stack instead uses password login.
 
-`IDENTITY_MODE` gates the other identity settings: with it unset, none are read.
+`IDENTITY_MODE` gates the other identity settings: explicitly empty disables them.
 For this local TLS proxy, `SSL_CERT_FILE` is required. Without it the control
 plane cannot verify the proxy's certificate and exits at boot with
 `x509: certificate signed by unknown authority`.

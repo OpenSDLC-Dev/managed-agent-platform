@@ -308,6 +308,10 @@ def main():
                 versions["fixture-oidc"] = value
             r = run(tmp, "oidc-bad-" + name, versions=versions,
                     env_extra={"OIDC_CLIENT_SECRET_NAME": "fixture-oidc"})
+            if name == "newline":
+                check("OIDC repair command names the Secret Manager source",
+                      "versions add fixture-oidc " in r.out and
+                      "Secret Manager secret 'fixture-oidc' contains a newline" in r.out, r.out)
             check("invalid OIDC secret is refused before any apply: " + name,
                   r.code != 0 and "kubectl" not in r.calls(), r.out)
 

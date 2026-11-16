@@ -411,7 +411,7 @@ deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
 
-An opt-in application Caddy edge serves the published Console at the same origin
+An application Caddy edge serves the published Console at the same origin
 as private CP routes and gateway administration. Explicit native mode sends login,
 management, OAuth and resource-proxy paths to CP. Pages, assets and shallow health
 remain Console-owned. Legacy mode retains the BFF. Raw `/v1` goes to CP; gateway

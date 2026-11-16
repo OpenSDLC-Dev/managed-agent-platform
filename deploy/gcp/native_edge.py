@@ -2,8 +2,29 @@
 """Render staging's existing HTTPS edge onto the platform-owned application edge."""
 import argparse
 import json
+from pathlib import Path
 import re
 from urllib.parse import urlsplit
+
+
+def validate_existing(origin, resources):
+    """Refuse a cutover that would replace the owner's existing TLS identity."""
+    items = {(item["kind"], item["metadata"]["name"]): item
+             for item in resources.get("items", [])}
+    ingress = items.get(("Ingress", "console"), {})
+    certificate = items.get(("ManagedCertificate", "console"), {})
+    hosts = [rule.get("host") for rule in ingress.get("spec", {}).get("rules", [])]
+    domains = certificate.get("spec", {}).get("domains", [])
+    if hosts != [origin.removeprefix("https://")] or domains != hosts:
+        raise ValueError("origin must match the existing console Ingress host and ManagedCertificate domain")
+    annotations = ingress.get("metadata", {}).get("annotations", {})
+    for key, expected in {
+        "kubernetes.io/ingress.global-static-ip-name": "console-ip",
+        "networking.gke.io/managed-certificates": "console",
+        "networking.gke.io/v1beta1.FrontendConfig": "console",
+    }.items():
+        if annotations.get(key) != expected:
+            raise ValueError(f"existing console Ingress must retain {key}={expected}")
 
 
 def manifest(origin, service):
@@ -22,8 +43,9 @@ def manifest(origin, service):
             metadata["annotations"] = annotations
         return {"apiVersion": api, "kind": kind, "metadata": metadata, "spec": spec}
 
-    # Keep the existing Ingress, address and certificate names. The separate
-    # BackendConfig leaves the old IAP backend available for slice 6 rollback.
+    # Keep the existing Ingress, address and certificate names. The old Kubernetes
+    # BackendConfig stays, but GKE can collect its unused cloud backend and IAM
+    # grant. Rollback must restore that grant; see this directory's README.
     return {"apiVersion": "v1", "kind": "List", "items": [
         obj("cloud.google.com/v1", "BackendConfig", "map-native-edge", {
             "iap": {"enabled": False}, "timeoutSec": 3600,
@@ -51,8 +73,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", required=True)
     parser.add_argument("--service", required=True)
+    parser.add_argument("--existing-edge", type=Path,
+                        help="kubectl JSON List of the existing Ingress and ManagedCertificate")
     args = parser.parse_args()
     try:
-        print(json.dumps(manifest(args.origin, args.service)))
+        rendered = manifest(args.origin, args.service)
+        if args.existing_edge:
+            validate_existing(args.origin, json.loads(args.existing_edge.read_text()))
+        print(json.dumps(rendered))
     except ValueError as error:
         parser.error(str(error))
