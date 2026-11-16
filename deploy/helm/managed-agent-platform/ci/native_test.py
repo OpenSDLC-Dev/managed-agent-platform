@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free one-origin render contracts. Helm remains the YAML validator."""
+"""Credential-free one-origin contracts, including the pinned edge executable."""
 import base64
 import json
 import re
@@ -45,6 +45,37 @@ def native(mode="password"):
 
 
 class NativeRender(unittest.TestCase):
+    def test_edge_binary_executes_with_rendered_capabilities(self):
+        body = section(render(native()), "app-edge.yaml")
+        container = body.split("        - name: app-edge\n", 1)[1]
+        image = json.loads(re.search(r"(?m)^          image: (.+)$", container).group(1))
+        context = re.search(r"(?ms)^          securityContext:\n(.*?)(?=^          \S|^      \S|\Z)", container).group(1)
+        # Consume the chart's rendered settings: a hard-coded Docker capability
+        # would pass even when a chart regression makes the image unexecutable.
+        self.assertIn("allowPrivilegeEscalation: false", context)
+        args = ["--security-opt=no-new-privileges"]
+        for action in ["drop", "add"]:
+            match = re.search(r"(?m)^              " + action + r": \[([A-Z_, ]+)\]$", context)
+            if match:
+                args.extend("--cap-" + action + "=" + cap.strip() for cap in match.group(1).split(","))
+        self.assertIn("--cap-drop=ALL", args)
+        with tempfile.TemporaryDirectory(prefix="helm-edge-exec-") as directory:
+            cidfile = Path(directory) / "container.cid"
+            try:
+                created = subprocess.run(["docker", "create", "--cidfile", str(cidfile), *args,
+                                          "--entrypoint", "/bin/sh", image, "-c", "exec caddy version"],
+                                         capture_output=True, text=True, timeout=120)
+                self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+                cid = cidfile.read_text().strip()
+                result = subprocess.run(["docker", "start", "-a", cid], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertRegex(result.stdout, r"^v\d+\.\d+\.\d+", result.stdout + result.stderr)
+            finally:
+                if cidfile.exists():
+                    removed = subprocess.run(["docker", "rm", "-f", "-v", cidfile.read_text().strip()],
+                                             capture_output=True, text=True, timeout=30)
+                    self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+
     def test_application_service_accepts_gke_backend_annotations(self):
         values = native()
         values["appEdge"] = {"service": {"annotations": {

@@ -14,6 +14,7 @@ Slice 5 merged in [PR #1043](https://github.com/OpenSDLC-Dev/managed-agent-platf
 - [x] Default Compose to password login and require a login mode in Helm.
 - [x] Obtain CI, acceptance and eval credentials through setup, login and private issuance.
 - [x] Deliver Console key management for both environment kinds ([Console PR #260](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/260)).
+- [x] Correct the app-edge capability failure found during the slice 6 staging rollout; verify the rendered container settings at runtime.
 - [ ] Configure staging HTTPS and Google OIDC; obtain its CD service-account key through Console.
 - [x] Complete local contract/runtime tests and independent `make verify` ([acceptance](./docs/HISTORY.md#plan-69-slice-6-independent-acceptance)).
 - [ ] Complete committed dual review, CI and live staging acceptance before slice 7.
