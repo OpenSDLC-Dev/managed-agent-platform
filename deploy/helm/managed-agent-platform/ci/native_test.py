@@ -3,6 +3,7 @@
 import base64
 import json
 import re
+import signal
 import subprocess
 import tempfile
 import textwrap
@@ -62,32 +63,52 @@ class NativeRender(unittest.TestCase):
                 self.assertEqual(caps, ["ALL"] if action == "drop" else ["NET_BIND_SERVICE"])
                 args.extend("--cap-" + action + "=" + cap for cap in caps)
         self.assertIn("--cap-drop=ALL", args)
-        with tempfile.TemporaryDirectory(prefix="helm-edge-exec-") as directory:
-            cidfile = Path(directory) / "container.cid"
-            owner = uuid.uuid4().hex
-            name = "helm-edge-exec-" + owner
-            label = "io.opensdlc.test.helm-edge=" + owner
-            try:
-                created = subprocess.run(["docker", "create", "--name", name, "--label", label,
-                                          "--cidfile", str(cidfile), *args,
-                                          "--entrypoint", "/bin/sh", image, "-c", "exec caddy version"],
-                                         capture_output=True, text=True, timeout=120)
-                self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
-                cid = cidfile.read_text().strip()
-                result = subprocess.run(["docker", "start", "-a", cid], capture_output=True, text=True, timeout=30)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertRegex(result.stdout, r"^v\d+\.\d+\.\d+", result.stdout + result.stderr)
-            finally:
-                # Docker opens the CID file before pulling/creating. Identify
-                # our original request even if it timed out before writing it.
-                owned = subprocess.run(["docker", "ps", "-aq", "--no-trunc",
-                                        "--filter", "name=^/" + name + "$", "--filter", "label=" + label],
-                                       capture_output=True, text=True, timeout=30)
-                self.assertEqual(owned.returncode, 0, owned.stdout + owned.stderr)
-                for cid in owned.stdout.split():
-                    removed = subprocess.run(["docker", "rm", "-f", "-v", cid],
-                                             capture_output=True, text=True, timeout=30)
-                    self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        # Bound registry access before there is any container to own. A cached
+        # pinned image needs no network, and create must not pull implicitly.
+        cached = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True, timeout=30)
+        if cached.returncode:
+            pulled = subprocess.run(["docker", "pull", image], capture_output=True, text=True, timeout=120)
+            self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
+        interrupted = []
+        previous = {sig: signal.signal(sig, lambda number, _: interrupted.append(number))
+                    for sig in [signal.SIGINT, signal.SIGTERM]}
+        try:
+            with tempfile.TemporaryDirectory(prefix="helm-edge-exec-") as directory:
+                cidfile = Path(directory) / "container.cid"
+                owner = uuid.uuid4().hex
+                name = "helm-edge-exec-" + owner
+                label = "io.opensdlc.test.helm-edge=" + owner
+                try:
+                    # Killing the CLI does not cancel daemon-side creation. Wait
+                    # for this original request, outside the terminal's signal
+                    # group, before looking up and removing its owned container.
+                    created = subprocess.run(["docker", "create", "--pull=never", "--name", name, "--label", label,
+                                              "--cidfile", str(cidfile), *args,
+                                              "--entrypoint", "/bin/sh", image, "-c", "exec caddy version"],
+                                             capture_output=True, text=True, start_new_session=True)
+                    self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+                    if not interrupted:
+                        cid = cidfile.read_text().strip()
+                        result = subprocess.run(["docker", "start", "-a", cid], capture_output=True, text=True,
+                                                timeout=30, start_new_session=True)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertRegex(result.stdout, r"^v\d+\.\d+\.\d+", result.stdout + result.stderr)
+                finally:
+                    # The name and nonce identify our original request even if
+                    # Docker failed to write its CID file after creation.
+                    owned = subprocess.run(["docker", "ps", "-aq", "--no-trunc",
+                                            "--filter", "name=^/" + name + "$", "--filter", "label=" + label],
+                                           capture_output=True, text=True, timeout=30, start_new_session=True)
+                    self.assertEqual(owned.returncode, 0, owned.stdout + owned.stderr)
+                    for cid in owned.stdout.split():
+                        removed = subprocess.run(["docker", "rm", "-f", "-v", cid],
+                                                 capture_output=True, text=True, timeout=30, start_new_session=True)
+                        self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+            if interrupted:
+                signal.raise_signal(interrupted[0])
 
     def test_application_service_accepts_gke_backend_annotations(self):
         values = native()
