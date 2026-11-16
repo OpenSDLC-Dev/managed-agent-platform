@@ -87,8 +87,8 @@ class NativeRender(unittest.TestCase):
                                               "--entrypoint", "/bin/sh", image, "-c", "exec caddy version"],
                                              capture_output=True, text=True, start_new_session=True)
                     self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+                    cid = cidfile.read_text().strip()
                     if not interrupted:
-                        cid = cidfile.read_text().strip()
                         result = subprocess.run(["docker", "start", "-a", cid], capture_output=True, text=True,
                                                 timeout=30, start_new_session=True)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
