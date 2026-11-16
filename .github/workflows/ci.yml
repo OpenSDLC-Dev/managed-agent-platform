@@ -837,10 +837,12 @@ jobs:
           # refused for the reason the node selector refuses one: a values file
           # decodes an unquoted number as float64.
           for bad in '"a,b": admin' '"a=b": admin' 'group: 42'; do
-            printf 'identity:\n  mode: oidc\n  oidc:\n    issuer: https://idp.example\n    audience: x\n  roleMap:\n    %s\n' "$bad" > /tmp/bad-rolemap.yaml
-            if helm template t "$CHART" -f "$VALUES" -f /tmp/bad-rolemap.yaml >/dev/null 2>&1; then
+            printf 'identity:\n  mode: oidc\n  oidc:\n    issuer: https://idp.example\n    audience: x\n    clientId: x\n  roleMap:\n    %s\n' "$bad" > /tmp/bad-rolemap.yaml
+            if err="$(helm template t "$CHART" -f "$VALUES" -f /tmp/bad-rolemap.yaml 2>&1 >/dev/null)"; then
               echo "a roleMap entry of {$bad} rendered instead of failing" >&2; exit 1
             fi
+            printf '%s\n' "$err" | grep -F 'identity.roleMap[' > /dev/null \
+              || { echo "a roleMap entry of {$bad} failed for another reason: $err" >&2; exit 1; }
           done
           echo "ok: identity lane"
       - name: the bundled IdP refuses the SAML and CAS surfaces, and nothing else reaches it

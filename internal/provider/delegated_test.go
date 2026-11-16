@@ -46,12 +46,13 @@ func TestDelegatedRouteUsesOnlyTheCurrentClaim(t *testing.T) {
 }
 
 func TestDelegatedRouteRefusesStaticCredentials(t *testing.T) {
+	t.Setenv("DELEGATED_TEST_KEY", "static")
 	for _, fields := range []string{
 		`"api_key":"static"`,
-		`"api_key_env":"UNSET_DELEGATED_TEST_KEY"`,
+		`"api_key_env":"DELEGATED_TEST_KEY"`,
 	} {
-		if _, err := provider.LoadRoutes(writeConfig(t, `[{"model":"*","protocol":"anthropic","base_url":"http://gateway","delegated_inference":true,`+fields+`}]`)); err == nil {
-			t.Errorf("accepted competing credential: %s", fields)
+		if _, err := provider.LoadRoutes(writeConfig(t, `[{"model":"*","protocol":"anthropic","base_url":"http://gateway","delegated_inference":true,`+fields+`}]`)); err == nil || !strings.Contains(err.Error(), "delegated_inference excludes api_key and api_key_env") {
+			t.Errorf("competing credential %s returned the wrong error: %v", fields, err)
 		}
 	}
 	for _, cfg := range []provider.Config{
