@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import uuid
 from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[1]
@@ -52,17 +53,23 @@ class NativeRender(unittest.TestCase):
         context = re.search(r"(?ms)^          securityContext:\n(.*?)(?=^          \S|^      \S|\Z)", container).group(1)
         # Consume the chart's rendered settings: a hard-coded Docker capability
         # would pass even when a chart regression makes the image unexecutable.
-        self.assertIn("allowPrivilegeEscalation: false", context)
+        self.assertRegex(context, r"(?m)^            allowPrivilegeEscalation: false$")
         args = ["--security-opt=no-new-privileges"]
         for action in ["drop", "add"]:
             match = re.search(r"(?m)^              " + action + r": \[([A-Z_, ]+)\]$", context)
             if match:
-                args.extend("--cap-" + action + "=" + cap.strip() for cap in match.group(1).split(","))
+                caps = [cap.strip() for cap in match.group(1).split(",")]
+                self.assertEqual(caps, ["ALL"] if action == "drop" else ["NET_BIND_SERVICE"])
+                args.extend("--cap-" + action + "=" + cap for cap in caps)
         self.assertIn("--cap-drop=ALL", args)
         with tempfile.TemporaryDirectory(prefix="helm-edge-exec-") as directory:
             cidfile = Path(directory) / "container.cid"
+            owner = uuid.uuid4().hex
+            name = "helm-edge-exec-" + owner
+            label = "io.opensdlc.test.helm-edge=" + owner
             try:
-                created = subprocess.run(["docker", "create", "--cidfile", str(cidfile), *args,
+                created = subprocess.run(["docker", "create", "--name", name, "--label", label,
+                                          "--cidfile", str(cidfile), *args,
                                           "--entrypoint", "/bin/sh", image, "-c", "exec caddy version"],
                                          capture_output=True, text=True, timeout=120)
                 self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
@@ -71,8 +78,14 @@ class NativeRender(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertRegex(result.stdout, r"^v\d+\.\d+\.\d+", result.stdout + result.stderr)
             finally:
-                if cidfile.exists():
-                    removed = subprocess.run(["docker", "rm", "-f", "-v", cidfile.read_text().strip()],
+                # Docker opens the CID file before pulling/creating. Identify
+                # our original request even if it timed out before writing it.
+                owned = subprocess.run(["docker", "ps", "-aq", "--no-trunc",
+                                        "--filter", "name=^/" + name + "$", "--filter", "label=" + label],
+                                       capture_output=True, text=True, timeout=30)
+                self.assertEqual(owned.returncode, 0, owned.stdout + owned.stderr)
+                for cid in owned.stdout.split():
+                    removed = subprocess.run(["docker", "rm", "-f", "-v", cid],
                                              capture_output=True, text=True, timeout=30)
                     self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
 
