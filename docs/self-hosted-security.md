@@ -1619,7 +1619,9 @@ separately from API keys. Claim completion, expiry or reclaim invalidates it; ti
 lease renewal preserves it. The gateway rechecks membership on every call and binds
 usage to the claim's session. Its only scope is inference, including model listings
 and token counting. Management and worker routes refuse it. It shares public-alias
-organization budgets. The brain still sends `BRAIN_API_KEY` until slice 6.
+organization budgets. The default gateway route sends it through
+`delegated_inference: true`. Direct routes retain their vendor credentials and
+never receive the claim token. A delegated route refuses static keys and auth headers.
 
 Migration 0064 backfills from `created_by`: principals remain principals, owned keys
 resolve to owners, and historical unowned or deleted-principal IDs remain legacy
@@ -1628,7 +1630,10 @@ their own creator is absent. Unresolvable initiators fail their next model turn.
 Insert triggers and the claim fallback cover old writers during a rolling upgrade.
 Keep migrations 0064/0065 during binary rollback. Old brains do not enforce the new
 membership check, and old gateways reject delegated tokens; drain old replicas before
-relying on these controls. This slice does not switch outbound brain credentials.
+relying on these controls. Deploy slice 5's token receiver before slice 6's sender.
+The static brain key remains on the receivers through slice 6 for old replicas.
+Rolling back a brain also requires restoring its static route configuration;
+Helm rollback restores both together. Do not remove the compatibility key until slice 7.
 
 #### Owned-key rollout and rollback
 
@@ -1672,7 +1677,7 @@ the variable revives that row at the next boot. If the value had been issued fro
 console, the adoption is logged with a warning naming its previous status; if it
 was env-var-managed all along, it is not, having never left that lane.
 
-`BRAIN_API_KEY`, the key the brain calls the model gateway with, takes the same lane
+`BRAIN_API_KEY`, retained for old brains through slice 6, takes the same lane
 under the name `brain`, with one addition: a boot with the variable unset archives the
 env-var-managed `brain` key, so removing the variable retires the credential rather
 than leaving it live with nobody holding it on purpose. It is a platform key like any

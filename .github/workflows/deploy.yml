@@ -66,12 +66,9 @@ on:
 # succession therefore deploy in order and the later one wins, at the cost of
 # waiting out the first.
 #
-# The group name is not unique across the organisation — managed-agent-console has
-# a `deploy-staging` of its own — and it does not need to be: a concurrency group
-# is scoped to ONE repository, so the two never contend. Nor should they be read
-# as serialised because they share a name. They deploy two different Helm releases
-# into the same namespace, and nothing here can order them against each other;
-# GitHub has no cross-repository lock to ask for.
+# This workflow owns the native Console and its public edge. The Console repo
+# publishes images; its legacy staging deploy is manual-only during slice 6.
+# Never run that rollback workflow concurrently: groups are repository-scoped.
 concurrency:
   group: deploy-staging
   cancel-in-progress: false
@@ -133,6 +130,11 @@ env:
   # staging-values.yaml runs the gateway: the step that reads that off the chart
   # asserts it then, and nothing reads it while the gateway is off.
   MODELGATEWAY_SERVICE_ACCOUNT: ${{ vars.MODELGATEWAY_SERVICE_ACCOUNT }}
+  # Native Google login uses the existing HTTPS application origin. Only the
+  # client secret's Secret Manager name is configuration; its value stays private.
+  STAGING_PUBLIC_ORIGIN: ${{ vars.STAGING_PUBLIC_ORIGIN }}
+  OIDC_CLIENT_ID: ${{ vars.OIDC_CLIENT_ID }}
+  OIDC_CLIENT_SECRET_NAME: ${{ vars.OIDC_CLIENT_SECRET_NAME }}
   # NOT variables, deliberately. These three name the CHART's own objects — the
   # namespace it installs into, the pre-created Secret its `existingSecret` value
   # names, the release — so they identify no operator and nothing here is hidden
@@ -196,7 +198,8 @@ jobs:
           for v in GCP_PROJECT_ID GCP_ZONE GKE_CLUSTER ARTIFACT_REGISTRY \
                    WIF_PROVIDER DEPLOY_SERVICE_ACCOUNT BLOB_BUCKET KMS_KEY_NAME \
                    CONTROLPLANE_SERVICE_ACCOUNT BRAIN_SERVICE_ACCOUNT \
-                   EXECUTOR_SERVICE_ACCOUNT; do
+                   EXECUTOR_SERVICE_ACCOUNT STAGING_PUBLIC_ORIGIN \
+                   OIDC_CLIENT_ID OIDC_CLIENT_SECRET_NAME; do
             case "${!v}" in
               "" | *[[:space:],]*) bad="$bad $v" ;;
             esac
@@ -249,6 +252,9 @@ jobs:
           # checkout v6+ would otherwise leave it in a credentials file wired into
           # the job's git config, in a job that also holds a cloud impersonation.
           persist-credentials: false
+
+      - name: Validate the native HTTPS origin before cloud authentication
+        run: python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service validation-only > /dev/null
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -504,7 +510,7 @@ jobs:
 
           # NOT captured, deliberately. GitHub reads `::add-mask::` off this
           # script's stdout, so a `$(...)` here would swallow every redaction and
-          # leave three credentials unmasked in a public log. The one thing this
+          # leave credentials unmasked in a public log. The one thing this
           # job needs back — whether the Secret actually changed — the script
           # writes to $GITHUB_ENV as SECRET_CHANGED for the step that rolls the
           # pods after the upgrade.
@@ -585,6 +591,9 @@ jobs:
           helm upgrade --install "$HELM_RELEASE" deploy/helm/managed-agent-platform \
             --namespace "$K8S_NAMESPACE" --create-namespace \
             -f deploy/gcp/staging-values.yaml \
+            --set-string "console.publicOrigin=$STAGING_PUBLIC_ORIGIN" \
+            --set-string "identity.oidc.clientId=$OIDC_CLIENT_ID" \
+            --set-string "identity.oidc.audience=$OIDC_CLIENT_ID" \
             --set-string "image.registry=${ARTIFACT_REGISTRY%%/*}" \
             --set-string "image.repository=${ARTIFACT_REGISTRY#*/}" \
             --set-string "controlplane.serviceAccount.annotations.iam\.gke\.io/gcp-service-account=$CONTROLPLANE_SERVICE_ACCOUNT" \
@@ -723,7 +732,25 @@ jobs:
             kubectl rollout status --namespace "$K8S_NAMESPACE" "$dep" --timeout=5m
           done
 
-      # Ready pods are not a working API. This is the only step that proves the
+      # Reuse the current hostname, static IP and certificate. Switching the
+      # Ingress changes the backend, not DNS. Admission now belongs to the
+      # platform: browser cookie/CSRF and public API keys, with no IAP wrapper.
+      - name: Route the existing HTTPS origin to the native application edge
+        if: env.POWERED_OFF != 'true'
+        run: |
+          set -euo pipefail
+          service="$(kubectl get svc --namespace "$K8S_NAMESPACE" \
+            --selector "app.kubernetes.io/instance=$HELM_RELEASE,app.kubernetes.io/component=app-edge" \
+            -o jsonpath='{.items[*].metadata.name}')"
+          python3 deploy/gcp/native_edge.py --origin "$STAGING_PUBLIC_ORIGIN" --service "$service" \
+            > "$RUNNER_TEMP/native-edge.json"
+          kubectl apply --namespace "$K8S_NAMESPACE" -f "$RUNNER_TEMP/native-edge.json"
+          got="$(kubectl get ingress console --namespace "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.rules[0].http.paths[0].backend.service.name}')"
+          test "$got" = "$service"
+          python3 deploy/gcp/native_smoke.py --origin "$STAGING_PUBLIC_ORIGIN" --modelgateway "$MODELGATEWAY"
+
+      # Ready pods are not a working API. This step proves the compatibility
       # LoadBalancer exists, that the deployed key is the key Secret Manager holds,
       # that the control plane can reach Cloud SQL — a 200 on a list endpoint is a
       # round trip through the database — and that the API is not answering

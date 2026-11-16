@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: OpenSDLC-Dev/managed-agent-console
-          ref: baee77aaf14336f08a5cde50da7ac396f78adb83
+          ref: cb7d741ff96098c6d7e428931ea05414d9f815aa
           path: console-source
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -103,11 +103,10 @@ jobs:
       - name: brain model-providers file is the JSON array the loader requires, gateway on and off
         run: |
           set -euo pipefail
-          # On, the default: one route, every model to the gateway's Service under
-          # BRAIN_API_KEY, from a ConfigMap the brain mounts in the Secret's place.
+          # The gateway route selects each turn's delegated claim token.
           mp="$(helm template t "$CHART" -f "$VALUES" --show-only templates/brain-configmap.yaml \
             | grep 'model-providers.json:' | sed 's/^[^:]*: //')"
-          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","api_key_env":"BRAIN_API_KEY"}]; assert d == want, d; print("ok: the gateway route")'
+          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","delegated_inference":True}]; assert d == want, d; print("ok: the gateway route")'
           # The route names the Service the chart renders, port included.
           helm template t "$CHART" -f "$VALUES" --show-only templates/modelgateway-service.yaml \
             | grep '^      port: 8090$' > /dev/null \
@@ -115,18 +114,19 @@ jobs:
           helm template t "$CHART" -f "$VALUES" --show-only templates/brain-deployment.yaml \
             | grep -A2 '^        - name: model-providers$' | grep '^            name: t-managed-agent-platform-brain-routes$' > /dev/null \
             || { echo "the brain does not mount the gateway route" >&2; exit 1; }
-          # The key the route names reaches the three processes that share it,
-          # from the Secret key the Secret writes, and no other.
-          for tpl in brain controlplane modelgateway; do
+          # Receivers keep the old key for rolling compatibility until slice 7.
+          for tpl in controlplane modelgateway; do
             helm template t "$CHART" -f "$VALUES" --show-only "templates/$tpl-deployment.yaml" \
               | grep -A4 'name: BRAIN_API_KEY$' | grep 'key: brain-api-key$' > /dev/null \
               || { echo "the $tpl does not read BRAIN_API_KEY from the brain-api-key Secret key" >&2; exit 1; }
           done
           # Each negative check greps a captured render, so a render that fails
           # fails the step rather than matching nothing.
-          exe="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$exe" | grep 'BRAIN_API_KEY' > /dev/null \
-            && { echo "the executor is handed BRAIN_API_KEY" >&2; exit 1; }
+          for tpl in brain executor; do
+            exe="$(helm template t "$CHART" -f "$VALUES" --show-only "templates/$tpl-deployment.yaml")"
+            echo "$exe" | grep 'BRAIN_API_KEY' > /dev/null \
+              && { echo "$tpl is handed BRAIN_API_KEY" >&2; exit 1; }
+          done
           sec="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
           echo "$sec" | grep '^  brain-api-key: ' > /dev/null \
             || { echo "the Secret does not write brain-api-key" >&2; exit 1; }
@@ -145,11 +145,11 @@ jobs:
           # brain.gatewayRoute joins the chart's four fields; it may not replace them.
           mp="$(helm template t "$CHART" -f "$VALUES" --set brain.gatewayRoute.max_tokens=32000 \
             --show-only templates/brain-configmap.yaml | grep 'model-providers.json:' | sed 's/^[^:]*: //')"
-          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","api_key_env":"BRAIN_API_KEY","max_tokens":32000}]; assert d == want, d; print("ok: brain.gatewayRoute joins the route")'
+          echo "$mp" | python3 -c 'import json,sys; d=json.loads(json.loads(sys.stdin.read())); want=[{"model":"*","protocol":"anthropic","base_url":"http://t-managed-agent-platform-modelgateway:8090","delegated_inference":True,"max_tokens":32000}]; assert d == want, d; print("ok: brain.gatewayRoute joins the route")'
           # Refused: everything but the four allowed keys — the chart's own, the
           # credential fields, and their other spellings, which the loader's
           # case-insensitive JSON would read as the same fields.
-          for k in model protocol base_url api_key api_key_env headers Headers API_KEY Max_Tokens extra; do
+          for k in model protocol base_url api_key api_key_env delegated_inference headers Headers API_KEY Max_Tokens extra; do
             if err="$(helm template t "$CHART" -f "$VALUES" --set "brain.gatewayRoute.$k=x" 2>&1)"; then
               echo "brain.gatewayRoute.$k rendered" >&2; exit 1
             fi
@@ -770,7 +770,7 @@ jobs:
             args=(--set "identity.mode=$mode")
             if [ "$mode" = oidc ]; then
               args+=(--set identity.oidc.issuer=https://idp.ci.example
-                     --set identity.oidc.audience=map-console)
+                     --set identity.oidc.audience=map-console --set identity.oidc.clientId=map-console)
             else
               args+=(--set identity.proxy.preset=gcp-iap
                      --set identity.proxy.audience=/projects/123456789/global/backendServices/987654321)
@@ -789,15 +789,13 @@ jobs:
             | grep 'value: "readers=viewer"' > /dev/null \
             || { echo "legacy viewer mapping must still render" >&2; exit 1; }
           echo "ok: legacy viewer mapping"
-      - name: the identity lane is off by default and complete when set
-        # Off by default has a stronger meaning here than "no behaviour change":
-        # IDENTITY_MODE unset and IDENTITY_MODE=disabled are ONE state to
-        # internal/identity, so rendering the pair explicitly would change every
-        # existing release's controlplane pod spec — and roll its pods on upgrade
-        # — to say something the platform already assumed.
+      - name: a login mode is required and its configuration reaches the control plane
         run: |
-          helm template t "$CHART" -f "$VALUES" | grep 'IDENTITY_' > /dev/null \
-            && { echo "default values must render no IDENTITY_* env at all" >&2; exit 1; }
+          for mode in '' disabled; do
+            if helm template t "$CHART" -f "$VALUES" --set "identity.mode=$mode" > /dev/null 2>&1; then
+              echo "a login mode must be selected" >&2; exit 1
+            fi
+          done
           # Only the control plane has a human lane. The brain and the executor
           # never see a user token, so handing them the issuer, the audience and
           # the role map would be configuration with no reader.
@@ -936,13 +934,12 @@ jobs:
           refuses 'casdoor.database.dataSourceName is required' \
             --set postgresql.enabled=false \
             --set externalDatabase.url='postgres://u:p@db.example:5432/x?sslmode=require'
-          # Deploying the IdP first and wiring the identity lane second is a
-          # supported order, so an unconfigured lane must not fail that render.
+          # A password login can coexist with the IdP while OIDC is prepared.
           helm template t "$CHART" -f "$VALUES" --set casdoor.enabled=true \
             --set casdoor.adminPassword=x --set casdoor.console.clientSecret=y \
             --set 'casdoor.console.redirectURIs[0]=https://console.example/api/auth/callback' \
             --set casdoor.ingress.host=idp.example > /dev/null \
-            || { echo "casdoor.enabled with identity.mode empty must render" >&2; exit 1; }
+            || { echo "casdoor.enabled with password login must render" >&2; exit 1; }
           echo "ok: the IdP's refusals and its single entrance"
       - name: required-value guards fire, each for its own reason
         run: |
@@ -957,7 +954,7 @@ jobs:
             echo "$err" | grep -F -- "$want" > /dev/null \
               || { echo "refused for the wrong reason (want: $want): $err" >&2; exit 1; }
           }
-          refuse 'controlplane.apiKey is required' --set image.tag=x --set brain.apiKey=b
+          refuse 'controlplane.apiKey is required' -f "$VALUES" --set controlplane.apiKey= --set brain.apiKey=b
           refuse 'brain.apiKey is required with modelgateway.enabled' -f "$VALUES" --set brain.apiKey=
           # apikey.CheckBrainKey's two refusals, made at render.
           refuse 'brain.apiKey must differ from controlplane.apiKey' -f "$VALUES" --set brain.apiKey=ci-placeholder-key
@@ -1033,7 +1030,8 @@ jobs:
           echo "ok: CD values file renders with the sandbox pair, the proxy connection test and one gateway replica"
       - name: the mode-2 assembly and the chart agree on the Secret's keys
         # Mode 2 splits one contract across two files nothing joins.
-        # deploy/gcp/mode2-secret.sh writes seven FILES into a temp dir and
+        # deploy/gcp/mode2-secret.sh writes the selected credentials and backends
+        # into a temp dir, including staging's required OIDC client secret, and
         # `kubectl create secret --from-file` turns each file NAME into a Secret
         # key; the chart reads
         # keys by name. Rename either side and nothing fails loudly: the keys
@@ -1048,11 +1046,11 @@ jobs:
         # grepping the workflow gave it for free — proof that CD runs the
         # assembly at all — so that is asserted first and separately. The count
         # is asserted rather than merely iterated so that a grep matching FEWER
-        # than six is a failure and not a shorter loop; a grep matching NOTHING
+        # than seven is a failure and not a shorter loop; a grep matching NOTHING
         # already aborts the step, `pipefail` handing grep's exit 1 to the
         # assignment and `set -e` taking it from there.
         #
-        # Six keys are literal flags. The seventh is `$brain_file`, which the
+        # Seven keys are literal flags. The eighth is `$brain_file`, which the
         # script sets per gateway mode (MODELGATEWAY, #906): the routes with the
         # gateway off, the brain's key for it on — the trade the chart's
         # `existingSecret` contract names. So each mode is checked against its
@@ -1086,8 +1084,8 @@ jobs:
           [ "$(echo "$flags" | wc -l)" -eq "$(echo "$shared" | wc -l)" ] \
             || { echo "a Secret key is written twice in deploy/gcp/mode2-secret.sh:" >&2
                  echo "$flags" | sort | uniq -d >&2; exit 1; }
-          [ "$(echo "$shared" | wc -l)" -eq 6 ] \
-            || { echo "expected 6 literal --from-file keys in deploy/gcp/mode2-secret.sh, found:" >&2
+          [ "$(echo "$shared" | wc -l)" -eq 7 ] \
+            || { echo "expected 7 literal --from-file keys in deploy/gcp/mode2-secret.sh, found:" >&2
                  echo "$shared" >&2; exit 1; }
           for gateway in false true; do
             case "$gateway" in
@@ -1107,7 +1105,7 @@ jobs:
             # `- ` alternative is the brain's projected volume item, which is a
             # list entry rather than a secretKeyRef.
             for k in $wrote; do
-              echo "$rendered" | grep -E "^[[:space:]]*(- )?key: ${k//./\\.}\$" > /dev/null \
+              echo "$rendered" | grep -E "^[[:space:]]*(- )?key: \"?${k//./\\.}\"?\$" > /dev/null \
                 || { echo "with modelgateway.enabled=$gateway, mode2-secret.sh writes Secret key '$k' and nothing in the render reads it" >&2
                      exit 1; }
             done
@@ -1116,7 +1114,7 @@ jobs:
             # CreateContainerConfigError — is a key the job writes.
             needs="$(echo "$rendered" | awk '
               pend != "" { if ($1 != "optional:" || $2 != "true") print pend; pend = "" }
-              inref && $1 == "key:" { pend = $2 }
+              inref && $1 == "key:" { gsub(/"/, "", $2); pend = $2 }
               $1 == "secretKeyRef:" { inref = 1 }
               END { if (pend != "") print pend }' | sort -u)"
             for k in $needs; do
@@ -1133,7 +1131,7 @@ jobs:
           # Secret nothing creates.
           echo "$rendered" | grep -E '^[[:space:]]*name: map-platform$' > /dev/null \
             || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
-          echo "ok: mode2-secret.sh writes exactly the seven keys the render reads, with the gateway off and on"
+          echo "ok: mode2-secret.sh writes exactly the eight keys the render reads, with the gateway off and on"
       - name: the bundled IdP is off by default and ships no default credential
         run: |
           # One seed, two deployment targets. The chart patches what differs per
@@ -1240,7 +1238,7 @@ jobs:
             --set identity.mode=oidc --set identity.oidc.issuer=https://idp.example.test \
             --set identity.oidc.audience=wrong 2>&1 >/dev/null)" \
             && { echo "an audience that is not the client id must fail the render" >&2; exit 1; }
-          echo "$err" | grep 'must equal casdoor.console.clientId' > /dev/null \
+          echo "$err" | grep 'native OIDC requires identity.oidc.clientId equal to identity.oidc.audience' > /dev/null \
             || { echo "the mismatched-audience render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: bundled IdP is off by default, seeds no demo account, and owns its admin password"
       - name: the model gateway renders by default, only when enabled, and only with a cipher
@@ -1398,6 +1396,8 @@ jobs:
       # automated read it at all while it lived twice (#754).
       - name: the mode-2 Secret assembly refuses what would fail later
         run: make gcp-mode2-secret-test
+      - name: the native staging edge preserves TLS and routes all application paths
+        run: make gcp-native-edge-test
       # Parking and reviving the environment is a SEQUENCE of gcloud calls, and
       # the two things worth getting right — restoring the saved node counts
       # rather than a plausible constant, and the orderings in both directions —
@@ -1672,6 +1672,7 @@ jobs:
         working-directory: .
         run: |
           python3 -I deploy/compose/native_config_test.py
+          python3 deploy/compose/smoke_login_test.py
           APP_EDGE_EVIDENCE="$RUNNER_TEMP/app-edge" python3 -I deploy/compose/app_edge_test.py
       - name: build the images
         # controlplane covers the shared server stage; gate-image keeps the
@@ -1681,15 +1682,7 @@ jobs:
       - name: control plane serves and the brain loads its config
         run: |
           docker compose up -d postgres minio controlplane brain modelgateway
-          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
-          for i in $(seq 1 30); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8080/v1/agents || true)"
-            [ "$code" = "200" ] && { echo "control plane serving (200)"; break; }
-            sleep 2
-          done
-          [ "$code" = "200" ] || { echo "control plane never served 200 (last: $code)" >&2; docker compose logs >&2; exit 1; }
-          noauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/agents || true)"
-          [ "$noauth" = "401" ] || { echo "expected 401 without a key, got $noauth" >&2; exit 1; }
+          python3 -I smoke_login.py --key-file "$RUNNER_TEMP/compose-api-key"
           # The brain logs "brain running" only after LoadRoutes parses the mounted
           # model-providers.json, so this catches a config-shape or image regression.
           # It boots independently of the control plane, so poll rather than grep once —
@@ -1700,37 +1693,13 @@ jobs:
             sleep 2
           done
           [ -n "$brain_ok" ] || { echo "brain did not start cleanly" >&2; docker compose logs brain >&2; exit 1; }
-          echo "ok: authed 200, unauthed 401, brain loaded its config"
-      - name: the model gateway serves its admin API and the platform's keys
-        run: |
-          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
-          # The admin API takes the bootstrap key as configured; the models list
-          # takes it through the api_keys row the control plane registers, which
-          # the previous step waited for.
-          for i in $(seq 1 30); do
-            code="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" http://localhost:8090/admin/v1/profiles || true)"
-            [ "$code" = "200" ] && break
-            sleep 2
-          done
-          [ "$code" = "200" ] || { echo "the gateway never served its admin API (last: $code)" >&2; docker compose logs modelgateway >&2; exit 1; }
-          noauth="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8090/admin/v1/profiles || true)"
-          [ "$noauth" = "401" ] || { echo "expected 401 from the gateway without a key, got $noauth" >&2; exit 1; }
-          models="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $key" -H 'anthropic-version: 2023-06-01' http://localhost:8090/v1/models || true)"
-          [ "$models" = "200" ] || { echo "the gateway refused the registered key on /v1/models: $models" >&2; docker compose logs modelgateway >&2; exit 1; }
-          # The brain's key, which its default route sends: registered by the
-          # control plane, accepted on /v1/, refused by the admin API.
-          brain="$(grep '^BRAIN_API_KEY=' .env | cut -d= -f2-)"
-          models="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $brain" -H 'anthropic-version: 2023-06-01' http://localhost:8090/v1/models || true)"
-          [ "$models" = "200" ] || { echo "the gateway refused the brain's key on /v1/models: $models" >&2; docker compose logs modelgateway controlplane >&2; exit 1; }
-          admin="$(curl -s -o /dev/null -w '%{http_code}' -H "x-api-key: $brain" http://localhost:8090/admin/v1/profiles || true)"
-          [ "$admin" = "401" ] || { echo "the admin API answered the brain's key with $admin, want 401" >&2; exit 1; }
-          echo "ok: the gateway's admin API answers the bootstrap key, and its models list the registered keys"
+          echo "ok: native login, owned key, gateway cookie and brain config"
       # E2E-1 (docs/plan/06_skills.md): the wire-only skills round-trip against
       # the bundled MinIO — upload both forms, list, download and byte-compare,
       # and prove the delete order (skill delete 400s until versions are gone).
       - name: skills registry round-trip (E2E-1)
         run: |
-          key="$(grep '^CONTROLPLANE_API_KEY=' .env | cut -d= -f2-)"
+          key="$(cat "$RUNNER_TEMP/compose-api-key")"
           base=http://localhost:8080/v1/skills
           workdir="$(mktemp -d)"
           mkdir -p "$workdir/demo-skill"
@@ -1767,7 +1736,9 @@ jobs:
           echo "ok: upload (zip + loose), list, download byte-compare, only-version refusal, cascade"
       - name: tear down
         if: always()
-        run: docker compose down -v
+        run: |
+          rm -f -- "$RUNNER_TEMP/compose-api-key"
+          docker compose down -v
 
   # Tests + the coverage gate as a distinct named check, so PRs show
   # "coverage" pass/fail on its own and the summary carries the numbers.

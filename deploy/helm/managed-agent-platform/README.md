@@ -57,7 +57,8 @@ compute, outside the platform cluster, and reaches the control plane only over t
 
 ## Install
 
-Minimum required values: a bootstrap API key, the brain's key for the model gateway,
+Minimum required values: a native login mode and public Console origin,
+the compatibility bootstrap and brain keys retained through plan 69 slice 6,
 and — with the bundled Postgres, MinIO, and OpenBao — a database password, MinIO root
 credentials, and the OpenBao seal key + platform token (none is auto-generated: a
 generated credential is unstable under `helm template`/GitOps; MinIO requires a
@@ -66,6 +67,12 @@ root password of at least 8 characters).
 ```bash
 helm install map ./deploy/helm/managed-agent-platform \
   --namespace map --create-namespace \
+  --set identity.mode=oidc \
+  --set console.publicOrigin=https://console.example.com \
+  --set identity.oidc.issuer=https://idp.example.com \
+  --set identity.oidc.clientId=map-console \
+  --set identity.oidc.audience=map-console \
+  -f private-oidc-values.yaml \
   --set controlplane.apiKey=$(openssl rand -hex 24) \
   --set postgresql.password=$(openssl rand -hex 24) \
   --set minio.rootUser=map \
@@ -74,6 +81,12 @@ helm install map ./deploy/helm/managed-agent-platform \
   --set openbao.platformToken=$(openssl rand -hex 24) \
   --set brain.apiKey=$(openssl rand -hex 24)
 ```
+
+Configure `identity.oidc.clientSecret` in the private values file when the client
+requires one, and register `<console.publicOrigin>/api/auth/callback` at the IdP.
+The application edge must be served at that HTTPS origin. A development-only
+password install instead sets `developmentMode=true`, `identity.mode=password`
+and a literal-loopback HTTP origin. The chart refuses empty or disabled login modes.
 
 The brain then sends every model call to the model gateway, which answers none until
 its catalogue names a deployment for the agent's model (see
@@ -132,23 +145,22 @@ default, off.
 
 ## One-origin Console (`console.enabled`)
 
-Off by default. Enabling it adds release-qualified Console and application-edge
-Deployments and Services. It does not create or adopt an Ingress, hostname or IAP
-resource. The separately managed staging Console remains outside this chart.
+Enabled by default with native login. The chart adds release-qualified Console
+and application-edge Deployments and Services. It creates no external Ingress.
+Staging CD attaches the existing HTTPS ingress to this edge; see the
+[staging runbook](../../gcp/README.md#native-google-sign-in-and-the-staging-https-edge).
 `console.image` and `appEdge.image` require independent immutable digest references;
 platform `image.tag` overrides never change them.
-The current Console pin is the published slice 3 owned-key companion.
-Follow the [native-routing and rollback contract](../../../docs/self-hosted-security.md#owned-key-rollout-and-rollback) before a slice 3 upgrade.
+The Console pin supports native login, owned API keys and key management for cloud and archived environments.
+Follow the [native-routing and rollback contract](../../../docs/self-hosted-security.md#owned-key-rollout-and-rollback) when upgrading an older install.
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 
 Set `console.authMode=platform` and `console.publicOrigin=https://console.example`
-with the chosen `identity.mode`. Empty auth mode keeps legacy BFF routing and
-requires no public origin. Legacy BFF defaults to the release's bootstrap API key.
-To use a separate key, set `console.legacySecret`, with `platform-api-key` and optional
-`console-password`. Native mode receives neither key and refuses that Secret.
-Chart-managed bootstrap-key rotation rolls the dependent legacy Console, not native Console.
-After same-name content rotation in `existingSecret` or `console.legacySecret`, roll the
-consuming Deployments yourself. Changing the Secret reference name changes their Pod templates.
+with the chosen `identity.mode`. An empty or disabled login mode is rejected.
+An older chart revision is required to roll back to legacy BFF routing.
+Native mode receives no bootstrap key and refuses `console.legacySecret`.
+After same-name content rotation in `existingSecret`, roll the consuming Deployments yourself.
+Changing the Secret reference name changes their Pod templates.
 The Console and edge never read the platform database or RP client secret.
 
 For external OIDC, set `identity.oidc.clientId` equal to `identity.oidc.audience`.
@@ -202,10 +214,10 @@ controlplane's and executor's do; [`deploy/gcp/`](../../gcp/) creates the accoun
 grant.
 
 The brain's one route is the chart's, in the ConfigMap `<release>-brain-routes`: every
-model string to the gateway's Service, where it names an alias, under `BRAIN_API_KEY`.
-The brain, the control plane (which registers the key in `api_keys` as `brain`) and the
-gateway read it from the Secret's `brain-api-key`, set from `brain.apiKey`, which must
-differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
+model string to the gateway's Service, where it names an alias. The route selects
+`delegated_inference: true`; each primary, child or grading call uses its own claim token.
+The control plane and gateway retain `brain.apiKey` for old replicas until slice 7.
+It must differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
 `upstream_model`, `stall_timeout`, `flatten_search_results` and, above all, `max_tokens`,
 since the brain sets none and the anthropic adapter otherwise sends 8192; any other key
 fails the render, since the route is a ConfigMap. `brain.modelProviders` set beside the
@@ -480,19 +492,18 @@ roles (plan 69 slice 1). Reads require developer; no read-only role exists.
 The `identity` block configures both Deployments; `casdoor.enabled` also
 deploys a bundled provider for clusters that have none.
 
-**Off is the default and means exactly today's platform.** With `identity.mode`
-empty the chart renders no `IDENTITY_*` env at all — `IDENTITY_MODE` unset and
-`IDENTITY_MODE=disabled` are one state to the control plane — so upgrading an
-existing release does not change its controlplane pod spec, no Bearer JWT is
-accepted anywhere, and `x-api-key` remains the only management credential. The
-machine lanes never change: the management key keeps full authority with no role
-model, and worker environment keys are untouched.
+Choose a native login mode and `console.publicOrigin` explicitly. Empty or disabled
+identity is rejected. Browser sessions use the member's current role; owned public
+API keys use their owner's current role. Legacy receiver keys remain through slice 6
+for rolling compatibility. Workers continue to use environment keys.
 
 ```bash
 # Any compliant provider — Keycloak, Entra ID, Cognito, accounts.google.com.
 --set identity.mode=oidc \
 --set identity.oidc.issuer=https://idp.example.com/realms/platform \
---set identity.oidc.audience=<the console's client id> \
+--set-string "identity.oidc.audience=$CLIENT_ID" \
+--set-string "identity.oidc.clientId=$CLIENT_ID" \
+--set-string "console.publicOrigin=$CONSOLE_ORIGIN" \
 --set 'identity.roleMap.platform-admins=admin' \
 --set 'identity.roleMap.platform-devs=developer'
 ```
@@ -543,6 +554,7 @@ algorithms itself and takes only the backend-service audience:
 
 ```bash
 --set identity.mode=trusted_proxy \
+--set-string "console.publicOrigin=$CONSOLE_ORIGIN" \
 --set identity.proxy.preset=gcp-iap \
 --set identity.proxy.audience=/projects/123456789/global/backendServices/987654321
 ```
@@ -692,15 +704,15 @@ does, whether it is REQUIRED, what it conflicts with, and what it costs to get
 wrong. It is the reference; this section is only the shape of the decisions it
 asks you to make.
 
-Four decisions. Only the database is mandatory; the other three have a supported
-**none**, which costs you the feature rather than the deployment:
+Four decisions. The database and native identity are mandatory. Object storage
+and the credential cipher can be omitted under the conditions below:
 
 | Decision | Options | Choosing none | If you pick two |
 |---|---|---|---|
 | Database | bundled Postgres · `externalDatabase.url` | not an option | `postgresql.enabled` **wins silently** — the external URL is only read when it is false |
 | Object storage | bundled MinIO · any S3-compatible endpoint · `gcsObjectStorage` (Google Cloud Storage natively) | supported: no `blob-*` keys, and the features that need object storage are unavailable | the render **fails**, naming the pair |
 | Credential cipher | bundled OpenBao · an external one · `gcpKMS.keyName` · `localCipher.masterKey` | supported with `modelgateway.enabled=false`: no `secrets-*` keys, and vault credential storage is unavailable; with the gateway on, the render fails | the render **fails**, naming the pair |
-| Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` · development-only `identity.mode=password` — with the bundled Casdoor as an optional IdP | the default: no `IDENTITY_*` env at all, and `x-api-key` stays the only management credential | not expressible: `mode` is one string |
+| Identity | `identity.mode=oidc` · `identity.mode=trusted_proxy` · development-only `identity.mode=password` — with the bundled Casdoor as an optional IdP | not an option; also requires `console.publicOrigin` | not expressible: `mode` is one string |
 
 The Cloud SQL Auth Proxy (`cloudSQLProxy.*`) is not a third database option but a
 transport for the **external** one. It is incompatible with `postgresql.enabled`

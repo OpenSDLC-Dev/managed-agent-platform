@@ -11,17 +11,36 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ComposeConfig(unittest.TestCase):
+    def test_default_install_uses_password_login_and_claim_tokens(self):
+        env = {key: os.environ[key] for key in ["PATH", "HOME"] if key in os.environ}
+        env.update(CONTROLPLANE_API_KEY="render-only-key", BRAIN_API_KEY="render-only-brain")
+        result = subprocess.run(["docker", "compose", "--env-file", "/dev/null", "-f", str(ROOT / "docker-compose.yml"), "--profile", "console", "config", "--format", "json"], env=env, capture_output=True, text=True, check=True)
+        services = json.loads(result.stdout)["services"]
+        for name in ["controlplane", "modelgateway", "app-edge"]:
+            self.assertEqual(services[name]["environment"]["IDENTITY_MODE"], "password")
+            self.assertEqual(services[name]["environment"]["CONSOLE_PUBLIC_ORIGIN"], "http://localhost:3000")
+        for name in ["controlplane", "modelgateway"]:
+            self.assertEqual(services[name]["environment"]["DEVELOPMENT_MODE"], "true")
+        for name in ["console", "app-edge"]:
+            self.assertEqual(services[name]["environment"]["CONSOLE_AUTH_MODE"], "platform")
+        self.assertNotIn("BRAIN_API_KEY", services["brain"]["environment"])
+        self.assertEqual(json.loads((ROOT / "model-providers.gateway.json").read_text()), [{
+            "model": "*", "protocol": "anthropic", "base_url": "http://modelgateway:8090", "delegated_inference": True,
+        }])
+
     def test_native_and_legacy_isolate_credentials_and_ports(self):
         for mode in ["", "platform"]:
             for project in ["mapnativeone", "mapnativetwo"]:
                 env = {key: os.environ[key] for key in ["PATH", "HOME"] if key in os.environ}
                 env.update(CONTROLPLANE_API_KEY="render-only-key", BRAIN_API_KEY="render-only-brain", CONSOLE_AUTH_MODE=mode)
+                if not mode:
+                    env.update(IDENTITY_MODE="", DEVELOPMENT_MODE="false", CONSOLE_PUBLIC_ORIGIN="")
                 if mode:
                     env.update(IDENTITY_MODE="password", DEVELOPMENT_MODE="true", CONSOLE_PUBLIC_ORIGIN="http://localhost:3000")
                 result = subprocess.run(["docker", "compose", "--env-file", "/dev/null", "-f", str(ROOT / "docker-compose.yml"), "-p", project, "--profile", "console", "--profile", "iam", "config", "--format", "json"], env=env, capture_output=True, text=True, check=True)
                 services = json.loads(result.stdout)["services"]
                 cp, gw, console, edge = [services[key] for key in ["controlplane", "modelgateway", "console", "app-edge"]]
-                self.assertEqual(console["image"], "ghcr.io/opensdlc-dev/managed-agent-console@sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68")
+                self.assertEqual(console["image"], "ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319")
                 self.assertIn("@sha256:", edge["image"])
                 for service in [console, edge]:
                     self.assertNotIn("build", service)

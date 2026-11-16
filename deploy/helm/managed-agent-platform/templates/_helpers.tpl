@@ -130,14 +130,11 @@ cipher, so its Deployment refuses to render without one.
 {{- end -}}
 
 {{/*
-BRAIN_API_KEY, the brain's platform key for the model gateway (plan 59), for the
-three processes that share it: the brain sends it on its one route, the control
-plane registers it in api_keys as "brain", and the gateway exempts it from key
-policy. Rendered with the gateway on only: with it off the brain routes past the
-gateway, and a control plane without the variable archives the key nobody holds.
-Not optional, as controlplane-api-key is not: a pre-created Secret without the
-key stops the three pods with the kubelet naming it, where an optional reference
-would start a control plane that archives the key the brain then lacks.
+BRAIN_API_KEY is receiver compatibility through plan 69 slice 6. Only the control
+plane and gateway receive it; new brains send claim tokens. The control plane
+registers it in api_keys as "brain", and the gateway exempts it from key policy.
+It is required while the gateway runs so a missing Secret key cannot silently
+archive a credential an old brain still holds during a rolling upgrade.
 */}}
 {{- define "map.brainKeyEnv" -}}
 {{- if (.Values.modelgateway | default dict).enabled }}
@@ -250,8 +247,11 @@ the binary rather than being restated here in a second place they could drift.
 {{- if not (has $console.authMode (list "" "platform")) -}}
 {{- fail "console.authMode must be empty (legacy) or platform" -}}
 {{- end -}}
-{{- if not (has $identity.mode (list "" "disabled" "password" "oidc" "trusted_proxy")) -}}
-{{- fail "identity.mode must be disabled, password, oidc or trusted_proxy" -}}
+{{- if not (has $identity.mode (list "password" "oidc" "trusted_proxy")) -}}
+{{- fail "identity.mode must select a login mode: password, oidc or trusted_proxy" -}}
+{{- end -}}
+{{- if not $console.publicOrigin -}}
+{{- fail "a login mode requires console.publicOrigin for native browser sessions" -}}
 {{- end -}}
 {{- if eq $console.authMode "platform" -}}
 {{- if or (not $console.enabled) (not $console.publicOrigin) (not (has $identity.mode (list "password" "oidc" "trusted_proxy"))) -}}

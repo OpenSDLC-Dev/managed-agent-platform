@@ -11,7 +11,7 @@ from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[1]
 ROOT = CHART.parents[2]
-CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68"
+CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319"
 
 
 def render(values=None, release="native-test", success=True):
@@ -45,52 +45,67 @@ def native(mode="password"):
 
 
 class NativeRender(unittest.TestCase):
-    def test_default_and_legacy(self):
-        default = render()
-        self.assertNotIn("CONSOLE_AUTH_MODE", default)
-        legacy = render({"console": {"enabled": True}})
-        self.assertIn(CONSOLE, section(legacy, "console.yaml"))
-        self.assertIn("legacy", section(legacy, "app-edge.yaml"))
-        self.assertIn("controlplane-api-key", section(legacy, "console.yaml"))
-        self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", legacy)
+    def test_application_service_accepts_gke_backend_annotations(self):
+        values = native()
+        values["appEdge"] = {"service": {"annotations": {
+            "cloud.google.com/neg": '{"ingress":true}',
+            "cloud.google.com/backend-config": '{"default":"map-native-edge"}',
+        }}}
+        body = section(render(values), "app-edge.yaml")
+        service = re.search(r"(?ms)^kind: Service\n(.*?)(?=^apiVersion:|\Z)", body).group(1)
+        metadata = service.split("\nspec:", 1)[0]
+        self.assertIn("app.kubernetes.io/component: app-edge", metadata)
+        self.assertIn('cloud.google.com/neg:', service)
+        self.assertIn('cloud.google.com/backend-config:', service)
+        self.assertIn('map-native-edge', service)
 
-    def test_legacy_console_key_rollout(self):
+    def test_requires_login_even_without_console_or_with_external_secret(self):
+        for mode in ["", "disabled", "oidc"]:
+            for existing in [False, True]:
+                values = {"identity": {"mode": mode}, "console": {"enabled": False, "authMode": "", "publicOrigin": ""}}
+                if existing:
+                    values.update(existingSecret="operator-secret", postgresql={"enabled": False}, minio={"enabled": False}, openbao={"enabled": False})
+                with self.subTest(mode=mode, existing=existing):
+                    render(values, success=False)
+
+    def test_example_uses_native_login(self):
+        default = render()
+        self.assertIn("CONSOLE_AUTH_MODE", default)
+        self.assertIn(CONSOLE, section(default, "console.yaml"))
+        self.assertNotIn("controlplane-api-key", section(default, "console.yaml"))
+        self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", default)
+
+    def test_retained_server_keys_do_not_reach_native_console(self):
         def pods(values):
             text = render(values)
             return {name: section(text, name).split("\n  template:\n", 1)[1]
                     for name in ["console.yaml", "controlplane-deployment.yaml", "modelgateway-deployment.yaml"]}
 
-        for mode in ["managed", "native", "existing", "explicit-legacy"]:
+        for mode in ["managed", "existing"]:
             with self.subTest(mode=mode):
-                values = native() if mode == "native" else {"console": {"enabled": True}}
+                values = native()
                 if mode == "existing":
                     values.update(existingSecret="external-platform", postgresql={"enabled": False},
                                   minio={"enabled": False}, openbao={"enabled": False})
-                if mode == "explicit-legacy":
-                    values["console"]["legacySecret"] = "external-console"
                 values["controlplane"] = {"apiKey": "render-only-old-key"}
                 old = pods(values)
                 values["controlplane"]["apiKey"] = "render-only-new-key"
                 new = pods(values)
-                self.assertEqual(old["console.yaml"] != new["console.yaml"], mode == "managed")
+                self.assertEqual(old["console.yaml"], new["console.yaml"])
                 for name in ["controlplane-deployment.yaml", "modelgateway-deployment.yaml"]:
                     self.assertEqual(old[name] != new[name], mode != "existing")
-                if mode == "native":
-                    self.assertNotIn("checksum/", new["console.yaml"])
-                    self.assertNotIn("controlplane-api-key", new["console.yaml"])
-                if mode in ["existing", "explicit-legacy"]:
-                    # Helm cannot read same-name external Secret content. Changing
-                    # the reference name, unlike its bytes, changes the template.
-                    if mode == "existing":
-                        values["existingSecret"] = "external-platform-next"
-                    else:
-                        values["console"]["legacySecret"] = "external-console-next"
+                self.assertNotIn("checksum/", new["console.yaml"])
+                self.assertNotIn("controlplane-api-key", new["console.yaml"])
+                if mode == "existing":
+                    values["existingSecret"] = "external-platform-next"
                     renamed = pods(values)
-                    self.assertNotEqual(new["console.yaml"], renamed["console.yaml"])
+                    self.assertEqual(new["console.yaml"], renamed["console.yaml"])
                     self.assertNotIn("checksum/", renamed["console.yaml"])
 
     def test_console_numeric_non_root_user(self):
-        for mode, values in [("native", native()), ("legacy", {"console": {"enabled": True}})]:
+        for mode, values in [("password", native()), ("oidc", native("oidc"))]:
+            if mode == "oidc":
+                values["identity"]["oidc"] = {"issuer": "https://idp.example", "audience": "client", "clientId": "client"}
             with self.subTest(mode=mode):
                 body = section(render(values), "console.yaml")
                 deployments = re.findall(r"(?ms)^kind: Deployment\n(.*?)(?=^apiVersion:|\Z)", body)

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -26,10 +27,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
-// evalKey is the management credential the harness sends as x-api-key. It is a
-// throwaway for a database that lives and dies with the test binary.
-const evalKey = "map-evals-local-key"
-
 // stack is the whole platform in one process: the real control plane over a real
 // Postgres, a real brain against a real model endpoint, and a real executor
 // driving real Docker sandboxes. Only main()'s glue is absent — env parsing, a
@@ -37,6 +34,7 @@ const evalKey = "map-evals-local-key"
 // that. Everything a trial touches below this line is the code that ships.
 type stack struct {
 	url  string
+	key  string
 	pool *pgxpool.Pool
 	sbx  *docker.Provider
 	// blobs and cipher are the handler's own, kept here for the one caller that
@@ -68,10 +66,6 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	// and no state carried between trials.
 	pool := pgtest.NewPool(t)
 
-	if err := api.EnsureAPIKey(ctx, pool, "evals", evalKey); err != nil {
-		t.Fatalf("seed the management key: %v", err)
-	}
-
 	// NewHandler builds its own event log, broker and queue over the pool, so
 	// the harness cannot accidentally hand it a different one than the loops
 	// use. No object store: the eval stack exercises no skills yet.
@@ -89,7 +83,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 	// WithDreamRunner because this process runs one when a dream test starts it
 	// (the control plane pairs the two the same way): POST /v1/dreams refuses a
 	// create on a deployment where nothing would ever sweep the row.
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner()))
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner(), apitest.PasswordLogin(pool)))
 	t.Cleanup(srv.Close)
 
 	// One default route. Config.Model is the id the *endpoint* receives, so it
@@ -120,7 +114,7 @@ func newStack(t *testing.T, cfg modeltest.Config) *stack {
 		t.Fatalf("evals require Docker: %v", err)
 	}
 
-	s := &stack{url: srv.URL, pool: pool, sbx: sbx, blobs: blobs, cipher: cipher, model: cfg.Model}
+	s := &stack{url: srv.URL, key: apitest.SetupKey(t, pool, srv.URL), pool: pool, sbx: sbx, blobs: blobs, cipher: cipher, model: cfg.Model}
 
 	// Reap every session's container. Registered BEFORE the loop-stop cleanup so
 	// that LIFO runs it AFTER the loops have stopped — the moment when no

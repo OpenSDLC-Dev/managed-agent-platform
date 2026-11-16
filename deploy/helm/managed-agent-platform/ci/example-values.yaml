@@ -5,6 +5,13 @@ image:
   registry: registry.example.com
   repository: example-org/managed-agent-platform
   tag: "0.1.0"
+developmentMode: true
+identity:
+  mode: password
+console:
+  enabled: true
+  authMode: platform
+  publicOrigin: http://localhost:3000
 controlplane:
   apiKey: "ci-placeholder-key"
 brain:

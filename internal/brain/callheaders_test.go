@@ -15,6 +15,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider/anthropic"
@@ -28,6 +29,14 @@ import (
 // key its per-session cost and cache locality and continue the trace
 // (docs/plan/59_model-gateway.md).
 func TestModelCallsCarryTheirSessionAndTrace(t *testing.T) {
+	for _, delegated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("delegated=%t", delegated), func(t *testing.T) {
+			testModelCallAuthority(t, delegated)
+		})
+	}
+}
+
+func testModelCallAuthority(t *testing.T, delegated bool) {
 	recorder := tracetest.NewSpanRecorder()
 	prev := otel.GetTracerProvider()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
@@ -35,12 +44,25 @@ func TestModelCallsCarryTheirSessionAndTrace(t *testing.T) {
 
 	var mu sync.Mutex
 	var sessions, parents []string
+	claims := map[string]bool{}
+	pool := pgtest.NewPool(t)
+	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
 	replies := []string{"coordinator done", "child done", "all done\nVERDICT: satisfied"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		sessions = append(sessions, r.Header.Get(provider.SessionHeader))
 		parents = append(parents, r.Header.Get("traceparent"))
+		if delegated {
+			token := r.Header.Get("x-api-key")
+			p, err := inferencetoken.Authenticate(r.Context(), pool, token)
+			if err != nil || p.SessionID != sid.String() || p.WorkID == "" || claims[token] {
+				t.Error("model call did not carry its own live claim for this session")
+			}
+			claims[token] = true
+		} else if r.Header.Get("x-api-key") != "test-key" {
+			t.Error("direct provider did not retain its vendor key")
+		}
 		if len(sessions) > len(replies) {
 			t.Error("unexpected extra model request")
 			http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -51,10 +73,12 @@ func TestModelCallsCarryTheirSessionAndTrace(t *testing.T) {
 		fmt.Fprint(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	}))
 	defer srv.Close()
-	pool := pgtest.NewPool(t)
-	sid, envID := pgtest.NewSession(t, pool, "self_hosted")
+	key := "test-key"
+	if delegated {
+		key = ""
+	}
 	reg, err := provider.NewRegistry([]provider.Route{{Model: "*", Config: provider.Config{
-		Protocol: "anthropic", Model: "upstream-model", BaseURL: srv.URL, APIKey: "test-key",
+		Protocol: "anthropic", Model: "upstream-model", BaseURL: srv.URL, APIKey: key, DelegatedInference: delegated,
 	}}}, map[string]provider.Factory{"anthropic": anthropic.New})
 	if err != nil {
 		t.Fatal(err)

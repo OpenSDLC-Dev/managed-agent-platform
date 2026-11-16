@@ -21,13 +21,14 @@ tool error saying it carries no ripgrep.
 From this directory:
 
 ```sh
-cp .env.example .env         # set CONTROLPLANE_API_KEY and BRAIN_API_KEY
-docker compose up --build
+cp .env.example .env         # review the local-only development defaults
+docker compose --profile console up --build
 ```
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
-- Drive it with the real CLI: `ANTHROPIC_API_KEY=<CONTROLPLANE_API_KEY> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
-- Model gateway: `http://localhost:8090`, on the same loopback bind. The brain sends every model call here, under `BRAIN_API_KEY`. Its `/admin/v1/` API takes `CONTROLPLANE_API_KEY`, and the gateway answers no model until a deployment and an alias for it are configured there ([plan 59](../../docs/plan/59_model-gateway.md)).
+- Console: `http://localhost:3000/setup`. Retrieve the first-admin code from the local file named in control-plane logs, create your admin and issue an API key.
+- Drive it with the real CLI: `ANTHROPIC_API_KEY=<issued-key> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
+- Model gateway: `http://localhost:8090`, on the same loopback bind. The brain sends its current claim token. Configure vendors, deployments and aliases through the signed-in Console before starting model turns.
 
 The stack comes up out of the box and idles: the brain's one route, the committed
 `model-providers.gateway.json`, is the gateway, so model *turns* fail until its
@@ -53,13 +54,13 @@ LAN, set real keys and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
 
 The `console` profile adds the published Console image and an application Caddy edge.
 Both images have independent immutable pins. Platform builds do not rebuild Console.
-The current Console pin is the published slice 3 owned-key companion.
-Before a slice 3 upgrade, follow the [native-routing and rollback contract](../../docs/self-hosted-security.md#owned-key-rollout-and-rollback).
+The current Console pin supports native login, owned API keys and key management for cloud and archived environments.
+When upgrading an older install, follow the [native-routing and rollback contract](../../docs/self-hosted-security.md#owned-key-rollout-and-rollback).
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 The edge binds only `127.0.0.1:${CONSOLE_PORT:-3000}`. Existing API listeners stay on
-8080 and 8090. Identity remains disabled by default.
+8080 and 8090. Native password login is the development default.
 
-For native development login, set these together in the local environment:
+The native development defaults are:
 
 ```sh
 CONSOLE_AUTH_MODE=platform
@@ -96,7 +97,8 @@ and `CONSOLE_GATEWAY_BASE_URL` to empty. Native admin then returns 503, with no 
 
 For production TLS or IAP, use the routing boundaries in
 [the security guide](../../docs/self-hosted-security.md#native-browser-login).
-This profile does not change the separately managed staging Console or its hostname.
+This local profile does not change staging. Its native HTTPS edge is owned by platform
+CD; see the [staging runbook](../gcp/README.md#native-google-sign-in-and-the-staging-https-edge).
 
 ## A second stack beside the first
 
@@ -163,20 +165,22 @@ Two files, and each documents its own settings in place rather than here:
 
 Three defaults worth knowing before you change anything: **sandbox containment is
 on** (512 processes, 2 CPUs, and the `NET_RAW`/`SETUID`/`SETGID` drops), so those
-variables exist to lower or disable it rather than to enable it; **identity is off**,
-so management auth is `x-api-key` alone; and the **web tools are unconfigured**
+variables exist to lower or disable it rather than to enable it; **native password login is on**,
+and signed-in users issue their own API keys; and the **web tools are unconfigured**
 without their backend keys, answering the model with an error that names what is
 missing rather than failing the turn.
 
 The **model routing** file (mounted into the brain at
 `/etc/map/model-providers.json`) is a **JSON array** of routes, each with `model`
 (`"*"` is the default route), `protocol` (`anthropic` or `openai`), `base_url`,
-and `api_key` or `api_key_env`, the name of a variable holding it. `base_url` is the **API root** — the adapter appends the protocol
+and credentials. Direct routes use `api_key` or `api_key_env`, the name of a variable
+holding it. Gateway routes use `delegated_inference: true` without a static credential.
+`base_url` is the **API root** — the adapter appends the protocol
 path (`/v1/messages` or `/v1/chat/completions`), so give e.g.
 `https://api.openai.com`, **not** `.../v1`. See `model-providers.example.json` and
 `internal/provider` (`LoadRoutes`). The mount defaults to the committed
 `model-providers.gateway.json`, one route sending every model to the gateway under
-`BRAIN_API_KEY`; point `MODEL_PROVIDERS_FILE` at your gitignored copy of the example
+its current claim token (`delegated_inference: true`); point `MODEL_PROVIDERS_FILE` at your gitignored copy of the example
 to route the brain yourself.
 
 A route may also set `upstream_model`, the model id the endpoint actually

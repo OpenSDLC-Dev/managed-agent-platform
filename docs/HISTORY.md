@@ -49,6 +49,87 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 6 independent acceptance
+
+An independent Codex verifier exercised the slice 6 candidate on 2026-11-16,
+based on `88883ba`, under Linux Go 1.26.8. The Go/SQL source fingerprint was
+`41969a9fa17dfd774450fb8bafb5159300ef2fdbe609945eb78657e20e88a4af`.
+The unchanged full `make verify` gate passed serially (`GOFLAGS=-p=1`), including
+build, Linux/ARM cross-build, vet, formatting and uncached tests. Total statement
+coverage was 91.73%, above the required 90%.
+
+A first canonical gate with three packages in parallel exceeded the API package's
+unchanged 30-minute timeout. The alarm caught a test that had run for one second;
+this was cumulative suite time. All 226 API source, test and fixture files matched
+the prior slice's successful serial snapshot. The failed run left one fixture
+container; the verifier removed only that run's identified container and restored
+the exact 19-container baseline. No product source or timeout changed for the serial retry.
+
+Fresh control-plane, Brain and gateway processes passed 58 runtime assertions.
+The probe used stock `ant` v1.42.0 and a synthetic model vendor, with no live model spend.
+Setup, logout/login and private issuance produced the owned credentials.
+The CLI accepted both `x-api-key` and issued-key Bearer authentication.
+Gateway administration used the browser cookie, and both environment kinds passed
+worker-key issuance and revocation checks.
+
+Primary, child and grading requests crossed the actual gateway with five distinct
+claim tokens. The finalized grader token then received 401. Direct vendor requests
+used the configured static key and produced no gateway ledger row.
+Delegated ledger rows named the initiator and session with the existing empty-string
+API-key sentinel. A separate public owned-key inference call recorded both key and
+principal, without an assigned session. The verifier initially expected SQL NULL;
+reading migration 0050 and the writer corrected that probe, not product code.
+The fresh corrected run passed, all three child processes exited, and Docker
+before/after inventories were byte-identical.
+
+A packaged Compose probe passed setup/login, owned-key public calls and cookie
+gateway administration through the control-plane and gateway listeners.
+Its first run exposed a setup-path parser that recognized JSON logs only; actual
+startup used slog text. A text/JSON regression test failed before the fix, and a
+fresh Compose rerun passed. Its owned containers and volumes were removed.
+A later independent packaged Console profile passed 29 assertions through one
+Caddy origin. It checked the published image digest and revision, setup, fresh
+login, cookie/CSRF private issuance and public-key/gateway-admin behavior.
+The exact 19-container baseline was restored afterward.
+
+The Console companion merged in [PR #260](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/260)
+at `cb7d741ff96098c6d7e428931ea05414d9f815aa`.
+Independent local checks passed 2,140 unit tests, 22 native browser cases and 211
+mock browser cases. The final native cases covered live and archived environments
+of both kinds, role withdrawal and one-time secret disposal.
+All six changed native Chrome surfaces were inspected in light and dark, including
+masked full-length key reveals contained within their dialogs. The full 39-surface
+walk preceded the wrap fix; only the six changed surfaces were re-shot afterward.
+Fresh authenticated reference environment screens were unavailable.
+
+[Console main CI run 43781481533](https://github.com/OpenSDLC-Dev/managed-agent-console/actions/runs/43781481533)
+passed Ubuntu, macOS, Windows, Docker checks and both architecture builds before
+publishing its SHA image. Two independent anonymous registry checks recomputed the
+index, runnable manifest and config digests and confirmed their source/revision/version labels.
+Compose and Helm pin `sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319`;
+native Console CI pins the same source. These later pins and documentation changed
+no Go, SQL, module, Makefile or model-route inputs to the gate.
+
+Final independent light checks passed all 24 Helm CI run blocks, Compose configuration
+and native guards, setup-log parsing, source-pin guards, GCP secret assembly and native
+edge rendering/probing. A trusted local HTTPS fixture rejected a stale IAP redirect
+and accepted only the native OIDC config and expected anonymous API refusals.
+Both gateway modes passed: public requests received 401; the admin route received
+401 with the gateway enabled and 503 with it disabled. The deployment passes its
+rendered gateway mode to the probe. A regression test first failed before this fix.
+All five verifier rungs passed with no unresolved product finding.
+The exact Compose CI replay passed all nine blocks, including the skill archive
+round-trip and 16 edge tests. Its alias fixture checked 2,130 HTTP requests:
+378 forwarded and 1,752 refused. The first replay had an unchanged fixture
+startup failure and a missing local zip utility; the rerun changed no product
+source or timeout and used Zip 3.0 from a temporary tool directory.
+The SDK report found zero unresolved transitions; the live registry check passed.
+
+This local acceptance does not certify staging deployment. Staging was parked,
+Google client creation remained unsubmitted, and no staging service-account key had
+been issued. The native HTTPS/OIDC configuration needs the owner-controlled cutover
+before slice 6's live acceptance and slice 7 contraction.
+
 ## Plan 69 slice 5 independent acceptance
 
 An independent Codex verifier ran the canonical `make verify` on `4ffbbed`

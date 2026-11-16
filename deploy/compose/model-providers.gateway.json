@@ -3,6 +3,6 @@
     "model": "*",
     "protocol": "anthropic",
     "base_url": "http://modelgateway:8090",
-    "api_key_env": "BRAIN_API_KEY"
+    "delegated_inference": true
   }
 ]

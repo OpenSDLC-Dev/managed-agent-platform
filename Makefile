@@ -21,7 +21,7 @@ SHELL := /usr/bin/env bash
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test evals-alert-test identifiers-test pins-test pipes-test tf-corpus-check registry-check sdk-bump-report \
-	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
+	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
@@ -88,7 +88,7 @@ third-party-licenses:
 # internal/blob/blobtest, internal/blob/gcs/gcstest, internal/provider/providertest,
 # internal/secrets/secretstest, internal/secrets/gcpkms/gcpkmstest,
 # internal/webtool/webtooltest and internal/identity/identitytest and
-# internal/mcp/mcptest are test support —
+# internal/mcp/mcptest and internal/api/apitest are test support —
 # packages solely because a test in another package must import them. What is
 # uncovered in them are the branches no unit test can reach: the ones that fire
 # when a suite fails, when a live tier is misconfigured, or only under the
@@ -111,7 +111,7 @@ third-party-licenses:
 # the growth, and reaping a fixture whose owner died, are #499.
 test: ripgrep
 	@set -euo pipefail; \
-	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|hookedtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest)$$' | paste -sd, -)"; \
+	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|hookedtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest|apitest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -timeout 30m -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 
@@ -572,6 +572,12 @@ gcp-dbinit-test:
 # documents. This runs the script against a fake gcloud and kubectl.
 gcp-mode2-secret-test:
 	python3 deploy/gcp/mode2_secret_test.py
+
+# Reuse the existing staging TLS edge, but route browser and API traffic through
+# the platform's native cookie/key admission instead of the legacy IAP BFF.
+gcp-native-edge-test:
+	python3 deploy/gcp/native_edge_test.py
+	python3 deploy/gcp/native_smoke_test.py
 
 # The split guard run against the real tree proves only that the real tree is
 # compliant — a checker that had silently stopped reading would pass that too,

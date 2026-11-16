@@ -12,7 +12,7 @@ Public control-plane resources admit owned keys using the owner's current role.
 Gateway inference admits active developer/admin owners without a model grant.
 Organization budgets share each public model alias across keys and protocols; usage groups owned calls by principal.
 Model turns check the session initiator's membership; scheduled deployments can use an admin-selected service account.
-The gateway accepts claim-bound inference tokens. The brain's outbound credential switches in slice 6.
+The brain's gateway route sends claim-bound inference tokens. Direct provider routes keep their configured vendor credentials.
 Slice 3's owned-key HTTP issuance and fenced per-row mutations are independently verified.
 Fresh packaged Compose/`ant` acceptance passed at platform `45f5264` with the published Console image.
 Native browser/SDK acceptance uses completed CI on a different integration tree; the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) separates sources and limits.
@@ -176,9 +176,12 @@ there is no key to distribute.
 
 ```bash
 cd deploy/compose
-cp .env.example .env          # set CONTROLPLANE_API_KEY and BRAIN_API_KEY
-docker compose up --build     # control plane on http://localhost:8080 (loopback)
+cp .env.example .env
+docker compose --profile console up --build  # Console: http://localhost:3000
 ```
+
+Complete password setup in Console with the restricted setup-code file named by the
+control-plane log. Sign in and issue an owned API key for the CLI.
 
 Then drive it with the real CLI: `ANTHROPIC_API_KEY=<key> ant --base-url http://localhost:8080 beta:agents list` (management commands take `--base-url` explicitly; they ignore `ANTHROPIC_BASE_URL`, which only the worker/auth subcommands honor). The brain sends every model call to the model gateway, so the stack idles until the gateway's catalogue names a vendor deployment for the agent's model (configured through its `/admin/v1/` API, which managed-agent-console drives); to route the brain to your endpoint directly instead, copy `model-providers.example.json` and set `MODEL_PROVIDERS_FILE`. See [`deploy/compose/README.md`](./deploy/compose/README.md) for details; production deploys use the [Helm chart](./deploy/helm) — from v0.2.0 onward installable straight from the registry (`helm install map oci://ghcr.io/opensdlc-dev/charts/managed-agent-platform --version <X.Y.Z> ...`), with prebuilt worker binaries attached to each [GitHub Release](https://github.com/OpenSDLC-Dev/managed-agent-platform/releases). Upgrade BYOC workers together with the platform: the brain offers the model the tools of its release and a worker runs those of its own, and the work protocol, the reference's, carries no worker version, so nothing refuses or flags a mismatch.
 

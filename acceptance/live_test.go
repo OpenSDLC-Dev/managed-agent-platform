@@ -26,7 +26,7 @@ const acceptanceEnv = "RUN_LIVE_ACCEPTANCE_TESTS"
 // .env, which modeltest reserves for MODEL_*):
 //
 //	ACCEPTANCE_BASE_URL  the stack's API root (default http://localhost:8080)
-//	ACCEPTANCE_API_KEY   its management key (compose: CONTROLPLANE_API_KEY)
+//	ACCEPTANCE_API_KEY   an owned key issued through Console after sign-in
 //	ACCEPTANCE_MODEL     the agent model string the stack's routing resolves
 //
 // Both rubric variants run, each as its own full agent session; expect minutes

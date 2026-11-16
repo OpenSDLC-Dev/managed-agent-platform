@@ -346,17 +346,13 @@ optional hardening step.
 
 Both acceptance runs behind this guide used `kubectl port-forward` and exposed nothing.
 
-**This project's own staging environment now breaks that rule on purpose, and the exception
-is recorded here rather than only in the pull request that made it.**
-[`deploy/gcp/staging-values.yaml`](../deploy/gcp/staging-values.yaml) sets
-`controlplane.service.type: LoadBalancer`, so the CD pipeline's deployment answers on a bare
-external IP over plain HTTP. The reason is that there is no domain yet: with no name, there
-is nothing for a certificate to be issued against and nothing for the Gateway below to route,
-so the alternative was not "HTTPS instead" but "unreachable". The cost is exactly the one
-stated above, unmitigated — the global `x-api-key`, every prompt and output, and the entire
-SSE stream in cleartext across the internet — and it is accepted only because that
-environment is staging and holds nothing anyone would miss. Do not read it as a pattern; the
-moment a domain exists the fix is the Gateway below and `service.type` back to `ClusterIP`.
+The plan 69 staging configuration serves native Google sign-in and application traffic
+through the existing HTTPS Console origin. The platform chart owns that application edge;
+[the staging runbook](../deploy/gcp/README.md#native-google-sign-in-and-the-staging-https-edge)
+covers the client, certificate, ingress and rollback order.
+Slice 6 retains its old plaintext control-plane LoadBalancer for CD compatibility only.
+Slice 7 moves CD to an issued service-account key over HTTPS and retires that listener.
+Do not use the compatibility listener for human login or a new deployment.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:

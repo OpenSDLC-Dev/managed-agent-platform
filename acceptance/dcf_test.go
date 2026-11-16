@@ -432,7 +432,7 @@ func rehearse(t *testing.T, fileRubric bool) {
 			doneChunk("end_turn", 30)},
 	}
 	s := newStack(t, scripts)
-	client := anthropic.NewClient(option.WithAPIKey(acceptanceKey), option.WithBaseURL(s.url))
+	client := anthropic.NewClient(option.WithAPIKey(s.key), option.WithBaseURL(s.url))
 
 	run := runDCF(t, client, s.track, "acceptance-scripted", fileRubric, 2*time.Minute)
 

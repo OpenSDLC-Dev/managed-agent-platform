@@ -120,9 +120,10 @@ brain:
   #       api_key: sk-...
   # Only with modelgateway.enabled=false: with the gateway on, the chart writes
   # the brain's one route itself — every model string to the gateway's Service,
-  # under brain.apiKey — and refuses routes here, which it would otherwise drop.
+  # under its current claim token — and refuses routes here, which it would otherwise drop.
   modelProviders: []
-  # -- The brain's platform API key for the model gateway, BRAIN_API_KEY.
+  # -- Compatibility key for old brains during rollout, BRAIN_API_KEY.
+  # New brains use per-claim tokens. The receivers retain this until plan 69 slice 7.
   # REQUIRED with modelgateway.enabled: set via --set or a values file, or point
   # existingSecret at a Secret holding key `brain-api-key`. The control plane
   # registers it in api_keys as "brain" and the gateway lets it call any model
@@ -132,7 +133,7 @@ brain:
   # quoted, or passed with --set-string, if it is all digits.
   apiKey: ""
   # -- The gateway route's other fields, with modelgateway.enabled: the chart
-  # writes model, protocol, base_url and api_key_env, and takes only these four
+  # writes model, protocol, base_url and delegated_inference, and takes only these four
   # beside them, spelled exactly, checked by the loader as brain.modelProviders'
   # entries are: max_tokens above all — the brain sets none, so without it the
   # anthropic adapter sends 8192 — upstream_model, which pins every agent to one
@@ -625,12 +626,8 @@ gcpKMS:
 # deployed, so an external provider — Keycloak, Entra ID, Cognito,
 # accounts.google.com — needs nothing from the `casdoor` block below.
 #
-# `mode: ""` is DISABLED, and it is the default: with IDENTITY_MODE unset the
-# control plane reads none of the other variables, no Bearer JWT is accepted
-# anywhere, and management auth stays `x-api-key` exactly as it was before this
-# block existed. The chart renders no IDENTITY_* entry at all in that state — not
-# even the pair that would say "disabled" — so upgrading an existing release does
-# not change its controlplane pod spec and does not roll it.
+# Select a login mode and public Console origin before installing. Empty or
+# disabled identity modes fail the render, including with an existing Secret.
 #
 # Whatever the platform refuses, it refuses at STARTUP, loudly and by variable
 # name: an unreachable issuer, a malformed pair, or an unknown role. The map is
@@ -638,15 +635,15 @@ gcpKMS:
 # The chart checks native rollout/origin shape, explicit secret ownership, role-map
 # encoding and the bundled client's equalities. Canonical host/IP validation and
 # provider reachability remain the binary's startup checks.
-# Native browser login remains opt-in. No staging hostname or IAP is managed.
+# Native browser login is required. This chart does not provision public TLS.
 developmentMode: false
 console:
-  enabled: false
-  # Empty keeps legacy BFF routing; platform selects native control-plane login.
-  authMode: ""
+  enabled: true
+  # Native control-plane login. Legacy template fields remain only until slice 7.
+  authMode: platform
   publicOrigin: ""
   # Independent multi-architecture published image. Platform image.tag never changes it.
-  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68
+  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319
   # Legacy only: keys platform-api-key and optional console-password.
   # Empty uses the release bootstrap key; native mode receives neither key.
   legacySecret: ""
@@ -656,10 +653,11 @@ appEdge:
   service:
     type: ClusterIP
     port: 8080
+    annotations: {}
   resources: {}
 
 identity:
-  # -- IDENTITY_MODE: "" (disabled) · password (development only) · oidc · trusted_proxy.
+  # -- Required: password (development only), oidc or trusted_proxy.
   mode: ""
   # -- Mode `oidc`. `issuer` is the discovery root AND the exact `iss` the
   # verifier compares against; `audience` is the client id the console's tokens

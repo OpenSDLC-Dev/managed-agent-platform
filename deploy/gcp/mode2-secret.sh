@@ -231,6 +231,15 @@ if [ "$gateway" = true ]; then
   verbatim+=(brain-api-key)
 fi
 
+# Native OIDC's confidential client belongs only to the control plane. The
+# caller names a Secret Manager secret; the chart names this fixed Secret key.
+oidc=()
+if [ -n "${OIDC_CLIENT_SECRET_NAME:-}" ]; then
+  fetch "$OIDC_CLIENT_SECRET_NAME" oidc-client-secret
+  verbatim+=(oidc-client-secret)
+  oidc=(--from-file="$d/oidc-client-secret")
+fi
+
 # A trailing newline is the classic way one of these gets stored (an `echo` where
 # bootstrap.sh uses `printf '%s'`), and each is embedded VERBATIM: an API key in
 # an x-api-key comparison, the DSN as a DSN. So the deploy would succeed and the
@@ -416,6 +425,7 @@ applied="$(kubectl create secret generic "$secret" \
   --from-file="$d/database-url" \
   --from-file="$d/$brain_file" \
   ${carried[@]+"${carried[@]}"} \
+  ${oidc[@]+"${oidc[@]}"} \
   --from-file="$d/blob-backend" \
   --from-file="$d/blob-bucket" \
   --from-file="$d/secrets-backend" \

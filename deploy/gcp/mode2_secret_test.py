@@ -225,6 +225,7 @@ def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=
     env.pop("K8S_SECRET", None)
     env.pop("SECRET_DIR", None)
     env.pop("GITHUB_ENV", None)
+    env.pop("OIDC_CLIENT_SECRET_NAME", None)
     if github:
         env["GITHUB_ACTIONS"] = "true"
     else:
@@ -291,6 +292,26 @@ def main():
         check("both manifests reach apply, not just the Secret's",
               r.calls().count("kubectl apply -f -") == 2, r.calls())
         check("reports what apply did on stdout", "created" in r.proc.stdout, r.proc.stdout)
+
+        print("native OIDC reads its configured client secret without exposing it")
+        oidc_value = b"oauth-client-secret-fixture"
+        for gateway in ["false", "true"]:
+            versions = {**(GOOD_GW if gateway == "true" else GOOD), "fixture-oidc": oidc_value}
+            r = run(tmp, "oidc-" + gateway, versions=versions,
+                    env_extra={"MODELGATEWAY": gateway, "OIDC_CLIENT_SECRET_NAME": "fixture-oidc"})
+            check("OIDC assembly succeeds with gateway=" + gateway, r.code == 0, r.out)
+            check("configured OIDC payload reaches only its named Secret key", r.key("oidc-client-secret") == oidc_value)
+            check("OIDC credential is absent from commands and ordinary output", oidc_value.decode() not in r.calls() + r.out)
+        for name, value in [("missing", None), ("empty", b""), ("blank", b"  "), ("newline", oidc_value + b"\n")]:
+            versions = dict(GOOD)
+            if value is not None:
+                versions["fixture-oidc"] = value
+            r = run(tmp, "oidc-bad-" + name, versions=versions,
+                    env_extra={"OIDC_CLIENT_SECRET_NAME": "fixture-oidc"})
+            check("invalid OIDC secret is refused before any apply: " + name,
+                  r.code != 0 and "kubectl" not in r.calls(), r.out)
+
+        r = run(tmp, "clean-again")
 
         print("credentials never reach an argv")
         check("no --from-literal anywhere", "--from-literal" not in r.calls(), r.calls())

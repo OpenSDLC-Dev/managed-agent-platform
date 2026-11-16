@@ -134,8 +134,8 @@ services:
     environment:
       <<: *app-env
       CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
-      # Registered in api_keys as "brain", the key the brain calls the gateway
-      # with; unset, the control plane archives it.
+      # Receiver compatibility for old brains through slice 6. New brains use
+      # delegated inference tokens attached to each claim.
       BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       CONTROLPLANE_ADDR: ":8080"
       # Skill archives go to the bundled MinIO (plain HTTP inside the network).
@@ -157,13 +157,11 @@ services:
       DREAM_TICK_INTERVAL: ${DREAM_TICK_INTERVAL:-}
       DREAM_TIMEOUT: ${DREAM_TIMEOUT:-}
       DREAM_MAX_INPUT_BYTES: ${DREAM_MAX_INPUT_BYTES:-}
-      # Human SSO (docs/plan/31_console-sso-rbac.md, #56). Empty is disabled,
-      # which is the default: with IDENTITY_MODE unset the control plane reads
-      # none of the rest and management auth stays x-api-key only. The `iam`
-      # profile below sets these; see README.md's "Single sign-on" section.
-      DEVELOPMENT_MODE: ${DEVELOPMENT_MODE:-false}
-      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN:-}
-      IDENTITY_MODE: ${IDENTITY_MODE:-}
+      # Native password login is the development default. Production installs
+      # select OIDC or a trusted proxy and a public HTTPS Console origin.
+      DEVELOPMENT_MODE: ${DEVELOPMENT_MODE-true}
+      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN-http://localhost:3000}
+      IDENTITY_MODE: ${IDENTITY_MODE-password}
       IDENTITY_OIDC_CLIENT_ID: ${IDENTITY_OIDC_CLIENT_ID:-}
       IDENTITY_OIDC_CLIENT_SECRET: ${IDENTITY_OIDC_CLIENT_SECRET:-}
       IDENTITY_OIDC_ISSUER: ${IDENTITY_OIDC_ISSUER:-}
@@ -249,9 +247,9 @@ services:
       # `iam` profile's variables reach it too, with the CA that verifies the
       # bundled IdP (the control plane's SSL_CERT_FILE comment says why it is
       # not defaulted).
-      DEVELOPMENT_MODE: ${DEVELOPMENT_MODE:-false}
-      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN:-}
-      IDENTITY_MODE: ${IDENTITY_MODE:-}
+      DEVELOPMENT_MODE: ${DEVELOPMENT_MODE-true}
+      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN-http://localhost:3000}
+      IDENTITY_MODE: ${IDENTITY_MODE-password}
       IDENTITY_OIDC_ISSUER: ${IDENTITY_OIDC_ISSUER:-}
       IDENTITY_OIDC_AUDIENCE: ${IDENTITY_OIDC_AUDIENCE:-}
       IDENTITY_OIDC_JWKS_URL: ${IDENTITY_OIDC_JWKS_URL:-}
@@ -284,9 +282,9 @@ services:
   # Opt-in browser receiver. It never inherits x-app or database credentials.
   console:
     profiles: ["console"]
-    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:9863594298d7a3469b878d2b42fe4e2cb0e01ee24ba5d479c3e4329004d47a68
+    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319
     environment:
-      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE:-}
+      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE-platform}
       PLATFORM_BASE_URL: http://controlplane:8080
       PLATFORM_API_KEY: ${CONSOLE_PLATFORM_API_KEY:-}
       CONSOLE_PASSWORD: ${CONSOLE_PASSWORD:-}
@@ -306,9 +304,9 @@ services:
     image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     entrypoint: ["/bin/sh", "/etc/caddy/start.sh"]
     environment:
-      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE:-}
-      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN:-}
-      IDENTITY_MODE: ${IDENTITY_MODE:-}
+      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE-platform}
+      CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN-http://localhost:3000}
+      IDENTITY_MODE: ${IDENTITY_MODE-password}
       MODELGATEWAY_UPSTREAM: ${APP_EDGE_GATEWAY_UPSTREAM-modelgateway:8090}
     volumes:
       - ./app-edge:/etc/caddy:ro
@@ -333,8 +331,6 @@ services:
     environment:
       <<: *app-env
       MODEL_PROVIDERS_PATH: /etc/map/model-providers.json
-      # The default route's key (model-providers.gateway.json reads it by name).
-      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       # File-rubric outcome snapshots are read from the same bundled MinIO the
       # controlplane writes them to; unset BLOB_ENDPOINT and file rubrics
       # grade from the outcome description alone (plan 21 slice 3).
@@ -349,10 +345,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      # Both listening before the brain claims a turn: the gateway answers its
-      # model calls, and the control plane has registered the key they carry,
-      # without which the gateway's 401 fails a queued turn rather than
-      # delaying it.
+      # Both listening before the brain claims a turn. The claim mints its
+      # inference credential; neither process supplies a static brain key.
       controlplane:
         condition: service_healthy
       # Waited for while it comes up, but not required: a brain routed past
@@ -364,7 +358,7 @@ services:
     volumes:
       # The brain's model routing (a JSON array — see internal/provider LoadRoutes).
       # Defaults to the committed model-providers.gateway.json, one route sending
-      # every model to the gateway under BRAIN_API_KEY. To route past the gateway,
+      # every model to the gateway under its current claim. To route past it,
       # copy model-providers.example.json to model-providers.json, edit it, and
       # set MODEL_PROVIDERS_FILE=model-providers.json. Referencing an
       # always-present file avoids Docker silently creating a directory when the
