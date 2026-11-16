@@ -96,7 +96,7 @@ jobs:
         run: helm lint "$CHART" -f "$VALUES"
       - name: helm lint (identity lane + bundled IdP)
         run: helm lint "$CHART" -f "$VALUES" -f "$IAM_VALUES"
-      - name: one-origin native and legacy deployment matrix
+      - name: one-origin deployment matrix and edge executable
         run: python3 -I "$CHART/ci/native_test.py"
       - name: helm template renders (smoke)
         run: helm template t "$CHART" -f "$VALUES" > /dev/null

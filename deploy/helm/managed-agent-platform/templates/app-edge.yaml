@@ -89,6 +89,9 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+              # The pinned Caddy binary carries this file capability. Linux
+              # refuses exec if it is absent from the capability bounding set.
+              add: [NET_BIND_SERVICE]
           {{- with .Values.appEdge.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
