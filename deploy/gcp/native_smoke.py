@@ -27,6 +27,7 @@ def expect_response(fetch, path, expected, timeout=600, clock=time.monotonic, pa
             if isinstance(error.reason, ssl.SSLError):
                 raise RuntimeError("HTTPS certificate verification failed") from None
         except (TimeoutError, ConnectionError):
+            # Retry transient connection failures within the same readiness deadline.
             pass
         if clock() >= deadline:
             raise RuntimeError(f"{path} did not become ready; expected {expected}")
