@@ -36,9 +36,6 @@ func seed(t *testing.T, s *store.Store, pool *pgxpool.Pool) (store.Provider, sto
 	if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_app', 'app', 'h')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PutKeyPolicy(ctx, store.KeyPolicy{APIKeyID: "key_app", Aliases: []string{"fast"}}); err != nil {
-		t.Fatal(err)
-	}
 	return p, d
 }
 
@@ -98,12 +95,6 @@ func TestNewLoadsTheConfiguration(t *testing.T) {
 	}
 	if got, ok := snap.Deployment(d.ID); !ok || got.UpstreamModel != "deepseek-flash" {
 		t.Errorf("deployment = %+v, %t", got, ok)
-	}
-	if got, ok := snap.KeyPolicy("key_app"); !ok || len(got.Aliases) != 1 {
-		t.Errorf("key policy = %+v, %t", got, ok)
-	}
-	if _, ok := snap.KeyPolicy("key_other"); ok {
-		t.Error("a key without a grant has one")
 	}
 }
 

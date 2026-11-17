@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
@@ -25,10 +26,16 @@ import (
 // prober the gateway's own request path, as cmd/modelgateway wires them.
 func (e *env) startProbing(mod ...func(*modelgateway.Config)) {
 	e.t.Helper()
+	manager := login.New(e.pool, login.Config{Mode: login.ModePassword, PublicOrigin: "https://gateway.example", Development: true})
+	_, err := e.pool.Exec(e.ctx, "INSERT INTO principals(id,issuer,subject,kind,role) VALUES ('principal_prober','prober','admin','user','admin')")
+	e.must(err)
+	issued, err := manager.Issue(e.ctx, "principal_prober")
+	e.must(err)
+	e.adminHeaders = map[string]string{"Cookie": "map_session=" + issued.Token, "Origin": "https://gateway.example", "X-CSRF-Token": issued.CSRFToken, "Content-Type": "application/json"}
 	e.start(append(mod, func(c *modelgateway.Config) {
 		pr, err := modelgateway.NewProber(*c)
 		e.must(err)
-		c.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap, Prober: pr})
+		c.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, Prober: pr, Login: manager})
 		e.must(err)
 	})...)
 }
@@ -36,7 +43,7 @@ func (e *env) startProbing(mod ...func(*modelgateway.Config)) {
 // check asks the admin API to check a credential.
 func (e *env) check(providerID, credentialID string) []admin.CredentialCheck {
 	e.t.Helper()
-	resp, b := e.do("POST", "/admin/v1/providers/"+providerID+"/credentials/"+credentialID+"/check", "", map[string]string{"x-api-key": bootstrap})
+	resp, b := e.do("POST", "/admin/v1/providers/"+providerID+"/credentials/"+credentialID+"/check", "", e.adminHeaders)
 	var out struct {
 		Type    string                  `json:"type"`
 		Results []admin.CredentialCheck `json:"results"`
@@ -51,7 +58,7 @@ func (e *env) check(providerID, credentialID string) []admin.CredentialCheck {
 // the request id the ledger rows carry.
 func (e *env) test(deploymentID, body string) ([]admin.DeploymentTest, string) {
 	e.t.Helper()
-	resp, b := e.do("POST", "/admin/v1/deployments/"+deploymentID+"/test", body, map[string]string{"x-api-key": bootstrap})
+	resp, b := e.do("POST", "/admin/v1/deployments/"+deploymentID+"/test", body, e.adminHeaders)
 	var out struct {
 		Type    string                 `json:"type"`
 		Results []admin.DeploymentTest `json:"results"`
@@ -332,7 +339,7 @@ func TestADeploymentTestMakesOneAttemptWithEachCredential(t *testing.T) {
 		slices.Reverse(rows)
 	}
 	for i, row := range rows {
-		if row.RequestID != rid || row.APIKeyID != "admin" || row.Endpoint != "deployment_test" || row.Alias != "" ||
+		if row.RequestID != rid || row.APIKeyID != "" || row.PrincipalID != "principal_prober" || row.Endpoint != "deployment_test" || row.Alias != "" ||
 			row.Model != "up-model" || row.DeploymentID != d.ID || row.Protocol != "anthropic" {
 			t.Errorf("row %d = %+v", i, row)
 		}

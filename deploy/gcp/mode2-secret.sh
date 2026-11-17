@@ -2,9 +2,8 @@
 # Assemble mode 2's Kubernetes Secret: the object the chart's `existingSecret`
 # names, which nothing else can build. The chart renders no Secret when
 # `existingSecret` is set, and Terraform holds no secret VALUES by design, so
-# three keys come from Secret Manager (four, when the other gateway mode's rides
-# along), four are coordinates, and they belong in one object only because that
-# is the shape `existingSecret` defines.
+# the database URL, optional direct routes and optional OIDC client secret come
+# from Secret Manager. Four coordinates complete the object.
 #
 # Two callers, one source. `.github/workflows/deploy.yml` runs this on every
 # push; an operator runs it by hand, and deploy/gcp/README.md shows where its
@@ -18,19 +17,15 @@
 #   KMS_KEY_NAME    `terraform output -raw kms_key_name`                (required)
 #   MODELGATEWAY    `true` when the release runs the model gateway (the chart's
 #                   modelgateway.enabled), else `false`               (required)
-#                   The Secret then requires `brain-api-key`, the brain's key
-#                   for the gateway, in place of `model-providers.json`, since
-#                   the chart writes the brain's one route itself. Each mode
-#                   also carries the other's key when Secret Manager holds it.
+#                   Direct routes are needed only with the gateway off.
 #   K8S_NAMESPACE   default `map`
 #   K8S_SECRET      default `map-platform`, which is what
 #                   deploy/gcp/staging-values.yaml's `existingSecret` names
 #   SECRET_DIR      where to leave the fetched values. Default: a fresh mode-700
 #                   directory removed on exit. deploy.yml passes one because a
-#                   later step reads controlplane-api-key back out of it to
-#                   smoke-test the deployment.
+#                   later step writes the independently issued CD key there.
 #
-# It writes the one line `kubectl apply` produced — "created", "configured" or
+# It writes one disposition line — "created", "configured" or
 # "unchanged" — to stdout. That line is the only thing in the deploy that knows
 # whether a rotation actually landed, so when `$GITHUB_ENV` is set it is also
 # reduced to `SECRET_CHANGED=true|false` there, for the step that rolls the pods.
@@ -39,9 +34,8 @@
 # GitHub reads `::add-mask::` off this script's stdout: a caller that captured
 # it would swallow every redaction and leave the values unmasked in a public log.
 #
-# kubectl is driven as `create --dry-run=client -o yaml | kubectl apply -f -`
-# rather than `create`: this runs on every push, and `create` fails the second
-# time. Apply also makes a rotation a re-run rather than a delete-and-recreate.
+# An absent Secret is created. Existing data is applied with a resource-version
+# check; an unchanged data map is a no-op. Neither path deletes the Secret.
 set -euo pipefail
 
 # GitHub's log is public, so under Actions every credential is registered as a
@@ -107,11 +101,10 @@ esac
 
 # Named before anything is fetched, as bootstrap.sh and dbinit.sh do. An absent
 # `jq` matters most: it exits 127 into the shape check's `if !`, which then
-# blames a healthy `model-providers` for a missing binary — and by then three
-# credentials are already on disk. `jq` arrives with neither gcloud nor kubectl,
-# and `cmp` is diffutils' rather than coreutils': a missing one would read as two
-# brain keys that differ.
-for tool in gcloud kubectl jq cmp; do
+# blames a healthy `model-providers` for a missing binary after fetching credentials.
+# `jq` arrives with neither gcloud nor kubectl.
+
+for tool in gcloud kubectl jq; do
   if ! command -v "$tool" > /dev/null; then
     fail "$tool is required and not on PATH"
     exit 1
@@ -156,8 +149,7 @@ fetch() {
   #
   # Blank rather than zero-byte, because a lone space is neither empty nor a
   # newline and so passes both a `test -s` and the newline check below, while
-  # being no more usable than nothing: the api key is compared verbatim against a
-  # header the parser has already trimmed, and the DSN parses as no connection
+  # being no more usable than nothing: the DSN parses as no connection
   # settings at all, which sends the pool to a localhost that is not there.
   #
   # `grep` reads the file rather than a substitution expanding it: this check sits
@@ -172,14 +164,9 @@ fetch() {
   mask_file "$d/$2"
 }
 
-# carry SECRET_ID DEST — the key the OTHER gateway mode requires, carried so the
-# Secret serves either revision of the release. This script runs before
-# `helm upgrade --atomic`, and `kubectl apply` drops a key its previous apply
-# wrote, so a flip of the switch that rolls back would otherwise restart the old
-# revision on a Secret without its key. This release reads none of it, so
-# carrying is best effort: a NOT_FOUND, the steady state, is silent, and any
-# other failure is replayed and skipped rather than failing a deploy that does
-# not need the value.
+# carry SECRET_ID DEST — optional direct routes retained for gateway-off rollback.
+# This gateway-on release does not read them. NOT_FOUND is silent; other failures
+# are reported without failing a deployment that does not need the routes.
 carry() {
   if gcloud secrets versions access latest \
        --secret="$1" --project="$PROJECT" --out-file="$d/$2" 2>"$d/$2.err"; then
@@ -223,13 +210,8 @@ mask_routes() {
     done
 }
 
-fetch controlplane-api-key controlplane-api-key
 fetch database-url         database-url
-verbatim=(controlplane-api-key database-url)
-if [ "$gateway" = true ]; then
-  fetch brain-api-key brain-api-key
-  verbatim+=(brain-api-key)
-fi
+verbatim=(database-url)
 
 # Native OIDC's confidential client belongs only to the control plane. The
 # caller names a Secret Manager secret; the chart names this fixed Secret key.
@@ -240,11 +222,7 @@ if [ -n "${OIDC_CLIENT_SECRET_NAME:-}" ]; then
   oidc=(--from-file="$d/oidc-client-secret")
 fi
 
-# A trailing newline is the classic way one of these gets stored (an `echo` where
-# bootstrap.sh uses `printf '%s'`), and each is embedded VERBATIM: an API key in
-# an x-api-key comparison, the DSN as a DSN. So the deploy would succeed and the
-# platform would then reject the very key CD smoke-tests with, or fail to parse
-# its own database URL. Refuse it here, where the fix is one command.
+# A newline changes the DSN or OIDC secret verbatim. Refuse it before applying.
 #
 # model-providers.json is deliberately NOT checked this way: it is a JSON
 # document read by a parser, a human adds it with `--data-file=/path/to/file`,
@@ -262,33 +240,15 @@ for f in "${verbatim[@]}"; do
   fi
 done
 
+routes=()
 if [ "$gateway" = true ]; then
-  # The two refusals the control plane and the gateway both make at startup
-  # (apikey.CheckBrainKey), made here as the chart makes them at render for a
-  # Secret it writes. With `existingSecret` it sees none, so a key either binary
-  # refuses would otherwise surface as pods crash-looping until `--atomic` rolls
-  # the release back. One value under both names, because the control plane
-  # registers each key by its value under its own name; surrounding whitespace,
-  # because HTTP trims it off a header, so no request can carry the key.
-  if cmp -s "$d/controlplane-api-key" "$d/brain-api-key"; then
-    fail "Secret Manager secret 'brain-api-key' equals 'controlplane-api-key'"
-    echo "The two must differ. Add a fresh version without a trailing newline:" >&2
-    echo "  printf '%s' \"\$(openssl rand -hex 32)\" | gcloud secrets versions add brain-api-key --project=$PROJECT --data-file=-" >&2
-    exit 1
-  fi
-  if LC_ALL=C grep -qE $'^[ \t\r]|[ \t\r]$' "$d/brain-api-key"; then
-    fail "Secret Manager secret 'brain-api-key' has leading or trailing whitespace, which no request can carry"
-    exit 1
-  fi
-  brain_file=brain-api-key
   # Carried only in the shape a rollback could use, which jq checks first, since
   # masking the keys inside needs a document jq can read.
-  carry_file=model-providers.json
-  if carry model-providers "$carry_file"; then
+  if carry model-providers model-providers.json; then
     if routes_ok; then
       mask_routes
     else
-      rm -f "$d/$carry_file"
+      rm -f "$d/model-providers.json"
       echo "Not carrying 'model-providers' into the Secret: it is not a non-empty JSON array of route objects, so no rollback could use it." >&2
     fi
   fi
@@ -373,31 +333,14 @@ EOF
     exit 1
   fi
   mask_routes
-  brain_file=model-providers.json
-  carry_file=brain-api-key
-  if carry brain-api-key "$carry_file"; then
-    mask_file "$d/$carry_file"
-    # Only a key a rollback could use: the refusals the gateway-on branch
-    # makes, as one test.
-    if ! LC_ALL=C grep -q '[^[:space:]]' "$d/$carry_file" \
-       || [ "$(wc -l < "$d/$carry_file")" -ne 0 ] \
-       || LC_ALL=C grep -qE $'^[ \t\r]|[ \t\r]$' "$d/$carry_file" \
-       || cmp -s "$d/controlplane-api-key" "$d/$carry_file"; then
-      rm -f "$d/$carry_file"
-      echo "Not carrying 'brain-api-key' into the Secret: the control plane and the gateway would refuse it, so no rollback could use it." >&2
-    fi
-  fi
 fi
 
-# The carried key's flag exists only when its file does; expanded below as
-# `${carried[@]+...}` because bash before 4.4 calls an empty array unset under
-# `set -u`, and operators run this on macOS's bash 3.2.
-carried=()
-if [ -f "$d/$carry_file" ]; then
-  carried=(--from-file="$d/$carry_file")
+# A direct-route file is optional with the gateway on, retained for rollback.
+if [ -f "$d/model-providers.json" ]; then
+  routes=(--from-file="$d/model-providers.json")
 fi
 
-# The four coordinates. Non-secret, but the chart reads all seven keys from this
+# The four coordinates. Non-secret, but the chart reads its keys from this
 # one object — `blob-backend` missing does not fail, it reads as the default "s3"
 # and then looks for an endpoint that is not there.
 printf '%s' gcs              > "$d/blob-backend"
@@ -421,19 +364,44 @@ kubectl create namespace "$namespace" --dry-run=client -o yaml \
 # script exists to report: it is the only thing that knows whether a rotation
 # actually landed. It names the object and never a value, so it is safe to hold
 # in a variable, unlike the manifest on the pipe.
-applied="$(kubectl create secret generic "$secret" \
+kubectl create secret generic "$secret" \
   --namespace "$namespace" \
-  --from-file="$d/controlplane-api-key" \
+  --type=Opaque \
   --from-file="$d/database-url" \
-  --from-file="$d/$brain_file" \
-  ${carried[@]+"${carried[@]}"} \
+  ${routes[@]+"${routes[@]}"} \
   ${oidc[@]+"${oidc[@]}"} \
   --from-file="$d/blob-backend" \
   --from-file="$d/blob-bucket" \
   --from-file="$d/secrets-backend" \
   --from-file="$d/gcpkms-key-name" \
-  --dry-run=client -o yaml \
-  | kubectl apply -f -)"
+  --dry-run=client -o json > "$d/new-secret.json"
+
+# Slice 7a retains existing data until its native-only binaries are accepted.
+# The following cleanup deployment can then remove retired fields safely.
+# Never print either manifest. The resource version makes a concurrent rotation
+# fail instead of overwriting it with the snapshot we read here.
+kubectl get secret "$secret" --namespace "$namespace" --ignore-not-found -o json > "$d/previous-secret.json"
+if [ -s "$d/previous-secret.json" ]; then
+  write_secret=(apply -f -)
+  jq --slurpfile previous "$d/previous-secret.json" \
+    '.data = ($previous[0].data + .data) | .metadata.resourceVersion = $previous[0].metadata.resourceVersion' \
+    "$d/new-secret.json" > "$d/merged-secret.json"
+else
+  # An intervening creator must win: apply could silently overwrite its data.
+  write_secret=(create -f -)
+  cp "$d/new-secret.json" "$d/merged-secret.json"
+fi
+if [ -s "$d/previous-secret.json" ] && jq -e --slurpfile previous "$d/previous-secret.json" \
+    '.data == $previous[0].data and .type == $previous[0].type' "$d/merged-secret.json" > /dev/null; then
+  # Applying an unchanged data map with resourceVersion would still rewrite
+  # last-applied configuration on every run and trigger needless pod restarts.
+  # This read is the no-op's observation point; later concurrent writes win.
+  applied="secret/$secret unchanged"
+elif ! applied="$(kubectl "${write_secret[@]}" < "$d/merged-secret.json" 2>"$d/apply.err")"; then
+  # kubectl can echo a failed patch, including base64 credentials, on stderr.
+  fail "cannot apply the platform Secret; credentials were not printed (check cluster access or a concurrent rotation)"
+  exit 1
+fi
 printf '%s\n' "$applied"
 
 # Nothing downstream can notice a rotation on its own. Env from a `secretKeyRef`

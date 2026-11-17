@@ -130,23 +130,6 @@ cipher, so its Deployment refuses to render without one.
 {{- end -}}
 
 {{/*
-BRAIN_API_KEY is receiver compatibility through plan 69 slice 6. Only the control
-plane and gateway receive it; new brains send claim tokens. The control plane
-registers it in api_keys as "brain", and the gateway exempts it from key policy.
-It is required while the gateway runs so a missing Secret key cannot silently
-archive a credential an old brain still holds during a rolling upgrade.
-*/}}
-{{- define "map.brainKeyEnv" -}}
-{{- if (.Values.modelgateway | default dict).enabled }}
-- name: BRAIN_API_KEY
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "map.secretName" . }}
-      key: brain-api-key
-{{- end }}
-{{- end -}}
-
-{{/*
 The credential cipher the release resolves — "openbao", "local", "gcpkms", or
 empty for none — in the order secret.yaml validates the options and refuses two
 at once. secret.yaml writes it as the secrets-backend key, and the model
@@ -164,19 +147,7 @@ gcpkms
 {{- end -}}
 
 {{/*
-The IDENTITY_* env entries for the control plane — the human-auth lane
-(docs/plan/31_console-sso-rbac.md, #56) — and the model gateway, whose admin API
-accepts the same operator credential the console sends the control plane.
-Rendered inside their containers' `env:` lists, like map.commonEnv above. No
-other process has a human lane, so no other Deployment includes this.
-
-Emits NOTHING while identity.mode is empty, and that is not a shortcut around a
-default: `IDENTITY_MODE` unset and `IDENTITY_MODE=disabled` are one state to
-internal/identity's ConfigFromEnv, which returns immediately and reads none of the
-other variables. Rendering the pair explicitly would therefore add an env entry to
-every existing release without changing any behaviour — and roll its control-plane
-pods on upgrade to do it.
-
+The control plane alone talks to the IdP at sign-in.
 Each remaining variable is emitted only when set, so the platform's own defaults
 (the `roles`/`email`/`name` claim names, the five-algorithm allowlist) come from
 the binary rather than being restated here in a second place they could drift.
@@ -244,22 +215,14 @@ the binary rather than being restated here in a second place they could drift.
 {{- if or (not (kindIs "bool" $console.enabled)) (not (kindIs "bool" .Values.developmentMode)) -}}
 {{- fail "console.enabled and developmentMode must be booleans, not quoted strings" -}}
 {{- end -}}
-{{- if not (has $console.authMode (list "" "platform")) -}}
-{{- fail "console.authMode must be empty (legacy) or platform" -}}
-{{- end -}}
 {{- if not (has $identity.mode (list "password" "oidc" "trusted_proxy")) -}}
 {{- fail "identity.mode must select a login mode: password, oidc or trusted_proxy" -}}
 {{- end -}}
 {{- if not $console.publicOrigin -}}
 {{- fail "a login mode requires console.publicOrigin for native browser sessions" -}}
 {{- end -}}
-{{- if eq $console.authMode "platform" -}}
-{{- if or (not $console.enabled) (not $console.publicOrigin) (not (has $identity.mode (list "password" "oidc" "trusted_proxy"))) -}}
-{{- fail "platform Console requires console.enabled, console.publicOrigin and an enabled native identity.mode" -}}
-{{- end -}}
-{{- if $console.legacySecret -}}{{- fail "native Console must not receive console.legacySecret" -}}{{- end -}}
-{{- else if $console.publicOrigin -}}
-{{- fail "console.publicOrigin requires console.authMode=platform; legacy routing cannot own native login" -}}
+{{- if not $console.enabled -}}
+{{- fail "native login requires console.enabled" -}}
 {{- end -}}
 {{- if and (eq $identity.mode "password") (or (not .Values.developmentMode) (not $console.publicOrigin)) -}}
 {{- fail "password mode requires developmentMode=true and console.publicOrigin" -}}
@@ -312,14 +275,14 @@ the binary rather than being restated here in a second place they could drift.
 - name: DEVELOPMENT_MODE
   value: {{ .Values.developmentMode | quote }}
 {{- end }}
-{{- if .Values.identity.caSecret }}
-- name: SSL_CERT_FILE
-  value: /etc/identity-ca/ca.crt
-{{- end }}
 {{- end -}}
 
 {{/* CP alone is the relying party. Bundled Casdoor and CP read one Secret. */}}
 {{- define "map.rpEnv" -}}
+{{- if .Values.identity.caSecret }}
+- name: SSL_CERT_FILE
+  value: /etc/identity-ca/ca.crt
+{{- end }}
 {{- if and (eq .Values.identity.mode "oidc") .Values.console.publicOrigin }}
 - name: IDENTITY_OIDC_CLIENT_ID
   value: {{ .Values.identity.oidc.clientId | quote }}

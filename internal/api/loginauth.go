@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
@@ -16,9 +15,8 @@ import (
 
 type cookieContextKey struct{}
 
-// cookieSessionFrom is deliberately separate from identityFrom. A machine key
-// bypasses the old role check, and an IdP credential is not a browser session.
-// New authenticated handlers must check this context at their own boundary.
+// cookieSessionFrom is separate from owned-key authority. Only a browser
+// session can reach private routes, including credential mutations.
 func cookieSessionFrom(ctx context.Context) (login.Session, bool) {
 	session, ok := ctx.Value(cookieContextKey{}).(login.Session)
 	return session, ok
@@ -33,13 +31,10 @@ func requireCookieSession(r *http.Request) (login.Session, error) {
 }
 
 // beginCredentialMutation fences cookie-selected authority until the write commits.
-// Callers read the body first. Legacy credentials keep their existing admission.
+// Callers read the body first.
 func (s *server) beginCredentialMutation(r *http.Request) (pgx.Tx, error) {
-	if _, ok := cookieSessionFrom(r.Context()); ok {
-		tx, _, err := s.beginPrincipalMutation(r)
-		return tx, err
-	}
-	return s.pool.Begin(r.Context())
+	tx, _, err := s.beginPrincipalMutation(r)
+	return tx, err
 }
 
 func (s *server) nativeLogin() bool { return s.login != nil && s.login.NativeEnabled() }
@@ -62,13 +57,6 @@ func privateCookiePath(r *http.Request) bool {
 		}
 	}
 	return true
-}
-
-func legacyLoginCredentialOffered(r *http.Request, v *identity.Verifier) bool {
-	if len(r.Header.Values("x-api-key")) > 0 || len(r.Header.Values("Authorization")) > 0 {
-		return true
-	}
-	return v != nil && v.AssertionHeader() != "" && len(r.Header.Values(v.AssertionHeader())) > 0
 }
 
 func (s *server) requireCookie(next http.Handler) http.Handler {
@@ -106,7 +94,7 @@ func (s *server) requireCookie(next http.Handler) http.Handler {
 // Only the named method+path exceptions are anonymous. Neither a subtree nor
 // the mux's cleaned redirect target is an authentication exception.
 func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
-	legacy := dispatchAuthWithLogin(s.pool, s.verifier, s.login, next)
+	resources := dispatchAuth(s.pool, next)
 	cookie := s.requireCookie(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A delegated credential cannot select another lane, including an IAP
@@ -118,7 +106,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			}
 		} else {
 			// The control plane treats one empty x-api-key as absent. Its
-			// retained IAP lane ignores Authorization, even repeated fields;
+			// sign-in exceptions must not accept an inference token;
 			// none of those fields may conceal a live delegated credential.
 			for _, value := range r.Header.Values("Authorization") {
 				if token, ok := strings.CutPrefix(value, "Bearer "); ok && strings.HasPrefix(token, inferencetoken.TokenPrefix) {
@@ -180,10 +168,10 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			cookie.ServeHTTP(w, r)
 			return
 		}
-		if s.nativeLogin() && privateCookiePath(r) && !legacyLoginCredentialOffered(r, s.verifier) {
+		if privateCookiePath(r) {
 			cookie.ServeHTTP(w, r)
 			return
 		}
-		legacy.ServeHTTP(w, r)
+		resources.ServeHTTP(w, r)
 	})
 }

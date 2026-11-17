@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,14 +15,15 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -34,24 +35,18 @@ const (
 )
 
 type env struct {
-	t      *testing.T
-	url    string
-	pool   *pgxpool.Pool
-	store  *store.Store
-	cipher *local.Cipher
-	idp    *identitytest.IdP
-	clock  *identitytest.Clock
-	prober *stubProber
+	t       *testing.T
+	url     string
+	pool    *pgxpool.Pool
+	store   *store.Store
+	cipher  *local.Cipher
+	idp     *identitytest.IdP
+	clock   *identitytest.Clock
+	prober  *stubProber
+	session login.IssuedSession
 }
 
 func newEnv(t *testing.T, withIdentity bool) *env {
-	t.Helper()
-	return newEnvWith(t, withIdentity, nil)
-}
-
-// newEnvWith is newEnv with the principals table the operator lane reads
-// replaced, when principals is not nil.
-func newEnvWith(t *testing.T, withIdentity bool, principals principal.Querier) *env {
 	t.Helper()
 	pool := pgtest.NewPool(t)
 	cipher, err := local.New(local.Config{KeyID: "test-1", Key: bytes.Repeat([]byte{7}, 32)})
@@ -59,25 +54,21 @@ func newEnvWith(t *testing.T, withIdentity bool, principals principal.Querier) *
 		t.Fatal(err)
 	}
 	e := &env{t: t, pool: pool, store: store.New(pool), cipher: cipher, prober: &stubProber{}}
-	cfg := admin.Config{Store: e.store, Cipher: cipher, BootstrapKey: bootstrap, Prober: e.prober}
+	manager := login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: cookieOrigin, Development: true})
+	principalID := domain.NewID(domain.PrefixPrincipal).String()
+	if _, err := pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,kind,role)
+		VALUES ($1,'admin-fixture',$1,'user','admin')`, principalID); err != nil {
+		t.Fatal(err)
+	}
+	e.session, err = manager.Issue(t.Context(), principalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := admin.Config{Store: e.store, Cipher: cipher, Prober: e.prober, Login: manager}
 	if withIdentity {
 		e.idp = identitytest.NewIdP(t)
 		e.clock = identitytest.NewClock(time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
-		v, err := identity.New(context.Background(), identity.Config{
-			Mode: identity.ModeOIDC, Issuer: e.idp.Issuer(), Audience: audience, JWKSURL: e.idp.JWKSURL(),
-			RoleMap: map[string]identity.Role{
-				"admins": identity.RoleAdmin, "devs": identity.RoleDeveloper, "readers": identity.RoleUser,
-			},
-			HTTPClient: e.idp.Client(), Now: e.clock.Now,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg.Verifier = v
-		cfg.Principals = pool
-		if principals != nil {
-			cfg.Principals = principals
-		}
+
 	}
 	h, err := admin.New(cfg)
 	if err != nil {
@@ -166,10 +157,10 @@ func (e *env) do(method, path string, body any, headers map[string]string) reply
 	return r
 }
 
-// admin calls with the bootstrap key.
+// admin selects the native browser session explicitly.
 func (e *env) admin(method, path string, body any) reply {
 	e.t.Helper()
-	return e.do(method, path, body, map[string]string{"x-api-key": bootstrap})
+	return e.do(method, path, body, map[string]string{"Cookie": "map_session=" + e.session.Token, "Origin": cookieOrigin, "X-CSRF-Token": e.session.CSRFToken})
 }
 
 func (e *env) ok(r reply, what string) map[string]any {
@@ -203,18 +194,15 @@ func (e *env) deployment(providerID, kind string) string {
 
 var deepseekBoth = map[string]string{"anthropic": "https://api.deepseek.com/anthropic", "openai": "https://api.deepseek.com"}
 
-// The bootstrap key, by either header, may do anything; no other platform
-// key may do anything, since a key that could edit key policies could lift
-// its own limits; and a request with no credential, or a wrong one, is
-// unauthenticated.
+// API keys never authenticate administration, regardless of header or row name.
 func TestAuthByKey(t *testing.T) {
 	e := newEnv(t, false)
 	if _, err := e.pool.Exec(context.Background(),
 		`INSERT INTO api_keys (id, name, key_hash) VALUES ('key_app', 'bootstrap', $1)`, apikey.Hash("sk-map-api01-app")); err != nil {
 		t.Fatal(err)
 	}
-	e.ok(e.admin("GET", "/admin/v1/providers", nil), "x-api-key bootstrap")
-	e.ok(e.do("GET", "/admin/v1/providers", nil, map[string]string{"Authorization": "Bearer " + bootstrap}), "bearer bootstrap")
+	e.ok(e.admin("GET", "/admin/v1/providers", nil), "browser cookie")
+	e.refused(e.do("GET", "/admin/v1/providers", nil, map[string]string{"Authorization": "Bearer " + bootstrap}), http.StatusUnauthorized, "authentication_error", "cookie")
 	for name, headers := range map[string]map[string]string{
 		"none":                          nil,
 		"wrong key":                     {"x-api-key": "sk-map-api01-wrong"},
@@ -239,65 +227,7 @@ func TestAuthByKey(t *testing.T) {
 	}
 }
 
-// An operator token reads with developer and writes with admin. A user has no
-// read-only role to fall back on, so it is refused everywhere; the refusal is
-// the same on a path that exists and one that does not, which is what keeps a
-// caller who can call nothing from learning which paths exist.
-func TestAuthByRole(t *testing.T) {
-	e := newEnv(t, true)
-	body := map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth}
-	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
-	for _, role := range []string{"devs", "admins"} {
-		e.ok(e.do("GET", "/admin/v1/providers", nil, bearer(e.token(role))), role+" reads")
-	}
-	e.refused(e.do("POST", "/admin/v1/providers", body, bearer(e.token("devs"))), http.StatusForbidden, "permission_error", "admin")
-	e.ok(e.do("POST", "/admin/v1/providers", body, bearer(e.token("admins"))), "admin writes")
-	for _, role := range []string{"readers", "strangers"} {
-		known := e.do("GET", "/admin/v1/providers", nil, bearer(e.token(role)))
-		unknown := e.do("GET", "/admin/v1/nothing", nil, bearer(e.token(role)))
-		e.refused(known, http.StatusForbidden, "permission_error", "yours is user")
-		if unknown.status != known.status || unknown.raw != known.raw {
-			t.Errorf("%s: an unknown path answered %d %s but a known one %d %s; both must read as the same refusal",
-				role, unknown.status, unknown.raw, known.status, known.raw)
-		}
-		e.refused(e.do("POST", "/admin/v1/providers", body, bearer(e.token(role))), http.StatusForbidden, "permission_error", "developer")
-		e.refused(e.do("PUT", "/admin/v1/providers", nil, bearer(e.token(role))), http.StatusForbidden, "permission_error", "developer")
-	}
-	if r := e.do("GET", "/admin/v1/providers", nil, bearer("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln")); r.status != http.StatusUnauthorized {
-		t.Errorf("forged token: %d %s", r.status, r.raw)
-	}
-}
-
-func TestOperatorTokenPersistsSanitizedProfileClaims(t *testing.T) {
-	e := newEnv(t, true)
-	claims := e.idp.Claims(audience, e.clock.Now())
-	claims["roles"] = []any{"devs"}
-	claims["email"] = "á" + string(rune(0)) + "da@example.test"
-	claims["name"] = string(rune(0)) + "Zoë 世"
-	res := e.do("GET", "/admin/v1/profiles", nil,
-		map[string]string{"Authorization": "Bearer " + e.idp.Mint(t, claims)})
-	if res.status != http.StatusOK {
-		t.Fatalf("valid operator with NUL descriptive claims got %d, want 200", res.status)
-	}
-	var email, name, subject string
-	if err := e.pool.QueryRow(context.Background(), `SELECT email, display_name, subject FROM principals`).Scan(&email, &name, &subject); err != nil {
-		t.Fatal(err)
-	}
-	if email != "áda@example.test" || name != "Zoë 世" || subject != "user-1" {
-		t.Error("gateway did not persist sanitized profiles with the original identity key")
-	}
-	if role, source, status := e.storedRole(); role != "developer" || source != "idp" || status != "active" {
-		t.Error("sanitizing the operator profile changed authority")
-	}
-	claims["sub"] = "user" + string(rune(0)) + "-1"
-	res = e.do("GET", "/admin/v1/profiles", nil,
-		map[string]string{"Authorization": "Bearer " + e.idp.Mint(t, claims)})
-	if res.status != http.StatusUnauthorized || res.errType() != "authentication_error" {
-		t.Fatalf("NUL identity key got %d/%s, want authentication failure", res.status, res.errType())
-	}
-}
-
-// storedRole reads the one principal row an operator token's tests make.
+// storedRole reads the test principal's current database role.
 func (e *env) storedRole() (role, source, status string) {
 	e.t.Helper()
 	var n int
@@ -318,96 +248,6 @@ func (e *env) setPrincipal(set string) {
 	tag, err := e.pool.Exec(context.Background(), `UPDATE principals SET `+set)
 	if err != nil || tag.RowsAffected() != 1 {
 		e.t.Fatalf("UPDATE principals SET %s: %d rows, error %v; want exactly 1 row", set, tag.RowsAffected(), err)
-	}
-}
-
-// The operator token is an identity lane that follows the control plane's:
-// the role that authorizes a request is the one stored on the person's row,
-// not the one the token carries. A token that maps to nothing signs in as a
-// user, and the console may raise that to developer. A mapping that matches
-// takes the role back.
-func TestOperatorTokenUsesTheStoredRole(t *testing.T) {
-	e := newEnv(t, true)
-	unmapped := map[string]string{"Authorization": "Bearer " + e.token("strangers")}
-	body := map[string]any{"name": "p", "profile": "deepseek", "endpoints": deepseekBoth}
-
-	// The first request creates the row, as a user, who reads nothing.
-	e.refused(e.do("GET", "/admin/v1/profiles", nil, unmapped), http.StatusForbidden, "permission_error", "developer")
-	e.setPrincipal(`role = 'developer', role_source = 'console'`)
-
-	e.ok(e.do("GET", "/admin/v1/profiles", nil, unmapped), "a console developer reads")
-	e.refused(e.do("POST", "/admin/v1/providers", body, unmapped), http.StatusForbidden, "permission_error", "admin")
-	if role, source, _ := e.storedRole(); role != "developer" || source != "console" {
-		t.Errorf("stored (role, role_source) = (%q, %q), want (developer, console)", role, source)
-	}
-
-	// The console may raise the role to admin as well.
-	e.setPrincipal(`role = 'admin'`)
-	e.ok(e.do("POST", "/admin/v1/providers", body, unmapped), "a console admin writes")
-
-	// A mapping that matches the person is the IdP's word, whatever the
-	// console set.
-	e.setPrincipal(`role = 'admin', role_source = 'console'`)
-	mapped := map[string]string{"Authorization": "Bearer " + e.token("devs")}
-	e.refused(e.do("POST", "/admin/v1/providers", body, mapped), http.StatusForbidden, "permission_error", "admin")
-	if role, source, _ := e.storedRole(); role != "developer" || source != "idp" {
-		t.Errorf("stored (role, role_source) = (%q, %q), want (developer, idp)", role, source)
-	}
-}
-
-// A person an admin removed is refused on every path, though a mapping still
-// matches them, and their row is not re-created. The refusal is a 403, as the
-// control plane's is: the token is genuine.
-func TestOperatorTokenForARemovedMemberIsRefused(t *testing.T) {
-	e := newEnv(t, true)
-	admins := map[string]string{"Authorization": "Bearer " + e.token("admins")}
-	e.ok(e.do("GET", "/admin/v1/profiles", nil, admins), "an admin reads before removal")
-	e.setPrincipal(`status = 'deactivated'`)
-
-	const removed = "this account has been removed from the organization"
-	for name, r := range map[string]reply{
-		"a read":          e.do("GET", "/admin/v1/profiles", nil, admins),
-		"a write":         e.do("POST", "/admin/v1/providers", map[string]any{"name": "p"}, admins),
-		"an unknown path": e.do("GET", "/admin/v1/nothing", nil, admins),
-	} {
-		if r.status != http.StatusForbidden || r.errType() != "permission_error" || r.errMessage() != removed {
-			t.Errorf("%s: got %d %s %q, want 403 permission_error %q", name, r.status, r.errType(), r.errMessage(), removed)
-		}
-	}
-	if role, source, status := e.storedRole(); role != "admin" || source != "idp" || status != "deactivated" {
-		t.Errorf("stored (role, role_source, status) = (%q, %q, %q), want (admin, idp, deactivated)", role, source, status)
-	}
-	// The bootstrap key is no one's account.
-	e.ok(e.admin("GET", "/admin/v1/profiles", nil), "the bootstrap key still reads")
-}
-
-// A token the mapping matches leaves its role on the person's row, as the
-// control plane's lane does.
-func TestOperatorTokenMappedRoleIsStored(t *testing.T) {
-	e := newEnv(t, true)
-	e.ok(e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")}), "an admin reads")
-	if role, source, status := e.storedRole(); role != "admin" || source != "idp" || status != "active" {
-		t.Errorf("stored (role, role_source, status) = (%q, %q, %q), want (admin, idp, active)", role, source, status)
-	}
-}
-
-// failingQuerier is a principals table that cannot be read.
-type failingQuerier struct{}
-
-func (failingQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return failingRow{} }
-
-type failingRow struct{}
-
-func (failingRow) Scan(...any) error { return errors.New("connection refused") }
-
-// A role that cannot be read is no role: the token's own claim does not stand
-// in for it, and the caller is told nothing of why.
-func TestOperatorTokenWhenTheStoredRoleCannotBeRead(t *testing.T) {
-	e := newEnvWith(t, true, failingQuerier{})
-	r := e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")})
-	e.refused(r, http.StatusInternalServerError, "api_error", "internal error")
-	if strings.Contains(r.raw, "refused") {
-		t.Errorf("the failure reached the caller: %s", r.raw)
 	}
 }
 
@@ -722,49 +562,6 @@ func TestAliases(t *testing.T) {
 	e.refused(e.admin("GET", "/admin/v1/aliases/Qwen/Qwen3-Coder", nil), http.StatusNotFound, "not_found_error", "Qwen/Qwen3-Coder")
 }
 
-func TestKeyPolicies(t *testing.T) {
-	e := newEnv(t, false)
-	if _, err := e.pool.Exec(context.Background(), `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_app', 'app', 'h')`); err != nil {
-		t.Fatal(err)
-	}
-	pid := e.provider("deepseek", deepseekBoth)
-	e.ok(e.admin("POST", "/admin/v1/aliases", map[string]any{"name": "fast", "targets": []map[string]any{{"deployment_id": e.deployment(pid, "chat")}}}), "alias")
-	put := func(body map[string]any) reply { return e.admin("POST", "/admin/v1/key_policies/key_app", body) }
-	kp := e.ok(put(map[string]any{"aliases": []string{"fast"}, "rpm": 60, "tpm": 100000}), "put")
-	if kp["type"] != "key_policy" || kp["api_key_id"] != "key_app" || kp["rpm"] != 60.0 || len(kp["aliases"].([]any)) != 1 {
-		t.Fatalf("put = %v", kp)
-	}
-	// A grant is written whole, so a body that leaves a field out would
-	// widen it silently: every field is named, null being every alias or no
-	// limit.
-	e.refused(put(map[string]any{"rpm": 120}), http.StatusBadRequest, "invalid_request_error", "aliases")
-	e.refused(put(map[string]any{"aliases": []string{"fast"}, "rpm": 120}), http.StatusBadRequest, "invalid_request_error", "tpm")
-	if got := e.ok(e.admin("GET", "/admin/v1/key_policies/key_app", nil), "get"); got["tpm"] != 100000.0 {
-		t.Fatalf("a refused write changed the grant: %v", got)
-	}
-	all := e.ok(put(map[string]any{"aliases": nil, "rpm": nil, "tpm": nil}), "replace")
-	if all["aliases"] != nil || all["rpm"] != nil || all["tpm"] != nil {
-		t.Fatalf("replaced = %v", all)
-	}
-	whole := func(aliases any, rpm, tpm any) map[string]any {
-		return map[string]any{"aliases": aliases, "rpm": rpm, "tpm": tpm}
-	}
-	e.refused(e.admin("POST", "/admin/v1/key_policies/key_missing", whole(nil, nil, nil)), http.StatusNotFound, "not_found_error", "key_missing")
-	e.refused(put(whole([]string{}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "DELETE")
-	e.refused(put(whole([]string{"typo"}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "typo")
-	e.refused(put(whole([]string{"fast", "fast"}, nil, nil)), http.StatusBadRequest, "invalid_request_error", "twice")
-	e.refused(put(whole(nil, 0, nil)), http.StatusBadRequest, "invalid_request_error", "rpm")
-	e.refused(put(whole(nil, nil, -5)), http.StatusBadRequest, "invalid_request_error", "tpm")
-	if n := len(e.admin("GET", "/admin/v1/key_policies", nil).list()); n != 1 {
-		t.Errorf("list has %d policies", n)
-	}
-	e.ok(put(whole([]string{"fast"}, nil, nil)), "grant fast")
-	e.refused(e.admin("DELETE", "/admin/v1/aliases/fast", nil), http.StatusConflict, "invalid_request_error", "key_app")
-	e.ok(e.admin("DELETE", "/admin/v1/key_policies/key_app", nil), "delete")
-	e.refused(e.admin("GET", "/admin/v1/key_policies/key_app", nil), http.StatusNotFound, "not_found_error", "key_app")
-	e.ok(e.admin("DELETE", "/admin/v1/aliases/fast", nil), "an alias no grant names")
-}
-
 // Paths and methods the API does not serve answer in its error envelope.
 func TestUnknownPathsAndMethods(t *testing.T) {
 	e := newEnv(t, false)
@@ -781,63 +578,16 @@ func TestNewRefusesAnIncompleteConfig(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	cipher, _ := local.New(local.Config{KeyID: "k", Key: bytes.Repeat([]byte{1}, 32)})
 	for name, cfg := range map[string]admin.Config{
-		"no store":         {Cipher: cipher, BootstrapKey: bootstrap, Prober: &stubProber{}},
-		"no cipher":        {Store: store.New(pool), BootstrapKey: bootstrap, Prober: &stubProber{}},
-		"no bootstrap key": {Store: store.New(pool), Cipher: cipher, Prober: &stubProber{}},
-		"no prober":        {Store: store.New(pool), Cipher: cipher, BootstrapKey: bootstrap},
-		// An operator lane with no stored roles to read could only fall back
-		// on the token's own claim.
-		"a verifier without principals": {Store: store.New(pool), Cipher: cipher, BootstrapKey: bootstrap, Prober: &stubProber{},
-			Verifier: &identity.Verifier{}},
+		"no store":  {Cipher: cipher, Prober: &stubProber{}},
+		"no cipher": {Store: store.New(pool), Prober: &stubProber{}},
+		"no login":  {Store: store.New(pool), Cipher: cipher, Prober: &stubProber{}},
+		"no prober": {Store: store.New(pool), Cipher: cipher},
 	} {
+		if name != "no login" {
+			cfg.Login = login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: cookieOrigin})
+		}
 		if _, err := admin.New(cfg); err == nil {
 			t.Errorf("%s: New accepted it", name)
 		}
-	}
-}
-
-// Behind an identity-aware proxy the assertion header is the operator's
-// credential, a Bearer never is, and a repeated assertion is none.
-func TestAuthBehindAProxy(t *testing.T) {
-	pool := pgtest.NewPool(t)
-	cipher, _ := local.New(local.Config{KeyID: "k", Key: bytes.Repeat([]byte{3}, 32)})
-	idp := identitytest.NewIdP(t)
-	clock := identitytest.NewClock(time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
-	const header = "X-Goog-Iap-Jwt-Assertion"
-	v, err := identity.New(context.Background(), identity.Config{
-		Mode: identity.ModeTrustedProxy, AssertionHeader: header, Issuer: idp.Issuer(), Audience: audience,
-		JWKSURL: idp.JWKSURL(), RoleMap: map[string]identity.Role{"admins": identity.RoleAdmin},
-		HTTPClient: idp.Client(), Now: clock.Now,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, err := admin.New(admin.Config{Store: store.New(pool), Cipher: cipher, Verifier: v, Principals: pool, BootstrapKey: bootstrap, Prober: &stubProber{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	claims := idp.Claims(audience, clock.Now())
-	claims["roles"] = []any{"admins"}
-	tok := idp.Mint(t, claims)
-	get := func(set func(http.Header)) int {
-		req, _ := http.NewRequest("GET", srv.URL+"/admin/v1/providers", nil)
-		set(req.Header)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		return resp.StatusCode
-	}
-	if got := get(func(h http.Header) { h.Set(header, tok) }); got != http.StatusOK {
-		t.Errorf("assertion header: %d, want 200", got)
-	}
-	if got := get(func(h http.Header) { h.Set("Authorization", "Bearer "+tok) }); got != http.StatusUnauthorized {
-		t.Errorf("the same token as a Bearer: %d, want 401", got)
-	}
-	if got := get(func(h http.Header) { h.Add(header, tok); h.Add(header, tok) }); got != http.StatusUnauthorized {
-		t.Errorf("a repeated assertion: %d, want 401", got)
 	}
 }

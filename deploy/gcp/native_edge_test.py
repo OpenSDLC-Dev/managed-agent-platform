@@ -52,7 +52,8 @@ class NativeDeployPreflight(unittest.TestCase):
         self.assertNotEqual(run(preflight, {}).returncode, 0)
         valid = {"STAGING_PUBLIC_ORIGIN": "https://console.example.com",
                  "OIDC_CLIENT_ID": "test.apps.googleusercontent.com",
-                 "OIDC_CLIENT_SECRET_NAME": "test-oidc-secret"}
+                 "OIDC_CLIENT_SECRET_NAME": "test-oidc-secret",
+                 "CD_API_KEY_SECRET_NAME": "issued-cd-secret"}
         result = run(preflight, valid)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for name in valid:
@@ -61,20 +62,21 @@ class NativeDeployPreflight(unittest.TestCase):
         self.assertNotEqual(run(preflight, {**valid, "STAGING_PUBLIC_ORIGIN":
                                            "http://console.example.com"}).returncode, 0)
 
-    def test_public_smoke_sends_its_credential_only_over_https(self):
+    def test_public_smoke_reads_only_the_issued_cd_secret_and_passes_a_file(self):
         _, _, script = workflow_step("Smoke — the public API answers")
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
-            (scratch / "controlplane-api-key").write_text("fixture-only-key")
             for name, body in {
-                "kubectl": "printf '192.0.2.1\\n'",
-                "sleep": ":",
-                "curl": '''printf '%s\\n' "$*" >> "$SMOKE_CALLS"
-case "$*" in
-  *https://console.example.com/v1/agents?limit=1*) ;;
-  *) exit 1 ;;
-esac
-case " $* " in *' -K '*) printf 200 ;; *) printf 401 ;; esac''',
+                "kubectl": "exit 99",
+                "gcloud": '''test "$1 $2 $3 $4" = 'secrets versions access latest' || exit 91
+test "$5" = '--secret=issued-cd-secret' || exit 92
+test "$6" = '--project=fixture-project' || exit 93
+case "$7" in --out-file=*) printf 'fixture-only-key' > "${7#--out-file=}" ;; *) exit 94 ;; esac
+printf 'secret fetched\\n' >> "$SMOKE_CALLS"''',
+                "python3": '''test "$1" = 'deploy/gcp/cd_smoke.py' || exit 95
+test "$2 $3 $4 $5 $6" = '--origin https://console.example.com --modelgateway true --key-file' || exit 96
+test "$(cat "$7")" = 'fixture-only-key' || exit 97
+printf '%s\\n' "$*" >> "$SMOKE_CALLS"''',
             }.items():
                 executable = scratch / name
                 executable.write_text("#!/bin/sh\n" + body + "\n")
@@ -82,7 +84,8 @@ case " $* " in *' -K '*) printf 200 ;; *) printf 401 ;; esac''',
             env = {"PATH": directory + os.pathsep + os.environ["PATH"],
                    "SECRET_DIR": directory, "SMOKE_CALLS": str(scratch / "calls"),
                    "STAGING_PUBLIC_ORIGIN": "https://console.example.com",
-                   "K8S_NAMESPACE": "fixture", "HELM_RELEASE": "fixture", "GITHUB_SHA": "fixture"}
+                   "CD_API_KEY_SECRET_NAME": "issued-cd-secret", "GCP_PROJECT_ID": "fixture-project",
+                   "MODELGATEWAY": "true", "K8S_NAMESPACE": "fixture", "HELM_RELEASE": "fixture"}
             result = subprocess.run(["bash", "-e", "-c", script], env=env,
                                     cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

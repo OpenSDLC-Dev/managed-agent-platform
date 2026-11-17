@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -274,11 +273,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 
 	// This new private surface is cookie-only. Its target re-enters dispatchAuth
 	// so worker/gate lanes are never bypassed by forwarding to the shared mux.
-	proxy := s.serveConsoleProxy(dispatchAuth(pool, s.verifier, mux))
+	proxy := s.serveConsoleProxy(dispatchAuth(pool, mux))
 	mux.HandleFunc(consoleProxyPath, roleGate(identity.RoleDeveloper, proxy))
 	mux.HandleFunc(consoleProxyRootPath, roleGate(identity.RoleDeveloper, proxy))
 
-	// Plan 69's new administration surfaces never inherit legacy key/IdP lanes.
+	// Administration surfaces require native browser sessions.
 	// Dispatch enforces cookie-only admission; each handler checks provenance too.
 	mux.HandleFunc("GET "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.listMembers)))
 	mux.HandleFunc("POST "+consoleMembersPath, noStore(s.handle(identity.RoleAdmin, s.createMember)))
@@ -419,20 +418,14 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 // dispatchAuth authenticates before ServeMux redirects or routes a request.
 // Worker-facing resource reads admit environment credentials or management
 // keys; work and gate routes retain their own credentials. Public management
-// accepts owned keys in either header and legacy keys in x-api-key only.
+// accepts owned keys in either header.
 // The router is needed to select the recorded environment-key refusal (#840).
-func dispatchAuth(pool *pgxpool.Pool, v *identity.Verifier, next *http.ServeMux) http.Handler {
-	return dispatchAuthWithLogin(pool, v, nil, next)
-}
-
-// dispatchAuthWithLogin applies native origin policy on the selected human lane,
-// while sharing legacy credential precedence with dispatchAuth's callers.
-func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
+func dispatchAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 	work := requireEnvironmentKey(pool, next)
 	workToken := requireWorkToken(pool, next)
-	mgmt := dispatchManagementAuth(pool, v, manager, next)
+	mgmt := dispatchManagementAuth(pool, next)
 	gate := requireGateToken(pool, next)
-	sessionEvents := dispatchSessionEventsAuth(pool, v, manager, next)
+	sessionEvents := dispatchSessionEventsAuth(pool, next)
 	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
 	fileReads := dualAuth(requireSelfHostedEnvironmentKey(pool, next), mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -440,7 +433,6 @@ func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *lo
 		// forge a worker segment. Encoded literals can instead miss this narrow
 		// machine classification and land on management auth. RoleNone then
 		// refuses an owned key (or an off-/v1 human) before a work/gate handler.
-		// Legacy unowned keys still rely on the handler's own scope checks.
 		p := r.URL.EscapedPath()
 		switch {
 		case isWorkTokenBearer(r) && isWorkTokenPath(r, p):
@@ -477,16 +469,9 @@ func dispatchAuthWithLogin(pool *pgxpool.Pool, v *identity.Verifier, manager *lo
 // dispatchManagementAuth preserves verified cookie context from the private
 // resource proxy. Otherwise x-api-key wins, including invalid/repeated fields.
 // On public /v1, an issued-prefix Bearer selects the key lane without fallback.
-// Off public /v1, a known unowned Bearer can accompany a human assertion; it
-// supplies no authority. Owned or unknown issued tokens cannot take that path.
-// Human credentials still precede private environment-key refusals. On public
-// /v1 an assertion is ignored, preserving the environment Bearer's own answer.
-func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
+// IdP credentials are used only at sign-in, never on this resource lane.
+func dispatchManagementAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
-	var human http.Handler
-	if v != nil {
-		human = requireIdentity(pool, v, manager, next)
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the private proxy can bring verified cookie context back into
 		// this dispatcher. Its credentials were stripped before rewriting; this
@@ -500,34 +485,6 @@ func dispatchManagementAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *l
 		if apiKeyOffered(r) || issuedAPIKeyBearer(r) && (requestedPublic || routedPublic) {
 			mgmt.ServeHTTP(w, r)
 			return
-		}
-		if human != nil && !requestedPublic && !routedPublic {
-			if _, ok := v.Credential(r); ok {
-				if issuedAPIKeyBearer(r) {
-					if len(r.Header.Values("Authorization")) > 1 {
-						mgmt.ServeHTTP(w, r)
-						return
-					}
-					// Classify the immutable stored shape, not active authority.
-					// A legacy companion is ignored even after expiry/archive;
-					// an owned one must never fall through after losing authority.
-					token, _ := bearerToken(r)
-					var legacy bool
-					err := pool.QueryRow(r.Context(), `SELECT EXISTS (
-						SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
-						apikey.Hash(token)).Scan(&legacy)
-					if err != nil {
-						writeError(w, r, err)
-						return
-					}
-					if !legacy {
-						mgmt.ServeHTTP(w, r)
-						return
-					}
-				}
-				human.ServeHTTP(w, r)
-				return
-			}
 		}
 		if answerEnvironmentKey(w, r, pool, next) {
 			return
@@ -554,10 +511,10 @@ func dualAuth(env, mgmt http.Handler) http.Handler {
 
 // dispatchSessionEventsAuth serves worker-facing session reads/events without
 // widening mutating session CRUD to an environment key. The selected issued
-// Bearer must resolve to an owned key; legacy issued keys remain x-api-key-only.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next *http.ServeMux) http.Handler {
+// Bearer must resolve to an owned key.
+func dispatchSessionEventsAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 	return dualAuth(requireEnvironmentKeyForSession(pool, next),
-		dispatchManagementAuth(pool, v, manager, next))
+		dispatchManagementAuth(pool, next))
 }
 
 // apiKeyOffered reports whether the request carries a usable management key —
@@ -797,7 +754,7 @@ func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
 // path, at the single place every route is declared — for the reason
 // requireEnvironmentKeyForSession already established: authorization is checked
 // where the route is defined, not somewhere a reader has to go find. It applies
-// to owned keys and humans, not legacy unowned keys or scoped machine lanes.
+// to owned keys and humans; scoped machine lanes keep their own checks.
 // RoleNone is a live denial: encoded literals can miss a machine dispatch
 // predicate while matching its ServeMux registration. The completeness test
 // requires real roles on resource routes and RoleNone on work/gate routes.

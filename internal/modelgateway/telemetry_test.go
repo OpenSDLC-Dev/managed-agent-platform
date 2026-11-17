@@ -97,7 +97,7 @@ func TestARequestIsTracedAcrossItsAttempts(t *testing.T) {
 	cred := e.credential(pu, "sk-upstream-2", 1)
 	first, second := e.deployment(pd, "model-a"), e.deployment(pu, "model-b")
 	e.alias("*", target(first, 0), target(second, 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"claude-x","max_tokens":8,"messages":[]}`,
 		map[string]string{"x-api-key": key, "traceparent": traceparent})
@@ -188,7 +188,7 @@ func TestTraceContextGoesUpstreamOnlyWhereAProviderOptsIn(t *testing.T) {
 	e.alias("plain", target(e.deployment(pp, "m"), 0))
 	dt := e.deployment(pt, "m")
 	e.alias("traced", target(dt, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, alias := range []string{"plain", "traced"} {
 		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
@@ -231,7 +231,7 @@ func TestWithNoTracerTheCallersContextPassesAsItCame(t *testing.T) {
 	e.credential(pt, "sk-upstream-2", 1)
 	e.alias("plain", target(e.deployment(pp, "m"), 0))
 	e.alias("traced", target(e.deployment(pt, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, alias := range []string{"plain", "traced"} {
 		if resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"messages":[]}`,
@@ -255,7 +255,7 @@ func TestEveryAnswerReachesItsSpan(t *testing.T) {
 	e := newEnv(t)
 	idle := e.provider("http://127.0.0.1:1") // no credential, so nothing to attempt
 	e.alias("idle", target(e.deployment(idle, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	e.do("POST", "/v1/messages", `{"model":"idle","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": "sk-wrong"})
 	e.do("POST", "/v1/messages", `{"model":"idle","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
@@ -317,7 +317,7 @@ func TestAnAttemptsSpanHoldsWhatItsUpstreamAnswered(t *testing.T) {
 	e.credential(portless, "sk-upstream-3", 1)
 	dp := e.deployment(portless, "portless")
 	e.alias("portless", target(dp, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) {
 		c.Client = upstream.NewClient()
 		c.Client.Transport = refusePortless{c.Client.Transport}
@@ -499,7 +499,7 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	e.alias("fast", target(d, 0))
 	e.alias("*", target(d, 0))
 	e.alias("broken", target(e.deployment(pd, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if _, err := e.s.UpdateDeployment(e.ctx, d.ID, func(d *store.Deployment) error {
 		d.Prices = store.Prices{Input: priced(6), Output: priced(30), CacheWrite: priced(7.5), CacheRead: priced(0.6)}
@@ -617,7 +617,7 @@ func TestAConvertedAttemptNamesItsProtocol(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, chatAnswer("ok", deepseekStyle))
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})

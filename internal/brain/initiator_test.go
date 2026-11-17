@@ -13,7 +13,7 @@ import (
 )
 
 func TestRefusedInitiatorDoesNoModelTurnWork(t *testing.T) {
-	for _, mode := range []string{"direct provider", "MCP discovery", "grading", "missing initiator"} {
+	for _, mode := range []string{"direct provider", "MCP discovery", "grading", "missing initiator", "legacy initiator"} {
 		t.Run(mode, func(t *testing.T) {
 			h := newHarness(t, [][]provider.Chunk{{done("end_turn", 1)}, {done("end_turn", 1)}}, nil)
 			ctx := t.Context()
@@ -23,6 +23,11 @@ func TestRefusedInitiatorDoesNoModelTurnWork(t *testing.T) {
 			}
 			if mode == "missing initiator" {
 				if _, err := h.pool.Exec(ctx, `UPDATE sessions SET created_by=NULL`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "legacy initiator" {
+				if _, err := h.pool.Exec(ctx, "UPDATE sessions SET created_by='old-key',initiator_principal_id=NULL,initiator_api_key_id='old-key'"); err != nil {
 					t.Fatal(err)
 				}
 			}

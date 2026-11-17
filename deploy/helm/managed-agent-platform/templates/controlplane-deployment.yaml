@@ -16,7 +16,7 @@ spec:
         # Roll the pods when the chart-managed Secret (API key, DSN, providers)
         # changes on upgrade. Inert when existingSecret is set (no Secret is rendered).
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum | quote }}
-        {{- if and .Values.casdoor.enabled (eq .Values.console.authMode "platform") (eq .Values.identity.mode "oidc") }}
+        {{- if and .Values.casdoor.enabled (eq .Values.identity.mode "oidc") }}
         # RP env must rotate with the bundled client's seed Secret, including existingSecret installs.
         checksum/oidc-client: {{ include (print $.Template.BasePath "/casdoor-init-data-secret.yaml") . | sha256sum | quote }}
         {{- end }}
@@ -39,12 +39,6 @@ spec:
           env:
             - name: CONTROLPLANE_ADDR
               value: ":{{ .Values.controlplane.service.port }}"
-            - name: CONTROLPLANE_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "map.secretName" . }}
-                  key: controlplane-api-key
-            {{- include "map.brainKeyEnv" . | nindent 12 }}
             {{- /* Set, not true: a Go template reads a YAML-numeric 0 as false, so
                    `with` would drop the one value that disables the runner and
                    leave it at its 30s default with no warning. `kindIs "invalid"`

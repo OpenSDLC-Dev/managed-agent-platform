@@ -10,9 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 )
 
 func TestAuthRejectsMissingAndWrongKeys(t *testing.T) {
@@ -44,10 +42,7 @@ func TestAuthRejectsRevokedKey(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 
-	const second = "second-key-to-be-revoked"
-	if err := api.EnsureAPIKey(ctx, s.pool, "second", second); err != nil {
-		t.Fatalf("EnsureAPIKey: %v", err)
-	}
+	second := issueAPIKey(t, s, map[string]any{"name": "second"})["raw_key"].(string)
 	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": second})
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -251,32 +246,5 @@ func TestARefusalAfterAuthenticationIsLoggedOnEveryLane(t *testing.T) {
 		if l := lineFor(rid); l != "" {
 			t.Errorf("%s: an unauthenticated request was logged: %s", name, l)
 		}
-	}
-}
-
-func TestEnsureAPIKeyIsIdempotentAndStoresOnlyHashes(t *testing.T) {
-	ctx := context.Background()
-	pool := pgtest.NewPool(t)
-
-	if err := api.EnsureAPIKey(ctx, pool, "boot", "secret-key-value"); err != nil {
-		t.Fatalf("first EnsureAPIKey: %v", err)
-	}
-	if err := api.EnsureAPIKey(ctx, pool, "boot", "secret-key-value"); err != nil {
-		t.Fatalf("second EnsureAPIKey (idempotent): %v", err)
-	}
-
-	var n int
-	if err := pool.QueryRow(ctx, "SELECT count(*) FROM api_keys").Scan(&n); err != nil {
-		t.Fatalf("count api_keys: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("api_keys rows = %d, want 1", n)
-	}
-	var hash string
-	if err := pool.QueryRow(ctx, "SELECT key_hash FROM api_keys").Scan(&hash); err != nil {
-		t.Fatalf("read key_hash: %v", err)
-	}
-	if hash == "secret-key-value" {
-		t.Fatal("api key stored in plaintext")
 	}
 }

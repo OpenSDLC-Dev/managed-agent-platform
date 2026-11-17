@@ -220,7 +220,7 @@ func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 
 	// Issue: noStore(handle(admin, …)). The response is the OAuth-shaped
 	// {access_token, expires_in}; the key's id comes from the listing.
-	status, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleTokens(envID), admin,
+	status, _, raw := laneRead(t, s.signInRequest(http.MethodPost, consoleTokens(envID), admin,
 		map[string]any{"name": "build-host-1"}))
 	if status != http.StatusOK {
 		t.Fatalf("admin issuing an environment key: status %d (%v)", status, laneMessage(t, raw))
@@ -234,7 +234,7 @@ func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 	}
 
 	// List: handle(admin, …), and the id to revoke.
-	status, _, raw = laneRead(t, s.bearer(http.MethodGet, consoleTokens(envID), admin, nil))
+	status, _, raw = laneRead(t, s.signInRequest(http.MethodGet, consoleTokens(envID), admin, nil))
 	if status != http.StatusOK {
 		t.Fatalf("admin listing environment keys: status %d (%v)", status, laneMessage(t, raw))
 	}
@@ -252,7 +252,7 @@ func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 	}
 
 	// Revoke: handleNoContent(admin, …), whose success is a bodiless 204.
-	res := s.bearer(http.MethodPost, consoleRevoke(envID, keyID), admin, nil)
+	res := s.signInRequest(http.MethodPost, consoleRevoke(envID, keyID), admin, nil)
 	body, err := io.ReadAll(res.Body)
 	res.Body.Close()
 	if err != nil {
@@ -275,10 +275,11 @@ func TestAnAdminCanWorkTheEnvironmentKeySurfaceEndToEnd(t *testing.T) {
 // would look exactly like a working one until someone needed the audit trail.
 func TestAHumanCreatedSessionRecordsThePrincipal(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
-	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
-	envID := selfHostedEnv(t, s.tserver, "human-audit")
 	owner := s.seedLocal("session-writer", "developer", "active")
 	cookie, loginSession := s.issue(owner)
+	s.key, _ = issueOwnedHTTP(t, s, nativeHeaders(cookie, loginSession.CSRFToken), "fixture resources", nil)
+	agent := createAgent(t, s.tserver, map[string]any{"name": "a", "model": "m"})
+	envID := selfHostedEnv(t, s.tserver, "human-audit")
 
 	status, _, raw := laneRead(t, s.doRaw(http.MethodPost, "/api/organizations/default/proxy/v1/sessions",
 		map[string]any{"agent": agent["id"], "environment_id": envID}, map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": loginSession.CSRFToken}))

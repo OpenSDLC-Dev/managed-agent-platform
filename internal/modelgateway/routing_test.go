@@ -61,7 +61,7 @@ func TestAStreamThatOpensWithAnErrorFallsBack(t *testing.T) {
 	e.alias("alone", target(e.deployment(pp, "m"), 0))
 	e.alias("odd", target(e.deployment(pp, "odd"), 0))
 	e.alias("conflict", target(e.deployment(pp, "conflict"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
 
 	stream := e.client(key).Messages.NewStreaming(e.ctx, anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()})
@@ -108,7 +108,7 @@ func TestHeldKeepAlivesAreBounded(t *testing.T) {
 	bp := e.provider(backup.URL)
 	e.credential(bp, "sk-backup-1", 1)
 	e.alias("fast", target(e.deployment(pp, "m"), 0), target(e.deployment(bp, "m"), 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if got := string(b); resp.StatusCode != 200 || !strings.HasPrefix(got, pad) || !strings.Contains(got, "event: error") || !strings.Contains(got, "overloaded_error") || len(backup.recorded()) != 0 {
@@ -144,7 +144,7 @@ func TestARefusedCredentialMovesOn(t *testing.T) {
 		e.credential(q, k, 1)
 		e.alias(k, target(e.deployment(q, "m"), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if msg, err := e.client(key).Messages.New(e.ctx, anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()}); err != nil || msg.Content[0].Text != "ok" {
 		t.Errorf("moved on: %v", err)
@@ -171,7 +171,7 @@ func TestFallbackOutlastsAManyCredentialDeployment(t *testing.T) {
 	bp := e.provider(backup.URL)
 	e.credential(bp, "sk-backup-1", 1)
 	e.alias("fast", target(e.deployment(dp, "m"), 0), target(e.deployment(bp, "m"), 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 2 })
 	msg, err := e.client(key).Messages.New(e.ctx, anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()})
 	if err != nil || msg.Content[0].Text != "from backup" || len(down.recorded()) != 2 {
@@ -195,7 +195,7 @@ func TestAStreamThatEndsEarlySaysSo(t *testing.T) {
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("cut", target(e.deployment(p, "cut"), 0))
 	e.alias("reported", target(e.deployment(p, "reported"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/messages", `{"model":"cut","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if got := string(b); !strings.Contains(got, "event: error") || !strings.Contains(got, "ended before message_stop") {
@@ -224,7 +224,7 @@ func TestACredentialIsOpenedOnce(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	counting := &countingCipher{Cipher: e.cipher}
 	e.start(func(c *modelgateway.Config) { c.Cipher = counting })
 	for range 3 {
@@ -248,7 +248,7 @@ func TestADeletedCredentialsKeyIsDropped(t *testing.T) {
 	q := e.provider(up.URL, func(p *store.Provider) { p.Name = "other" })
 	c := e.credential(q, "sk-other-key-1", 1)
 	e.alias("other", target(e.deployment(q, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	var cat *catalog.Catalog
 	e.start(func(c *modelgateway.Config) { cat = c.Catalog })
 	ctx, cancel := context.WithCancel(e.ctx)
@@ -329,7 +329,7 @@ func TestAKeptAliveConnectionOutlivesTheWriteBound(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
 	var conns atomic.Int32
@@ -372,7 +372,7 @@ func TestAHalfClosedCallerGetsItsAnswer(t *testing.T) {
 	e.credential(p, "sk-upstream-a1", 1)
 	e.credential(p, "sk-upstream-b1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(e.url, "http://"))
 	if err != nil {
@@ -412,7 +412,7 @@ func TestTheUpstreamsShouldRetryDecides(t *testing.T) {
 	for _, m := range []string{"never", "always", "timeout", "conflict"} {
 		e.alias(m, target(e.deployment(p, m), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for alias, want := range map[string]int{"never": 1, "always": 2, "timeout": 2, "conflict": 2} {
 		before := len(up.recorded())
@@ -455,7 +455,7 @@ func TestTheRelayEndsAtTheTerminalEvent(t *testing.T) {
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("whole", target(e.deployment(p, "whole"), 0))
 	e.alias("failed", target(e.deployment(p, "failed"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, alias := range []string{"whole", "failed"} {
 		start := time.Now()
@@ -485,7 +485,7 @@ func TestAnOpeningStreamErrorKeepsItsRetryHeaders(t *testing.T) {
 	e.credential(p, "sk-upstream-b1", 1)
 	e.alias("stop", target(e.deployment(p, "stop"), 0))
 	e.alias("nudge", target(e.deployment(p, "nudge"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"stop","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if resp.StatusCode != 529 || len(up.recorded()) != 1 || resp.Header.Get("X-Should-Retry") != "false" || resp.Header.Get("Retry-After") != "7" {
@@ -517,7 +517,7 @@ func TestARelayedErrorCarriesTheGatewaysRequestID(t *testing.T) {
 	for _, m := range []string{"body", "opening", "midway"} {
 		e.alias(m, target(e.deployment(p, m), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, alias := range []string{"body", "opening", "midway"} {
 		resp, b := e.do("POST", "/v1/messages", `{"model":"`+alias+`","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
@@ -557,7 +557,7 @@ func TestACutOffEventIsCompleted(t *testing.T) {
 	e.alias("delta", target(e.deployment(p, "delta"), 0))
 	e.alias("stop", target(e.deployment(p, "stop"), 0))
 	e.alias("torn", target(e.deployment(p, "torn"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/messages", `{"model":"torn","max_tokens":8,"stream":true}`, map[string]string{"x-api-key": key})
 	if got := string(b); strings.Contains(got, `"type":"content_bl`+"\n") || !strings.Contains(got, "\n\nevent: error\ndata: {") {

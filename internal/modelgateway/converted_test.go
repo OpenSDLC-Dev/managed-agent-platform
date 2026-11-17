@@ -63,7 +63,7 @@ func TestAMessagesRequestIsConverted(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, chatAnswer("Jupiter", style))
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL+"/base"), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		cl := e.client(key)
 
@@ -125,7 +125,7 @@ func TestTheCallersProtocolIsPreferred(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, either("hi"))
 		e.alias("fast", target(e.deployment(onBoth(e, "deepseek", f.URL, c.protos...), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		if _, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()}); err != nil {
 			t.Fatal(err)
@@ -146,7 +146,7 @@ func TestACountIsNeverConverted(t *testing.T) {
 	e.alias("mixed",
 		target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0),
 		target(e.deployment(onBoth(e, "minimax", f.URL), "MiniMax-M3"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 	resp, b := e.do("POST", "/v1/messages/count_tokens", `{"model":"converts","messages":[{"role":"user","content":"hi"}]}`, hdr)
@@ -172,7 +172,7 @@ func TestARequestTheConversionCannotCarry(t *testing.T) {
 	e.alias("converts", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
 	e.alias("falls", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0),
 		target(e.deployment(onBoth(e, "minimax", f.URL), "MiniMax-M3"), 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 	doc := `"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"x"}}]}]`
@@ -196,7 +196,7 @@ func TestAConvertedRequestAVendorWouldIgnore(t *testing.T) {
 	f := newFake(t, either("hi"))
 	e.alias("ds", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
 	e.alias("m2", target(e.deployment(onOpenAI(e, "minimax", f.URL), "MiniMax-M2.7"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 	for _, c := range []struct{ model, fields, want string }{
@@ -249,7 +249,7 @@ func TestConvertedReasoningReturnsToItsProducer(t *testing.T) {
 	other := e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-v4-pro")
 	e.alias("fast", target(ds, 0))
 	e.alias("other", target(other, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time", InputSchema: anthropic.ToolInputSchemaParam{Properties: map[string]any{"tz": map[string]any{"type": "string"}}}}}}
@@ -320,7 +320,7 @@ func TestConvertedErrors(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, c.answer)
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start(func(cfg *modelgateway.Config) { cfg.MaxAttempts = 1 })
 		resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -372,7 +372,7 @@ func TestAConvertedStreamsEnds(t *testing.T) {
 			}
 		})
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -409,7 +409,7 @@ func TestAConvertedAnswerThatCannotBeCarried(t *testing.T) {
 	p := onOpenAI(e, "deepseek", f.URL)
 	e.credential(p, "sk-deepseek-key2", 1) // where a retry would go
 	e.alias("fast", target(e.deployment(p, "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -441,7 +441,7 @@ func TestAConvertedErrorTakesItsStatussType(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, status(code, a.body))
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start(func(cfg *modelgateway.Config) { cfg.MaxAttempts = 1 })
 		resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -466,7 +466,7 @@ func TestConvertedReasoningStaysOnItsProtocol(t *testing.T) {
 			{"role":"user","content":"go"}]`, dep)
 	}
 	send := func(e *env, f *fake, d store.Deployment) []map[string]json.RawMessage {
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"messages":`+history(d.ID)+`}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -504,7 +504,7 @@ func TestConvertedReasoningStaysOnItsProtocol(t *testing.T) {
 	f = newFake(t, status(400, `{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid signature in thinking block"}}`))
 	d = e.deployment(onBoth(e, "deepseek", f.URL, profile.Anthropic), "deepseek-flash")
 	e.alias("m", target(d, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	only := fmt.Sprintf(`[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"from chat","signature":"mapgw1.%s."},{"type":"text","text":"one"}]},{"role":"user","content":"go"}]`, d.ID)
 	resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"messages":`+only+`}`,
@@ -537,7 +537,7 @@ func TestAConvertedStreamErrorsType(t *testing.T) {
 			_, _ = io.WriteString(w, "data: "+`{"choices":[{"index":0,"delta":{"content":"par"}}]}`+"\n\n"+"data: "+chunk+"\n\n")
 		})
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -563,7 +563,7 @@ func TestAConvertedStreamPingsOnlyWhenIdle(t *testing.T) {
 		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\ndata: [DONE]\n\n")
 	})
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -587,7 +587,7 @@ func TestAConvertedRequestsThinkingIsTheVendors(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, chatAnswer("ok", deepseekStyle))
 		e.alias("m", target(e.deployment(onOpenAI(e, c.prof, f.URL), "model-x"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":2048,"thinking":`+c.asked+`,"messages":[{"role":"user","content":"hi"}]}`,
 			map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -619,7 +619,7 @@ func TestAConvertedStreamStallsThroughItsPings(t *testing.T) {
 	})
 	e.credential(p, "sk-deepseek-key1", 1)
 	e.alias("fast", target(e.deployment(p, "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	start := time.Now()
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
@@ -655,7 +655,7 @@ func TestAnUnconvertibleStreamIsStillCounted(t *testing.T) {
 		}
 	})
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -693,7 +693,7 @@ func TestAStalledDrainKeepsTheCallersError(t *testing.T) {
 	})
 	e.credential(p, "sk-deepseek-key1", 1)
 	e.alias("fast", target(e.deployment(p, "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -727,7 +727,7 @@ func TestADrainEndsAtTheUpstreamsError(t *testing.T) {
 		}
 	})
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	start := time.Now()
 	_, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
@@ -775,7 +775,7 @@ func TestThinkingGoesFirstToItsProtocol(t *testing.T) {
 		}
 		d := e.deployment(p, "deepseek-flash")
 		e.alias("m", target(d, 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		history := fmt.Sprintf(`[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"mapgw1.%s.%s"},{"type":"text","text":"one"}]},{"role":"user","content":"go"}]`, d.ID, c.sig)
 		resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":8,"messages":`+history+`}`,
@@ -794,7 +794,7 @@ func TestAConvertedAnswersCacheWrites(t *testing.T) {
 		writeBody(w, 200, `{"id":"c1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":50}}}`)
 	})
 	e.alias("fast", target(e.deployment(onOpenAI(e, "moonshot", f.URL), "kimi-k3"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	m, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "fast", MaxTokens: 8, Messages: hello()})
 	if err != nil {
@@ -834,7 +834,7 @@ func TestAConvertedLongToolNameComesBackWhole(t *testing.T) {
 		}
 	})
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	params := anthropic.MessageNewParams{Model: "fast", MaxTokens: 64, Messages: hello(),

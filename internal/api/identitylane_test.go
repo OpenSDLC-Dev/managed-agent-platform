@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 )
 
@@ -44,12 +45,13 @@ func laneRoles() map[string]identity.Role {
 // provider whose tokens it accepts.
 type laneServer struct {
 	*tserver
-	idp   *identitytest.IdP
-	clock *identitytest.Clock
+	idp             *identitytest.IdP
+	clock           *identitytest.Clock
+	assertionHeader string
 }
 
-// newLaneServer starts a control plane in oidc mode. The management key still
-// works throughout — that is half of what these tests are for.
+// newLaneServer exposes trusted-proxy sign-in and cookie-only private routes.
+// A separate owned key drives public fixture setup.
 func newLaneServer(t *testing.T) *laneServer {
 	t.Helper()
 	return newLaneServerWith(t, func(*identity.Config) {})
@@ -63,13 +65,14 @@ func newLaneServerWith(t *testing.T, adjust func(*identity.Config)) *laneServer 
 	clock := identitytest.NewClock(time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC))
 
 	cfg := identity.Config{
-		Mode:       identity.ModeOIDC,
-		Issuer:     idp.Issuer(),
-		Audience:   laneAudience,
-		JWKSURL:    idp.JWKSURL(),
-		RoleMap:    laneRoles(),
-		HTTPClient: idp.Client(),
-		Now:        clock.Now,
+		Mode:            identity.ModeTrustedProxy,
+		AssertionHeader: "X-Goog-IAP-JWT-Assertion",
+		Issuer:          idp.Issuer(),
+		Audience:        laneAudience,
+		JWKSURL:         idp.JWKSURL(),
+		RoleMap:         laneRoles(),
+		HTTPClient:      idp.Client(),
+		Now:             clock.Now,
 	}
 	adjust(&cfg)
 
@@ -78,7 +81,9 @@ func newLaneServerWith(t *testing.T, adjust func(*identity.Config)) *laneServer 
 		t.Fatalf("identity.New: %v", err)
 	}
 
-	pool := newPoolWithKey(t)
+	pool := pgtest.NewPool(t)
+	// The public fixture is a service account, never the install's first human admin.
+	insertOwnedTestKeyFor(t, pool, "service_account", "developer")
 	blobs := blobtest.Mem()
 	// A real cipher, matching newTestServer. With nil, the vault-credential write
 	// routes answer errSecretsUnavailable — a 500 — and the role-matrix test's
@@ -92,12 +97,21 @@ func newLaneServerWith(t *testing.T, adjust func(*identity.Config)) *laneServer 
 	// The dream runner is on for the same reason the cipher is real: with it
 	// off, POST /v1/dreams answers a 500 and the role-matrix rows would pass
 	// on a configuration detail rather than on the role check.
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, v, api.WithDreamRunner()))
+	manager := login.New(pool, login.Config{Mode: login.Mode(cfg.Mode), PublicOrigin: nativeOrigin, Development: true})
+	var rp *identity.RelyingParty
+	if cfg.Mode == identity.ModeOIDC {
+		rp, err = identity.NewRelyingParty(context.Background(), cfg, laneAudience, "fixture-client-secret", nativeOrigin+"/api/auth/callback")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, v, api.WithDreamRunner(), api.WithLogin(manager, rp)))
 	t.Cleanup(srv.Close)
 	return &laneServer{
-		tserver: &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs},
-		idp:     idp,
-		clock:   clock,
+		tserver:         &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs},
+		idp:             idp,
+		clock:           clock,
+		assertionHeader: cfg.AssertionHeader,
 	}
 }
 
@@ -126,6 +140,36 @@ func (s *laneServer) token(roles ...string) string {
 func (s *laneServer) bearer(method, path, token string, body any) *http.Response {
 	s.t.Helper()
 	return s.doRaw(method, path, body, map[string]string{"Authorization": "Bearer " + token})
+}
+
+// signInRequest exchanges an assertion at the login endpoint, then explicitly
+// sends only the issued cookie and CSRF to the requested private resource.
+func (s *laneServer) signInRequest(method, path, token string, body any) *http.Response {
+	s.t.Helper()
+	res := s.doRaw("POST", "/api/auth/login", nil, map[string]string{s.assertionHeader: token, "Origin": nativeOrigin})
+	if res.StatusCode != http.StatusOK {
+		return res
+	}
+	raw, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	cookie, session := sessionReply(s.t, res, raw)
+	return s.doRaw(method, path, body, map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken, "Content-Type": "application/json"})
+}
+
+// signInHeaders establishes a session before concurrent private requests start.
+func (s *laneServer) signInHeaders(token string) map[string]string {
+	s.t.Helper()
+	res := s.doRaw("POST", "/api/auth/login", nil, map[string]string{s.assertionHeader: token, "Origin": nativeOrigin})
+	raw, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	cookie, session := sessionReply(s.t, res, raw)
+	return map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken, "Content-Type": "application/json"}
 }
 
 // env creates an environment through the management lane and returns its id.
@@ -185,7 +229,7 @@ func laneMessage(t *testing.T, body string) string {
 func countPrincipals(t *testing.T, s *laneServer) int {
 	t.Helper()
 	var n int
-	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM principals`).Scan(&n); err != nil {
+	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM principals WHERE issuer <> 'owned-key-fixture'`).Scan(&n); err != nil {
 		t.Fatalf("count principals: %v", err)
 	}
 	return n
@@ -196,7 +240,7 @@ func countPrincipals(t *testing.T, s *laneServer) int {
 func storedRole(t *testing.T, s *laneServer) (role, source string) {
 	t.Helper()
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT role, role_source FROM principals`).Scan(&role, &source); err != nil {
+		`SELECT role, role_source FROM principals WHERE issuer <> 'owned-key-fixture'`).Scan(&role, &source); err != nil {
 		t.Fatalf("read the principal's role: %v", err)
 	}
 	return role, source
@@ -206,7 +250,7 @@ func storedRole(t *testing.T, s *laneServer) (role, source string) {
 // admin's change in the console.
 func setPrincipal(t *testing.T, s *laneServer, set string) {
 	t.Helper()
-	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET `+set); err != nil {
+	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET `+set+" WHERE issuer <> 'owned-key-fixture'"); err != nil {
 		t.Fatalf("UPDATE principals SET %s: %v", set, err)
 	}
 }
@@ -222,7 +266,7 @@ func TestIdentityLaneAuthenticatesAHuman(t *testing.T) {
 	s := newLaneServer(t)
 	envID := s.env()
 
-	status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleTokens(envID), s.token("platform-admins"), nil))
+	status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleTokens(envID), s.token("platform-admins"), nil))
 	if status != http.StatusOK {
 		t.Fatalf("admin listing environment keys: status %d, error type %q, want 200", status, errType)
 	}
@@ -232,7 +276,7 @@ func TestIdentityLaneAuthenticatesAHuman(t *testing.T) {
 	}
 	var id, issuer, subject, email, name string
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT id, issuer, subject, email, display_name FROM principals`).
+		`SELECT id, issuer, subject, email, display_name FROM principals WHERE issuer <> 'owned-key-fixture'`).
 		Scan(&id, &issuer, &subject, &email, &name); err != nil {
 		t.Fatalf("read principal: %v", err)
 	}
@@ -255,18 +299,18 @@ func TestIdentityLaneProvisionsOnceAndRefreshes(t *testing.T) {
 	s := newLaneServer(t)
 	path := consoleTokens(s.env())
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, path, s.token("platform-admins"), nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.signInRequest(http.MethodGet, path, s.token("platform-admins"), nil)); status != http.StatusOK {
 		t.Fatalf("first request: status %d, error %q, want 200", status, errType)
 	}
 	var first string
-	if err := s.pool.QueryRow(context.Background(), `SELECT id FROM principals`).Scan(&first); err != nil {
+	if err := s.pool.QueryRow(context.Background(), `SELECT id FROM principals WHERE issuer <> 'owned-key-fixture'`).Scan(&first); err != nil {
 		t.Fatalf("read principal: %v", err)
 	}
 
 	// The same human — same issuer, same sub — with a changed name at the provider.
 	claims := s.claims("platform-admins")
 	claims["name"] = "Ada L. Byron"
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, path, s.idp.Mint(t, claims), nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.signInRequest(http.MethodGet, path, s.idp.Mint(t, claims), nil)); status != http.StatusOK {
 		t.Fatalf("second request: status %d, error %q, want 200", status, errType)
 	}
 
@@ -275,7 +319,7 @@ func TestIdentityLaneProvisionsOnceAndRefreshes(t *testing.T) {
 	}
 	var second, name string
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT id, display_name FROM principals`).Scan(&second, &name); err != nil {
+		`SELECT id, display_name FROM principals WHERE issuer <> 'owned-key-fixture'`).Scan(&second, &name); err != nil {
 		t.Fatalf("read principal: %v", err)
 	}
 	if second != first {
@@ -301,7 +345,7 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 	s := newLaneServer(t)
 
 	for _, claim := range []string{"unmapped-group", "Platform-Read", "platform-read-only"} {
-		status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(claim), nil))
+		status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token(claim), nil))
 		if status != http.StatusForbidden {
 			t.Errorf("GET api_keys as %q: status %d, want 403 — an unmapped claim value is not a role", claim, status)
 		}
@@ -317,13 +361,13 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 	}
 
 	// A token carrying no role claim at all is the same case, reached differently.
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(), nil)); status != http.StatusForbidden {
+	if status, _ := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token(), nil)); status != http.StatusForbidden {
 		t.Errorf("GET api_keys with no role claim: status %d, want 403", status)
 	}
 
 	// The control: the same route, the same server, the machine key.
-	if status, _ := s.do(http.MethodGet, consoleAPIKeysPath, nil); status != http.StatusOK {
-		t.Errorf("GET api_keys with x-api-key: status %d, want 200 — the key lane has no role to check", status)
+	if status, _ := s.do(http.MethodGet, consoleAPIKeysPath, nil); status != http.StatusUnauthorized {
+		t.Errorf("GET api_keys with x-api-key: status %d, want 401", status)
 	}
 }
 
@@ -333,7 +377,7 @@ func TestIdentityLaneDefaultDenies(t *testing.T) {
 func TestAFirstSignInWithoutAMappingIsAUser(t *testing.T) {
 	s := newLaneServer(t)
 
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
+	status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Fatalf("GET api_keys at a first, unmapped sign-in: status %d, error %q, want 403 permission_error", status, errType)
 	}
@@ -376,12 +420,11 @@ func checkTheMappingIsStoredAndFollowed(t *testing.T, s *laneServer, send func(m
 	}
 }
 
-// TestAMappedRoleIsStoredAndFollowsTheIdP is the mapping in oidc mode, on the
-// default roles claim.
+// TestAMappedRoleIsStoredAndFollowsTheIdP maps the default roles claim at sign-in.
 func TestAMappedRoleIsStoredAndFollowsTheIdP(t *testing.T) {
 	s := newLaneServer(t)
 	checkTheMappingIsStoredAndFollowed(t, s, func(method, path, value string) *http.Response {
-		return s.bearer(method, path, s.token(value), nil)
+		return s.signInRequest(method, path, s.token(value), nil)
 	})
 }
 
@@ -400,7 +443,7 @@ func TestAMappedRoleIsStoredAndFollowsTheIdPBehindAProxy(t *testing.T) {
 	checkTheMappingIsStoredAndFollowed(t, s, func(method, path, value string) *http.Response {
 		claims := s.claims(decoy[value])
 		claims["groups"] = []any{value}
-		return s.doRaw(method, path, nil, map[string]string{header: s.idp.Mint(t, claims)})
+		return s.signInRequest(method, path, s.idp.Mint(t, claims), nil)
 	})
 }
 
@@ -411,10 +454,10 @@ func TestAMappedRoleIsStoredAndFollowsTheIdPBehindAProxy(t *testing.T) {
 func TestAnUnmappedFormerIdPRoleFallsToUser(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
 		t.Fatalf("GET api_keys mapped to admin: status %d, error %q, want 200", status, errType)
 	}
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
+	status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET api_keys no longer mapped: status %d, error %q, want 403 permission_error", status, errType)
 	} else if msg := laneMessage(t, body); msg != "this route requires the developer role" {
@@ -433,12 +476,12 @@ func TestAConsoleRoleSurvivesAnUnmappedSignIn(t *testing.T) {
 	unmapped := s.token("unmapped-group")
 
 	// The first sign-in creates the row, as a user.
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusForbidden {
+	if status, _ := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusForbidden {
 		t.Fatalf("GET api_keys at the first sign-in: status %d, want 403", status)
 	}
 	setPrincipal(t, s, `role = 'admin', role_source = 'console'`)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, unmapped, nil)); status != http.StatusOK {
 		t.Errorf("GET api_keys as a console admin: status %d, error %q, want 200", status, errType)
 	}
 	if role, source := storedRole(t, s); role != "admin" || source != "console" {
@@ -452,12 +495,12 @@ func TestAConsoleRoleSurvivesAnUnmappedSignIn(t *testing.T) {
 func TestAMappingTakesOverAConsoleRole(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, _ := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil)); status != http.StatusForbidden {
+	if status, _ := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token("unmapped-group"), nil)); status != http.StatusForbidden {
 		t.Fatalf("GET api_keys at the first sign-in: status %d, want 403", status)
 	}
 	setPrincipal(t, s, `role = 'admin', role_source = 'console'`)
 
-	status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleTokens(s.env()), s.token("platform-devs"), nil))
+	status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleTokens(s.env()), s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET tokens mapped to developer over a console admin: status %d, error %q, want 403 permission_error", status, errType)
 	}
@@ -474,7 +517,7 @@ func TestAMappingTakesOverAConsoleRole(t *testing.T) {
 func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	s := newLaneServer(t)
 
-	if status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
+	if status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token("platform-admins"), nil)); status != http.StatusOK {
 		t.Fatalf("GET api_keys as an admin: status %d, error %q, want 200", status, errType)
 	}
 	lastSeen := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -483,7 +526,7 @@ func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	changed := s.claims("platform-admins")
 	changed["email"] = "ada.byron@corp.example"
 	changed["name"] = "Ada L. Byron"
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.idp.Mint(t, changed), nil))
+	status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.idp.Mint(t, changed), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET api_keys as a removed admin: status %d, error %q, want 403 permission_error", status, errType)
 	} else if msg := laneMessage(t, body); msg != "this account has been removed from the organization" {
@@ -496,7 +539,7 @@ func TestADeactivatedPrincipalIsRefusedAndNotRecreated(t *testing.T) {
 	var email, name string
 	var got time.Time
 	if err := s.pool.QueryRow(context.Background(),
-		`SELECT email, display_name, last_seen_at FROM principals`).Scan(&email, &name, &got); err != nil {
+		`SELECT email, display_name, last_seen_at FROM principals WHERE issuer <> 'owned-key-fixture'`).Scan(&email, &name, &got); err != nil {
 		t.Fatalf("read the principal: %v", err)
 	}
 	if email != "ada@corp.example" || name != "Ada Lovelace" {
@@ -524,7 +567,7 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 		{role: "platform-devs", want: http.StatusForbidden},
 		{role: "platform-admins", want: http.StatusOK},
 	} {
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, path, s.token(tc.role), nil))
+		status, errType := laneStatus(t, s.signInRequest(http.MethodGet, path, s.token(tc.role), nil))
 		if status != tc.want {
 			t.Errorf("GET tokens as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
 		}
@@ -533,7 +576,7 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 		}
 
 		body := map[string]any{"name": "host-" + tc.role}
-		status, errType = laneStatus(t, s.bearer(http.MethodPost, path, s.token(tc.role), body))
+		status, errType = laneStatus(t, s.signInRequest(http.MethodPost, path, s.token(tc.role), body))
 		if status != tc.want {
 			t.Errorf("POST tokens as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
 		}
@@ -542,14 +585,14 @@ func TestIdentityLaneEnvironmentKeyRoutesRequireAdmin(t *testing.T) {
 	// The revoke route is gated too, and denies before it decides whether the key
 	// exists — a 404 here would be a probe for key ids.
 	status, errType := laneStatus(t,
-		s.bearer(http.MethodPost, consoleRevoke(envID, "envkey_missing"), s.token("platform-devs"), nil))
+		s.signInRequest(http.MethodPost, consoleRevoke(envID, "envkey_missing"), s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("revoke as a developer: status %d, error type %q, want 403 permission_error", status, errType)
 	}
 
 	// The denial names the requirement and never the caller — a 403 that told a
 	// user they are a user would map their own authority for them.
-	_, _, body := laneRead(t, s.bearer(http.MethodGet, path, s.token("platform-read"), nil))
+	_, _, body := laneRead(t, s.signInRequest(http.MethodGet, path, s.token("platform-read"), nil))
 	if !strings.Contains(body, "admin") {
 		t.Errorf("denial %q does not name the required role", body)
 	}
@@ -573,7 +616,7 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 		{role: "platform-devs", want: http.StatusOK},
 		{role: "platform-admins", want: http.StatusOK},
 	} {
-		status, errType := laneStatus(t, s.bearer(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
+		status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
 		if status != tc.want {
 			t.Errorf("GET api_keys as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
 		}
@@ -582,7 +625,7 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 		}
 
 		body := map[string]any{"name": "key-" + tc.role}
-		status, errType = laneStatus(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token(tc.role), body))
+		status, errType = laneStatus(t, s.signInRequest(http.MethodPost, consoleAPIKeysPath, s.token(tc.role), body))
 		if status != tc.want {
 			t.Errorf("POST api_keys as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
 		}
@@ -594,14 +637,14 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 		consoleAPIKey("apikey_" + strings.Repeat("a", 24)),
 		consoleOrgAPIKey("apikey_" + strings.Repeat("a", 24)),
 	} {
-		status, errType := laneStatus(t, s.bearer(http.MethodPost, path, s.token("platform-read"),
+		status, errType := laneStatus(t, s.signInRequest(http.MethodPost, path, s.token("platform-read"),
 			map[string]any{"status": "archived"}))
 		if status != http.StatusForbidden || errType != "permission_error" {
 			t.Errorf("update %s as a user: status %d, error type %q, want 403 permission_error", path, status, errType)
 		}
 	}
 	// The workspace read keeps its separate admin floor.
-	status, errType := laneStatus(t, s.bearer(http.MethodGet,
+	status, errType := laneStatus(t, s.signInRequest(http.MethodGet,
 		"/api/console/organizations/default/workspaces/default", s.token("platform-devs"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("workspace read as a developer: status %d, error type %q, want 403 permission_error", status, errType)
@@ -609,7 +652,7 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 
 	// New owned resources expose the human creator alias, separate from the
 	// unchanged internal principal_ audit identifier stored in SQL.
-	_, _, raw := laneRead(t, s.bearer(http.MethodPost, consoleAPIKeysPath, s.token("platform-admins"),
+	_, _, raw := laneRead(t, s.signInRequest(http.MethodPost, consoleAPIKeysPath, s.token("platform-admins"),
 		map[string]any{"name": "issued-by-a-human"}))
 	var issued struct {
 		CreatedBy struct{ ID, Type string } `json:"created_by"`
@@ -663,7 +706,7 @@ func TestIdentityLaneRejectionsAreUniform401(t *testing.T) {
 		// never reaches this lane at all.
 		{name: "alg none", token: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.AAAA"},
 	} {
-		status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, tc.token, nil))
+		status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, path, tc.token, nil))
 		if status != http.StatusUnauthorized {
 			t.Errorf("%s: status %d, want 401", tc.name, status)
 		}
@@ -685,12 +728,12 @@ func TestIdentityLaneRejectionsAreUniform401(t *testing.T) {
 	// arm answers with the missing-key 401 it always has. Still 401, and the
 	// difference leaks nothing: it reports the shape of the string the caller
 	// themselves constructed, not the outcome of any check against a real token.
-	status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.", nil))
+	status, errType, body := laneRead(t, s.signInRequest(http.MethodGet, path, "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.", nil))
 	if status != http.StatusUnauthorized || errType != "authentication_error" {
 		t.Errorf("alg none with an empty signature: status %d, error type %q, want 401 authentication_error", status, errType)
 	}
-	if msg := laneMessage(t, body); !strings.Contains(msg, "x-api-key") {
-		t.Errorf("message = %q, want the management arm's missing-key 401", msg)
+	if msg := laneMessage(t, body); msg != messages[0] {
+		t.Errorf("message = %q, want uniform login refusal %q", msg, messages[0])
 	}
 
 	// A token that verifies but maps to no role signs in as a user, who may not
@@ -698,7 +741,7 @@ func TestIdentityLaneRejectionsAreUniform401(t *testing.T) {
 	// diagnostic — "your IdP is not sending the group I map" reads nothing like
 	// "your token is bad" — and it is safe because the caller already proved who
 	// they are.
-	status, errType = laneStatus(t, s.bearer(http.MethodGet, path, s.token("some-unrelated-group"), nil))
+	status, errType = laneStatus(t, s.signInRequest(http.MethodGet, path, s.token("some-unrelated-group"), nil))
 	if status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("unmapped role: status %d, error type %q, want 403 permission_error", status, errType)
 	}
@@ -814,11 +857,12 @@ func TestManagementKeyWinsOverAHumanCredential(t *testing.T) {
 // user.message.
 func TestIdentityLaneCannotPostAToolResult(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
+	owner := s.seedLocal("tool-result-admin", "admin", "active")
+	cookie, session := s.issue(owner)
+	s.key, _ = issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "fixture resources", nil)
 	sid := selfHostedSession(t, s.tserver)
 	useID := appendToolUse(t, s.tserver, sid, domain.EventAgentToolUse)
 	path := "/api/organizations/default/proxy/v1/sessions/" + sid + "/events"
-	owner := s.seedLocal("tool-result-admin", "admin", "active")
-	cookie, session := s.issue(owner)
 	headers := map[string]string{"Cookie": cookie, "Origin": nativeOrigin, "X-CSRF-Token": session.CSRFToken}
 	send := func(method, path string, body any) *http.Response { return s.doRaw(method, path, body, headers) }
 
@@ -888,13 +932,12 @@ func TestARepeatedAPIKeyHeaderCannotChangeLanes(t *testing.T) {
 		}
 	}
 
-	// The single-field cases are unchanged: one valid key still serves, and no
-	// x-api-key at all still leaves the human lane reachable.
-	if status, _ := send(t, []string{testKey}, ""); status != http.StatusOK {
-		t.Errorf("one valid x-api-key: status %d, want 200", status)
+	// Neither a single API key nor a direct IdP token replaces a cookie.
+	if status, _ := send(t, []string{testKey}, ""); status != http.StatusUnauthorized {
+		t.Errorf("one valid x-api-key: status %d, want 401", status)
 	}
-	if status, _ := send(t, nil, "Bearer "+admin); status != http.StatusOK {
-		t.Errorf("admin token with no x-api-key: status %d, want 200", status)
+	if status, _ := send(t, nil, "Bearer "+admin); status != http.StatusUnauthorized {
+		t.Errorf("admin token with no x-api-key: status %d, want 401", status)
 	}
 }
 
@@ -966,10 +1009,10 @@ func TestTrustedProxyModeReadsOnlyItsHeader(t *testing.T) {
 	path := consoleTokens(envID)
 	admin := s.token("platform-admins")
 
-	// The assertion header authenticates.
+	// An assertion alone cannot authenticate a private resource request.
 	res := s.doRaw(http.MethodGet, path, nil, map[string]string{header: admin})
-	if status, errType := laneStatus(t, res); status != http.StatusOK {
-		t.Errorf("assertion header: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, res); status != http.StatusUnauthorized {
+		t.Errorf("assertion header: status %d, error %q, want 401", status, errType)
 	}
 
 	// The same token as a Bearer does not. In this mode Bearer is a machine

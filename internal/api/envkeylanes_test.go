@@ -110,6 +110,9 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	want := map[string]envKeyRoute{
 		// Anonymous platform configuration, not authority granted to the key.
 		"GET /api/auth/config": served,
+		// Password setup is anonymous but requires browser origin. Login
+		// explicitly refuses an environment Bearer before its origin check.
+		"POST /api/console/organizations/default/setup_code/redeem": {status: http.StatusForbidden, errType: "permission_error"},
 		// The work API: the reference's recorded answers on a cloud
 		// environment, and the work-item 404 on the item routes.
 		"GET /v1/environments/{id}/work":           {status: http.StatusNotFound, errType: "not_found_error"},

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
@@ -135,7 +136,11 @@ func TestInternalRowsAreUnlistedAndUnretrievable(t *testing.T) {
 			{http.MethodGet, consoleTokens(envID), nil},
 			{http.MethodPost, consoleRevoke(envID, internalKeyID), nil},
 		} {
-			status, body := s.do(tc.method, tc.path, tc.body)
+			call := s.do
+			if strings.HasPrefix(tc.path, "/api/") {
+				call = s.doCookie
+			}
+			status, body := call(tc.method, tc.path, tc.body)
 			if status != http.StatusNotFound {
 				t.Errorf("%s %s: status %d, want 404 (%v)", tc.method, tc.path, status, body)
 				continue

@@ -4,17 +4,16 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 6: move installs and callers onto native login and delegated inference.
-Slice 5 merged in [PR #1043](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1043); its independent [acceptance](./docs/HISTORY.md#plan-69-slice-5-independent-acceptance) is the baseline.
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 7: remove preset credentials and legacy admission.
+Slice 6 passed independent live [acceptance](./docs/HISTORY.md#plan-69-slice-6-independent-acceptance) after [PR #1046](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1046).
 **no release until plan 69 slice 7**.
 
 ## Tasks
 
-- [x] Send per-claim credentials from Brain to configured gateway routes, including grading.
-- [x] Default Compose to password login and require a login mode in Helm.
-- [x] Obtain CI, acceptance and eval credentials through setup, login and private issuance.
-- [x] Deliver Console key management for both environment kinds ([Console PR #260](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/260)).
-- [x] Correct the app-edge capability failure found during the slice 6 staging rollout; verify the rendered container settings at runtime.
-- [ ] Configure staging HTTPS and Google OIDC; obtain its CD service-account key through Console.
-- [x] Complete local contract/runtime tests and independent `make verify` ([acceptance](./docs/HISTORY.md#plan-69-slice-6-independent-acceptance)).
-- [ ] Complete committed dual review, CI and live staging acceptance before slice 7.
+- [x] Accept native staging HTTPS/OIDC and the Console-issued developer CD key stored in Secret Manager.
+- [x] Deliver the native-only Console companion ([PR #261](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/261)) and pin its verified image.
+- [x] Require login, restrict private APIs to cookies and public keys to current owners, and remove legacy model policies.
+- [x] Switch CD to its issued key; verify fresh Compose, real `ant` and local gates ([acceptance](./docs/HISTORY.md#plan-69-slice-7-local-installation-acceptance)).
+- [ ] Complete committed reviews, hosted CI and native-only staging acceptance before cleanup.
+- [ ] After accepting the code rollout, remove obsolete policy tables and retained compatibility secrets without breaking rollback.
+- [ ] Retire the separate HTTP listener and legacy Console resources, complete live acceptance, and archive the plan.

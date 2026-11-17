@@ -2,7 +2,7 @@
 // platform serves, and the dispatcher deciding which credential may reach which
 // route. One http.ServeMux shares resource, private-browser and machine routes.
 // dispatchLoginAuth (loginauth.go) admits private cookies; dispatchAuth
-// (server.go) keeps legacy and machine lanes apart before the router.
+// (server.go) keeps public owned-key and scoped machine lanes apart before the router.
 // Splitting the routes across nested muxes would let ServeMux's own
 // path-cleaning and subtree-slash redirects answer an unauthenticated request
 // before auth had run. Surfaces and credentials do not line up one to one, and
@@ -12,7 +12,7 @@
 // The public /v1 wire — agents, environments, sessions with their events and
 // resources, vaults and credentials, skills, files — is wire-compatible with
 // Anthropic Managed Agents down to paths, JSON shapes, ID prefixes and the
-// pagination and error envelopes, and takes the management x-api-key (auth.go)
+// pagination and error envelopes, and takes an owned key through x-api-key or issued-prefix Bearer (auth.go)
 // everywhere the dual-auth set at the end does not say otherwise;
 // anthropic-version / anthropic-beta and ?beta=true are accepted and ignored.
 // The work API under /v1/environments/{id}/work is the second credential: a
@@ -20,13 +20,10 @@
 // workScope asserts that key's environment against the path's, so one key
 // drives one queue and no other (envauth.go, workapi.go). Existing private
 // key-management paths mirror the reference console (consoleapi.go,
-// consoleapikeys.go). They retain management keys and verified IdP credentials
-// beside native cookies during rollout; their human callers require admin.
-// A management key cannot distinguish the console from another caller. This
-// legacy admission is not a namespace-wide rule: new private browser routes
-// require their own cookie admission, as described below. The legacy IdP lane
-// still reaches management /v1 when no x-api-key is offered, with the route's
-// role floor. Fourth, the internal
+// consoleapikeys.go). Private routes take native browser sessions only.
+// Key management requires developer with owner checks; environment-key and
+// principal administration require admin. IdP credentials reach login only.
+// Fourth, the internal
 // gate-config endpoint, and with it the fourth credential: a session's egress
 // gate authenticates with its per-session gtk_ token and fetches the
 // networking policy and resolved credentials it needs (gateauth.go,
@@ -39,7 +36,7 @@
 //
 // Native browser cookies never authenticate /v1 or a machine lane. The private
 // /api/organizations/{org}/proxy/v1/... resource proxy is cookie-only, even
-// beside a legacy credential. It re-enters dispatchAuth with verified human
+// beside another offered credential. It re-enters dispatchAuth with verified human
 // context only on the management arm, retaining the resource's role floor and
 // audit actor. It strips edge assertions rather than replaying an IdP sign-in.
 // Long-lived proxy requests recheck the session every 5s with a 5s lookup bound;

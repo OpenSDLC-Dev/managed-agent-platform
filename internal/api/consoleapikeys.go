@@ -107,10 +107,9 @@ const (
 	actorHuman   = "principal"
 )
 
-// actorFor renders an id as an actor, or nil for the absent issuer a key seeded
-// from CONTROLPLANE_API_KEY carries. The type is read from the id's own prefix,
+// actorFor renders an id as an actor, or nil for an absent historical issuer. The type is read from the id's own prefix,
 // so the two can never disagree. An empty string is treated as absent for
-// safety, though IssueManagementKey refuses to write one.
+// safety, though the owned issuer refuses to write one.
 func actorFor(id *string) *actorJSON {
 	if id == nil || *id == "" {
 		return nil
@@ -212,10 +211,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The issuer, from whichever lane authenticated: a `principal_` id for a human
-	// over SSO, the machine key's own `apikey_` row id otherwise. This route is
-	// authenticated on both lanes, so it is never empty — and it must not be, since
-	// a NULL issuer is what marks a row env-var-managed.
+	// The cookie-selected human is the issuer; ownership is resolved below.
 	ctx := r.Context()
 	tx, caller, err := s.beginAPIKeyMutation(r)
 	if err != nil {
@@ -368,29 +364,10 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// archived or lapsed row is refused for that reason rather than for its shape,
 	// which is the ordering the reference's own messages imply.
 
-	// The env-var-managed refusal comes FIRST, before the archived one, because a
-	// rotated deployment holds archived rows with no issuer — EnsureAPIKey archives
-	// the incumbent on every rotation — and for those the environment variable is
-	// both the more fundamental fact and the only actionable one. Ordered the other
-	// way, an admin patching such a row is told "archived is permanent, use
-	// inactive", follows that advice, is refused again, and is never told the thing
-	// they could act on.
-	//
-	// The rule itself: a key nobody issued belongs to its environment variable —
-	// CONTROLPLANE_API_KEY, or BRAIN_API_KEY for the row named brain — and this
-	// route does not get to touch it. Its lifecycle already has an owner —
-	// rotation-by-restart — so a console disable would be silently undone by the
-	// next boot. And renaming it would break that rotation outright: EnsureAPIKey
-	// archives the incumbent by *name*, so a bootstrap row renamed out from under it
-	// would survive the next rotation and leave two live credentials, which is
-	// exactly the race api_keys_one_live_unissued exists to prevent. The row is
-	// still listed — hiding it would be a worse lie than refusing to mutate it.
+	// Historical presets remain audit records. They cannot authenticate and
+	// have no current owner who can rotate them through this surface.
 	if key.CreatedBy == nil {
-		variable := "CONTROLPLANE_API_KEY"
-		if key.Name == "brain" {
-			variable = "BRAIN_API_KEY"
-		}
-		return nil, errInvalid("api key %s is managed by %s; rotate it by restarting the control plane with a new value", keyID, variable)
+		return nil, errInvalid("historical unowned API key %s cannot be updated", keyID)
 	}
 	// Archived is terminal, and NOTHING may be patched onto an archived row — the
 	// repeated archive included. The reference refuses all five shapes with one
@@ -405,12 +382,6 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	// plaintext may sit in a leaked backup one request from working. Migration 0024
 	// states the same rule, mapping every `revoked_at` row to archived because
 	// "revocation was one-way, and archived is the one-way state".
-	//
-	// Terminal *on this surface*. EnsureAPIKey still adopts an archived row whose
-	// plaintext is configured as CONTROLPLANE_API_KEY, which is deliberate and
-	// logged — see the warning it emits. That is the environment variable claiming
-	// a value, not the console undoing an archive, and it needs the deployment
-	// access that could equally configure a fresh key.
 	//
 	// Both refusals are worded as the #389 probe measured them (docs/HISTORY.md),
 	// since #540 — they used to name the key and say "archived" for the

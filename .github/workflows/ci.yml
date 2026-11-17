@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: OpenSDLC-Dev/managed-agent-console
-          ref: cb7d741ff96098c6d7e428931ea05414d9f815aa
+          ref: 8158c6a3b8917da7c5b38abddde3c00326ac54b6
           path: console-source
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -114,33 +114,18 @@ jobs:
           helm template t "$CHART" -f "$VALUES" --show-only templates/brain-deployment.yaml \
             | grep -A2 '^        - name: model-providers$' | grep '^            name: t-managed-agent-platform-brain-routes$' > /dev/null \
             || { echo "the brain does not mount the gateway route" >&2; exit 1; }
-          # Receivers keep the old key for rolling compatibility until slice 7.
-          for tpl in controlplane modelgateway; do
-            helm template t "$CHART" -f "$VALUES" --show-only "templates/$tpl-deployment.yaml" \
-              | grep -A4 'name: BRAIN_API_KEY$' | grep 'key: brain-api-key$' > /dev/null \
-              || { echo "the $tpl does not read BRAIN_API_KEY from the brain-api-key Secret key" >&2; exit 1; }
-          done
-          # Each negative check greps a captured render, so a render that fails
-          # fails the step rather than matching nothing.
-          for tpl in brain executor; do
-            exe="$(helm template t "$CHART" -f "$VALUES" --show-only "templates/$tpl-deployment.yaml")"
-            echo "$exe" | grep 'BRAIN_API_KEY' > /dev/null \
-              && { echo "$tpl is handed BRAIN_API_KEY" >&2; exit 1; }
-          done
           sec="$(helm template t "$CHART" -f "$VALUES" --show-only templates/secret.yaml)"
-          echo "$sec" | grep '^  brain-api-key: ' > /dev/null \
-            || { echo "the Secret does not write brain-api-key" >&2; exit 1; }
           echo "$sec" | grep 'model-providers.json' > /dev/null \
             && { echo "the Secret writes model-providers.json with the gateway on" >&2; exit 1; }
           # Off: the brain routes itself, from the Secret's model-providers.json,
-          # and nothing names the gateway's route or key.
+          # and nothing names the gateway's route.
           off() { helm template t "$CHART" -f "$VALUES" --set modelgateway.enabled=false \
             --set-json 'brain.modelProviders=[{"model":"*","protocol":"anthropic","base_url":"https://gateway.example.internal","api_key":"ci-placeholder-secret"}]' "$@"; }
           mp="$(off --show-only templates/secret.yaml \
             | grep 'model-providers.json:' | awk '{print $2}' | tr -d '"' | base64 -d)"
           echo "$mp" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and d and all("model" in e for e in d), "model-providers.json must be a non-empty JSON array of route objects"; print("ok:", len(d), "route(s) with the gateway off")'
           offr="$(off)"
-          echo "$offr" | grep 'BRAIN_API_KEY\|brain-routes\|brain-api-key' > /dev/null \
+          echo "$offr" | grep 'brain-routes' > /dev/null \
             && { echo "the gateway-off render names the gateway's route or key" >&2; exit 1; }
           # brain.gatewayRoute joins the chart's four fields; it may not replace them.
           mp="$(helm template t "$CHART" -f "$VALUES" --set brain.gatewayRoute.max_tokens=32000 \
@@ -956,25 +941,9 @@ jobs:
             echo "$err" | grep -F -- "$want" > /dev/null \
               || { echo "refused for the wrong reason (want: $want): $err" >&2; exit 1; }
           }
-          refuse 'controlplane.apiKey is required' -f "$VALUES" --set controlplane.apiKey= --set brain.apiKey=b
-          refuse 'brain.apiKey is required with modelgateway.enabled' -f "$VALUES" --set brain.apiKey=
-          # apikey.CheckBrainKey's two refusals, made at render.
-          refuse 'brain.apiKey must differ from controlplane.apiKey' -f "$VALUES" --set brain.apiKey=ci-placeholder-key
-          # A key read as a number has lost its digits (00123456 is octal), so it
-          # is refused rather than written as something the operator never wrote.
-          refuse 'brain.apiKey must be a string' -f "$VALUES" --set brain.apiKey=12345678
-          printf 'brain:\n  apiKey: 00123456\n' | refuse 'brain.apiKey must be a string' -f "$VALUES" -f -
-          helm template t "$CHART" -f "$VALUES" --set-string brain.apiKey=00123456 --show-only templates/secret.yaml \
-            | grep "^  brain-api-key: \"$(printf 00123456 | base64)\"$" > /dev/null \
-            || { echo "a quoted all-digit brain.apiKey is not written as its digits" >&2; exit 1; }
-          refuse 'brain.apiKey has leading or trailing whitespace' -f "$VALUES" --set 'brain.apiKey=k '
           # The gateway on drops routes of the brain's own, so it refuses them,
           # with existingSecret too.
           refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" \
-            --set-json 'brain.modelProviders=[{"model":"*"}]'
-          # An upgrade's values carry routes and no brain.apiKey: it is told how to
-          # keep them before it is told the key is missing.
-          refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" --set brain.apiKey= \
             --set-json 'brain.modelProviders=[{"model":"*"}]'
           refuse 'brain.modelProviders is set, but modelgateway.enabled' -f "$VALUES" \
             --set postgresql.enabled=false --set minio.enabled=false --set openbao.enabled=false \
@@ -1074,10 +1043,6 @@ jobs:
                  exit 1; }
           flags="$(grep -oE -- '--from-file="\$d/[^"$]+"' deploy/gcp/mode2-secret.sh \
             | sed 's|.*/||; s|"$||')"
-          grep -F -- '--from-file="$d/$brain_file"' deploy/gcp/mode2-secret.sh > /dev/null \
-            || { echo "mode2-secret.sh no longer writes the per-mode key \$brain_file" >&2; exit 1; }
-          grep -F -- '--from-file="$d/$carry_file"' deploy/gcp/mode2-secret.sh > /dev/null \
-            || { echo "mode2-secret.sh no longer carries the other mode's key \$carry_file" >&2; exit 1; }
           shared="$(echo "$flags" | sort -u)"
           # Both counts, because `sort -u` answers only the second question. A
           # duplicated `--from-file` leaves seven unique names and eight flags,
@@ -1090,27 +1055,9 @@ jobs:
             || { echo "expected 7 literal --from-file keys in deploy/gcp/mode2-secret.sh, found:" >&2
                  echo "$shared" >&2; exit 1; }
           for gateway in false true; do
-            case "$gateway" in
-              false) key=model-providers.json other=brain-api-key ;;
-              true) key=brain-api-key other=model-providers.json ;;
-            esac
-            grep -xE "[[:space:]]*brain_file=${key//./\\.}" deploy/gcp/mode2-secret.sh > /dev/null \
-              || { echo "mode2-secret.sh never sets brain_file=$key, the key the chart reads with modelgateway.enabled=$gateway" >&2
-                   exit 1; }
-            grep -xE "[[:space:]]*carry_file=${other//./\\.}" deploy/gcp/mode2-secret.sh > /dev/null \
-              || { echo "mode2-secret.sh never sets carry_file=$other, the key a rollback from modelgateway.enabled=$gateway needs" >&2
-                   exit 1; }
-            wrote="$(printf '%s\n%s\n' "$shared" "$key" | sort -u)"
+            wrote="$shared"
             rendered="$(helm template t "$CHART" -f deploy/gcp/staging-values.yaml \
               --set "modelgateway.enabled=$gateway")"
-            # Forward: every key the job writes is a key the render reads. The
-            # `- ` alternative is the brain's projected volume item, which is a
-            # list entry rather than a secretKeyRef.
-            for k in $wrote; do
-              echo "$rendered" | grep -E "^[[:space:]]*(- )?key: \"?${k//./\\.}\"?\$" > /dev/null \
-                || { echo "with modelgateway.enabled=$gateway, mode2-secret.sh writes Secret key '$k' and nothing in the render reads it" >&2
-                     exit 1; }
-            done
             # Back: every key the chart REQUIRES — a secretKeyRef without
             # `optional: true`, the one whose absence wedges the pod in
             # CreateContainerConfigError — is a key the job writes.
@@ -1128,12 +1075,12 @@ jobs:
           done
           # And all of it against the PRE-CREATED Secret, whose name is also the
           # `K8S_SECRET` the script defaults to. Dropping `existingSecret`
-          # entirely fails the render (secret.yaml's required-apiKey guard), but
+          # entirely fails the render (external-database guard), but
           # CHANGING it renders green while binding every reference above to a
           # Secret nothing creates.
           echo "$rendered" | grep -E '^[[:space:]]*name: map-platform$' > /dev/null \
             || { echo "the render does not bind to the pre-created Secret map-platform" >&2; exit 1; }
-          echo "ok: mode2-secret.sh writes exactly the eight keys the render reads, with the gateway off and on"
+          echo "ok: mode2-secret.sh supplies every required key, with the gateway off and on"
       - name: the bundled IdP is off by default and ships no default credential
         run: |
           # One seed, two deployment targets. The chart patches what differs per
@@ -1276,10 +1223,10 @@ jobs:
           # A pod that is not Ready must not hold the budget and block a drain.
           echo "$pdb" | grep '^  unhealthyPodEvictionPolicy: AlwaysAllow$' > /dev/null \
             || { echo "the gateway's PodDisruptionBudget lets an unready pod block a drain" >&2; exit 1; }
-          # The bootstrap key, the DSN and the cipher, each from the Secret key
+          # The DSN and the cipher, each from the Secret key
           # the Secret writes: an env entry naming an absent key would arrive
           # unset and the gateway would refuse to start.
-          for pair in CONTROLPLANE_API_KEY:controlplane-api-key DATABASE_URL:database-url SECRETS_BACKEND:secrets-backend; do
+          for pair in DATABASE_URL:database-url SECRETS_BACKEND:secrets-backend; do
             echo "$dep" | grep -A4 "name: ${pair%%:*}$" | grep "key: ${pair#*:}$" > /dev/null \
               || { echo "the gateway does not read ${pair%%:*} from the ${pair#*:} Secret key" >&2; exit 1; }
           done
@@ -1670,7 +1617,7 @@ jobs:
       - name: the openbao bootstrap scripts behave
         working-directory: .
         run: make openbao-init-test
-      - name: the application edge routes native and legacy requests
+      - name: the native application edge preserves routing and streams
         working-directory: .
         run: |
           python3 -I deploy/compose/native_config_test.py

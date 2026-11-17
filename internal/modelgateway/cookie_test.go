@@ -22,7 +22,7 @@ func TestGatewayCookieNeverAuthenticatesInference(t *testing.T) {
 	e.start(func(cfg *modelgateway.Config) {
 		prober, err := modelgateway.NewProber(*cfg)
 		e.must(err)
-		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap, Prober: prober, Login: manager})
+		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, Prober: prober, Login: manager})
 		e.must(err)
 	})
 	h := map[string]string{"Cookie": "map_session=" + issued.Token}
@@ -61,7 +61,7 @@ func TestGatewayDiagnosticUsageNamesCookiePrincipal(t *testing.T) {
 	e.start(func(cfg *modelgateway.Config) {
 		prober, err := modelgateway.NewProber(*cfg)
 		e.must(err)
-		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, BootstrapKey: bootstrap, Prober: prober, Login: m})
+		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, Prober: prober, Login: m})
 		e.must(err)
 	})
 	res, raw := e.do("POST", "/admin/v1/deployments/"+d.ID+"/test", `{}`, map[string]string{

@@ -77,7 +77,7 @@ func TestLiveResponses(t *testing.T) {
 			}
 		}
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 CHART = Path(__file__).resolve().parents[1]
 ROOT = CHART.parents[2]
-CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319"
+CONSOLE = "ghcr.io/opensdlc-dev/managed-agent-console@sha256:3395af7496c827f4607cc2a5b35246241a5d8f63a3026b7e966ba7da4179cfae"
 
 
 def render(values=None, release="native-test", success=True):
@@ -42,7 +42,7 @@ def section(text, name):
 
 
 def native(mode="password"):
-    return {"console": {"enabled": True, "authMode": "platform", "publicOrigin": "http://localhost:3000"},
+    return {"console": {"enabled": True, "publicOrigin": "http://localhost:3000"},
             "identity": {"mode": mode}, "developmentMode": True}
 
 
@@ -127,7 +127,7 @@ class NativeRender(unittest.TestCase):
     def test_requires_login_even_without_console_or_with_external_secret(self):
         for mode in ["", "disabled", "oidc"]:
             for existing in [False, True]:
-                values = {"identity": {"mode": mode}, "console": {"enabled": False, "authMode": "", "publicOrigin": ""}}
+                values = {"identity": {"mode": mode}, "console": {"enabled": False, "publicOrigin": ""}}
                 if existing:
                     values.update(existingSecret="operator-secret", postgresql={"enabled": False}, minio={"enabled": False}, openbao={"enabled": False})
                 with self.subTest(mode=mode, existing=existing):
@@ -135,37 +135,29 @@ class NativeRender(unittest.TestCase):
 
     def test_example_uses_native_login(self):
         default = render()
-        self.assertIn("CONSOLE_AUTH_MODE", default)
+        self.assertIn("CONSOLE_PUBLIC_ORIGIN", default)
         self.assertIn(CONSOLE, section(default, "console.yaml"))
-        self.assertNotIn("controlplane-api-key", section(default, "console.yaml"))
+        self.assertNotIn("secretKeyRef:", section(default, "console.yaml"))
         self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", default)
 
-    def test_retained_server_keys_do_not_reach_native_console(self):
-        def pods(values):
+    def test_console_holds_no_credentials_and_gateway_only_reads_sessions(self):
+        for existing in [False, True]:
+            values = native("oidc")
+            values["identity"].update(caSecret="idp-ca", oidc={"issuer": "https://idp.example", "audience": "client", "clientId": "client"})
+            if existing:
+                values.update(existingSecret="external-platform", postgresql={"enabled": False}, minio={"enabled": False}, openbao={"enabled": False})
             text = render(values)
-            return {name: section(text, name).split("\n  template:\n", 1)[1]
-                    for name in ["console.yaml", "controlplane-deployment.yaml", "modelgateway-deployment.yaml"]}
-
-        for mode in ["managed", "existing"]:
-            with self.subTest(mode=mode):
-                values = native()
-                if mode == "existing":
-                    values.update(existingSecret="external-platform", postgresql={"enabled": False},
-                                  minio={"enabled": False}, openbao={"enabled": False})
-                values["controlplane"] = {"apiKey": "render-only-old-key"}
-                old = pods(values)
-                values["controlplane"]["apiKey"] = "render-only-new-key"
-                new = pods(values)
-                self.assertEqual(old["console.yaml"], new["console.yaml"])
-                for name in ["controlplane-deployment.yaml", "modelgateway-deployment.yaml"]:
-                    self.assertEqual(old[name] != new[name], mode != "existing")
-                self.assertNotIn("checksum/", new["console.yaml"])
-                self.assertNotIn("controlplane-api-key", new["console.yaml"])
-                if mode == "existing":
-                    values["existingSecret"] = "external-platform-next"
-                    renamed = pods(values)
-                    self.assertEqual(new["console.yaml"], renamed["console.yaml"])
-                    self.assertNotIn("checksum/", renamed["console.yaml"])
+            console = section(text, "console.yaml")
+            self.assertNotIn("env:", console)
+            self.assertNotIn("secretKeyRef:", console)
+            self.assertNotIn("checksum/", console)
+            gateway = section(text, "modelgateway-deployment.yaml")
+            self.assertEqual(re.findall(r"- name: (IDENTITY_[A-Z_]+)", gateway), ["IDENTITY_MODE"])
+            self.assertNotIn("SSL_CERT_FILE", gateway)
+            self.assertNotIn("identity-ca", gateway)
+            self.assertIn("SSL_CERT_FILE", section(text, "controlplane-deployment.yaml"))
+            for component in ["controlplane-deployment.yaml", "modelgateway-deployment.yaml", "brain-deployment.yaml"]:
+                self.assertFalse(re.findall(r"- name: [A-Z_]*API_KEY", section(text, component)))
 
     def test_console_numeric_non_root_user(self):
         for mode, values in [("password", native()), ("oidc", native("oidc"))]:
@@ -200,7 +192,7 @@ class NativeRender(unittest.TestCase):
             self.assertTrue(body, name)
             self.assertNotIn("DATABASE_URL", body)
             self.assertNotIn("IDENTITY_OIDC_CLIENT_SECRET", body)
-            self.assertNotIn("controlplane-api-key", body)
+            self.assertNotIn("secretKeyRef:", body)
         self.assertIn("/api/health", section(text, "console.yaml"))
         self.assertNotIn("deep=", section(text, "console.yaml"))
 
@@ -248,18 +240,15 @@ class NativeRender(unittest.TestCase):
         changes = [
             {"developmentMode": False},
             {"developmentMode": "false"},
-            {"console": {"enabled": "false", "authMode": "platform", "publicOrigin": "http://localhost:3000"}},
-            {"console": {"enabled": False, "authMode": "platform", "publicOrigin": "http://localhost:3000"}},
-            {"console": {"enabled": True, "authMode": "platform", "publicOrigin": "http://localhost:3000", "legacySecret": "legacy-credential"}},
-            {"console": {"enabled": True, "authMode": "platform", "publicOrigin": "http://localhost:3000", "image": "example/console:latest"}},
+            {"console": {"enabled": "false", "publicOrigin": "http://localhost:3000"}},
+            {"console": {"enabled": False, "publicOrigin": "http://localhost:3000"}},
+            {"console": {"enabled": True, "publicOrigin": "http://localhost:3000", "image": "example/console:latest"}},
             {"appEdge": {"image": "caddy:2.10-alpine"}},
             {"identity": {"mode": "disabled"}},
-            {"console": {"enabled": True, "authMode": "platform", "publicOrigin": ""}},
-            {"console": {"enabled": True, "authMode": "wrong"}},
-            {"console": {"enabled": True, "authMode": "", "publicOrigin": "https://console.example"}},
+            {"console": {"enabled": True, "publicOrigin": ""}},
         ]
         for origin in ["https://UPPER.example", "https://console.example/", "https://console.example:443", "http://console.example", "https://user:password@console.example"]:
-            changes.append({"console": {"enabled": True, "authMode": "platform", "publicOrigin": origin}})
+            changes.append({"console": {"enabled": True, "publicOrigin": origin}})
         for change in changes:
             for existing in [False, True]:
                 values = native()

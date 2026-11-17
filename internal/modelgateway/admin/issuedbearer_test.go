@@ -135,8 +135,8 @@ func TestGatewayAdminIssuedBearerLegacyCompanion(t *testing.T) {
 			h.Set("X-Goog-IAP-JWT-Assertion", e.token("admins"))
 			for _, method := range []string{"GET", "POST"} {
 				status, _, _ := cookieAdminRequest(t, e, method, "/admin/v1/providers", issuedBearerProvider, h)
-				if status != http.StatusOK {
-					t.Errorf("legacy companion with admin assertion: %s HTTP %d, want 200", method, status)
+				if status != http.StatusUnauthorized {
+					t.Errorf("legacy companion with admin assertion: %s HTTP %d, want 401", method, status)
 				}
 			}
 			var principals, providers int
@@ -145,13 +145,13 @@ func TestGatewayAdminIssuedBearerLegacyCompanion(t *testing.T) {
 				(SELECT count(*) FROM modelgateway.providers)`).Scan(&principals, &providers); err != nil {
 				t.Fatal(err)
 			}
-			if principals != 1 || providers != 1 {
-				t.Error("legacy assertion did not sign in and persist the management write")
+			if principals != 0 || providers != 0 {
+				t.Error("legacy assertion changed principals or providers")
 			}
 			h.Set("X-Goog-IAP-JWT-Assertion", e.token("devs"))
 			status, _, _ = cookieAdminRequest(t, e, "POST", "/admin/v1/providers", issuedBearerProvider, h)
-			if status != http.StatusForbidden {
-				t.Errorf("companion overrode developer assertion: HTTP %d, want 403", status)
+			if status != http.StatusUnauthorized {
+				t.Errorf("companion overrode developer assertion: HTTP %d, want 401", status)
 			}
 			before = issuedBearerState(t, e)
 			h.Set("X-Goog-IAP-JWT-Assertion", "invalid")
@@ -162,7 +162,7 @@ func TestGatewayAdminIssuedBearerLegacyCompanion(t *testing.T) {
 			h.Set("X-Goog-IAP-JWT-Assertion", e.token("admins"))
 			h.Set("Origin", "https://other.example")
 			status, _, _ = cookieAdminRequest(t, e, "POST", "/admin/v1/providers", issuedBearerProvider, h)
-			if status != http.StatusForbidden || issuedBearerState(t, e) != before {
+			if status != http.StatusUnauthorized || issuedBearerState(t, e) != before {
 				t.Error("legacy companion bypassed proxy browser-origin protection")
 			}
 		})
@@ -182,12 +182,12 @@ func TestGatewayAdminIssuedBearerPrecedence(t *testing.T) {
 		want    int
 	}{
 		{"owned-with-cookie", nil, 401},
-		{"selected-bootstrap-key", http.Header{"X-Api-Key": {bootstrap}}, 200},
+		{"selected-bootstrap-key", http.Header{"X-Api-Key": {bootstrap}}, 401},
 		{"selected-invalid-key", http.Header{"X-Api-Key": {"invalid"}}, 401},
 		{"selected-empty-key", http.Header{"X-Api-Key": {""}}, 401},
 		{"repeated-key", http.Header{"X-Api-Key": {bootstrap, bootstrap}}, 401},
 		{"repeated-authorization", http.Header{"Authorization": {"Bearer " + bootstrap, "Bearer " + raw}, "X-Api-Key": {bootstrap}}, 401},
-		{"issued-looking-bootstrap-bearer", http.Header{"Authorization": {"Bearer " + bootstrap}}, 200},
+		{"issued-looking-bootstrap-bearer", http.Header{"Authorization": {"Bearer " + bootstrap}}, 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := cookieAdminHeaders(cookie)
@@ -208,7 +208,7 @@ func TestGatewayAdminIssuedBearerPrecedence(t *testing.T) {
 	}
 }
 
-func TestGatewayAdminIssuedBearerLookupFailure(t *testing.T) {
+func TestGatewayAdminRefusesBearerWithoutKeyLookup(t *testing.T) {
 	e, _ := newCookieAdmin(t, login.ModeTrustedProxy, cookieOrigin, true)
 	raw := issuedBearerKey(t, e, "unowned", "active")
 	if _, err := e.pool.Exec(context.Background(), `ALTER TABLE api_keys RENAME TO unavailable_api_keys`); err != nil {
@@ -219,19 +219,19 @@ func TestGatewayAdminIssuedBearerLookupFailure(t *testing.T) {
 		t.Run(method, func(t *testing.T) {
 			before := issuedBearerState(t, e)
 			status, header, response := cookieAdminRequest(t, e, method, "/admin/v1/providers", issuedBearerProvider, h)
-			if status != http.StatusInternalServerError || !strings.Contains(response, `"api_error"`) || header.Get("x-platform-signed-out") != "" {
-				t.Errorf("key-shape lookup failure: HTTP %d, want 500 api_error without sign-out", status)
+			if status != http.StatusUnauthorized || !strings.Contains(response, `"authentication_error"`) || header.Get("x-platform-signed-out") != "" {
+				t.Errorf("key-shape lookup failure: HTTP %d, want 401 authentication_error without sign-out", status)
 			}
 			if issuedBearerState(t, e) != before {
 				t.Error("failed key-shape lookup changed principals or providers")
 			}
 		})
 	}
-	// Exact bootstrap selection must not depend on the key table at all.
+	// Refusing a preset must not depend on the key table either.
 	for _, headers := range []http.Header{{"X-Api-Key": {bootstrap}}, {"Authorization": {"Bearer " + bootstrap}}} {
 		status, _, _ := cookieAdminRequest(t, e, "GET", "/admin/v1/profiles", "", headers)
-		if status != http.StatusOK {
-			t.Errorf("bootstrap required the key table: HTTP %d, want 200", status)
+		if status != http.StatusUnauthorized {
+			t.Errorf("bootstrap required the key table: HTTP %d, want 401", status)
 		}
 	}
 }

@@ -58,7 +58,6 @@ compute, outside the platform cluster, and reaches the control plane only over t
 ## Install
 
 Minimum required values: a native login mode and public Console origin,
-the compatibility bootstrap and brain keys retained through plan 69 slice 6,
 and — with the bundled Postgres, MinIO, and OpenBao — a database password, MinIO root
 credentials, and the OpenBao seal key + platform token (none is auto-generated: a
 generated credential is unstable under `helm template`/GitOps; MinIO requires a
@@ -73,13 +72,11 @@ helm install map ./deploy/helm/managed-agent-platform \
   --set identity.oidc.clientId=map-console \
   --set identity.oidc.audience=map-console \
   -f private-oidc-values.yaml \
-  --set controlplane.apiKey=$(openssl rand -hex 24) \
   --set postgresql.password=$(openssl rand -hex 24) \
   --set minio.rootUser=map \
   --set minio.rootPassword=$(openssl rand -hex 24) \
   --set openbao.staticSealKey=$(openssl rand -base64 32) \
-  --set openbao.platformToken=$(openssl rand -hex 24) \
-  --set brain.apiKey=$(openssl rand -hex 24)
+  --set openbao.platformToken=$(openssl rand -hex 24)
 ```
 
 Configure `identity.oidc.clientSecret` in the private values file when the client
@@ -95,7 +92,7 @@ its catalogue names a deployment for the agent's model (see
 ### Without the gateway
 
 With `modelgateway.enabled=false`, the brain routes itself, and
-`brain.modelProviders` replaces `brain.apiKey` among the required values:
+`brain.modelProviders` supplies the required direct routes:
 
 ```bash
   --set modelgateway.enabled=false \
@@ -155,10 +152,10 @@ The Console pin supports native login, owned API keys and key management for clo
 Follow the [native-routing and rollback contract](../../../docs/self-hosted-security.md#owned-key-rollout-and-rollback) when upgrading an older install.
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 
-Set `console.authMode=platform` and `console.publicOrigin=https://console.example`
+Set `console.publicOrigin=https://console.example`
 with the chosen `identity.mode`. An empty or disabled login mode is rejected.
 An older chart revision is required to roll back to legacy BFF routing.
-Native mode receives no bootstrap key and refuses `console.legacySecret`.
+Console holds no credentials. See the [Plan 69 upgrade note](../../../docs/UPGRADING_PLAN69.md) before upgrading.
 After same-name content rotation in `existingSecret`, roll the consuming Deployments yourself.
 Changing the Secret reference name changes their Pod templates.
 The Console and edge never read the platform database or RP client secret.
@@ -204,9 +201,9 @@ On by default. It runs `cmd/modelgateway`
 ClusterIP Service on port 8090, with a PodDisruptionBudget of
 `maxUnavailable: 1` and `unhealthyPodEvictionPolicy: AlwaysAllow`: a drain evicts one
 Ready pod at a time, waiting for its replacement before the next, never pins a lone
-replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url`, `controlplane-api-key` and `brain-api-key` from the release's
-Secret, takes `identity.*` so the console's operator sign-in reaches its admin API, and
-seals vendor keys with the release's credential cipher — so it needs one. A chart-managed
+replica, and evicts a pod that is not Ready regardless (from Kubernetes 1.27). It reads `database-url` from the release's Secret and validates native browser sessions.
+Only the control plane talks to the IdP. The gateway seals vendor keys with the
+release's credential cipher, so it needs one. A chart-managed
 Secret that resolves none fails the render; with `existingSecret` the chart cannot see
 the keys, and a Secret without `secrets-*` leaves the gateway refusing to start. Under
 `gcpKMS` its ServiceAccount needs `roles/cloudkms.cryptoKeyEncrypterDecrypter`, as the
@@ -216,8 +213,7 @@ grant.
 The brain's one route is the chart's, in the ConfigMap `<release>-brain-routes`: every
 model string to the gateway's Service, where it names an alias. The route selects
 `delegated_inference: true`; each primary, child or grading call uses its own claim token.
-The control plane and gateway retain `brain.apiKey` for old replicas until slice 7.
-It must differ from `controlplane.apiKey`. `brain.gatewayRoute` adds the route's other fields —
+`brain.gatewayRoute` adds the route's other fields —
 `upstream_model`, `stall_timeout`, `flatten_search_results` and, above all, `max_tokens`,
 since the brain sets none and the anthropic adapter otherwise sends 8192; any other key
 fails the render, since the route is a ConfigMap. `brain.modelProviders` set beside the
@@ -487,15 +483,17 @@ values — sits orders of magnitude below either.
 ## Single sign-on and roles (`identity.*`, `casdoor.*`)
 
 Human login uses OIDC, a trusted proxy or development-only passwords. The control plane and
-model gateway's operator lane share stored `user`, `developer` and `admin`
-roles (plan 69 slice 1). Reads require developer; no read-only role exists.
-The `identity` block configures both Deployments; `casdoor.enabled` also
-deploys a bundled provider for clusters that have none.
+gateway administration use browser sessions with stored `user`, `developer` and `admin` roles.
+Resource reads require developer; no read-only role exists.
+The `identity` block configures the control plane's login provider.
+The gateway receives only the mode and session configuration, not IdP credentials.
+`casdoor.enabled` deploys a bundled provider for clusters that have none.
 
 Choose a native login mode and `console.publicOrigin` explicitly. Empty or disabled
 identity is rejected. Browser sessions use the member's current role; owned public
-API keys use their owner's current role. Legacy receiver keys remain through slice 6
-for rolling compatibility. Workers continue to use environment keys.
+API keys use their owner's current role. Unowned keys retained by earlier revisions
+must be replaced before upgrading; see [the upgrade procedure](../../../docs/UPGRADING_PLAN69.md).
+Workers continue to use environment keys.
 
 ```bash
 # Any compliant provider — Keycloak, Entra ID, Cognito, accounts.google.com.
@@ -511,8 +509,8 @@ for rolling compatibility. Workers continue to use environment keys.
 `identity.roleMap` is written as a **map** — claim value to role — and the chart
 encodes it into the flat `value=role,...` the verifier parses; a claim value or
 role containing `,` or `=` fails the render, because it would encode as a
-different, still-valid map. The map is **optional** in both IdP modes. Each verified
-IdP request or native IdP login applies it; cookie lookup never replays it.
+different, still-valid map. The map is **optional** in both IdP modes. Native IdP
+sign-in applies it; cookie lookup never replays it.
 A match sets the stored role, a former match now absent
 resets to user, and a never-mapped person keeps the stored role. First unmatched
 sign-in gets user, which reaches auth/session routes and setup redemption, not resources.
@@ -576,7 +574,7 @@ templates means owning their lifecycle — image tag, database, seed, CVE tracki
 --set casdoor.adminPassword=$(openssl rand -hex 24) \
 --set casdoor.console.clientSecret=$(openssl rand -hex 24) \
 --set 'casdoor.console.redirectURIs[0]=https://console.example.com/api/auth/callback' \
---set console.enabled=true --set console.authMode=platform \
+--set console.enabled=true \
 --set console.publicOrigin=https://console.example.com \
 --set identity.oidc.clientId=map-console \
 --set identity.mode=oidc \
@@ -682,8 +680,7 @@ the example maps it to user, which cannot read. Use developer for readers.
 ## Managing your own Secret
 
 To keep credentials out of Helm values, pre-create a Secret with keys
-`controlplane-api-key`, `database-url`, and `brain-api-key` — or `model-providers.json`
-with `modelgateway.enabled=false` (plus the
+`database-url`, and `model-providers.json` with `modelgateway.enabled=false` (plus the
 `blob-*` keys for object storage and, for the credential cipher if used, the
 `secrets-backend` key plus that backend's own — `bao-*` for OpenBao, `secrets-*`
 for the local cipher, `gcpkms-key-name` for Cloud KMS), then set
@@ -761,7 +758,7 @@ Four things worth understanding before you turn them on:
   `values.yaml` carries the per-field table beside the keys.
 
 Nothing here is auto-generated: every secret-shaped value you must supply yourself —
-`controlplane.apiKey`, `brain.apiKey`, `postgresql.password`, the MinIO pair (`minio.rootUser` /
+`postgresql.password`, the MinIO pair (`minio.rootUser` /
 `minio.rootPassword`, whose password needs at least 8 characters, and which the
 **default** object-storage option requires), the OpenBao pair, and the Casdoor pair.
 The chart refuses to render without one rather than inventing a credential you did

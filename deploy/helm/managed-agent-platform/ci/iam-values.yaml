@@ -16,7 +16,6 @@
 #     that origin becomes the `iss` claim. The chart refuses a mismatch here too.
 console:
   enabled: true
-  authMode: platform
   publicOrigin: https://console.ci.example
 identity:
   mode: oidc

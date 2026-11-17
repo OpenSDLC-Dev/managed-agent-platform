@@ -3,20 +3,18 @@ package admin_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
+
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
@@ -137,7 +135,7 @@ func newGrantFixture(t *testing.T, ctx context.Context) *grantFixture {
 	}
 	e := &env{t: t, pool: pool, store: store.New(pool), cipher: cipher, prober: &stubProber{}}
 	m := login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: cookieOrigin, Development: true})
-	h, err := admin.New(admin.Config{Store: e.store, Cipher: cipher, BootstrapKey: bootstrap, Prober: e.prober, Login: m})
+	h, err := admin.New(admin.Config{Store: e.store, Cipher: cipher, Prober: e.prober, Login: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,142 +190,4 @@ func (f *grantFixture) withdraw(t *testing.T, ctx context.Context, withdrawal st
 		want, marker = 401, "1"
 	}
 	return want, marker
-}
-
-type grantTarget struct {
-	id, secret string
-	before     *store.KeyPolicy
-}
-
-func prepareGrantTarget(t *testing.T, ctx context.Context, f *grantFixture, state string) grantTarget {
-	t.Helper()
-	expires := time.Now().Add(time.Hour)
-	secret, row, err := api.IssueManagementKey(ctx, f.e.pool, "grant-target", &expires, "apikey_fixture_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := grantTarget{id: row.ID, secret: secret}
-	if state == "limited" {
-		rpm, tpm := int32(1), int64(10)
-		before, err := f.e.store.PutKeyPolicy(ctx, store.KeyPolicy{APIKeyID: row.ID, RPM: &rpm, TPM: &tpm})
-		if err != nil {
-			t.Fatal(err)
-		}
-		target.before = &before
-	}
-	return target
-}
-
-func (target grantTarget) assertState(t *testing.T, ctx context.Context, f *grantFixture, rr *httptest.ResponseRecorder, changed bool) {
-	t.Helper()
-	got, err := f.e.store.GetKeyPolicy(ctx, target.id)
-	wantRows := 0
-	switch {
-	case changed:
-		wantRows = 1
-		if err != nil || got.APIKeyID != target.id || got.Aliases != nil || got.RPM != nil || got.TPM != nil {
-			t.Errorf("successful grant did not restore/widen the actual row: %+v err=%v", got, err)
-		}
-		if rr.Code == 200 {
-			var body map[string]any
-			if json.Unmarshal(rr.Body.Bytes(), &body) != nil || body["type"] != "key_policy" || body["api_key_id"] != target.id {
-				t.Errorf("grant reply does not describe the widened target: %s", rr.Body.String())
-			}
-			for _, key := range []string{"aliases", "rpm", "tpm"} {
-				if value, present := body[key]; !present || value != nil {
-					t.Errorf("widened grant reply requires explicit null %q: present=%t value=%v body=%s", key, present, value, rr.Body.String())
-				}
-			}
-		}
-	case target.before != nil:
-		wantRows = 1
-		if err != nil || !reflect.DeepEqual(got, *target.before) {
-			t.Errorf("withdrawn caller changed the limited grant: got=%+v before=%+v err=%v", got, *target.before, err)
-		}
-	default:
-		if !errors.Is(err, store.ErrNotFound) {
-			t.Errorf("withdrawn caller restored an absent grant: %+v err=%v", got, err)
-		}
-	}
-	var rows, keys int
-	var valid bool
-	if err := f.e.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM modelgateway.key_policies),(SELECT count(*) FROM api_keys),status='active' AND expires_at>clock_timestamp() AND key_hash=$2 FROM api_keys WHERE id=$1`, target.id, apikey.Hash(target.secret)).Scan(&rows, &keys, &valid); err != nil || rows != wantRows || keys != 1 || !valid {
-		t.Errorf("durable grant/key state: grants=%d want=%d keys=%d valid_target=%v err=%v", rows, wantRows, keys, valid, err)
-	}
-}
-
-// A copied admission-time admin role must not restore an absent grant or lift
-// limits after logout, role loss, deactivation or absolute session expiry.
-func TestGatewayCredentialMutationDelayedBody(t *testing.T) {
-	for _, state := range []string{"missing", "limited"} {
-		for _, withdrawal := range []string{"unchanged", "logout", "demote", "deactivate", "expire"} {
-			t.Run(state+"/"+withdrawal, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-				defer cancel()
-				f := newGrantFixture(t, ctx)
-				target := prepareGrantTarget(t, ctx, f, state)
-				body := newGrantBody(ctx)
-				call := startGrantRequest(t, ctx, f.handler, "POST", "/admin/v1/key_policies/"+target.id, body, cookieAdminHeaders(f.issued))
-				call.await(t, body.entered, "partial body after admin admission")
-				want, marker := 200, ""
-				if withdrawal != "unchanged" {
-					want, marker = f.withdraw(t, ctx, withdrawal)
-				}
-				body.unblock()
-				rr := call.result(t)
-				select {
-				case <-body.eof:
-				default:
-					t.Error("admitted grant request did not consume the complete valid body")
-				}
-				if rr.Code != want || rr.Header().Get("x-platform-signed-out") != marker {
-					t.Errorf("post-body grant authority: status=%d marker=%q want=%d/%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), want, marker, rr.Body.String())
-				}
-				target.assertState(t, ctx, f, rr, withdrawal == "unchanged")
-				if withdrawal == "unchanged" && !t.Failed() {
-					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
-				}
-			})
-		}
-	}
-}
-
-// Bootstrap admission remains independent of the cookie, including when that
-// cookie is withdrawn during the same upload. Ordinary issued keys stay refused
-// by TestAuthByKey and malformed offered headers by TestGatewayCookieLegacyPrecedence.
-func TestGatewayCredentialMutationLegacyPrecedence(t *testing.T) {
-	for _, state := range []string{"missing", "limited"} {
-		for _, field := range []string{"X-Api-Key", "Authorization"} {
-			t.Run(state+"/"+field, func(t *testing.T) {
-				ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-				defer cancel()
-				f := newGrantFixture(t, ctx)
-				target := prepareGrantTarget(t, ctx, f, state)
-				headers := cookieAdminHeaders(f.issued)
-				credential := bootstrap
-				if field == "Authorization" {
-					credential = "Bearer " + credential
-				}
-				headers.Set(field, credential)
-				body := newGrantBody(ctx)
-				call := startGrantRequest(t, ctx, f.handler, "POST", "/admin/v1/key_policies/"+target.id, body, headers)
-				call.await(t, body.entered, "partial body on the legacy bootstrap lane")
-				f.withdraw(t, ctx, "logout")
-				body.unblock()
-				rr := call.result(t)
-				select {
-				case <-body.eof:
-				default:
-					t.Error("legacy grant request did not consume the complete valid body")
-				}
-				if rr.Code != 200 || rr.Header().Get("x-platform-signed-out") != "" {
-					t.Errorf("bootstrap credential lost precedence: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
-				}
-				target.assertState(t, ctx, f, rr, true)
-				if !t.Failed() {
-					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
-				}
-			})
-		}
-	}
 }

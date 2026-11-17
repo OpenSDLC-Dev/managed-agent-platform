@@ -94,9 +94,9 @@ func describe(snap *catalog.Snapshot, a store.Alias) modelInfo {
 }
 
 // listable reports whether the caller sees a in Anthropic's list: a chat
-// alias its grant covers. The wildcard is a fallback, not a model.
+// alias. The wildcard is a fallback, not a model.
 func listable(c caller, a store.Alias) bool {
-	return a.Kind == store.KindChat && a.Name != "*" && c.may(a.Name)
+	return a.Kind == store.KindChat && a.Name != "*"
 }
 
 // listModels pages through the aliases by name. after_id and before_id are
@@ -157,9 +157,9 @@ type openAIModel struct {
 }
 
 // openAIListable reports whether the caller sees a in OpenAI's list: any
-// alias its grant covers, chat or not, since an OpenAI client may call every
+// alias, chat or not, since an OpenAI client may call every
 // kind. The wildcard is a fallback, not a model.
-func openAIListable(c caller, a store.Alias) bool { return a.Name != "*" && c.may(a.Name) }
+func openAIListable(c caller, a store.Alias) bool { return a.Name != "*" }
 
 func openAIModelOf(a store.Alias) openAIModel {
 	return openAIModel{ID: a.Name, Object: "model", Created: a.CreatedAt.Unix(), OwnedBy: "modelgateway"}

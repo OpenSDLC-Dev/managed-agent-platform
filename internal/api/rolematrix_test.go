@@ -196,19 +196,14 @@ func TestTheMatrixCoversEveryAnnotatedRoute(t *testing.T) {
 func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 	s := newLaneServer(t)
 	envID := s.env()
-	admin := s.token("platform-admins")
 	owner := ownedPrincipalFixture(t, s.pool, "user", "admin")
 	owned, _ := ownedKeyFixture(t, s.pool, owner, owner)
 
 	for _, path := range []string{
 		"/v1/environments/" + envID + "/%77ork",
 		"/v1/environments/" + envID + "/%77ork/poll",
-		"/internal/v1/gate/%63onfig",
 	} {
 		credential, refusal := owned, "this route is not available to principal-owned API keys"
-		if strings.HasPrefix(path, "/internal/") {
-			credential, refusal = admin, "this route is not available to SSO-authenticated callers"
-		}
 		// Pin requireRole's refusal, not merely some authentication or scope denial.
 		status, errType, body := laneRead(t, s.bearer(http.MethodGet, path, credential, nil))
 		if status != http.StatusForbidden || errType != "permission_error" {
@@ -220,6 +215,10 @@ func TestAnEncodedPathCannotSlipPastTheWorkLane(t *testing.T) {
 			t.Errorf("GET %s as an admin: message %q; want requireRole's own refusal, not a downstream scope check",
 				path, msg)
 		}
+	}
+	// Off-public gate paths accept neither an owned key nor a direct IdP token.
+	for _, credential := range []string{owned, s.token("platform-admins")} {
+		assertOwnedResponse(t, s.bearer(http.MethodGet, "/internal/v1/gate/%63onfig", credential, nil), http.StatusUnauthorized)
 	}
 }
 

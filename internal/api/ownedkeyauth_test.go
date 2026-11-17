@@ -10,7 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -152,10 +152,8 @@ func TestOwnedKeyCredentialDispatch(t *testing.T) {
 	user := s.seedLocal("user", "user", "active")
 	userKey, _ := ownedKeyFixture(t, s.pool, user, admin)
 	adminKey, _ := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "dispatch admin", nil)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy issued", nil, "apikey_fixture_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacy := api.IssuedKeyPrefix + "historical-issued"
+	insertHistoricalKey(t, s.pool, "legacy issued", legacy)
 	// Native verifier uses the real clock, not the lane fixture's frozen clock.
 	claims := s.idp.Claims(laneAudience, time.Now())
 	assertion := s.idp.Mint(t, claims)
@@ -252,30 +250,30 @@ func ownedDurableSnapshot(t *testing.T, pool *pgxpool.Pool) string {
 }
 
 func TestPublicHumanCredentialsDoNotSignIn(t *testing.T) {
-	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
+	for _, mode := range []login.Mode{login.ModeOIDC, login.ModeTrustedProxy} {
 		t.Run(string(mode), func(t *testing.T) {
-			s := newLaneServerWith(t, func(c *identity.Config) {
-				c.Mode = mode
-				if mode == identity.ModeTrustedProxy {
-					c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
-				}
-			})
+			s := newNativeServer(t, mode)
 			send := func(path, token string) *http.Response {
-				if mode == identity.ModeOIDC {
-					return s.bearer("GET", path, token, nil)
+				if mode == login.ModeOIDC {
+					return s.doRaw("GET", path, nil, map[string]string{"Authorization": "Bearer " + token})
 				}
 				return s.doRaw("GET", path, nil, map[string]string{"X-Goog-IAP-JWT-Assertion": token})
 			}
 			for _, state := range []string{"new", "existing", "deactivated"} {
 				if state == "existing" {
-					assertOwnedResponse(t, send(consoleAPIKeysPath, s.token("platform-admins")), 200)
-					setPrincipal(t, s, `role='user', role_source='console', last_seen_at='2026-01-01T00:00:00Z'`)
+					_, err := s.pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,role_source,last_seen_at) VALUES ($1,$2,'user-1','user','user','console','2026-01-01')`, domain.NewID(domain.PrefixPrincipal).String(), s.idp.Issuer())
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 				if state == "deactivated" {
-					setPrincipal(t, s, `status='deactivated'`)
+					if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET status='deactivated'`); err != nil {
+						t.Fatal(err)
+					}
 				}
 				before := ownedDurableSnapshot(t, s.pool)
-				claims := s.claims("platform-admins")
+				claims := s.idp.Claims(laneAudience, time.Now())
+				claims["roles"] = []any{"platform-admins"}
 				claims["name"] = "Must Not Refresh"
 				claims["email"] = "must-not-refresh@example.test"
 				token := s.idp.Mint(t, claims)

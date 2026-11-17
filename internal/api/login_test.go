@@ -36,7 +36,7 @@ type nativeServer struct {
 
 func newNativeServer(t *testing.T, mode login.Mode) *nativeServer {
 	t.Helper()
-	pool := newPoolWithKey(t)
+	pool := newPoolWithLegacyKey(t)
 	m := login.New(pool, login.Config{Mode: mode, PublicOrigin: nativeOrigin, Development: true})
 	var v *identity.Verifier
 	var rp *identity.RelyingParty
@@ -184,7 +184,7 @@ func TestNativeLoginRouteMatrix(t *testing.T) {
 			}
 			if tc.path == "/api/auth/config" && tc.method == "GET" {
 				var cfg map[string]any
-				if json.Unmarshal(raw, &cfg) != nil || cfg["mode"] != "disabled" || cfg["native_login"] != false || len(cfg) != 2 {
+				if json.Unmarshal(raw, &cfg) != nil || cfg["mode"] != "password" || cfg["native_login"] != true || len(cfg) != 2 {
 					t.Fatalf("config=%s", raw)
 				}
 				if res.Header.Get("Cache-Control") != "no-store" || res.Header.Get("Pragma") != "no-cache" {

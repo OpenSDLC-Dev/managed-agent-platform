@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +14,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,7 +89,7 @@ func TestDelegatedTokenCannotFallThroughToPrivateIAP(t *testing.T) {
 		{"duplicate first", http.Header{"Authorization": {bearer, "Bearer itk_not_issued"}}, 403},
 		{"duplicate last", http.Header{"Authorization": {"Bearer itk_not_issued", bearer}}, 403},
 		{"selected key with duplicate bearers", http.Header{"X-Api-Key": {item.InferenceToken}, "Authorization": {"Bearer one", "Bearer two"}}, 403},
-		{"legacy prefix", http.Header{"Authorization": {"Bearer itk_not_issued", "Bearer legacy"}}, 200},
+		{"legacy prefix", http.Header{"Authorization": {"Bearer itk_not_issued", "Bearer legacy"}}, 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.headers.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-admins"))
@@ -104,132 +102,6 @@ func TestDelegatedTokenCannotFallThroughToPrivateIAP(t *testing.T) {
 	}
 }
 
-// An ignored legacy Bearer must not displace the private assertion or become
-// machine authority. The assertion supplies the current role and owned-row view.
-func TestPrivateLegacyBearerKeepsAssertionAuthority(t *testing.T) {
-	s := newLaneServerWith(t, func(c *identity.Config) {
-		c.Mode = identity.ModeTrustedProxy
-		c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
-	})
-	headers := make(http.Header)
-	headers.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-admins"))
-	assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers), 200)
-	var human string
-	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals WHERE issuer=$1 AND subject='user-1'`, s.idp.Issuer()).Scan(&human); err != nil {
-		t.Fatal(err)
-	}
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	headers.Set("Authorization", "Bearer "+legacy)
-	t.Run("admin_assertion_with_unowned_bearer", func(t *testing.T) {
-		assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers), 200)
-	})
-	t.Run("user_assertion_cannot_borrow_machine_authority", func(t *testing.T) {
-		h := headers.Clone()
-		h.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-read"))
-		status, typ, body := laneRead(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, h))
-		if status != 403 || typ != "permission_error" || laneMessage(t, body) != "this route requires the developer role" {
-			t.Fatalf("status=%d error=%q body=%s; want human developer-role 403", status, typ, body)
-		}
-	})
-	for _, state := range []string{"active", "inactive", "expired", "archived"} {
-		t.Run(state, func(t *testing.T) {
-			raw, row, err := api.IssueManagementKey(t.Context(), s.pool, "legacy "+state, nil, "apikey_companion_issuer")
-			if err != nil {
-				t.Fatal(err)
-			}
-			status := state
-			if state == "expired" {
-				status = "active"
-			}
-			if _, err := s.pool.Exec(t.Context(), `UPDATE api_keys SET status=$2,
-				expires_at=CASE WHEN $3 THEN clock_timestamp()-interval '1 second' END WHERE id=$1`, row.ID, status, state == "expired"); err != nil {
-				t.Fatal(err)
-			}
-			h := headers.Clone()
-			h.Set("Authorization", "Bearer "+raw)
-			for _, tc := range []struct {
-				name, assertion string
-				want            int
-			}{
-				{"admin", s.token("platform-admins"), 200},
-				{"developer", s.token("platform-devs"), 200},
-				{"user", s.token("platform-read"), 403},
-				{"bad_assertion", "not-a-valid-assertion", 401},
-				{"no_assertion", "", 401},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					h.Set("X-Goog-IAP-JWT-Assertion", tc.assertion)
-					res := ownedFirstHop(t, s.url, consoleAPIKeysPath, h)
-					if tc.name == "developer" {
-						status, _, body := laneRead(t, res)
-						if status != 200 {
-							t.Fatalf("developer list status=%d", status)
-						}
-						var rows []map[string]any
-						if json.Unmarshal([]byte(body), &rows) != nil {
-							t.Fatal("invalid key list")
-						}
-						for _, key := range rows {
-							owner, ok := key["principal"].(map[string]any)
-							if !ok || owner["user_id"] != principal.PublicID(human, "user") || key["can_manage"] != true {
-								t.Fatal("companion key bypassed true-owner list filter")
-							}
-						}
-						// Workspace remains an admin-only control; bypassing the human role
-						// would return its 404 instead of 403.
-						assertOwnedResponse(t, ownedFirstHop(t, s.url, "/api/console/organizations/default/workspaces/default", h), 403)
-					} else {
-						assertOwnedResponse(t, res, tc.want)
-					}
-				})
-			}
-			// Classification ignores lifecycle only for the companion Bearer. The
-			// same value selected as x-api-key must still pass key authentication.
-			t.Run("selected_x_key", func(t *testing.T) {
-				h.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-admins"))
-				h.Set("x-api-key", raw)
-				want := 401
-				if state == "active" {
-					want = 200
-				}
-				assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, h), want)
-			})
-			t.Run("human_audit", func(t *testing.T) {
-				res := s.doRaw("POST", consoleAPIKeysPath, map[string]any{"name": "human audit " + state}, map[string]string{
-					"Authorization": "Bearer " + raw, "X-Goog-IAP-JWT-Assertion": s.token("platform-admins"),
-				})
-				status, _, body := laneRead(t, res)
-				if status != 200 {
-					t.Fatalf("human issuance: status=%d body=%s", status, body)
-				}
-				var created struct {
-					ID        string                    `json:"id"`
-					CreatedBy struct{ ID, Type string } `json:"created_by"`
-				}
-				if err := json.Unmarshal([]byte(body), &created); err != nil {
-					t.Fatal(err)
-				}
-				var creator string
-				if err := s.pool.QueryRow(t.Context(), `SELECT created_by FROM api_keys WHERE id=$1`, created.ID).Scan(&creator); err != nil {
-					t.Fatal(err)
-				}
-				if creator != human || created.CreatedBy.ID != principal.PublicID(human, "user") || created.CreatedBy.Type != "user" {
-					t.Fatalf("creator=%q response_actor=%+v want human %q, never companion key %q", creator, created.CreatedBy, human, row.ID)
-				}
-			})
-		})
-	}
-	t.Run("deactivated_human", func(t *testing.T) {
-		if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET status='deactivated' WHERE id=$1`, human); err != nil {
-			t.Fatal(err)
-		}
-		assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers), 403)
-	})
-}
-
 // Use the same verified human for the native cookie and private assertion, with
 // no IdP mapping to undo the stored-role changes exercised below.
 func privateAssertionServer(t *testing.T) (*nativeServer, http.Header, string) {
@@ -237,7 +109,8 @@ func privateAssertionServer(t *testing.T) (*nativeServer, http.Header, string) {
 	s := newNativeServer(t, login.ModeTrustedProxy)
 	h := nativeHeaders("", "")
 	h.Set("X-Goog-IAP-JWT-Assertion", s.idp.Mint(t, s.idp.Claims(laneAudience, time.Now())))
-	assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, h), 403)
+	res, raw := s.request("POST", "/api/auth/login", "", h)
+	sessionReply(t, res, raw)
 	var human string
 	if err := s.pool.QueryRow(t.Context(), `UPDATE principals SET role='admin' WHERE issuer=$1 AND subject='user-1' RETURNING id`, s.idp.Issuer()).Scan(&human); err != nil {
 		t.Fatal(err)
@@ -296,10 +169,8 @@ func TestOwnedKeyPrivateAssertionIsolation(t *testing.T) {
 
 func TestPrivateLegacyBearerSelection(t *testing.T) {
 	s, headers, human := privateAssertionServer(t)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacy := api.IssuedKeyPrefix + "historical-companion"
+	insertHistoricalKey(t, s.pool, "legacy companion", legacy)
 	owned, _ := ownedKeyFixture(t, s.pool, human, human)
 	for _, tc := range []struct {
 		name      string
@@ -308,8 +179,8 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 		assertion bool
 		want      int
 	}{
-		{"legacy_companion", nil, []string{"Bearer " + legacy}, true, 200},
-		{"single_empty_x", []string{""}, []string{"Bearer " + legacy}, true, 200},
+		{"legacy_companion", nil, []string{"Bearer " + legacy}, true, 401},
+		{"single_empty_x", []string{""}, []string{"Bearer " + legacy}, true, 401},
 		{"invalid_x", []string{"wrong"}, []string{"Bearer " + legacy}, true, 401},
 		{"repeated_x", []string{"", legacy}, []string{"Bearer " + legacy}, true, 401},
 		{"repeated_empty_x", []string{"", ""}, []string{"Bearer " + legacy}, true, 401},
@@ -319,7 +190,7 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 		{"repeated_owned_legacy", nil, []string{"Bearer " + owned, "Bearer " + legacy}, true, 401},
 		{"repeated_legacy", nil, []string{"Bearer " + legacy, "Bearer " + legacy}, true, 401},
 		{"cookie_cannot_replace_assertion", nil, []string{"Bearer " + legacy}, false, 401},
-		{"selected_legacy_x_wins", []string{legacy}, []string{"Bearer " + owned}, true, 200},
+		{"selected_legacy_x_wins", []string{legacy}, []string{"Bearer " + owned}, true, 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := headers.Clone()
@@ -339,7 +210,6 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 			}
 		})
 	}
-	headers.Set("Authorization", "Bearer "+legacy)
 	t.Run("method_fallback", func(t *testing.T) {
 		res, body := s.request("PUT", consoleAPIKeysPath, "", headers)
 		if res.StatusCode != 405 {
@@ -351,7 +221,7 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 		h.Set("Origin", "https://foreign.example")
 		before := ownedDurableSnapshot(t, s.pool)
 		res, body := s.request("POST", consoleAPIKeysPath, `{"name":"must not persist"}`, h)
-		if res.StatusCode != 403 || laneMessage(t, string(body)) != "invalid browser origin" {
+		if res.StatusCode != 403 || laneMessage(t, string(body)) != "invalid browser origin or CSRF token" {
 			t.Fatalf("status=%d body=%s want origin refusal", res.StatusCode, body)
 		}
 		if ownedDurableSnapshot(t, s.pool) != before {
@@ -369,17 +239,6 @@ func TestPrivateLegacyBearerSelection(t *testing.T) {
 	})
 }
 
-func TestPrivateLegacyBearerLookupFailure(t *testing.T) {
-	s, headers, _ := privateAssertionServer(t)
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	headers.Set("Authorization", "Bearer "+legacy)
-	s.pool.Close()
-	assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers), 500)
-}
-
 // Neither the raw nor the mux-cleaned public boundary may inherit the private
 // legacy exception. Encoded dots and slashes remain literal route segments.
 func TestPrivateLegacyBearerCanonicalization(t *testing.T) {
@@ -387,22 +246,20 @@ func TestPrivateLegacyBearerCanonicalization(t *testing.T) {
 		c.Mode = identity.ModeTrustedProxy
 		c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
 	})
-	legacy, _, err := api.IssueManagementKey(t.Context(), s.pool, "legacy companion", nil, "apikey_companion_issuer")
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacy := api.IssuedKeyPrefix + "historical-companion"
+	insertHistoricalKey(t, s.pool, "legacy companion", legacy)
 	for _, tc := range []struct {
 		name, path, location string
 		want                 int
 	}{
-		{"private", consoleAPIKeysPath, "", 200},
-		{"encoded_private", "/%61pi/console/organizations/default/workspaces/default/api_keys", "", 200},
-		{"private_cleaning", "/other/.." + consoleAPIKeysPath, consoleAPIKeysPath, 307},
-		{"private_repeated_slash", "/" + consoleAPIKeysPath, consoleAPIKeysPath, 307},
-		{"unknown_private", "/api/unknown", "", 404},
-		{"encoded_dot", "/%2e/v1/agents", "", 404},
-		{"encoded_parent", "/api/%2e%2e/v1/agents", "", 404},
-		{"encoded_slash", "/v1%2fapi/agents", "", 404},
+		{"private", consoleAPIKeysPath, "", 401},
+		{"encoded_private", "/%61pi/console/organizations/default/workspaces/default/api_keys", "", 401},
+		{"private_cleaning", "/other/.." + consoleAPIKeysPath, "", 401},
+		{"private_repeated_slash", "/" + consoleAPIKeysPath, "", 401},
+		{"unknown_private", "/api/unknown", "", 401},
+		{"encoded_dot", "/%2e/v1/agents", "", 401},
+		{"encoded_parent", "/api/%2e%2e/v1/agents", "", 401},
+		{"encoded_slash", "/v1%2fapi/agents", "", 401},
 		{"raw_public_to_private", "/v1/.." + consoleAPIKeysPath, "", 401},
 		{"encoded_public_to_private", "/%761/.." + consoleAPIKeysPath, "", 401},
 		{"private_to_public", "/api/../v1/agents", "", 401},
@@ -426,7 +283,7 @@ func TestPrivateLegacyBearerCanonicalization(t *testing.T) {
 				t.Fatal("public boundary provisioned or refreshed a human")
 			}
 			if tc.location != "" {
-				assertOwnedResponse(t, ownedFirstHop(t, s.url, tc.location, headers), 200)
+				assertOwnedResponse(t, ownedFirstHop(t, s.url, tc.location, headers), 401)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
@@ -29,12 +30,7 @@ func ownedFirstHop(t *testing.T, base, path string, headers http.Header) *http.R
 func TestPublicHumanCanonicalizationDoesNotSignIn(t *testing.T) {
 	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
 		t.Run(string(mode), func(t *testing.T) {
-			s := newLaneServerWith(t, func(c *identity.Config) {
-				c.Mode = mode
-				if mode == identity.ModeTrustedProxy {
-					c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
-				}
-			})
+			s := newNativeServer(t, login.Mode(mode))
 			for _, state := range []string{"new", "existing", "deactivated"} {
 				for _, tc := range []struct{ name, path, target string }{
 					{"repeated_slash", "//v1/agents", "/v1/agents"},
@@ -47,7 +43,7 @@ func TestPublicHumanCanonicalizationDoesNotSignIn(t *testing.T) {
 					{"dual_file", "//v1/files/file_nonexistent/content", "/v1/files/file_nonexistent/content"},
 				} {
 					t.Run(state+"/"+tc.name, func(t *testing.T) {
-						claims := s.claims("platform-admins")
+						claims := s.idp.Claims(laneAudience, time.Now())
 						claims["sub"] = rand.Text()
 						headers := make(http.Header)
 						setToken := func() {
@@ -60,14 +56,14 @@ func TestPublicHumanCanonicalizationDoesNotSignIn(t *testing.T) {
 						}
 						setToken()
 						if state != "new" {
-							assertOwnedResponse(t, ownedFirstHop(t, s.url, consoleAPIKeysPath, headers), 200)
 							status := "active"
 							if state == "deactivated" {
 								status = "deactivated"
 							}
-							_, err := s.pool.Exec(t.Context(), `UPDATE principals SET role='user', role_source='console',
-								email='old@example.test', display_name='Old Profile',
-								last_seen_at='2026-01-01T00:00:00Z', status=$2 WHERE subject=$1`, claims["sub"], status)
+							_, err := s.pool.Exec(t.Context(), `INSERT INTO principals
+								(id,issuer,subject,role,role_source,email,display_name,last_seen_at,status)
+								VALUES ($1,$2,$3,'user','console','old@example.test','Old Profile','2026-01-01T00:00:00Z',$4)`,
+								"user_"+rand.Text(), s.idp.Issuer(), claims["sub"], status)
 							if err != nil {
 								t.Fatal(err)
 							}
@@ -101,38 +97,29 @@ func TestHumanCanonicalizationBoundaryControls(t *testing.T) {
 		for _, tc := range []struct {
 			name, path, location string
 			want                 int
-			private              bool
 		}{
-			{"raw_public_to_private", "/v1/.." + consoleAPIKeysPath, "", 401, false},
-			{"encoded_public_to_private", "/%761/.." + consoleAPIKeysPath, "", 401, false},
-			{"private_cleaning", "/other/.." + consoleAPIKeysPath, consoleAPIKeysPath, 307, true},
-			{"private_repeated_slash", "/" + consoleAPIKeysPath, consoleAPIKeysPath, 307, true},
-			{"encoded_private", "/%61pi/console/organizations/default/workspaces/default/api_keys", "", 200, true},
-			{"encoded_dot_is_literal", "/%2e/v1/agents", "", 404, true},
-			{"encoded_parent_is_literal", "/api/%2e%2e/v1/agents", "", 404, true},
-			{"encoded_slash_is_literal", "/v1%2fapi/agents", "", 404, true},
+			{"raw_public_to_private", "/v1/.." + consoleAPIKeysPath, "", 401},
+			{"encoded_public_to_private", "/%761/.." + consoleAPIKeysPath, "", 401},
+			{"private_cleaning", "/other/.." + consoleAPIKeysPath, "", 401},
+			{"private_repeated_slash", "/" + consoleAPIKeysPath, "", 401},
+			{"encoded_private", "/%61pi/console/organizations/default/workspaces/default/api_keys", "", 200},
+			{"encoded_dot_is_literal", "/%2e/v1/agents", "", 401},
+			{"encoded_parent_is_literal", "/api/%2e%2e/v1/agents", "", 401},
+			{"encoded_slash_is_literal", "/v1%2fapi/agents", "", 401},
 		} {
 			t.Run(string(mode)+"/"+tc.name, func(t *testing.T) {
-				s := newLaneServerWith(t, func(c *identity.Config) {
-					c.Mode = mode
-					if mode == identity.ModeTrustedProxy {
-						c.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
-					}
-				})
-				headers := make(http.Header)
-				if mode == identity.ModeOIDC {
-					headers.Set("Authorization", "Bearer "+s.token("platform-admins"))
-				} else {
-					headers.Set("X-Goog-IAP-JWT-Assertion", s.token("platform-admins"))
-				}
+				s := newNativeServer(t, login.Mode(mode))
+				owner := ownedPrincipalFixture(t, s.pool, "user", "admin")
+				cookie, session := s.issue(owner)
+				headers := nativeHeaders(cookie, session.CSRFToken)
 				before := ownedDurableSnapshot(t, s.pool)
 				res := ownedFirstHop(t, s.url, tc.path, headers)
 				if location := res.Header.Get("Location"); location != tc.location {
 					t.Errorf("location=%q want=%q", location, tc.location)
 				}
 				assertOwnedResponse(t, res, tc.want)
-				if changed := ownedDurableSnapshot(t, s.pool) != before; changed != tc.private {
-					t.Fatalf("persisted principal changed=%t want=%t", changed, tc.private)
+				if ownedDurableSnapshot(t, s.pool) != before {
+					t.Fatal("cookie boundary requests changed durable keys or principals")
 				}
 				if tc.location != "" {
 					assertOwnedResponse(t, ownedFirstHop(t, s.url, tc.location, headers), 200)

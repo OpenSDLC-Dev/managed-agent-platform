@@ -25,14 +25,9 @@ type Tokens struct {
 	CacheRead  int64
 }
 
-// limited is what a key's TPM counts: every token but a cache read, as
-// Anthropic's own limits count them (platform.claude.com/docs/en/api/rate-limits,
-// "Cache-aware ITPM", read 2026-10-07).
-func (t Tokens) limited() int64 { return t.Input + t.CacheWrite + t.Output }
-
 // Usage is one request in the ledger. A deployment test's attempt (the admin
-// API's test route) is one too, under the authenticated human principal (or
-// the key id "admin" for a legacy bootstrap call) and endpoint "deployment_test",
+// API's test route) is one too, under the authenticated human principal
+// and endpoint "deployment_test",
 // with the deployment's upstream id for its model and no alias: no inference
 // API key made it, and its tokens cost what a call's do.
 type Usage struct {
@@ -75,12 +70,12 @@ func (s *Store) exec(ctx context.Context, sql string, args ...any) error {
 // statement. The ledger and each token-window transaction start independently
 // under the caller's deadline. They share the connection pool. All writes reuse
 // one database completion timestamp, including across minute/day boundaries.
-// Tokens feed both windows even if the ledger rejects the row.
+// Tokens feed the model window even if the ledger rejects the row.
 // Cost is computed here, at the prices the deployment has now, a
 // missing price costing nothing and missing tokens making no cost; it is
 // returned, nil when the row has none, was not written, or holds one no
 // float64 can.
-func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*float64, error) {
+func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 	var completed time.Time
 	if err := s.pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&completed); err != nil {
 		return nil, err
@@ -90,7 +85,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 		in, out, cw, cr = &t.Input, &t.Output, &t.CacheWrite, &t.CacheRead
 	}
 	var windows sync.WaitGroup
-	var modelErr, keyErr error
+	var modelErr error
 	if t := u.Tokens; t != nil {
 		if u.Alias != "" {
 			windows.Go(func() {
@@ -101,15 +96,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 					u.Alias, t.Input+t.CacheWrite, t.Output, completed)
 			})
 		}
-		if tpmLimited {
-			windows.Go(func() {
-				keyErr = s.exec(ctx, `
-					INSERT INTO modelgateway.rate_windows AS w (api_key_id, minute, tokens)
-					VALUES ($1, date_trunc('minute', $3::timestamptz), $2)
-					ON CONFLICT (api_key_id, minute) DO UPDATE SET tokens = w.tokens + EXCLUDED.tokens`,
-					u.APIKeyID, t.limited(), completed)
-			})
-		}
+
 	}
 	var ttft *int64
 	if u.TTFT > 0 {
@@ -150,7 +137,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage, tpmLimited bool) (*flo
 			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, u.PrincipalID, completed).Scan(&cost)
 	})
 	windows.Wait()
-	windowErr := errors.Join(modelErr, keyErr)
+	windowErr := modelErr
 	if ledgerErr != nil || cost == nil {
 		return nil, errors.Join(windowErr, ledgerErr)
 	}
@@ -333,10 +320,7 @@ func (s *Store) SweepUsage(ctx context.Context, keep time.Duration) (int64, erro
 			}
 			n = tag.RowsAffected()
 			if n < sweepBatch {
-				_, err = tx.Exec(ctx, `DELETE FROM modelgateway.rate_windows WHERE minute < now() - interval '1 hour'`)
-				if err == nil {
-					_, err = tx.Exec(ctx, `DELETE FROM modelgateway.model_rate_windows WHERE minute < now() - interval '1 hour'`)
-				}
+				_, err = tx.Exec(ctx, `DELETE FROM modelgateway.model_rate_windows WHERE minute < now() - interval '1 hour'`)
 			}
 			return err
 		})

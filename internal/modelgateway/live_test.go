@@ -504,8 +504,8 @@ func TestLiveThinkingRoundTrip(t *testing.T) {
 	vp := e.provider(down.URL, func(p *store.Provider) { p.Name = "vectors" })
 	e.credential(vp, "sk-vectors-key1", 1)
 	e.alias("vectors", target(e.deployment(vp, "vectors", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	narrow := e.key(append(slices.Clone(chat[1:]), "vectors"))
-	key := e.key(everyAlias)
+	narrow := e.key()
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 

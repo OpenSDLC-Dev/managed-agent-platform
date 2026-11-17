@@ -90,15 +90,8 @@ func TestModelClaimRefusesMissingAndRemovedInitiators(t *testing.T) {
 			if err != nil || item == nil {
 				t.Fatalf("claim: %v %v", item, err)
 			}
-			allowed := actor == "apikey_archived" || actor == "principal_deleted_before_retention"
-			if (item.InferenceToken != "") != allowed {
+			if item.InferenceToken != "" {
 				t.Fatalf("token admission for %q = %t", actor, item.InferenceToken != "")
-			}
-			if allowed {
-				p, err := inferencetoken.Authenticate(ctx, pool, item.InferenceToken)
-				if err != nil || p.APIKeyID != actor || p.PrincipalID != "" {
-					t.Fatalf("legacy authority: %+v %v", p, err)
-				}
 			}
 			if err := q.Complete(ctx, pool, item); err != nil {
 				t.Fatalf("refusal must retain the normal lease: %v", err)
@@ -107,13 +100,32 @@ func TestModelClaimRefusesMissingAndRemovedInitiators(t *testing.T) {
 	}
 }
 
+func TestOutstandingLegacyInferenceTokenIsRefused(t *testing.T) {
+	ctx := t.Context()
+	pool := pgtest.NewPool(t)
+	sid, eid := pgtest.NewSession(t, pool, "cloud")
+	q := queue.New(pool)
+	if _, err := q.Enqueue(ctx, pool, eid, sid, queue.ModelTurn); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.Claim(ctx, queue.ModelTurn, time.Minute)
+	if err != nil || item == nil || item.InferenceToken == "" {
+		t.Fatalf("claim: %v %v", item, err)
+	}
+	// An old binary may have minted this row before the rolling update.
+	if _, err := pool.Exec(ctx, `UPDATE inference_tokens SET principal_id=NULL,api_key_id='old-unowned' WHERE work_id=$1`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	p, err := inferencetoken.Authenticate(ctx, pool, item.InferenceToken)
+	if err != nil || p.WorkID != "" {
+		t.Fatalf("legacy claim still carries authority: %+v %v", p, err)
+	}
+}
+
 func TestModelClaimDoesNotLockItsSession(t *testing.T) {
 	ctx := t.Context()
 	pool := pgtest.NewPool(t)
 	sid, eid := pgtest.NewSession(t, pool, "cloud")
-	if _, err := pool.Exec(ctx, `UPDATE sessions SET initiator_principal_id=NULL,initiator_api_key_id=NULL,created_by='legacy' WHERE id=$1`, sid); err != nil {
-		t.Fatal(err)
-	}
 	q := queue.New(pool)
 	if _, err := q.Enqueue(ctx, pool, eid, sid, queue.ModelTurn); err != nil {
 		t.Fatal(err)
@@ -138,7 +150,7 @@ func TestModelClaimRollsBackWhenMintFails(t *testing.T) {
 	ctx := t.Context()
 	pool := pgtest.NewPool(t)
 	sid, eid := pgtest.NewSession(t, pool, "cloud")
-	if _, err := pool.Exec(ctx, `UPDATE sessions SET initiator_principal_id=NULL,initiator_api_key_id=NULL,created_by='legacy';ALTER TABLE inference_tokens ADD CONSTRAINT reject_mint CHECK(false) NOT VALID`); err != nil {
+	if _, err := pool.Exec(ctx, `ALTER TABLE inference_tokens ADD CONSTRAINT reject_mint CHECK(false) NOT VALID`); err != nil {
 		t.Fatal(err)
 	}
 	q := queue.New(pool)
@@ -177,7 +189,7 @@ func TestModelClaimDelegatesMemberAuthority(t *testing.T) {
 		t.Fatal("a user member's model turn was refused")
 	}
 	p, err := inferencetoken.Authenticate(ctx, pool, item.InferenceToken)
-	if err != nil || p.PrincipalID != "principal_initiator" || p.SessionID != string(sid) || p.APIKeyID != "" {
+	if err != nil || p.PrincipalID != "principal_initiator" || p.SessionID != string(sid) {
 		t.Fatalf("delegated authority: %+v %v", p, err)
 	}
 	if err := q.Extend(ctx, item, 2*time.Minute); err != nil {

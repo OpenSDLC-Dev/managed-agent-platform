@@ -203,43 +203,42 @@ func TestOwnedKeyAssignment(t *testing.T) {
 			t.Fatal("cookie fallback minted key")
 		}
 		for _, body := range []string{`{"name":"legacy"}`, `{"name":"legacy-null","principal_id":null}`} {
-			obj := ownedObject(t, expectManagement(t, s, "POST", consoleAPIKeysPath, body, h, 200))
-			if obj["principal"] != nil {
-				t.Fatal("selected machine gained an owner")
-			}
+			expectManagement(t, s, "POST", consoleAPIKeysPath, body, h, 401)
 		}
+
 	})
 	for _, mode := range []login.Mode{login.ModeOIDC, login.ModeTrustedProxy} {
 		t.Run(string(mode), func(t *testing.T) {
-			humanServer := newNativeServer(t, mode)
-			h := nativeHeaders("", "")
-			token := humanServer.idp.Mint(t, humanServer.idp.Claims(laneAudience, time.Now()))
-			if mode == login.ModeOIDC {
-				h.Set("Authorization", "Bearer "+token)
-			} else {
-				h.Set("X-Goog-IAP-JWT-Assertion", token)
+			hs := newNativeServer(t, mode)
+			caller := hs.seedLocal("cookie-owner", "developer", "active")
+			cookie, session := hs.issue(caller)
+			h := nativeHeaders(cookie, session.CSRFToken)
+			token := hs.idp.Mint(t, hs.idp.Claims(laneAudience, time.Now()))
+			field := "Authorization"
+			value := "Bearer " + token
+			if mode == login.ModeTrustedProxy {
+				field = "X-Goog-IAP-JWT-Assertion"
+				value = token
 			}
-			expectManagement(t, humanServer, "GET", consoleAPIKeysPath, "", h, 403)
-			var caller string
-			if err := humanServer.pool.QueryRow(t.Context(), `UPDATE principals SET role='developer' WHERE subject='user-1' RETURNING id`).Scan(&caller); err != nil {
-				t.Fatal(err)
+			h.Set(field, value)
+			before := ownedSnapshot(t, hs)
+			want := 401
+			if mode == login.ModeTrustedProxy {
+				want = 200
 			}
-			cookie, session := humanServer.issue(caller)
-			h.Set("Cookie", cookie)
-			h.Set("X-CSRF-Token", session.CSRFToken)
-			before := ownedSnapshot(t, humanServer)
-			expectManagement(t, humanServer, "POST", consoleAPIKeysPath, fmt.Sprintf(`{"name":"explicit","principal_id":%q}`, session.ID), h, 401)
-			if before != ownedSnapshot(t, humanServer) {
-				t.Fatal("legacy human named owner with companion cookie")
-			}
-			for _, body := range []string{`{"name":"implicit"}`, `{"name":"implicit-null","principal_id":null}`} {
-				obj := ownedObject(t, expectManagement(t, humanServer, "POST", consoleAPIKeysPath, body, h, 200))
-				if !reflect.DeepEqual(obj["principal"], map[string]any{"type": "user_actor", "user_id": session.ID}) {
-					t.Errorf("legacy human owner=%v", obj["principal"])
+			obj := expectManagement(t, hs, "POST", consoleAPIKeysPath, `{"name":"implicit"}`, h, want)
+			if want == 401 {
+				if ownedSnapshot(t, hs) != before {
+					t.Fatal("Bearer with cookie changed keys")
 				}
+				return
+			}
+			if got := ownedObject(t, obj)["principal"]; !reflect.DeepEqual(got, map[string]any{"type": "user_actor", "user_id": session.ID}) {
+				t.Errorf("cookie owner=%v", got)
 			}
 		})
 	}
+
 }
 
 // A genuine pre-cutover human-issued unowned row. Never disable the INSERT
@@ -292,20 +291,18 @@ func historicalKeyServer(t *testing.T) (*nativeServer, string, string) {
 	pool := preIssuerPool(t)
 	s := &nativeServer{tserver: &tserver{t: t, pool: pool}, manager: login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})}
 	developer := seedMember(t, s, "historical-issuer", "developer", "console")
-	_, old, err := api.IssueManagementKey(t.Context(), pool, "legacy-human", nil, developer)
-	if err != nil {
+	old := insertHistoricalKey(t, pool, "legacy-human", "historical-issued-key")
+	if _, err := pool.Exec(t.Context(), "UPDATE api_keys SET created_by=$2 WHERE id=$1", old, developer); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Migrate(t.Context(), pool); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.EnsureAPIKey(t.Context(), pool, "test", testKey); err != nil {
-		t.Fatal(err)
-	}
+	insertHistoricalKey(t, pool, "test", testKey)
 	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil, api.WithLogin(s.manager, nil)))
 	t.Cleanup(srv.Close)
 	s.url = srv.URL
-	return s, developer, old.ID
+	return s, developer, old
 }
 
 func TestOwnedKeyRowPermissions(t *testing.T) {

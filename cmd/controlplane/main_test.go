@@ -12,17 +12,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestMain(m *testing.M) { os.Exit(pgtest.Main(m)) }
@@ -40,12 +36,14 @@ func setupIdentityEnv(t *testing.T, mode, roleMap string) {
 	} {
 		t.Setenv(name, "")
 	}
+	t.Setenv("CONSOLE_PUBLIC_ORIGIN", "https://console.example")
 	if mode == "trusted_proxy" {
 		t.Setenv("IDENTITY_PROXY_PRESET", "gcp-iap")
 		t.Setenv("IDENTITY_PROXY_AUDIENCE", "/projects/example/global/backendServices/test")
 	} else {
 		t.Setenv("IDENTITY_OIDC_ISSUER", "https://idp.example")
 		t.Setenv("IDENTITY_OIDC_AUDIENCE", "console")
+		t.Setenv("IDENTITY_OIDC_CLIENT_ID", "console")
 	}
 }
 
@@ -127,8 +125,7 @@ func TestSetupCodeDeliveryFailure(t *testing.T) {
 	// A regular-file parent fails even when a root test process bypasses chmod.
 	t.Setenv("TMPDIR", blocked)
 	t.Setenv("DATABASE_URL", pool.Config().ConnString())
-	t.Setenv("CONTROLPLANE_API_KEY", "startup-test-key")
-	t.Setenv("BRAIN_API_KEY", "")
+
 	t.Setenv("BLOB_BACKEND", "stop-after-setup")
 	var logs bytes.Buffer
 	old := slog.Default()
@@ -168,8 +165,7 @@ func TestStartupAdminMapInvalidatesOldSetupCodes(t *testing.T) {
 		t.Fatalf("could not mint the old configuration's code: %v", err)
 	}
 	t.Setenv("DATABASE_URL", pool.Config().ConnString())
-	t.Setenv("CONTROLPLANE_API_KEY", "startup-test-key")
-	t.Setenv("BRAIN_API_KEY", "")
+
 	t.Setenv("BLOB_BACKEND", "stop-after-setup")
 	temp := t.TempDir()
 	t.Setenv("TMPDIR", temp)
@@ -205,7 +201,7 @@ func TestStartupNativeHTTP(t *testing.T) {
 	listener.Close()
 	origin := "http://" + addr
 	temp := t.TempDir()
-	for key, value := range map[string]string{"DATABASE_URL": pool.Config().ConnString(), "CONTROLPLANE_API_KEY": "native-startup-test-key", "BRAIN_API_KEY": "", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": origin, "CONTROLPLANE_ADDR": addr, "BLOB_BACKEND": "", "SECRETS_BACKEND": "", "DREAM_TICK_INTERVAL": "0", "TMPDIR": temp} {
+	for key, value := range map[string]string{"DATABASE_URL": pool.Config().ConnString(), "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": origin, "CONTROLPLANE_ADDR": addr, "BLOB_BACKEND": "", "SECRETS_BACKEND": "", "DREAM_TICK_INTERVAL": "0", "TMPDIR": temp} {
 		t.Setenv(key, value)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -245,6 +241,10 @@ func TestStartupNativeHTTP(t *testing.T) {
 		case <-deadline:
 			t.Fatal("native startup did not listen")
 		}
+	}
+	var keys int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM api_keys`).Scan(&keys); err != nil || keys != 0 {
+		t.Fatalf("startup must not seed any API key: count=%d err=%v", keys, err)
 	}
 	entries, err := os.ReadDir(temp)
 	if err != nil || len(entries) != 1 {
@@ -415,8 +415,7 @@ func TestStartupSetupCode(t *testing.T) {
 			setupIdentityEnv(t, tc.mode, tc.roleMap)
 			pool := pgtest.NewPool(t)
 			t.Setenv("DATABASE_URL", pool.Config().ConnString())
-			t.Setenv("CONTROLPLANE_API_KEY", "startup-test-key")
-			t.Setenv("BRAIN_API_KEY", "")
+
 			// Stop run after setup, before any backend or IdP network call.
 			t.Setenv("BLOB_BACKEND", "stop-after-setup")
 			temp := t.TempDir()
@@ -425,8 +424,13 @@ func TestStartupSetupCode(t *testing.T) {
 			old := slog.Default()
 			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
 			defer slog.SetDefault(old)
-			if err := run(context.Background()); err == nil || !strings.Contains(err.Error(), `unknown BLOB_BACKEND "stop-after-setup"`) {
-				t.Fatalf("startup did not reach the stop point: %v", err)
+			err := run(context.Background())
+			want := `unknown BLOB_BACKEND "stop-after-setup"`
+			if tc.mode == "" || tc.mode == "disabled" {
+				want = "login: IDENTITY_MODE must be"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("startup error=%v want %q", err, want)
 			}
 			var codes, flags int
 			if err := pool.QueryRow(context.Background(), `SELECT (SELECT count(*) FROM setup_codes),
@@ -465,190 +469,4 @@ func TestStartupSetupCode(t *testing.T) {
 			}
 		})
 	}
-}
-
-func buildPresetControlplane(t *testing.T) string {
-	t.Helper()
-	binary := filepath.Join(t.TempDir(), "controlplane")
-	cmd := exec.Command("go", "build", "-o", binary, ".")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build actual controlplane: %v\n%s", err, out)
-	}
-	return binary
-}
-
-func presetStartupRows(t *testing.T, pool *pgxpool.Pool) string {
-	t.Helper()
-	var rows string
-	if err := pool.QueryRow(context.Background(), `SELECT jsonb_agg(to_jsonb(k) ORDER BY id)::text FROM api_keys k`).Scan(&rows); err != nil {
-		t.Fatal(err)
-	}
-	return rows
-}
-
-func seedStartupOwned(t *testing.T, pool *pgxpool.Pool, raw, state string) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := pool.Exec(ctx, `INSERT INTO principals (id,issuer,subject,role) VALUES ('principal_owner','startup-test','owner','developer')`); err != nil {
-		t.Fatal(err)
-	}
-	status := state
-	if state == "expired" {
-		status = "active"
-	}
-	if _, err := pool.Exec(ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
-		VALUES ('apikey_owned','owned','principal_owner',$1,'principal_owner',$2,
-		CASE WHEN $3 THEN now() - interval '1 hour' ELSE NULL END)`, apikey.Hash(raw), status, state == "expired"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// The actual executable, rather than a reconstructed handler, owns the listener
-// and startup side effects. A refused start must exit, not merely time out.
-func runPresetControlplane(t *testing.T, binary string, pool *pgxpool.Pool, boot, brain string, refuse bool) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	listener.Close()
-	temp := t.TempDir()
-	log, err := os.CreateTemp(t.TempDir(), "startup-log")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
-	cmd := exec.Command(binary)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "TMPDIR=" + temp,
-		"DATABASE_URL=" + pool.Config().ConnString(), "CONTROLPLANE_API_KEY=" + boot, "BRAIN_API_KEY=" + brain,
-		"CONTROLPLANE_ADDR=" + addr, "IDENTITY_MODE=password", "DEVELOPMENT_MODE=true",
-		"CONSOLE_PUBLIC_ORIGIN=http://" + addr, "DREAM_TICK_INTERVAL=0"}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout, cmd.Stderr = log, log
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	pid := cmd.Process.Pid
-	t.Logf("created controlplane pid=%d pgid=%d loopback=%s", pid, pid, addr)
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	waited := false
-	defer func() {
-		if !waited {
-			_ = syscall.Kill(-pid, syscall.SIGTERM)
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Errorf("controlplane orderly shutdown: %v", err)
-				}
-			case <-time.After(10 * time.Second):
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-				<-done
-				t.Error("controlplane required forced cleanup")
-			}
-		}
-		if err := syscall.Kill(-pid, 0); !errors.Is(err, syscall.ESRCH) {
-			t.Errorf("owned process group still exists: %v", err)
-		} else {
-			t.Logf("removed controlplane pid=%d pgid=%d; group absent", pid, pid)
-		}
-		if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
-			conn.Close()
-			t.Error("owned loopback listener survived exit")
-		}
-		entries, err := os.ReadDir(temp)
-		if err != nil || len(entries) != 0 {
-			t.Errorf("startup left temporary delivery resources: entries=%d err=%v", len(entries), err)
-		}
-	}()
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 200 * time.Millisecond}
-	defer client.CloseIdleConnections()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	deadline := time.After(20 * time.Second)
-	for {
-		select {
-		case err := <-done:
-			waited = true
-			raw, readErr := os.ReadFile(log.Name())
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			if !refuse || err == nil {
-				t.Fatalf("startup exit=%v; want refused=%t", err, refuse)
-			}
-			if !bytes.Contains(raw, []byte("principal-owned API key")) {
-				t.Errorf("startup omitted safe owned-preset refusal: %s", raw)
-			}
-			if bytes.Contains(raw, []byte(boot)) || (brain != "" && bytes.Contains(raw, []byte(brain))) || bytes.Contains(raw, []byte("listening")) || bytes.Contains(raw, []byte("setup_code_file")) {
-				t.Error("refusal exposed a credential, listener or setup delivery")
-			}
-			var codes int
-			if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM setup_codes`).Scan(&codes); err != nil || codes != 0 {
-				t.Errorf("refusal reached setup mint: codes=%d err=%v", codes, err)
-			}
-			return
-		case <-ticker.C:
-			res, err := client.Get("http://" + addr + "/api/auth/config")
-			if err != nil {
-				continue
-			}
-			res.Body.Close()
-			if refuse {
-				t.Errorf("owned preset exposed actual controlplane listener: HTTP %d", res.StatusCode)
-			} else if res.StatusCode != http.StatusOK {
-				t.Errorf("unowned control did not serve native auth config: HTTP %d", res.StatusCode)
-			}
-			return
-		case <-deadline:
-			t.Fatal("startup neither exited nor exposed its test-owned listener")
-		}
-	}
-}
-
-func TestPresetPreparationIsAtomic(t *testing.T) {
-	binary := buildPresetControlplane(t)
-	pool := pgtest.NewPool(t)
-	ctx := context.Background()
-	for _, name := range []string{"bootstrap", "brain"} {
-		if err := api.EnsureAPIKey(ctx, pool, name, "previous-"+name); err != nil {
-			t.Fatal(err)
-		}
-	}
-	const owned = "synthetic-owned-brain-preset"
-	seedStartupOwned(t, pool, owned, "active")
-	before := presetStartupRows(t, pool)
-	runPresetControlplane(t, binary, pool, "replacement-bootstrap", owned, true)
-	if presetStartupRows(t, pool) != before {
-		t.Error("failed startup changed prior presets: bootstrap rotated before the brain collision")
-	}
-}
-
-func TestControlplaneRefusesAnOwnedPreset(t *testing.T) {
-	binary := buildPresetControlplane(t)
-	for _, name := range []string{"bootstrap", "brain"} {
-		for _, state := range []string{"active", "inactive", "archived", "expired"} {
-			t.Run(name+"/"+state, func(t *testing.T) {
-				pool := pgtest.NewPool(t)
-				const owned = "synthetic-owned-startup-preset"
-				seedStartupOwned(t, pool, owned, state)
-				boot, brain := "unowned-bootstrap", "unowned-brain"
-				if name == "bootstrap" {
-					boot = owned
-				} else {
-					brain = owned
-				}
-				before := presetStartupRows(t, pool)
-				runPresetControlplane(t, binary, pool, boot, brain, true)
-				if presetStartupRows(t, pool) != before {
-					t.Error("refused startup changed key rows")
-				}
-			})
-		}
-	}
-	t.Run("unowned control", func(t *testing.T) {
-		pool := pgtest.NewPool(t)
-		runPresetControlplane(t, binary, pool, "unowned-bootstrap", "unowned-brain", false)
-	})
 }

@@ -62,7 +62,7 @@ func TestLiveChatCompletions(t *testing.T) {
 			refusals = append(refusals, newRoute(v, host, model, "refuse-"+model))
 		}
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 

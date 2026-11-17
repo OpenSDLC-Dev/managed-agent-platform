@@ -98,8 +98,8 @@ func TestMembersCookieOnly(t *testing.T) {
 		expectManagement(t, s, "PUT", path, "", h, 405)
 		expectManagement(t, s, "PUT", path, "", http.Header{"X-Api-Key": {testKey}}, 401)
 	}
-	// Existing private key management retains the machine lane; developer sees only owned rows.
-	expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default/api_keys", "", http.Header{"X-Api-Key": {testKey}}, 200)
+	// Every private key route requires a cookie; developers see only owned rows.
+	expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default/api_keys", "", http.Header{"X-Api-Key": {testKey}}, 401)
 	expectManagement(t, s, "GET", "/api/console/organizations/default/workspaces/default/api_keys", "", nativeHeaders(devCookie, devSession.CSRFToken), 200)
 	legacy := newTestServer(t)
 	res := legacy.doRaw("GET", membersPath, nil, map[string]string{"x-api-key": testKey})

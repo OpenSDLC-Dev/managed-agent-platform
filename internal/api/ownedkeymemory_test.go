@@ -48,6 +48,7 @@ func TestOwnedKeyMemoryActors(t *testing.T) {
 					raw, keyID = issueOwnedHTTP(t, ns, headers, "memory service writer", &ownerAlias)
 					adminRaw, adminKeyID = issueOwnedHTTP(t, ns, headers, "memory service admin", &adminAlias)
 				}
+				s.key = adminRaw
 				headers := ownedHeaders(header, raw)
 				store := createMemoryStore(t, s, "owned actors")
 				base := "/v1/memory_stores/" + store
@@ -98,6 +99,7 @@ func TestOwnedKeyMemoryActors(t *testing.T) {
 		s := newNativeServer(t, login.ModePassword)
 		owner := s.seedLocal("writer", "developer", "active")
 		cookie, session := s.issue(owner)
+		s.key, _ = issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "fixture reader", nil)
 		store := createMemoryStore(t, s.tserver, "cookie actor")
 		path := "/api/organizations/default/proxy/v1/memory_stores/" + store
 		res, raw := s.request("POST", path+"/memories", `{"path":"/cookie.md","content":"human"}`, nativeHeaders(cookie, session.CSRFToken))

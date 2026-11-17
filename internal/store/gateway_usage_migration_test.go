@@ -42,7 +42,7 @@ func TestGatewayPrincipalUsagePreservesHistoryAndOldWriters(t *testing.T) {
 	}
 	s := gatewaystore.New(pool)
 	_, err = s.RecordUsage(ctx, gatewaystore.Usage{RequestID: "new", APIKeyID: "key_owned", PrincipalID: "principal_owner",
-		Model: "fast", Alias: "fast", DeploymentID: "dep_1", CredentialID: "cred_1", Protocol: "anthropic", Endpoint: "messages", Status: 200}, false)
+		Model: "fast", Alias: "fast", DeploymentID: "dep_1", CredentialID: "cred_1", Protocol: "anthropic", Endpoint: "messages", Status: 200})
 	if err != nil {
 		t.Fatal(err)
 	}

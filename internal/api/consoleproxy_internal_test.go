@@ -65,7 +65,7 @@ func TestPrivateProxyForwardingContext(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	w := httptest.NewRecorder()
-	s.serveConsoleProxy(dispatchAuth(nil, v, mux))(w, r)
+	s.serveConsoleProxy(dispatchAuth(nil, mux))(w, r)
 	if !reached || w.Code != 204 {
 		t.Fatalf("resource dispatch reached=%t status=%d body=%s", reached, w.Code, w.Body.String())
 	}
@@ -115,7 +115,7 @@ func TestPrivateProxyResourceRedirects(t *testing.T) {
 				io.WriteString(w, "raw-redirect-body")
 			}))
 			w := httptest.NewRecorder()
-			s.serveConsoleProxy(dispatchAuth(nil, nil, mux))(w, r)
+			s.serveConsoleProxy(dispatchAuth(nil, mux))(w, r)
 			if w.Code != 307 || w.Header().Get("Location") != tc.want || w.Body.String() != "raw-redirect-body" || w.Header().Get("Content-Type") != "application/binary" || w.Header().Get("Cache-Control") != "no-store, private" {
 				t.Fatalf("redirect=%d location=%q body=%s headers=%v; want location=%q", w.Code, w.Header().Get("Location"), w.Body.String(), w.Header(), tc.want)
 			}

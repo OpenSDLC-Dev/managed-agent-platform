@@ -27,19 +27,16 @@ func ownedKeyFrom(ctx context.Context) (apiKeyAuthority, bool) {
 	return authority, ok
 }
 
-// authenticateManagementKey is control-plane-only. The shared legacy apikey
-// lookup cannot admit owned digests to private APIs; gateway inference has its
-// own current-owner check.
+// authenticateManagementKey admits only principal-owned public credentials.
+// Gateway inference has its own current-owner check.
 // Read the owner and credential in one snapshot; this is not an IdP sign-in.
 func authenticateManagementKey(ctx context.Context, db apikey.Querier, raw string) (apiKeyAuthority, error) {
 	var authority apiKeyAuthority
-	err := db.QueryRow(ctx, `SELECT k.id, coalesce(k.owner_principal_id,''),
-		coalesce(p.kind,''), coalesce(p.role,'')
-		FROM api_keys k LEFT JOIN principals p ON p.id=k.owner_principal_id
-		WHERE coalesce(k.key_hash,k.owned_key_hash)=$1 AND k.status='active'
+	err := db.QueryRow(ctx, `SELECT k.id, p.id, p.kind, p.role
+		FROM api_keys k JOIN principals p ON p.id=k.owner_principal_id
+		WHERE k.owned_key_hash=$1 AND k.status='active'
 		  AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp())
-		  AND (k.owner_principal_id IS NULL OR
-		       (p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'))`,
+		  AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'`,
 		apikey.Hash(raw)).Scan(&authority.KeyID, &authority.OwnerID, &authority.OwnerKind, &authority.Role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return apiKeyAuthority{}, nil

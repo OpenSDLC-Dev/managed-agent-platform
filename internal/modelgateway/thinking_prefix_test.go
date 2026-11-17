@@ -50,7 +50,7 @@ func TestTheGatewaySaysWhenThinkingMayGoBackUnderAnyPrefix(t *testing.T) {
 	e.alias("to-generic", target(e.deployment(named(e, "ds-down", "deepseek", anth(down.URL)), "deepseek-flash"), 0), target(generic, 1))
 	e.alias("to-deepseek", target(e.deployment(named(e, "plain-down", "anthropic-generic", anth(down.URL)), "m"), 0), target(deepseek, 1))
 	e.alias("refused", target(e.deployment(named(e, "ds-refuse", "deepseek", anth(refuse.URL)), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
 
 	bearer := map[string]string{"Authorization": "Bearer " + key}

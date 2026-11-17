@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
@@ -33,16 +32,17 @@ const bootstrap = "sk-map-bootstrap-test-key"
 // env is a gateway over a real database and cipher, with its configuration
 // written through the store before start.
 type env struct {
-	t       *testing.T
-	ctx     context.Context
-	pool    *pgxpool.Pool
-	s       *store.Store
-	cipher  secrets.Cipher
-	url     string
-	keys    int
-	handler http.Handler
-	h2      bool         // serve the gateway over TLS, and do's requests over HTTP/2
-	httpc   *http.Client // do's client when h2 is set
+	t            *testing.T
+	ctx          context.Context
+	pool         *pgxpool.Pool
+	s            *store.Store
+	cipher       secrets.Cipher
+	url          string
+	keys         int
+	handler      http.Handler
+	adminHeaders map[string]string
+	h2           bool         // serve the gateway over TLS, and do's requests over HTTP/2
+	httpc        *http.Client // do's client when h2 is set
 }
 
 func newEnv(t *testing.T) *env {
@@ -107,26 +107,11 @@ func target(d store.Deployment, priority int) store.Target {
 	return store.Target{DeploymentID: d.ID, Priority: priority, Weight: 1}
 }
 
-// everyAlias grants a key every alias; noGrant writes no policy at all.
-var (
-	everyAlias = []string(nil)
-	noGrant    = []string{"\x00none"}
-)
-
-// key issues a platform API key and grants it aliases.
-func (e *env) key(aliases []string) string {
+// key issues an active developer-owned platform API key.
+func (e *env) key() string {
 	e.t.Helper()
 	e.keys++
-	key := fmt.Sprintf("sk-map-api01-test-%d", e.keys)
-	id := fmt.Sprintf("key_%d", e.keys)
-	_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ($1, $2, $3)`, id, id, apikey.Hash(key))
-	e.must(err)
-	if len(aliases) == 1 && aliases[0] == noGrant[0] {
-		return key
-	}
-	_, err = e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: id, Aliases: aliases})
-	e.must(err)
-	return key
+	return e.ownedKey(fmt.Sprintf("principal_fixture_%d", e.keys), "user", "developer", fmt.Sprintf("key_%d", e.keys))
 }
 
 // start loads the configuration written so far and serves the gateway.
@@ -134,7 +119,7 @@ func (e *env) start(mod ...func(*modelgateway.Config)) {
 	e.t.Helper()
 	cat, err := catalog.New(e.ctx, e.pool, time.Hour)
 	e.must(err)
-	cfg := modelgateway.Config{Catalog: cat, Store: e.s, Keys: e.pool, Cipher: e.cipher, BootstrapKey: bootstrap, Backoff: time.Millisecond}
+	cfg := modelgateway.Config{Catalog: cat, Store: e.s, Keys: e.pool, Cipher: e.cipher, Backoff: time.Millisecond}
 	for _, m := range mod {
 		m(&cfg)
 	}

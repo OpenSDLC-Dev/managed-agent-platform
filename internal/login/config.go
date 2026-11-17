@@ -47,15 +47,14 @@ func (c Config) LogValue() slog.Value { return slog.StringValue(c.String()) }
 // fields; those paths are not covered. %p on a pointer prints only its address.
 func (c Config) Format(state fmt.State, _ rune) { io.WriteString(state, c.String()) }
 
-// ConfigFromEnv parses control-plane login settings. It does not replace
-// identity.ConfigFromEnv: that parser still validates the IdP verification lane.
-// An absent public origin preserves verifier-only OIDC/trusted-proxy installs.
+// ConfigFromEnv requires native control-plane login settings. IdP verification
+// is configured separately and is used only when signing in.
 func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg, err := SessionConfigFromEnv(getenv)
 	if err != nil {
 		return Config{}, err
 	}
-	if cfg.Mode == ModeOIDC && cfg.PublicOrigin != "" {
+	if cfg.Mode == ModeOIDC {
 		cfg.OIDCClientID = strings.TrimSpace(getenv("IDENTITY_OIDC_CLIENT_ID"))
 		if cfg.OIDCClientID == "" {
 			return Config{}, errors.New("login: native OIDC requires IDENTITY_OIDC_CLIENT_ID")
@@ -73,11 +72,9 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 func SessionConfigFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{Mode: Mode(strings.TrimSpace(getenv("IDENTITY_MODE")))}
 	switch cfg.Mode {
-	case "", ModeDisabled:
-		return Config{Mode: ModeDisabled}, nil
 	case ModePassword, ModeOIDC, ModeTrustedProxy:
 	default:
-		return Config{}, errors.New("login: IDENTITY_MODE must be disabled, password, oidc or trusted_proxy")
+		return Config{}, errors.New("login: IDENTITY_MODE must be password, oidc or trusted_proxy")
 	}
 	switch getenv("DEVELOPMENT_MODE") {
 	case "", "false":
@@ -87,10 +84,11 @@ func SessionConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("login: DEVELOPMENT_MODE must be true or false")
 	}
 	cfg.PublicOrigin = getenv("CONSOLE_PUBLIC_ORIGIN")
-	if cfg.PublicOrigin != "" {
-		if _, err := parseOrigin(cfg.PublicOrigin, cfg.Development); err != nil {
-			return Config{}, err
-		}
+	if cfg.PublicOrigin == "" {
+		return Config{}, errors.New("login: CONSOLE_PUBLIC_ORIGIN is required")
+	}
+	if _, err := parseOrigin(cfg.PublicOrigin, cfg.Development); err != nil {
+		return Config{}, err
 	}
 	if cfg.Mode == ModePassword && (!cfg.Development || cfg.PublicOrigin == "") {
 		return Config{}, errors.New("login: password mode requires DEVELOPMENT_MODE=true and CONSOLE_PUBLIC_ORIGIN")

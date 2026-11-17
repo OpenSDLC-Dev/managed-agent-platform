@@ -17,12 +17,11 @@ type ModelLimit struct {
 	RPM, ITPM, OTPM *int64
 }
 
-// Admission is the shared model and legacy-key limit decision for one request.
+// Admission is the organization model limit decision for one request.
 type Admission struct {
 	Admitted   bool
-	Tokens     bool   // a retained key policy refused for tokens rather than requests
 	RetryAfter int    // seconds until the window the refusal counted in ends
-	Limit      string // organization or legacy-key dimension that refused admission
+	Limit      string // organization dimension that refused admission
 }
 
 // lockModelLimit orders configuration changes and admission, including when no
@@ -88,21 +87,20 @@ var errRateRefused = errors.New("rate limit reached")
 var errWindowMoved = errors.New("rate limit minute changed during admission")
 
 // AdmitModel counts one external request against the organization's model
-// budget and, for an unowned key, its existing policy. Both counts commit or
-// neither does. Token limits use completed usage, so in-flight calls can
+// budget. Token limits use completed usage, so in-flight calls can
 // overshoot them; RPM bounds admissions. Cache reads do not count as input.
-func (s *Store) AdmitModel(ctx context.Context, model, key string, rpm *int32, tpm *int64) (Admission, error) {
+func (s *Store) AdmitModel(ctx context.Context, model string) (Admission, error) {
 	for {
-		a, err := s.admitModel(ctx, model, key, rpm, tpm)
+		a, err := s.admitModel(ctx, model)
 		if !errors.Is(err, errWindowMoved) {
 			return a, err
 		}
-		// Roll back both counters and release all old-minute locks before
+		// Roll back the counter and release the old-minute lock before
 		// restarting. The caller's context bounds repeated contention.
 	}
 }
 
-func (s *Store) admitModel(ctx context.Context, model, key string, rpm *int32, tpm *int64) (Admission, error) {
+func (s *Store) admitModel(ctx context.Context, model string) (Admission, error) {
 	var a Admission
 	err := pgx.BeginTxFunc(ctx, s.pool, readCommitted, func(tx pgx.Tx) error {
 		if err := lockModelLimit(ctx, tx, model); err != nil {
@@ -115,7 +113,7 @@ func (s *Store) admitModel(ctx context.Context, model, key string, rpm *int32, t
 			return err
 		}
 		// Select a candidate minute after the advisory wait. Token writers and
-		// other aliases can still hold either window row; recheck after those.
+		// usage writes can still hold the window row; recheck after those.
 		var minute time.Time
 		if err := tx.QueryRow(ctx, `SELECT date_trunc('minute',clock_timestamp())`).Scan(&minute); err != nil {
 			return err
@@ -156,43 +154,11 @@ func (s *Store) admitModel(ctx context.Context, model, key string, rpm *int32, t
 		case limit.OTPM != nil && output >= *limit.OTPM:
 			a.Limit = "output_tokens_per_minute"
 		}
-		var kr, kt int64
-		// An organization refusal needs no key lock. The common clock check
-		// below still prevents a stale refusal after the model-row wait.
-		if a.Limit == "" && (rpm != nil || tpm != nil) {
-			// Do not start another wait on an obsolete key row if the model
-			// wait already crossed the boundary.
-			if err := checkMinute(); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `INSERT INTO modelgateway.rate_windows (api_key_id,minute) VALUES ($1,$2::timestamptz)
-				ON CONFLICT DO NOTHING`, key, minute); err != nil {
-				return err
-			}
-			if err := tx.QueryRow(ctx, `SELECT requests,tokens FROM modelgateway.rate_windows WHERE api_key_id=$1 AND minute=$2::timestamptz FOR UPDATE`, key, minute).
-				Scan(&kr, &kt); err != nil {
-				return err
-			}
-		}
 		if err := checkMinute(); err != nil {
 			return err
 		}
 		if a.Limit != "" {
 			return finish(true)
-		}
-		switch {
-		case tpm != nil && kt >= *tpm:
-			a.Limit, a.Tokens = "key_tokens_per_minute", true
-		case rpm != nil && kr >= int64(*rpm):
-			a.Limit = "key_requests_per_minute"
-		}
-		if a.Limit != "" {
-			return finish(true)
-		}
-		if rpm != nil || tpm != nil {
-			if _, err := tx.Exec(ctx, `UPDATE modelgateway.rate_windows SET requests=requests+1 WHERE api_key_id=$1 AND minute=$2::timestamptz`, key, minute); err != nil {
-				return err
-			}
 		}
 		_, err = tx.Exec(ctx, `UPDATE modelgateway.model_rate_windows SET requests=requests+1 WHERE model=$1 AND minute=$2::timestamptz`, model, minute)
 		if err != nil {

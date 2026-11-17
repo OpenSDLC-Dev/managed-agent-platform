@@ -38,10 +38,10 @@ its PersistentVolumes are the thing the teardown section warns about.
 **Mode 2** points the platform at Cloud SQL, Cloud Storage and Cloud KMS. Everything below
 assumes mode 2 unless it says otherwise. The switch is `existingSecret`: set it and the
 chart creates no Secret of its own and reads every credential from the one you pre-created,
-which must carry `controlplane-api-key`, `brain-api-key`, `database-url`,
+which must carry `database-url`,
 `blob-backend` (`gcs`) plus `blob-bucket`, and `secrets-backend` plus `gcpkms-key-name` —
-`brain-api-key` because `staging-values.yaml` runs the model gateway; with it off,
-`model-providers.json` takes that key's place.
+with the gateway off, add `model-providers.json`. Native OIDC also needs its configured
+client-secret key when the client is confidential.
 Object storage needs no credential key of its own since #240: it authenticates as the
 workload through Workload Identity. `existingSecret` is
 incompatible with `postgresql.enabled`, `minio.enabled` and `openbao.enabled` — the chart

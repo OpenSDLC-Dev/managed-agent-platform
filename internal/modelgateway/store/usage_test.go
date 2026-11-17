@@ -50,7 +50,7 @@ func TestRecordUsageWritesTheLedgerAndItsDay(t *testing.T) {
 		usage("key_a", "chat", partly.ID, &store.Tokens{Input: 1000, Output: 100}),
 		usage("key_a", "chat", "dep_gone", &store.Tokens{Input: 1000, Output: 100}),
 		usage("key_b", "chat", priced.ID, nil)} {
-		cost, err := s.RecordUsage(ctx, u, false)
+		cost, err := s.RecordUsage(ctx, u)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +124,7 @@ func TestADayIsAUTCDay(t *testing.T) {
 	if local == utc.Format(time.DateOnly) {
 		t.Fatalf("%s shares UTC's date", zone)
 	}
-	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil)); err != nil {
 		t.Fatal(err)
 	}
 	days, _, err := s.ListDailyUsage(ctx, store.UsageFilter{}, utc, utc, 100)
@@ -144,7 +144,7 @@ func TestListUsagePagesAndFilters(t *testing.T) {
 		usage("key_a", "x", "dep_2", nil), usage("key_b", "y", "dep_1", nil),
 	} {
 		u.SessionID = []string{"s1", "s2", "s1", "", "s2"}[i]
-		if _, err := s.RecordUsage(ctx, u, false); err != nil {
+		if _, err := s.RecordUsage(ctx, u); err != nil {
 			t.Fatal(err)
 		}
 		all = append(all, u)
@@ -190,8 +190,8 @@ func TestListUsagePagesAndFilters(t *testing.T) {
 
 func window(t *testing.T, pool *pgxpool.Pool, key string) (requests, tokens int64) {
 	t.Helper()
-	err := pool.QueryRow(context.Background(), `SELECT coalesce(sum(requests), 0), coalesce(sum(tokens), 0)
-		FROM modelgateway.rate_windows WHERE api_key_id = $1 AND minute = date_trunc('minute', now())`, key).Scan(&requests, &tokens)
+	err := pool.QueryRow(context.Background(), `SELECT coalesce(sum(requests), 0), coalesce(sum(input_tokens+output_tokens), 0)
+		FROM modelgateway.model_rate_windows WHERE model = $1 AND minute = date_trunc('minute', now())`, key).Scan(&requests, &tokens)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,72 +213,6 @@ func clearOfAMinute(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-// RPM admits a key's requests until the minute's count reaches it and does
-// not count the ones it refuses; TPM admits while the minute's completed
-// tokens — a cache read not among them — are under it. Each refusal says
-// which limit, and how long until the window ends. An earlier minute counts
-// for nothing.
-func TestAdmitCountsRequestsAndTokens(t *testing.T) {
-	s, pool := newStore(t)
-	ctx := context.Background()
-	clearOfAMinute(t, pool)
-	rpm, tpm := int32(2), int64(1000)
-
-	if _, err := pool.Exec(ctx, `INSERT INTO modelgateway.rate_windows (api_key_id, minute, requests, tokens)
-		VALUES ('key_r', date_trunc('minute', now()) - interval '2 minutes', 100, 100000)`); err != nil {
-		t.Fatal(err)
-	}
-	for i, want := range []bool{true, true, false, false} {
-		a, err := s.AdmitModel(ctx, "x", "key_r", &rpm, nil)
-		if err != nil || a.Admitted != want || a.Tokens || a.RetryAfter < 1 || a.RetryAfter > 60 {
-			t.Errorf("request %d: %+v, %v; want admitted %t", i, a, err, want)
-		}
-	}
-	if r, _ := window(t, pool, "key_r"); r != 2 {
-		t.Errorf("the window counted %d requests, want the 2 admitted", r)
-	}
-
-	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || !a.Admitted {
-		t.Fatalf("the first request: %+v, %v", a, err)
-	}
-	u := usage("key_t", "x", "dep_1", &store.Tokens{Input: 600, Output: 300, CacheWrite: 50, CacheRead: 50000})
-	if _, err := s.RecordUsage(ctx, u, true); err != nil {
-		t.Fatal(err)
-	}
-	if _, tok := window(t, pool, "key_t"); tok != 950 {
-		t.Errorf("the window counted %d tokens, want 950 without the cache read", tok)
-	}
-	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || !a.Admitted {
-		t.Errorf("under the limit: %+v, %v", a, err)
-	}
-	if _, err := s.RecordUsage(ctx, usage("key_t", "x", "dep_1", &store.Tokens{Input: 50}), true); err != nil {
-		t.Fatal(err)
-	}
-	if a, err := s.AdmitModel(ctx, "x", "key_t", nil, &tpm); err != nil || a.Admitted || !a.Tokens {
-		t.Errorf("at the limit: %+v, %v; want refused for tokens", a, err)
-	}
-	// With both limits set, the refusal names the one reached.
-	both, one := int32(5), int32(1)
-	if _, err := s.RecordUsage(ctx, usage("key_both", "x", "dep_1", &store.Tokens{Input: 1000}), true); err != nil {
-		t.Fatal(err)
-	}
-	if a, err := s.AdmitModel(ctx, "x", "key_both", &both, &tpm); err != nil || a.Admitted || !a.Tokens {
-		t.Errorf("both limits, tokens reached: %+v, %v", a, err)
-	}
-	for i, want := range []bool{true, false} {
-		if a, err := s.AdmitModel(ctx, "x", "key_rpm", &one, &tpm); err != nil || a.Admitted != want || a.Tokens {
-			t.Errorf("both limits, request %d: %+v, %v; want admitted %t and never for tokens", i, a, err, want)
-		}
-	}
-	// A key whose TPM is not limited leaves the windows alone.
-	if _, err := s.RecordUsage(ctx, usage("key_u", "x", "dep_1", &store.Tokens{Input: 5}), false); err != nil {
-		t.Fatal(err)
-	}
-	if r, tok := window(t, pool, "key_u"); r != 0 || tok != 0 {
-		t.Errorf("an unlimited key's window holds %d requests and %d tokens", r, tok)
-	}
-}
-
 // A sweep deletes the rows past retention a batch at a time, and the rate
 // windows no admission reads, and keeps the daily rollups; a replica that
 // finds the sweep's lock held deletes nothing. RunRetention sweeps at once
@@ -288,7 +222,7 @@ func TestSweepUsage(t *testing.T) {
 	ctx := context.Background()
 	defer store.SetSweepBatch(2)()
 	for range 7 {
-		if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", &store.Tokens{Input: 1}), true); err != nil {
+		if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", &store.Tokens{Input: 1})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -300,8 +234,8 @@ func TestSweepUsage(t *testing.T) {
 	}
 	exec(`UPDATE modelgateway.usage SET created_at = now() - interval '91 days'
 		WHERE id IN (SELECT id FROM modelgateway.usage ORDER BY id LIMIT 5)`)
-	exec(`INSERT INTO modelgateway.rate_windows (api_key_id, minute, requests)
-		VALUES ('key_a', date_trunc('minute', now()) - interval '2 hours', 3)`)
+	exec(`INSERT INTO modelgateway.model_rate_windows (model, minute, requests)
+		VALUES ('x', date_trunc('minute', now()) - interval '2 hours', 3)`)
 	count := func(sql string) (n int) {
 		t.Helper()
 		if err := pool.QueryRow(ctx, sql).Scan(&n); err != nil {
@@ -328,7 +262,7 @@ func TestSweepUsage(t *testing.T) {
 	if left := count(`SELECT count(*) FROM modelgateway.usage`); left != 2 {
 		t.Errorf("%d rows left, want 2", left)
 	}
-	if w := count(`SELECT count(*) FROM modelgateway.rate_windows`); w != 1 {
+	if w := count(`SELECT count(*) FROM modelgateway.model_rate_windows`); w != 1 {
 		t.Errorf("%d rate windows left, want the current one", w)
 	}
 	if d := count(`SELECT requests FROM modelgateway.usage_daily`); d != 7 {
@@ -349,7 +283,7 @@ func TestSweepUsage(t *testing.T) {
 		}
 	}
 	swept("the first sweep")
-	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil), false); err != nil {
+	if _, err := s.RecordUsage(ctx, usage("key_a", "x", "dep_1", nil)); err != nil {
 		t.Fatal(err)
 	}
 	swept("a later sweep")
@@ -366,10 +300,10 @@ func TestATokenCountOutlivesItsLedgerRow(t *testing.T) {
 	clearOfAMinute(t, pool)
 	u := usage("key_n", "x", "dep_1", &store.Tokens{Input: 40, Output: 2, CacheRead: 9})
 	u.Model = "bad\x00name"
-	if cost, err := s.RecordUsage(ctx, u, true); err == nil || cost != nil {
+	if cost, err := s.RecordUsage(ctx, u); err == nil || cost != nil {
 		t.Fatalf("the ledger took a NUL: cost %v, %v", cost, err)
 	}
-	if _, tok := window(t, pool, "key_n"); tok != 42 {
+	if _, tok := window(t, pool, "x"); tok != 42 {
 		t.Errorf("the window counted %d tokens, want 42", tok)
 	}
 	var n int
@@ -392,7 +326,7 @@ func TestAnUnreadableCostStillWritesItsRow(t *testing.T) {
 			t.Fatal(err)
 		}
 		key := fmt.Sprint("key_big", i)
-		if cost, err := s.RecordUsage(ctx, usage(key, "x", d.ID, &store.Tokens{Input: 2_000_000}), false); err != nil || cost != nil {
+		if cost, err := s.RecordUsage(ctx, usage(key, "x", d.ID, &store.Tokens{Input: 2_000_000})); err != nil || cost != nil {
 			t.Fatalf("price %v: RecordUsage = cost %v, %v; want the row written without a cost", v, cost, err)
 		}
 		var n int
@@ -411,15 +345,14 @@ func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
 	ctx := context.Background()
 	pgtest.DefaultRepeatableRead(t, pool)
 	clearOfAMinute(t, pool)
-	rpm := int32(100)
-	if _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); err != nil {
+	if _, err := s.AdmitModel(ctx, "x"); err != nil {
 		t.Fatal(err)
 	}
-	record := func(tpmLimited bool) error {
-		_, err := s.RecordUsage(ctx, usage("key_rr", "x", "dep_1", &store.Tokens{Input: 1}), tpmLimited)
+	record := func() error {
+		_, err := s.RecordUsage(ctx, usage("key_rr", "x", "dep_1", &store.Tokens{Input: 1}))
 		return err
 	}
-	if err := record(true); err != nil {
+	if err := record(); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
@@ -427,17 +360,13 @@ func TestTheLimitsAndTheLedgerAreReadCommitted(t *testing.T) {
 		run        func() error
 	}{
 		{"model admission", `UPDATE modelgateway.model_rate_windows SET requests = requests WHERE model = 'x'`,
-			func() error { _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); return err }},
-		{"admission", `UPDATE modelgateway.rate_windows SET requests = requests WHERE api_key_id = 'key_rr'`,
-			func() error { _, err := s.AdmitModel(ctx, "x", "key_rr", &rpm, nil); return err }},
+			func() error { _, err := s.AdmitModel(ctx, "x"); return err }},
 		{"model window", `UPDATE modelgateway.model_rate_windows SET input_tokens = input_tokens WHERE model = 'x'`,
-			func() error { return record(true) }},
-		{"window", `UPDATE modelgateway.rate_windows SET tokens = tokens WHERE api_key_id = 'key_rr'`,
-			func() error { return record(true) }},
+			func() error { return record() }},
 		{"actor rollup", `UPDATE modelgateway.usage_actor_daily SET requests = requests WHERE actor_id = 'key_rr'`,
-			func() error { return record(false) }},
+			func() error { return record() }},
 		{"rollup", `UPDATE modelgateway.usage_daily SET requests = requests WHERE api_key_id = 'key_rr'`,
-			func() error { return record(false) }},
+			func() error { return record() }},
 	} {
 		tx, err := pool.Begin(ctx)
 		if err != nil {

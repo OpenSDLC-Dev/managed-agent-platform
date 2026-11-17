@@ -57,7 +57,7 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordTimeout)
 	defer cancel()
-	cost, err := h.cfg.Store.RecordUsage(ctx, u, c.policy.TPM != nil)
+	cost, err := h.cfg.Store.RecordUsage(ctx, u)
 	if err != nil {
 		slog.ErrorContext(ctx, "modelgateway: usage could not be recorded", "request_id", u.RequestID,
 			"api_key_id", u.APIKeyID, "deployment", u.DeploymentID, "error", err)
@@ -88,17 +88,16 @@ func cut(s string, n int) string {
 	return s[:n]
 }
 
-// admit counts the request against the model and any retained key limits,
+// admit counts the request against the public model alias's organization budget,
 // and answers a refusal itself: 429 rate_limit_error with retry-after in
 // whole seconds, until the minute the refusal counted in ends.
 func (h *handler) admit(w http.ResponseWriter, r *http.Request, c caller, model string) bool {
-	p := c.policy
 	// Reading a complete body can observe a TCP half-close. net/http cancels
 	// its context then, although the caller can still read our answer. Match
 	// the upstream path's contract, with a separate bound for database waits.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), recordTimeout)
 	defer cancel()
-	a, err := h.cfg.Store.AdmitModel(ctx, model, c.keyID, p.RPM, p.TPM)
+	a, err := h.cfg.Store.AdmitModel(ctx, model)
 	if err != nil {
 		writeError(w, r, internal(r, "rate limit check failed", err))
 		return false
@@ -106,27 +105,10 @@ func (h *handler) admit(w http.ResponseWriter, r *http.Request, c caller, model 
 	if a.Admitted {
 		return true
 	}
-	if !strings.HasPrefix(a.Limit, "key_") {
-		w.Header().Set("Retry-After", strconv.Itoa(a.RetryAfter))
-		writeError(w, r, &apiError{http.StatusTooManyRequests, "rate_limit_error",
-			"the organization's " + a.Limit + " limit for model " + model + " is reached"})
-		return false
-	}
-	limit := strconv.Itoa(int(derefInt32(p.RPM))) + " requests"
-	if a.Tokens {
-		limit = strconv.FormatInt(*p.TPM, 10) + " tokens"
-	}
 	w.Header().Set("Retry-After", strconv.Itoa(a.RetryAfter))
 	writeError(w, r, &apiError{http.StatusTooManyRequests, "rate_limit_error",
-		"this API key's limit of " + limit + " per minute is reached; retry after " + strconv.Itoa(a.RetryAfter) + " seconds"})
+		"the organization's " + a.Limit + " limit for model " + model + " is reached"})
 	return false
-}
-
-func derefInt32(p *int32) int32 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 // usageCounts are the counts of an Anthropic usage object, by the store's

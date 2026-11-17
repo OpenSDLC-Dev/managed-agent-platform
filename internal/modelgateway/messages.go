@@ -276,9 +276,6 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	case !ok, a.Name == "*" && a.Kind != rt.kind: // the wildcard catches names for its own kind's routes alone
 		writeError(w, r, notFound("model: %s", model))
 		return
-	case !c.may(a.Name):
-		writeError(w, r, forbidden("this API key may not use model %s", model))
-		return
 	case a.Kind != rt.kind:
 		writeError(w, r, invalid("model: %s serves %s, not %s", model, a.Kind, rt.kind))
 		return

@@ -1,12 +1,9 @@
 package api_test
 
 import (
-	"context"
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 )
 
 // TestArchivedResourcesAreImmutable: archive means read-only — update paths
@@ -184,48 +181,5 @@ func TestSessionListIgnoresAgentVersionWithoutAgentID(t *testing.T) {
 	}
 	if entries := listData(t, list); len(entries) != 1 {
 		t.Errorf("agent_version without agent_id filtered the list: %v", entries)
-	}
-}
-
-// TestBootstrapKeyRotation: ensuring a new key under the same name revokes
-// the previous one — a leaked key must die on rotation, not live forever.
-func TestBootstrapKeyRotation(t *testing.T) {
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	const rotated = "rotated-bootstrap-key"
-	if err := api.EnsureAPIKey(ctx, s.pool, "test", rotated); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
-	res := s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": testKey})
-	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("old key after rotation: %d, want 401", res.StatusCode)
-	}
-	res = s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": rotated})
-	res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Errorf("new key after rotation: %d, want 200", res.StatusCode)
-	}
-
-	// Rotating back un-revokes the original hash and kills the interim key.
-	if err := api.EnsureAPIKey(ctx, s.pool, "test", testKey); err != nil {
-		t.Fatalf("rotate back: %v", err)
-	}
-	res = s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": testKey})
-	res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Errorf("original key after rotate-back: %d, want 200", res.StatusCode)
-	}
-	res = s.doRaw(http.MethodGet, "/v1/agents", nil, map[string]string{"x-api-key": rotated})
-	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Errorf("interim key after rotate-back: %d, want 401", res.StatusCode)
-	}
-
-	// A broken pool surfaces as an error, not a silent no-op.
-	s.pool.Close()
-	if err := api.EnsureAPIKey(ctx, s.pool, "test", "another"); err == nil {
-		t.Error("EnsureAPIKey on a closed pool should fail")
 	}
 }

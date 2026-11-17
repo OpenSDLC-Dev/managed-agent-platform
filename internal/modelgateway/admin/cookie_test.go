@@ -9,8 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
 )
@@ -21,20 +19,7 @@ func newCookieAdmin(t *testing.T, mode login.Mode, origin string, withIdentity b
 	t.Helper()
 	e := newEnv(t, withIdentity)
 	m := login.New(e.pool, login.Config{Mode: mode, PublicOrigin: origin, Development: true})
-	cfg := admin.Config{Store: e.store, Cipher: e.cipher, BootstrapKey: bootstrap, Prober: e.prober, Login: m}
-	if withIdentity {
-		ic := identity.Config{Mode: identity.ModeOIDC, Issuer: e.idp.Issuer(), Audience: audience, JWKSURL: e.idp.JWKSURL(),
-			RoleMap: map[string]identity.Role{"admins": identity.RoleAdmin, "devs": identity.RoleDeveloper}, HTTPClient: e.idp.Client(), Now: e.clock.Now}
-		if mode == login.ModeTrustedProxy {
-			ic.Mode, ic.AssertionHeader = identity.ModeTrustedProxy, "X-Goog-IAP-JWT-Assertion"
-		}
-		var err error
-		cfg.Verifier, err = identity.New(context.Background(), ic)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cfg.Principals = e.pool
-	}
+	cfg := admin.Config{Store: e.store, Cipher: e.cipher, Prober: e.prober, Login: m}
 	h, err := admin.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -69,84 +54,9 @@ func cookieAdminHeaders(issued login.IssuedSession) http.Header {
 	return http.Header{"Cookie": {"map_session=" + issued.Token}, "Origin": {cookieOrigin}, "X-Csrf-Token": {issued.CSRFToken}}
 }
 
-func TestGatewayAdminRefusesOwnedKeyPolicies(t *testing.T) {
-	e, m := newCookieAdmin(t, login.ModePassword, cookieOrigin, false)
-	ctx := context.Background()
-	if _, err := e.pool.Exec(ctx, `INSERT INTO principals (id,issuer,subject,kind,role) VALUES
-		('principal_admin','policy-test','admin','user','admin'),
-		('principal_user','policy-test','user','user','developer'),
-		('principal_service','policy-test','service','service_account','developer')`); err != nil {
-		t.Fatal(err)
-	}
-	issued, err := m.Issue(ctx, "principal_admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cookie := cookieAdminHeaders(issued)
-	if _, err := e.pool.Exec(ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ('key_unowned','unowned','unowned-digest')`); err != nil {
-		t.Fatal(err)
-	}
-	for _, body := range []string{`{"aliases":null,"rpm":60,"tpm":1000}`, `{"aliases":null,"rpm":120,"tpm":2000}`} {
-		status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/key_unowned", body, cookie)
-		if status != http.StatusOK {
-			t.Fatalf("unowned create/replacement control=%d %s", status, raw)
-		}
-	}
-	snapshot := func() string {
-		t.Helper()
-		var rows string
-		if err := e.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(k) ORDER BY api_key_id)::text FROM modelgateway.key_policies k`).Scan(&rows); err != nil {
-			t.Fatal(err)
-		}
-		return rows
-	}
-	before := snapshot()
-	for _, owner := range []string{"principal_user", "principal_service"} {
-		for _, state := range []string{"active", "inactive", "archived", "expired"} {
-			id := "key_" + owner + "_" + state
-			status := state
-			if state == "expired" {
-				status = "active"
-			}
-			if _, err := e.pool.Exec(ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by,status,expires_at)
-				VALUES ($1,$1,$2,$3,'principal_admin',$4,CASE WHEN $5 THEN now() - interval '1 hour' ELSE NULL END)`,
-				id, owner, apikey.Hash(id+"-synthetic-secret"), status, state == "expired"); err != nil {
-				t.Fatal(err)
-			}
-			for lane, h := range map[string]http.Header{"cookie": cookie, "bootstrap": {"X-Api-Key": {bootstrap}}} {
-				t.Run(owner+"/"+state+"/"+lane, func(t *testing.T) {
-					// This endpoint writes a whole policy for create and replacement.
-					// No owned policy can be seeded under the database guard; repeated
-					// whole writes must remain refused and preserve the unowned grant.
-					for _, body := range []string{`{"aliases":null,"rpm":null,"tpm":null}`, `{"aliases":["missing-alias"],"rpm":10,"tpm":20}`} {
-						status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/"+id, body, h)
-						if status != http.StatusBadRequest || !strings.Contains(raw, "invalid_request_error") || !strings.Contains(raw, "principal-owned API key") {
-							t.Errorf("owned whole policy write=%d %s", status, raw)
-						}
-					}
-					if snapshot() != before {
-						t.Error("owned policy refusal changed stored grants")
-					}
-				})
-			}
-		}
-	}
-	if _, err := e.pool.Exec(ctx, `UPDATE principals SET role='developer' WHERE id='principal_admin'`); err != nil {
-		t.Fatal(err)
-	}
-	status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/key_policies/key_principal_user_active", `{"aliases":null,"rpm":null,"tpm":null}`, cookie)
-	if status != http.StatusForbidden || strings.Contains(raw, "principal-owned") {
-		t.Fatalf("owned target check bypassed current cookie authority: %d %s", status, raw)
-	}
-	if snapshot() != before {
-		t.Error("denied cookie write changed stored grants")
-	}
-}
-
 // A cached login role, sign-in mapping/profile replay, missing CSRF or wrong sign-out marker fails this.
 func TestGatewayCookieUsesCurrentRole(t *testing.T) {
 	e, m := newCookieAdmin(t, login.ModeOIDC, cookieOrigin, true)
-	e.ok(e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")}), "legacy sign-in")
 	var id string
 	if err := e.pool.QueryRow(context.Background(), `SELECT id FROM principals`).Scan(&id); err != nil {
 		t.Fatal(err)
@@ -250,8 +160,8 @@ func TestGatewayCookieUsesCurrentRole(t *testing.T) {
 	}
 }
 
-// Offered legacy credentials retain precedence and never fall back, including empty/repeated fields.
-func TestGatewayCookieLegacyPrecedence(t *testing.T) {
+// Credential headers are refused; an incidental proxy assertion cannot change cookie authority.
+func TestGatewayCookieCredentialBoundary(t *testing.T) {
 	for _, mode := range []login.Mode{login.ModeOIDC, login.ModeTrustedProxy} {
 		t.Run(string(mode), func(t *testing.T) {
 			e, m := newCookieAdmin(t, mode, cookieOrigin, true)
@@ -288,11 +198,11 @@ func TestGatewayCookieLegacyPrecedence(t *testing.T) {
 				h := valid.Clone()
 				h.Set("X-Goog-IAP-JWT-Assertion", token)
 				status, header, raw := cookieAdminRequest(t, e, "GET", "/admin/v1/profiles", "", h)
-				if status != 401 || header.Get("x-platform-signed-out") != "" {
-					t.Fatalf("offered assertion fallback=%d %s marker=%q", status, raw, header.Get("x-platform-signed-out"))
+				if status != 200 || header.Get("x-platform-signed-out") != "" {
+					t.Fatalf("incidental assertion changed cookie authority=%d %s marker=%q", status, raw, header.Get("x-platform-signed-out"))
 				}
 			}
-			// The legacy operator token, not the admin cookie, determines the role.
+			// A Bearer is refused. A proxy assertion is ignored outside sign-in.
 			h := valid.Clone()
 			field, token := "Authorization", "Bearer "+e.token("devs")
 			if mode == login.ModeTrustedProxy {
@@ -300,8 +210,12 @@ func TestGatewayCookieLegacyPrecedence(t *testing.T) {
 			}
 			h.Set(field, token)
 			status, header, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/providers", `{}`, h)
-			if status != 403 || header.Get("x-platform-signed-out") != "" {
-				t.Fatalf("operator precedence=%d %s marker=%q", status, raw, header.Get("x-platform-signed-out"))
+			want := 401
+			if mode == login.ModeTrustedProxy {
+				want = 400
+			} // cookie passes, provider body is invalid
+			if status != want || header.Get("x-platform-signed-out") != "" {
+				t.Fatalf("credential boundary=%d %s marker=%q", status, raw, header.Get("x-platform-signed-out"))
 			}
 			for _, field := range []string{"X-Api-Key", "Authorization"} {
 				h := http.Header{"Cookie": {"map_session=not-canonical"}}
@@ -311,8 +225,8 @@ func TestGatewayCookieLegacyPrecedence(t *testing.T) {
 				}
 				h.Set(field, value)
 				status, _, raw := cookieAdminRequest(t, e, "GET", "/admin/v1/profiles", "", h)
-				if status != 200 {
-					t.Fatalf("bootstrap precedence=%d %s", status, raw)
+				if status != 401 {
+					t.Fatalf("preset refusal=%d %s", status, raw)
 				}
 			}
 		})
@@ -320,32 +234,11 @@ func TestGatewayCookieLegacyPrecedence(t *testing.T) {
 }
 
 func TestGatewayCookieNeedsNativeLogin(t *testing.T) {
-	for _, tc := range []struct {
-		mode   login.Mode
-		origin string
-		legacy bool
-	}{{login.ModeDisabled, cookieOrigin, false}, {login.ModeOIDC, "", true}, {login.ModePassword, cookieOrigin, false}} {
-		t.Run(string(tc.mode)+"/"+tc.origin, func(t *testing.T) {
-			e, m := newCookieAdmin(t, tc.mode, tc.origin, tc.legacy)
-			if _, err := e.pool.Exec(context.Background(), `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_reader','https://control.example','control','developer')`); err != nil {
-				t.Fatal(err)
-			}
-			issued, err := m.Issue(context.Background(), "principal_reader")
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := 401
-			if tc.mode == login.ModePassword {
-				want = 200
-			}
-			status, _, raw := cookieAdminRequest(t, e, "GET", "/admin/v1/profiles", "", cookieAdminHeaders(issued))
-			if status != want {
-				t.Fatalf("native gate=%d %s want=%d", status, raw, want)
-			}
-			e.ok(e.admin("GET", "/admin/v1/profiles", nil), "legacy bootstrap remains")
-			if tc.legacy {
-				e.ok(e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("admins")}), "verifier-only operator remains")
-			}
-		})
+	e := newEnv(t, false)
+	for _, cfg := range []login.Config{{Mode: login.ModeDisabled, PublicOrigin: cookieOrigin}, {Mode: login.ModeOIDC}} {
+		_, err := admin.New(admin.Config{Store: e.store, Cipher: e.cipher, Prober: e.prober, Login: login.New(e.pool, cfg)})
+		if err == nil {
+			t.Fatalf("admin accepted non-native login: %+v", cfg)
+		}
 	}
 }

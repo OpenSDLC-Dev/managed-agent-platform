@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -1697,13 +1698,10 @@ func (h *harness) childReport(t *testing.T, child domain.ID, text string) {
 // coordinator the child's ending notice (notifyThreadArchived).
 func (h *harness) archiveChild(t *testing.T, child domain.ID) {
 	t.Helper()
-	if err := api.EnsureAPIKey(context.Background(), h.pool, "brain-test", "brain-test-key"); err != nil {
-		t.Error(err)
-		return
-	}
+	key := apitest.OwnedKey(t, h.pool)
 	req := httptest.NewRequest(http.MethodPost,
 		"/v1/sessions/"+h.sessionID.String()+"/threads/"+child.String()+"/archive", nil)
-	req.Header.Set("x-api-key", "brain-test-key")
+	req.Header.Set("x-api-key", key)
 	rec := httptest.NewRecorder()
 	api.NewHandler(h.pool, nil, nil, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

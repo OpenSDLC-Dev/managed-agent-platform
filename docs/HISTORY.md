@@ -49,7 +49,71 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 7 local installation acceptance
+
+An independent verifier built the server and gate images from the native-only candidate
+on 2026-11-17. A fresh Compose project used new volumes and no preset credential variables.
+Its Console image had revision `8158c6a` and digest
+`sha256:3395af7496c827f4607cc2a5b35246241a5d8f63a3026b7e966ba7da4179cfae`.
+Headless Chromium completed password setup, sign-out and sign-in, then created a developer
+service account and issued its owned key through the Console. Browser requests carried
+no API key or Bearer. The issued key reached public control-plane and gateway routes
+through both headers, but received 401 on private and gateway-admin routes.
+Former Compose preset values received 401; removed BFF routes returned 404.
+The real `ant 1.42.0` ran `beta:agents list` through the Compose edge with both
+`--api-key-stdin` and `--auth-token-stdin`, with identical successful output.
+The edge replay passed 16 tests after one initial startup timeout.
+
+The Secret assembler passed independent tests against Kubernetes, including initial
+creation, rotation, two unchanged reconciliations and competing writers. An unchanged
+Secret produced no rollout signal. Concurrent update and creation were refused without
+overwriting the winner; the reported error exposed no credential payload.
+The independent full `make verify` passed on 2026-11-18 (Asia/Shanghai), with
+**91.66%** total statement coverage. All 80 package test runs passed; seven packages
+contained no tests. The run used Linux Go 1.26.8 and `GOFLAGS=-p=1` after correcting
+stale authentication fixtures found by the first full run. Its focused regression
+passed all 90 selected top-level tests before the full gate. At that checkpoint,
+all 993 Go, SQL, module and Makefile paths matched the full-gate tree; their manifest fingerprint was
+`6c7a26290b31d1b2633c7342c912d37ec1a6b81365c444feb8f5ced3aea0021f`.
+
+A separate real-binary probe passed 98 checks. It covered native setup and login,
+owned-key admission, private cookie boundaries, old-credential refusal, shared model
+budgets and primary, child and grader claim tokens. Gateway usage recorded the initiating
+principal without API-key fallback. Direct vendor calls used their configured credential;
+historical unowned work made no inference call. Completed claim tokens were refused.
+The verifier confirmed unchanged production build tokens between that probe and the gate.
+Its owned processes and fixtures were removed, with no gate Docker or kind resource delta.
+Independent local CI also passed 24 Helm, 24 Terraform and nine Compose steps;
+the registry check and SDK citation report had no findings or pending transitions.
+
+Review restored the existing concurrent environment-key issuance test that had been
+removed with preset-key tests. It passed independently against a fresh database.
+All 422 production Go, SQL, module and Makefile files still matched the full-gate snapshot.
+Two operator-documentation claims were narrowed to the behavior the code actually checks.
+
+This record covers local verification. It does not certify the pending committed reviews,
+staging rollout or obsolete-data cleanup. The infrastructure run left 21 anonymous-volume
+candidates from the existing database-init test untouched because no retained record
+proved their container ownership; its named projects and fixtures were removed.
+
 ## Plan 69 slice 6 independent acceptance
+
+The final staging check passed independently on 2026-11-17 (Asia/Shanghai).
+[CD attempt 2](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/43893158524/attempts/2)
+deployed `e655ec9` after the pinned Caddy file-capability correction in PR #1046.
+The original HTTPS hostname, static IP and active certificate were preserved.
+All six deployments were Ready. App-edge had no restarts or injected NEG readiness gate;
+its effective and bounding capability sets contained only `NET_BIND_SERVICE`, with no-new-privileges enabled.
+Native OIDC configuration and Console health returned 200. Anonymous session, public API and gateway-admin requests returned 401.
+The live Brain route used per-claim delegated inference with no static credential fields.
+
+The operator completed Google sign-in for the internal organization. Normal setup-code redemption created the first administrator.
+Console then created an active developer service account and issued its CD key.
+That key returned 200 on the public list API through both supported headers, and 401 on private and gateway-admin paths.
+Secret Manager version 1 was enabled, its bytes matched the one-time reveal, and the repository CD variable named that secret.
+The verifier confirmed the existing deployer access grant; no new IAM permission or paid model turn was needed.
+Credential transfer files were removed. Hosted corrective CI passed with 91.71% statement coverage;
+the independent local corrective gate passed with 91.72%. Both committed reviewers reported no unresolved findings.
 
 An independent Codex verifier exercised the slice 6 candidate on 2026-11-16,
 based on `88883ba`, under Linux Go 1.26.8. The Go/SQL source fingerprint was

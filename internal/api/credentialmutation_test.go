@@ -337,89 +337,55 @@ func TestNativeCredentialMutationDelayedBody(t *testing.T) {
 	}
 }
 
-// A cookie-only fix on these legacy-capable routes would reject the legitimate
-// x-api-key machine issuer, whose independently offered credential outranks cookies.
-func TestNativeCredentialMutationLegacyPrecedence(t *testing.T) {
-	for _, operation := range []string{"management-issue", "reactivate-org", "reactivate-workspace", "worker-issue"} {
-		t.Run(operation+"/X-Api-Key", func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-			defer cancel()
-			s, h := newCredentialHandler(t)
-			caller := seedMember(t, s, "legacy-cookie", "admin", "console")
-			cookie, session := s.issue(caller)
-			headers := nativeHeaders(cookie, session.CSRFToken)
-			target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
-			offered := headers.Clone()
-			offered.Set("X-Api-Key", testKey)
-			body := newCredentialBody(ctx, target.body)
-			call := startCredentialRequest(t, ctx, h, "POST", target.path, body, offered)
-			call.await(t, body.entered, "partial body on the legacy machine lane")
-			withdrawCredentialCaller(t, ctx, s, h, caller, "logout", headers)
-			body.unblock()
-			rr := call.result(t)
-			select {
-			case <-body.eof:
-			default:
-				t.Error("legacy request did not consume the complete valid body")
-			}
-			if rr.Code != 200 || rr.Header().Get("x-platform-signed-out") != "" {
-				t.Errorf("legacy credential lost precedence: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
-			}
-			var issuer string
-			if err := s.pool.QueryRow(ctx, `SELECT id FROM api_keys WHERE key_hash=$1`, apikey.Hash(testKey)).Scan(&issuer); err != nil {
-				t.Fatal(err)
-			}
-			target.assertState(t, ctx, s, h, rr, true, issuer, false)
-			if !t.Failed() {
-				fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
-			}
-		})
-	}
-}
-
 // A management key is not a generic Bearer credential. Offering it must prevent
 // cookie fallback without reading a valid mutation body or signing out the browser.
 func TestNativeCredentialMutationRejectsManagementBearer(t *testing.T) {
 	for _, operation := range []string{"management-issue", "reactivate-org", "reactivate-workspace", "worker-issue"} {
-		t.Run(operation, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-			defer cancel()
-			s, h := newCredentialHandler(t)
-			caller := seedMember(t, s, "bearer-cookie", "admin", "console")
-			cookie, session := s.issue(caller)
-			headers := nativeHeaders(cookie, session.CSRFToken)
-			target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
-			cookieOnly := credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
-			if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
-				t.Fatalf("cookie-only control was not authenticated: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
-			}
-			offered := headers.Clone()
-			offered.Set("Authorization", "Bearer "+testKey)
-			body := newCredentialBody(ctx, target.body)
-			call := startCredentialRequest(t, ctx, h, "POST", target.path, body, offered)
-			select {
-			case <-call.done:
-			case <-body.entered:
-				t.Error("unsupported management Bearer reached the handler body")
-			case <-ctx.Done():
-				t.Fatalf("management Bearer rejection did not finish: %v", ctx.Err())
-			}
-			body.unblock()
-			rr := call.result(t)
-			if body.prefix.Len() != len(target.body)-1 || body.tail.Len() != 1 {
-				t.Error("unsupported management Bearer consumed the request body")
-			}
-			if rr.Code != 401 || rr.Header().Get("x-platform-signed-out") != "" {
-				t.Errorf("management Bearer was not rejected independently of its cookie: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
-			}
-			target.assertState(t, ctx, s, h, rr, false, "", false)
-			cookieOnly = credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
-			if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
-				t.Errorf("management Bearer rejection invalidated its cookie: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
-			}
-			if !t.Failed() {
-				fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
-			}
-		})
+		for _, credentialHeader := range []string{"Authorization", "X-Api-Key"} {
+			t.Run(operation+"/"+credentialHeader, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+				defer cancel()
+				s, h := newCredentialHandler(t)
+				caller := seedMember(t, s, "bearer-cookie", "admin", "console")
+				cookie, session := s.issue(caller)
+				headers := nativeHeaders(cookie, session.CSRFToken)
+				target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)
+				cookieOnly := credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
+				if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
+					t.Fatalf("cookie-only control was not authenticated: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
+				}
+				offered := headers.Clone()
+				if credentialHeader == "Authorization" {
+					offered.Set(credentialHeader, "Bearer "+testKey)
+				} else {
+					offered.Set(credentialHeader, testKey)
+				}
+				body := newCredentialBody(ctx, target.body)
+				call := startCredentialRequest(t, ctx, h, "POST", target.path, body, offered)
+				select {
+				case <-call.done:
+				case <-body.entered:
+					t.Error("unsupported management Bearer reached the handler body")
+				case <-ctx.Done():
+					t.Fatalf("management Bearer rejection did not finish: %v", ctx.Err())
+				}
+				body.unblock()
+				rr := call.result(t)
+				if body.prefix.Len() != len(target.body)-1 || body.tail.Len() != 1 {
+					t.Error("unsupported management Bearer consumed the request body")
+				}
+				if rr.Code != 401 || rr.Header().Get("x-platform-signed-out") != "" {
+					t.Errorf("management Bearer was not rejected independently of its cookie: status=%d marker=%q body=%s", rr.Code, rr.Header().Get("x-platform-signed-out"), rr.Body.String())
+				}
+				target.assertState(t, ctx, s, h, rr, false, "", false)
+				cookieOnly = credentialCall(ctx, h, "GET", "/api/auth/session", nil, headers)
+				if cookieOnly.Code != 200 || cookieOnly.Header().Get("x-platform-signed-out") != "" {
+					t.Errorf("management Bearer rejection invalidated its cookie: status=%d body=%s", cookieOnly.Code, cookieOnly.Body.String())
+				}
+				if !t.Failed() {
+					fmt.Printf("CONTROL_ASSERTIONS_PASSED %s\n", t.Name())
+				}
+			})
+		}
 	}
 }

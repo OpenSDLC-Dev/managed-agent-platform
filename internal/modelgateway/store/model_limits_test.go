@@ -2,7 +2,7 @@ package store_test
 
 import (
 	"context"
-	"strconv"
+
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,7 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
-func TestModelLimitsShareAdmissionAcrossKeys(t *testing.T) {
+func TestModelLimitsShareConcurrentAdmission(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
 	clearOfAMinute(t, pool)
@@ -20,9 +20,9 @@ func TestModelLimitsShareAdmissionAcrossKeys(t *testing.T) {
 	}
 	var admitted atomic.Int32
 	var wg sync.WaitGroup
-	for i := range 12 {
+	for range 12 {
 		wg.Go(func() {
-			a, err := s.AdmitModel(ctx, "fast", "key_"+strconv.Itoa(i), nil, nil)
+			a, err := s.AdmitModel(ctx, "fast")
 			if err != nil {
 				t.Error(err)
 			} else if a.Admitted {
@@ -36,12 +36,12 @@ func TestModelLimitsShareAdmissionAcrossKeys(t *testing.T) {
 	if admitted.Load() != 3 {
 		t.Fatalf("admitted %d, want 3 across concurrent callers", admitted.Load())
 	}
-	if a, err := s.AdmitModel(ctx, "slow", "", nil, nil); err != nil || !a.Admitted {
+	if a, err := s.AdmitModel(ctx, "slow"); err != nil || !a.Admitted {
 		t.Fatalf("independent model: %+v %v", a, err)
 	}
 }
 
-func TestModelLimitsSeparateInputOutputAndKeepLegacyCountersAtomic(t *testing.T) {
+func TestModelLimitsSeparateInputOutput(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := context.Background()
 	clearOfAMinute(t, pool)
@@ -57,35 +57,18 @@ func TestModelLimitsSeparateInputOutputAndKeepLegacyCountersAtomic(t *testing.T)
 		if _, err := s.PutModelLimit(ctx, tc.limit, nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RecordUsage(ctx, usage("key_a", tc.model, "dep_1", &store.Tokens{CacheRead: 10000}), false); err != nil {
+		if _, err := s.RecordUsage(ctx, usage("key_a", tc.model, "dep_1", &store.Tokens{CacheRead: 10000})); err != nil {
 			t.Fatal(err)
 		}
-		if a, err := s.AdmitModel(ctx, tc.model, "", nil, nil); err != nil || !a.Admitted {
+		if a, err := s.AdmitModel(ctx, tc.model); err != nil || !a.Admitted {
 			t.Fatalf("cache reads: %+v %v", a, err)
 		}
-		if _, err := s.RecordUsage(ctx, usage("key_b", tc.model, "dep_1", &tc.tokens), false); err != nil {
+		if _, err := s.RecordUsage(ctx, usage("key_b", tc.model, "dep_1", &tc.tokens)); err != nil {
 			t.Fatal(err)
 		}
-		rpm := int32(3)
-		if a, err := s.AdmitModel(ctx, tc.model, "key_new", &rpm, nil); err != nil || a.Admitted || a.Limit != tc.want {
+		if a, err := s.AdmitModel(ctx, tc.model); err != nil || a.Admitted || a.Limit != tc.want {
 			t.Fatalf("tokens: %+v %v", a, err)
 		}
-		if n, _ := window(t, pool, "key_new"); n != 0 {
-			t.Fatalf("organization refusal consumed key budget: %d", n)
-		}
-	}
-	rpm := int32(1)
-	if a, err := s.AdmitModel(ctx, "other", "key_old", &rpm, nil); err != nil || !a.Admitted {
-		t.Fatalf("first: %+v %v", a, err)
-	}
-	if a, err := s.AdmitModel(ctx, "other", "key_old", &rpm, nil); err != nil || a.Admitted || a.Limit != "key_requests_per_minute" {
-		t.Fatalf("key refusal: %+v %v", a, err)
-	}
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT requests FROM modelgateway.model_rate_windows WHERE model='other' AND minute=date_trunc('minute',now())`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("key refusal consumed organization budget: %d", n)
+
 	}
 }

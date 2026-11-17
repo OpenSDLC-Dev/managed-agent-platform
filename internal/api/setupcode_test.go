@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
 const setupCodeURL = "/api/console/organizations/default/setup_code/redeem"
@@ -42,7 +43,7 @@ func setupCounts(t *testing.T, pool *pgxpool.Pool, codes, flags, admins int) {
 	var c, f, a int
 	if err := pool.QueryRow(context.Background(), `SELECT
 		(SELECT count(*) FROM setup_codes), (SELECT count(*) FROM install_bootstrap),
-		(SELECT count(*) FROM principals WHERE role = 'admin')`).Scan(&c, &f, &a); err != nil {
+		(SELECT count(*) FROM principals WHERE kind='user' AND role = 'admin')`).Scan(&c, &f, &a); err != nil {
 		t.Fatal(err)
 	}
 	if c != codes || f != flags || a != admins {
@@ -140,7 +141,7 @@ func TestMintSetupCodePrunesOnlyExpiredHashes(t *testing.T) {
 		hex.EncodeToString(sum[:])).Scan(&stale); err != nil || stale {
 		t.Fatalf("mint retained an expired hash: present=%v err=%v", stale, err)
 	}
-	setupResponse(t, s.bearer("POST", setupCodeURL, s.token(), map[string]any{"code": live}), 200, "")
+	setupResponse(t, s.signInRequest("POST", setupCodeURL, s.token(), map[string]any{"code": live}), 200, "")
 	setupCounts(t, s.pool, 0, 1, 1)
 }
 
@@ -156,32 +157,16 @@ func TestAdminMapInvalidatesOutstandingSetupCodes(t *testing.T) {
 }
 
 func TestAdminMapRefusesSetupEvenWithAnOldReplicaCode(t *testing.T) {
-	for _, mode := range []identity.Mode{identity.ModeOIDC, identity.ModeTrustedProxy} {
-		t.Run(string(mode), func(t *testing.T) {
-			s := newLaneServerWith(t, func(cfg *identity.Config) {
-				cfg.Mode = mode
-				if mode == identity.ModeTrustedProxy {
-					cfg.AssertionHeader = "x-proxy-assertion"
-				}
-			})
-			code := strings.Repeat("B", 32)
-			sum := sha256.Sum256([]byte(code))
-			if _, err := s.pool.Exec(context.Background(), `INSERT INTO setup_codes (code_hash, expires_at)
-				VALUES ($1, clock_timestamp() + interval '1 hour')`, hex.EncodeToString(sum[:])); err != nil {
-				t.Fatal(err)
-			}
-			headers := map[string]string{"Authorization": "Bearer " + s.token()}
-			if mode == identity.ModeTrustedProxy {
-				headers = map[string]string{"x-proxy-assertion": s.token()}
-			}
-			setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, headers), 409,
-				"the identity provider's mapping supplies administrators")
-			setupCounts(t, s.pool, 1, 0, 0)
-			setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 403,
-				"only a signed-in person can redeem a setup code")
-			setupResponse(t, s.doRaw("POST", strings.Replace(setupCodeURL, "default", "not-an-org", 1), map[string]any{"code": code}, headers), 400, "")
-		})
+	s := newLaneServer(t)
+	code := strings.Repeat("B", 32)
+	sum := sha256.Sum256([]byte(code))
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO setup_codes(code_hash,expires_at) VALUES ($1,clock_timestamp()+interval '1 hour')`, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
 	}
+	setupResponse(t, s.signInRequest("POST", setupCodeURL, s.token(), map[string]any{"code": code}), 409, "the identity provider's mapping supplies administrators")
+	setupCounts(t, s.pool, 1, 0, 0)
+	setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 401, "a browser session cookie is required")
+	setupResponse(t, s.signInRequest("POST", strings.Replace(setupCodeURL, "default", "not-an-org", 1), s.token(), map[string]any{"code": code}), 400, "")
 }
 
 func TestNoCodeWhenTheMapCanGrantAdmin(t *testing.T) {
@@ -224,10 +209,10 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 	token := s.token()
 	code := mintSetupCode(t, s.pool)
 	mintSetupCode(t, s.pool)
-	if status, typ := laneStatus(t, s.bearer("GET", consoleAPIKeysPath, token, nil)); status != 403 || typ != "permission_error" {
+	if status, typ := laneStatus(t, s.signInRequest("GET", consoleAPIKeysPath, token, nil)); status != 403 || typ != "permission_error" {
 		t.Fatalf("before bootstrap read = %d/%s, want 403", status, typ)
 	}
-	body := setupResponse(t, s.bearer("POST", setupCodeURL, token, map[string]any{"code": code}), 200, "")
+	body := setupResponse(t, s.signInRequest("POST", setupCodeURL, token, map[string]any{"code": code}), 200, "")
 	var got struct{ ID, Role string }
 	if err := json.Unmarshal([]byte(body), &got); err != nil || got.ID == "" || got.Role != "admin" {
 		t.Fatalf("redemption response = %s, %v", body, err)
@@ -243,22 +228,26 @@ func TestARedeemedCodeMakesTheCallerAdmin(t *testing.T) {
 		t.Error("redemption response leaked the submitted setup code")
 	}
 	var role, source string
-	if err := s.pool.QueryRow(context.Background(), `SELECT role, role_source FROM principals WHERE id = $1`, got.ID).Scan(&role, &source); err != nil || role != "admin" || source != "console" {
+	internalID, kind, valid := principal.ParsePublicID(got.ID)
+	if !valid || kind != "user" {
+		t.Fatalf("setup returned invalid human id %q", got.ID)
+	}
+	if err := s.pool.QueryRow(context.Background(), `SELECT role, role_source FROM principals WHERE id = $1`, internalID).Scan(&role, &source); err != nil || role != "admin" || source != "console" {
 		t.Fatalf("promoted row = %q/%q, %v", role, source, err)
 	}
 	setupCounts(t, s.pool, 0, 1, 1)
 	for _, replay := range []any{map[string]any{"code": code}, map[string]any{"code": "wrong"}, map[string]any{}, `{"code":`} {
-		setupResponse(t, s.bearer("POST", setupCodeURL, token, replay), 409, "an admin already exists")
+		setupResponse(t, s.signInRequest("POST", setupCodeURL, token, replay), 409, "an admin already exists")
 	}
-	if status, typ := laneStatus(t, s.bearer("GET", consoleAPIKeysPath, token, nil)); status != 200 {
+	if status, typ := laneStatus(t, s.signInRequest("GET", consoleAPIKeysPath, token, nil)); status != 200 {
 		t.Fatalf("after bootstrap read = %d/%s, want 200", status, typ)
 	}
-	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role = 'user', status = 'deactivated' WHERE id = $1`, got.ID); err != nil {
+	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role = 'user', status = 'deactivated' WHERE id = $1`, internalID); err != nil {
 		t.Fatal(err)
 	}
 	claims := s.claims()
 	claims["sub"] = "another-person"
-	setupResponse(t, s.bearer("POST", setupCodeURL, s.idp.Mint(t, claims), map[string]any{"code": code}), 409, "an admin already exists")
+	setupResponse(t, s.signInRequest("POST", setupCodeURL, s.idp.Mint(t, claims), map[string]any{"code": code}), 409, "an admin already exists")
 	setupCounts(t, s.pool, 0, 1, 0)
 }
 
@@ -277,19 +266,19 @@ func TestAnExpiredOrMalformedSetupCodeIsRefused(t *testing.T) {
 		map[string]any{"code": "malformed"}, map[string]any{"code": ""},
 		map[string]any{"code": 7}, map[string]any{"code": nil}, map[string]any{}, `{"code":`,
 	} {
-		setupResponse(t, s.bearer("POST", setupCodeURL, token, body), 400, "")
+		setupResponse(t, s.signInRequest("POST", setupCodeURL, token, body), 400, "")
 		setupCounts(t, s.pool, 2, 0, 0)
 	}
-	setupResponse(t, s.bearer("POST", setupCodeURL, token, map[string]any{"code": valid}), 200, "")
+	setupResponse(t, s.signInRequest("POST", setupCodeURL, token, map[string]any{"code": valid}), 200, "")
 }
 
 func TestTheManagementKeyCannotRedeemASetupCode(t *testing.T) {
 	s := newSetupServer(t)
 	code := mintSetupCode(t, s.pool)
 	// A real person already exists, so a mistaken machine promotion has a target.
-	laneStatus(t, s.bearer("GET", consoleAPIKeysPath, s.token(), nil))
-	setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 403,
-		"only a signed-in person can redeem a setup code")
+	laneStatus(t, s.signInRequest("GET", consoleAPIKeysPath, s.token(), nil))
+	setupResponse(t, s.doRaw("POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"x-api-key": testKey}), 401,
+		"a browser session cookie is required")
 	setupCounts(t, s.pool, 1, 0, 0)
 }
 
@@ -298,7 +287,7 @@ func TestAnIdPMappedPersonCannotRedeem(t *testing.T) {
 		t.Run(claim, func(t *testing.T) {
 			s := newSetupServer(t)
 			code := mintSetupCode(t, s.pool)
-			setupResponse(t, s.bearer("POST", setupCodeURL, s.token(claim), map[string]any{"code": code}), 409,
+			setupResponse(t, s.signInRequest("POST", setupCodeURL, s.token(claim), map[string]any{"code": code}), 409,
 				"your role comes from the identity provider's mapping")
 			setupCounts(t, s.pool, 1, 0, 0)
 		})
@@ -313,9 +302,9 @@ func TestSetupCodeOrganizationAndMethod(t *testing.T) {
 		value  string
 		status int
 	}{{"not-an-org", 400}, {"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 401}} {
-		setupResponse(t, s.bearer("POST", strings.Replace(setupCodeURL, "default", org.value, 1), token, map[string]any{"code": code}), org.status, "")
+		setupResponse(t, s.signInRequest("POST", strings.Replace(setupCodeURL, "default", org.value, 1), token, map[string]any{"code": code}), org.status, "")
 	}
-	setupResponse(t, s.bearer("GET", setupCodeURL, token, nil), 405, "Method Not Allowed")
+	setupResponse(t, s.signInRequest("GET", setupCodeURL, token, nil), 405, "Method Not Allowed")
 	setupCounts(t, s.pool, 1, 0, 0)
 }
 
@@ -332,6 +321,7 @@ func TestConcurrentRedemptionsMakeOneAdmin(t *testing.T) {
 		claims := s.claims()
 		claims["sub"] = subject
 		token := s.idp.Mint(t, claims)
+		headers := s.signInHeaders(token)
 		code := mintSetupCode(t, s.pool)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		t.Cleanup(cancel)
@@ -339,7 +329,7 @@ func TestConcurrentRedemptionsMakeOneAdmin(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			res, err := s.roundTrip(ctx, "POST", setupCodeURL, map[string]any{"code": code}, map[string]string{"Authorization": "Bearer " + token})
+			res, err := s.roundTrip(ctx, "POST", setupCodeURL, map[string]any{"code": code}, headers)
 			responses <- response{res, err}
 		}()
 	}

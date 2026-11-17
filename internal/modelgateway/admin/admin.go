@@ -1,29 +1,16 @@
 // Package admin is the model gateway's admin API, under /admin/v1/
 // (docs/plan/59_model-gateway.md, "Auth, admin API and /v1/models"): the
-// providers and their credentials, the deployments, the aliases and the key
-// policies, the usage ledger read-only, and the compiled-in profiles
+// providers and their credentials, the deployments, the aliases and organization
+// model limits, the usage ledger read-only, and the compiled-in profiles
 // read-only. No reference surface
 // corresponds to it, so its shape is the platform's own, and
 // managed-agent-console is its client.
 //
-// Native browser cookies and two legacy credentials reach it. A cookie reads
-// current active-human authority from the shared session database, without
-// replaying IdP mappings. Unsafe cookie requests require exact Origin and CSRF.
-// Existing routes retain explicitly offered legacy credential precedence.
-// The cookie-only rate-limit routes ignore incidental proxy assertions.
-// The bootstrap key — CONTROLPLANE_API_KEY, read
-// from the Secret the control plane reads it from — is compared in constant
-// time against what the request carries in x-api-key or as a Bearer, and reaches
-// the existing legacy admin routes; a key an application issues under the name bootstrap is
-// nothing to it, since it is never looked up in api_keys. An operator token,
-// verified by internal/identity under the same IDENTITY_* configuration the
-// control plane reads, is an identity lane that shares the control plane's
-// stored-role rule (docs/plan/69_principal-bound-auth.md decision 4).
-// internal/principal resolves its stored role and refuses a removed member.
-// It reads with developer and writes with admin. A user has no read-only role
-// to fall back on, so it reads nothing here.
-// Every other platform API key is refused: a key that could edit key policies
-// could lift its own limits.
+// Only native browser cookies reach this API. Sessions read current active
+// user authority from the shared database without replaying IdP mappings.
+// Unsafe requests require exact Origin and CSRF. API keys and Authorization
+// headers are refused, including when a valid cookie accompanies them.
+// Developers can read; admins can write. A user has no gateway-admin access.
 //
 // Routes:
 //
@@ -50,19 +37,16 @@
 //	GET    /admin/v1/aliases                            list
 //	GET    /admin/v1/aliases/{name...}                  one (a name may hold a slash)
 //	POST   /admin/v1/aliases/{name...}                  update
-//	DELETE /admin/v1/aliases/{name...}                  delete (off every key policy first)
-//	GET    /admin/v1/key_policies                       list
-//	GET    /admin/v1/key_policies/{api_key_id}          one
-//	POST   /admin/v1/key_policies/{api_key_id}          create or replace
-//	DELETE /admin/v1/key_policies/{api_key_id}          revoke
-//	GET    /admin/v1/usage/daily                        rollups per UTC day, key, alias and deployment
+//	DELETE /admin/v1/aliases/{name...}                  delete
+//	GET    /admin/v1/rate_limits                       list organization limits
+//	POST   /admin/v1/rate_limits/{model...}           replace organization limits
+//	GET    /admin/v1/usage/daily                        rollups per UTC day, principal, alias and deployment
 //	GET    /admin/v1/usage/requests                     the ledger, a page at a time
 //
 // An update names only the fields it changes, as null only where null means
 // what it means at creation (a provider's headers and stall timeout, a
 // credential's protocols), and naming a field fixed at creation is refused
-// rather than ignored. A key policy is the exception: it is written whole, so
-// its body names every field. A list answers {"data": [...]},
+// rather than ignored. A model limit is replaced whole and names every dimension. A list answers {"data": [...]},
 // unpaginated: a configuration is tens of rows, not thousands. The ledger is
 // the exception, millions of rows, read a page at a time. Errors answer
 // in the platform's envelope, {"type":"error","error":{"type","message"}}.
@@ -78,20 +62,15 @@ package admin
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"path"
 	"slices"
 	"strings"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -101,19 +80,15 @@ import (
 
 // Config is what the admin API needs.
 type Config struct {
-	Store        *store.Store
-	Cipher       secrets.Cipher     // seals credential keys
-	Verifier     *identity.Verifier // nil: no legacy operator identity
-	Principals   principal.Querier  // stored roles; required with a Verifier
-	Login        *login.Manager     // shared-DB browser sessions; nil or non-native preserves legacy-only admission
-	BootstrapKey string             // CONTROLPLANE_API_KEY
-	Prober       Prober             // calls vendors for the check and test routes (modelgateway.NewProber)
+	Store  *store.Store
+	Cipher secrets.Cipher // seals credential keys
+	Login  *login.Manager // required shared-DB browser sessions
+	Prober Prober         // calls vendors for the check and test routes (modelgateway.NewProber)
 }
 
 type handler struct {
-	cfg       Config
-	bootstrap [sha256.Size]byte
-	mux       *http.ServeMux
+	cfg Config
+	mux *http.ServeMux
 }
 
 // New returns the admin API's handler.
@@ -123,14 +98,12 @@ func New(cfg Config) (http.Handler, error) {
 		return nil, errors.New("modelgateway admin: a store is required")
 	case cfg.Cipher == nil:
 		return nil, errors.New("modelgateway admin: a secrets cipher is required to seal credential keys")
-	case cfg.BootstrapKey == "":
-		return nil, errors.New("modelgateway admin: the bootstrap key is required")
+	case cfg.Login == nil || !cfg.Login.NativeEnabled():
+		return nil, errors.New("modelgateway admin: native browser login is required")
 	case cfg.Prober == nil:
 		return nil, errors.New("modelgateway admin: a prober is required for the check and test routes")
-	case cfg.Verifier != nil && cfg.Principals == nil:
-		return nil, errors.New("modelgateway admin: an operator identity needs the principals table to read a role from")
 	}
-	h := &handler{cfg: cfg, bootstrap: sha256.Sum256([]byte(cfg.BootstrapKey)), mux: http.NewServeMux()}
+	h := &handler{cfg: cfg, mux: http.NewServeMux()}
 	h.routes()
 	return h, nil
 }
@@ -153,9 +126,6 @@ func (h *handler) routes() {
 	h.route("/admin/v1/aliases", ep("GET", read, h.listAliases), ep("POST", write, h.createAlias))
 	h.route("/admin/v1/aliases/{name...}",
 		ep("GET", read, h.getAlias), ep("POST", write, h.updateAlias), ep("DELETE", write, h.deleteAlias))
-	h.route("/admin/v1/key_policies", ep("GET", read, h.listKeyPolicies))
-	h.route("/admin/v1/key_policies/{api_key_id}",
-		ep("GET", read, h.getKeyPolicy), ep("POST", write, h.putKeyPolicy), ep("DELETE", write, h.deleteKeyPolicy))
 	h.route("/admin/v1/usage/daily", ep("GET", read, h.dailyUsage))
 	h.route("/admin/v1/usage/requests", ep("GET", read, h.listUsage))
 	h.route("/admin/v1/rate_limits", ep("GET", read, h.listModelLimits))
@@ -228,109 +198,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r.WithContext(ctx))
 }
 
-// authenticate returns the role that authorizes r. The bootstrap key is admin.
-// An operator token shares the control plane's identity lane rule (plan 69
-// decision 4): principal.Resolve applies the mapping and rejects removed
-// members. A browser cookie instead reads current authority without a sign-in.
-// Existing routes retain offered legacy credential precedence, including failures.
-// cookie is true only when a browser session actually authenticated the request.
-func (h *handler) authenticate(r *http.Request) (role identity.Role, cookie bool, principalID string, err error) {
-	keys := r.Header.Values("x-api-key")
-	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
-		return "", false, "", unauthenticated("a credential header is repeated")
+// authenticate refuses every non-cookie credential before routing.
+func (h *handler) authenticate(r *http.Request) (identity.Role, bool, string, error) {
+	if len(r.Header.Values("x-api-key")) > 0 || len(r.Header.Values("Authorization")) > 0 {
+		return "", false, "", unauthenticated("a browser session cookie is required")
 	}
-	if len(keys) == 1 {
-		if h.isBootstrap(keys[0]) {
-			return identity.RoleAdmin, false, "", nil
-		}
-		return "", false, "", unauthenticated("invalid x-api-key: the admin API takes the bootstrap key, or an operator token")
-	}
-	if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && h.isBootstrap(tok) {
-		return identity.RoleAdmin, false, "", nil
-	}
-	if modelLimitPath(r) {
-		// IAP can attach an assertion to every browser request. This namespace
-		// must neither authenticate it nor replay its sign-in side effects.
-		if len(r.Header.Values("Authorization")) > 0 || h.cfg.Login == nil || !h.cfg.Login.NativeEnabled() {
-			return "", false, "", unauthenticated("organization rate limits require a console cookie")
-		}
-		return h.authenticateCookie(r)
-	}
-	if v := h.cfg.Verifier; v != nil {
-		if tok, ok := v.Credential(r); ok {
-			if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && strings.HasPrefix(bearer, "sk-map-api01-") {
-				// Match the private control-plane lane's immutable-shape check.
-				// A known unowned companion supplies no authority, even after
-				// expiry/archive. Owned or unknown keys cannot select an assertion.
-				var legacy bool
-				err := h.cfg.Principals.QueryRow(r.Context(), `SELECT EXISTS (
-					SELECT 1 FROM api_keys WHERE key_hash=$1 AND owner_principal_id IS NULL)`,
-					apikey.Hash(bearer)).Scan(&legacy)
-				if err != nil {
-					return "", false, "", err
-				}
-				if !legacy {
-					return "", false, "", unauthenticated("the admin API does not accept this issued API key")
-				}
-			}
-			id, err := v.Verify(r.Context(), tok)
-			if err != nil {
-				// As the control plane's identity lane: the caller is told
-				// only that the token failed, the operator's log which check.
-				var reason string
-				var ie *identity.Error
-				if errors.As(err, &ie) {
-					reason = ie.Reason()
-				}
-				slog.InfoContext(r.Context(), "modelgateway admin: operator token rejected", "reason", reason)
-				return "", false, "", unauthenticated("invalid operator token")
-			}
-			if m := h.cfg.Login; v.AssertionHeader() != "" && m != nil && m.NativeEnabled() && m.CheckProxyOrigin(r) != nil {
-				return "", false, "", forbidden("invalid browser origin")
-			}
-			p, err := principal.Resolve(r.Context(), h.cfg.Principals, id)
-			if errors.Is(err, principal.ErrDeactivated) {
-				// A 403 as on the control plane: the token is genuine, and the
-				// refusal is of the account.
-				return "", false, "", forbidden("this account has been removed from the organization")
-			}
-			if err != nil {
-				return "", false, "", err
-			}
-			return p.Role, false, p.ID, nil
-		}
-	}
-	legacyOffered := len(r.Header.Values("Authorization")) > 0
-	if v := h.cfg.Verifier; v != nil && v.AssertionHeader() != "" && len(r.Header.Values(v.AssertionHeader())) > 0 {
-		legacyOffered = true
-	}
-	if m := h.cfg.Login; !legacyOffered && m != nil && m.NativeEnabled() {
-		return h.authenticateCookie(r)
-	}
-	return "", false, "", unauthenticated("the admin API takes the bootstrap key in x-api-key, or an operator token")
-}
-
-// Check both sides of ServeMux's cleaning redirect before legacy sign-in can
-// run. Encoded dots/slashes are segment data, not cleaning instructions.
-func modelLimitPath(r *http.Request) bool {
-	budget := func(p string) bool {
-		parts := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 4)
-		if len(parts) < 3 {
-			return false
-		}
-		for i, want := range []string{"admin", "v1", "rate_limits"} {
-			got, err := url.PathUnescape(parts[i])
-			if err != nil || got != want {
-				return false
-			}
-		}
-		return true
-	}
-	p := r.URL.EscapedPath()
-	if budget(p) {
-		return true
-	}
-	return r.Method != http.MethodConnect && budget(path.Clean("/"+strings.TrimPrefix(p, "/")))
+	return h.authenticateCookie(r)
 }
 
 func (h *handler) authenticateCookie(r *http.Request) (identity.Role, bool, string, error) {
@@ -342,13 +215,6 @@ func (h *handler) authenticateCookie(r *http.Request) (identity.Role, bool, stri
 		return "", false, "", forbidden("invalid browser origin or CSRF token")
 	}
 	return session.Role, true, session.PrincipalID, nil
-}
-
-// isBootstrap compares digests, so the comparison is constant-time in the
-// key's length as well as its bytes.
-func (h *handler) isBootstrap(key string) bool {
-	sum := sha256.Sum256([]byte(key))
-	return subtle.ConstantTimeCompare(sum[:], h.bootstrap[:]) == 1
 }
 
 func requireRole(ctx context.Context, min identity.Role) error {

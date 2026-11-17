@@ -65,8 +65,12 @@ func TestNativeProxyAssertionBrowserMutation(t *testing.T) {
 					headers.Set("Cookie", offeredCookie)
 				}
 				res, raw := s.request("POST", path, "x=y", headers)
-				if res.StatusCode != 403 {
-					t.Errorf("asserted browser form=%d %s, want 403", res.StatusCode, raw)
+				want := 401
+				if offeredCookie == validCookie {
+					want = 403
+				}
+				if res.StatusCode != want {
+					t.Errorf("asserted browser form=%d %s, want %d", res.StatusCode, raw, want)
 				}
 				var revoked bool
 				if err := s.pool.QueryRow(context.Background(), `SELECT revoked_at IS NOT NULL FROM environment_keys WHERE id=$1`, id).Scan(&revoked); err != nil || revoked {
@@ -83,8 +87,8 @@ func TestNativeProxyAssertionBrowserMutation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			path, _ := target()
 			res, raw := s.request("POST", path, "x=y", headers)
-			if res.StatusCode != 204 {
-				t.Fatalf("compatible lane=%d %s", res.StatusCode, raw)
+			if res.StatusCode != 401 {
+				t.Fatalf("non-cookie refusal=%d %s", res.StatusCode, raw)
 			}
 		})
 	}

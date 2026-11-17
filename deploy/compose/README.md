@@ -45,10 +45,9 @@ The first `--build` compiles the Go binaries; later `up`s reuse the image. Every
 binary applies database migrations itself on connect (advisory-locked), so there
 is no separate migrate step.
 
-The API is published on **loopback (`127.0.0.1`) by default**, because the
-committed `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` are well-known placeholders —
-anyone who can reach the port can drive the API with either. To expose it on the
-LAN, set real keys and `CONTROLPLANE_BIND=0.0.0.0` in `.env`.
+The API is published on **loopback (`127.0.0.1`) by default** for local development.
+Remote access needs an operator-owned TLS ingress, an HTTPS Console origin and
+OIDC or trusted-proxy login. Issue API keys after signing in.
 
 ## One-origin Console (optional)
 
@@ -63,29 +62,18 @@ The edge binds only `127.0.0.1:${CONSOLE_PORT:-3000}`. Existing API listeners st
 The native development defaults are:
 
 ```sh
-CONSOLE_AUTH_MODE=platform
 CONSOLE_PUBLIC_ORIGIN=http://localhost:3000
 IDENTITY_MODE=password
 DEVELOPMENT_MODE=true
 ```
 
-Leave `CONSOLE_PLATFORM_API_KEY` and `CONSOLE_PASSWORD` unset. Start with
+Start with
 `docker compose --profile console up --build`, then open `/setup` at that origin.
 Retrieve the first-admin code from the restricted file that the control-plane log names.
 Use the same host spelling throughout; `localhost` and `127.0.0.1` are different origins.
 
-For a slice 6 legacy rollback, explicitly set all three values to empty in `.env`;
-unsetting them restores the native defaults:
-
-```sh
-CONSOLE_AUTH_MODE=
-CONSOLE_PUBLIC_ORIGIN=
-IDENTITY_MODE=
-```
-
-Set `CONSOLE_PLATFORM_API_KEY` to the control-plane key. An optional `CONSOLE_PASSWORD`
-protects that legacy console. A native public origin is invalid with legacy routing.
-Other mode values fail startup. The Console never receives the RP client secret.
+The Console renders pages and holds no credentials. The control plane owns login.
+Use the [Plan 69 upgrade note](../../docs/UPGRADING_PLAN69.md) for a coordinated upgrade.
 
 For native bundled OIDC, add the `iam` profile and use the native OIDC block in
 [`.env.example`](./.env.example). Browser and backend share `https://idp.localhost:8443`.
@@ -100,8 +88,8 @@ to the gateway; its inference listener stays separate. Pages, assets and shallow
 `/api/health` go to Console. Native deep health deliberately returns 503 and is not
 readiness. Internal paths and ambiguous path spellings are refused before proxying.
 The edge does not compress SSE or impose a response lifetime.
-If the gateway is omitted in a custom stack, set both `APP_EDGE_GATEWAY_UPSTREAM`
-and `CONSOLE_GATEWAY_BASE_URL` to empty. Native admin then returns 503, with no fallback.
+If the gateway is omitted in a custom stack, set `APP_EDGE_GATEWAY_UPSTREAM`
+to empty. Native admin then returns 503, with no fallback.
 
 For production TLS or IAP, use the routing boundaries in
 [the security guide](../../docs/self-hosted-security.md#native-browser-login).
@@ -159,8 +147,7 @@ Two files, and each documents its own settings in place rather than here:
 
 - **[`.env.example`](./.env.example)** — copy it to `.env` (compose reads that
   automatically; never commit it). It carries the handful you are expected to set:
-  `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` are the **required** ones, and
-  `CONTROLPLANE_BIND` stays on loopback until you replace the placeholder keys.
+  `CONTROLPLANE_BIND` stays on loopback for development. Remote access needs a TLS ingress.
 - **[`docker-compose.yml`](./docker-compose.yml)** — every other variable the stack
   passes through, declared on the service that reads it and grouped under comments
   explaining the group: the executor's timeouts and reap intervals, sandbox
@@ -266,7 +253,7 @@ same as the sandboxes that join their network namespace.
 
 ```sh
 # in .env: OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-docker compose --profile observability up --build
+docker compose --profile console --profile observability up --build
 ```
 
 Jaeger UI: `http://localhost:16686`.
@@ -279,36 +266,23 @@ and the noise gone, put an OTel Collector at `4317` and let it fan out.
 
 ## Single sign-on (optional)
 
-This block is the legacy verifier-only configuration. Native browser login uses
-the Console profile and HTTPS issuer described above.
+Use the native OIDC block in `.env.example`, with the Console and IAM profiles:
 
 ```sh
-# In .env, use the legacy OIDC block in .env.example, including its explicit
-# empty CONSOLE_PUBLIC_ORIGIN and CONSOLE_AUTH_MODE. Do not use the native block.
-docker compose --profile iam up --build
+docker compose --profile console --profile iam up --build
 ```
 
-Two services join the stack (docs/plan/31_console-sso-rbac.md,
-[#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)): **casdoor**, a
-local-account OIDC provider, so "the platform's default IAM works out of the box" is true
-on a laptop; and **idp**, a small Caddy proxy that is the only published way to reach it.
-The sign-in page is `http://localhost:8000`. These legacy settings select IdP token
-verification without native browser login. The default stack instead uses password login.
+The profile adds Casdoor and its Caddy TLS proxy. Open the Console login page at
+`http://localhost:3000/login`; browser and control plane use the same HTTPS issuer,
+`https://idp.localhost:8443`. Trust the generated local CA in the browser. The control
+plane requires `SSL_CERT_FILE` for that CA; the gateway reads platform sessions only.
+Keep the Console origin and the registered `/api/auth/callback` URI consistent.
 
-`IDENTITY_MODE` gates the other identity settings: explicitly empty disables them.
-For this local TLS proxy, `SSL_CERT_FILE` is required. Without it the control
-plane cannot verify the proxy's certificate and exits at boot with
-`x509: certificate signed by unknown authority`.
-
-`.env.example` supplies the seeded role examples. The issuer must equal the IdP's
-`origin` byte for byte. `IDENTITY_OIDC_JWKS_URL` is **not** optional here: the
-control plane needs an https key set through the proxy, while the browser keeps
-plain HTTP on the issuer. The role examples need `IDENTITY_CLAIM_ROLES=groups`,
-not `roles`. `IDENTITY_ROLE_MAP` itself is optional. Without it, first sign-in
-gets user and a never-bootstrapped install delivers its first-admin code through
-a restricted local file. Retrieve it from the specific control-plane container;
+The seeded role examples use `IDENTITY_CLAIM_ROLES=groups`, not `roles`.
+`IDENTITY_ROLE_MAP` is optional. Without it, first sign-in gets user; first-admin
+setup uses the restricted local file named in control-plane logs. See
 [the security guide](../../docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider)
-covers delivery and recovery. Logs contain only the path and expiry.
+for delivery and recovery. Empty or disabled login modes refuse startup.
 
 Three accounts are seeded, one per role:
 

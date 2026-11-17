@@ -7,12 +7,11 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"strconv"
+
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
@@ -34,15 +33,6 @@ func (e *env) clearOfAMinute() {
 	if left < 5 {
 		time.Sleep(time.Duration(left*float64(time.Second)) + 100*time.Millisecond)
 	}
-}
-
-// limitedKey issues a key granted every alias under the limits given.
-func (e *env) limitedKey(rpm *int32, tpm *int64) string {
-	e.t.Helper()
-	key := e.key(everyAlias)
-	_, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: fmt.Sprintf("key_%d", e.keys), RPM: rpm, TPM: tpm})
-	e.must(err)
-	return key
 }
 
 func priced(v float64) *float64 { return &v }
@@ -69,7 +59,7 @@ func TestTheLedgerRecordsEachAnsweredRequest(t *testing.T) {
 	})
 	e.alias("fast", target(d, 0))
 	e.alias("*", target(d, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	hdr := map[string]string{"x-api-key": key, "X-MAP-Session-ID": "sesn_1"}
@@ -130,7 +120,7 @@ func TestAStreamsUsageIsItsLastWord(t *testing.T) {
 			p := e.provider(up.URL)
 			e.credential(p, "sk-upstream-1", 1)
 			e.alias("fast", target(e.deployment(p, "m"), 0))
-			key := e.key(everyAlias)
+			key := e.key()
 			e.start()
 			e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
 			got := e.ledger()[0].Tokens
@@ -167,7 +157,7 @@ func TestAStreamsEmptyEventChangesNoCount(t *testing.T) {
 	e.alias("fast", target(e.deployment(p, "m"), 0))
 	e.alias("failing", target(e.deployment(p, "failing"), 0))
 	e.alias("dataless", target(e.deployment(p, "dataless"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key})
 	if got := e.ledger()[0]; got.Tokens == nil || *got.Tokens != (store.Tokens{Input: 100, Output: 1}) || got.ErrorType != "" {
@@ -219,7 +209,7 @@ func TestTheLedgerRecordsWhatTheCallerWasGiven(t *testing.T) {
 			c1, c2 := e.credential(p1, "sk-upstream-1", 1), e.credential(p2, "sk-upstream-2", 1)
 			d1, d2 := e.deployment(p1, "m1"), e.deployment(p2, "m2")
 			e.alias("fast", target(d1, 0), target(d2, 1))
-			key := e.key(everyAlias)
+			key := e.key()
 			e.start()
 			body := `{"model":"fast","max_tokens":8,"messages":[]}`
 			if tc.stream {
@@ -266,7 +256,7 @@ func TestACallerThatLeavesIsRecordedInFull(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	ctx, cancel := context.WithCancel(e.ctx)
@@ -299,82 +289,13 @@ func TestALedgerFailureIsNotTheCallers(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if _, err := e.pool.Exec(e.ctx, `ALTER TABLE modelgateway.usage RENAME TO usage_gone`); err != nil {
 		t.Fatal(err)
 	}
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 || !strings.Contains(string(b), `"ok"`) {
 		t.Errorf("%d %s", resp.StatusCode, b)
-	}
-}
-
-// A key's RPM refuses its requests past the limit with a 429
-// rate_limit_error and a retry-after in whole seconds; the refusals reach no
-// upstream and leave no row, and a count is a request like any other. Its
-// TPM refuses once the minute's completed tokens reach it. A refusal the
-// gateway makes before asking any upstream counts for nothing; a key with
-// no limits writes no window.
-func TestALimitedKeyIsRefusedPastItsLimit(t *testing.T) {
-	e := newEnv(t)
-	up := newFake(t, message("ok"))
-	p := e.provider(up.URL)
-	e.credential(p, "sk-upstream-1", 1)
-	e.alias("fast", target(e.deployment(p, "m"), 0))
-	rpm, tpm := int32(2), int64(10)
-	byRequests, byTokens, free := e.limitedKey(&rpm, nil), e.limitedKey(nil, &tpm), e.key(everyAlias)
-	// The control plane registers the bootstrap key's row; no policy names it.
-	_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap))
-	e.must(err)
-	e.start()
-	e.clearOfAMinute()
-	send := func(key, path, model string) (*http.Response, []byte) {
-		return e.do("POST", path, `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
-	}
-	refused := func(resp *http.Response, b []byte, limit string) {
-		t.Helper()
-		typ, msg, _ := errorOf(t, b)
-		ra, err := strconv.Atoi(resp.Header.Get("Retry-After"))
-		if resp.StatusCode != 429 || typ != "rate_limit_error" || !strings.Contains(msg, limit+" per minute") || err != nil || ra < 1 || ra > 60 {
-			t.Errorf("%d %s, retry-after %q; want a 429 naming %s", resp.StatusCode, b, resp.Header.Get("Retry-After"), limit)
-		}
-	}
-
-	if resp, _ := send(byRequests, "/v1/messages", "nope"); resp.StatusCode != 404 {
-		t.Fatalf("an unknown model: %d", resp.StatusCode)
-	}
-	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
-		if resp, b := send(byRequests, path, "fast"); resp.StatusCode != 200 {
-			t.Fatalf("%s within the limit: %d %s", path, resp.StatusCode, b)
-		}
-	}
-	resp, b := send(byRequests, "/v1/messages", "fast")
-	refused(resp, b, "2 requests")
-	if n := len(up.recorded()); n != 2 {
-		t.Errorf("the upstream was called %d times, want the 2 admitted", n)
-	}
-
-	// Each answer reports 7 tokens: the first two are admitted under 10, the
-	// third is not.
-	for i := range 2 {
-		if resp, b := send(byTokens, "/v1/messages", "fast"); resp.StatusCode != 200 {
-			t.Fatalf("token request %d: %d %s", i, resp.StatusCode, b)
-		}
-	}
-	resp, b = send(byTokens, "/v1/messages", "fast")
-	refused(resp, b, "10 tokens")
-
-	for range 3 {
-		send(free, "/v1/messages", "fast")
-		send(bootstrap, "/v1/messages", "fast")
-	}
-	if n := len(e.ledger()); n != 2+2+3+3 {
-		t.Errorf("%d rows, want one per admitted request", n)
-	}
-	var windows int
-	e.must(e.pool.QueryRow(e.ctx, `SELECT count(*) FROM modelgateway.rate_windows WHERE api_key_id NOT IN ('key_1', 'key_2')`).Scan(&windows))
-	if windows != 0 {
-		t.Errorf("unlimited keys wrote %d windows", windows)
 	}
 }
 
@@ -387,8 +308,10 @@ func TestASessionIDTheLedgerCannotHoldIsRefused(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	rpm := int32(1)
-	key := e.limitedKey(&rpm, nil)
+	rpm := int64(1)
+	_, err := e.s.PutModelLimit(e.ctx, store.ModelLimit{Model: "fast", RPM: &rpm}, nil)
+	e.must(err)
+	key := e.key()
 	e.start()
 	body := `{"model":"fast","max_tokens":8,"messages":[]}`
 	for _, id := range []string{strings.Repeat("s", 257), "sesn_\xff"} {
@@ -418,7 +341,7 @@ func TestASlowLedgerDoesNotCutTheAnswer(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	tx, err := e.pool.Begin(e.ctx)
 	e.must(err)
@@ -462,7 +385,7 @@ func TestTheLedgerHoldsWhatItIsSent(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("*", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key}
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"x\u0000`+strings.Repeat("é", 200)+`","max_tokens":8,"messages":[]}`, hdr); resp.StatusCode != 200 {
@@ -523,7 +446,7 @@ func TestTimeToFirstTokenSkipsKeepAlives(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"stream":true,"messages":[]}`, map[string]string{"x-api-key": key}); resp.StatusCode != 200 {
 		t.Fatalf("%d %s", resp.StatusCode, b)

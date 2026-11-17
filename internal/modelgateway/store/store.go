@@ -4,13 +4,12 @@
 // Every configuration write runs in one transaction that ends with a
 // notification on NotifyChannel, so each replica's catalog reloads once the
 // write is visible; a write that fails commits neither. The ledger and the
-// rate windows (usage.go, limits.go) are not configuration, and announce
+// rate windows (usage.go, model_limits.go) are not configuration, and announce
 // nothing. The invariants that span rows are held
 // here, inside that transaction, rather than by each caller: a credential
 // names only protocols its provider has an endpoint for; an alias's targets
 // share one kind, which is the alias's from creation on; an embedding alias
-// keeps the one deployment it was created with; a key policy names only
-// aliases that exist, and an alias a policy names cannot be deleted. The rows
+// keeps the one deployment it was created with. The rows
 // those checks read are locked, so a concurrent write cannot slip between the
 // check and the write.
 //
@@ -148,23 +147,12 @@ type Alias struct {
 	UpdatedAt   time.Time
 }
 
-// KeyPolicy grants one platform API key the right to call models.
-type KeyPolicy struct {
-	APIKeyID  string
-	Aliases   []string // nil: every alias
-	RPM       *int32   // nil: no limit
-	TPM       *int64   // nil: no limit
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
-
 // Config is every row, read in one snapshot.
 type Config struct {
 	Providers   []Provider
 	Credentials []Credential
 	Deployments []Deployment
 	Aliases     []Alias
-	KeyPolicies []KeyPolicy
 }
 
 // Store runs the gateway's queries.

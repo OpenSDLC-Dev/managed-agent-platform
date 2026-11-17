@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -163,9 +164,7 @@ func (h *harness) wake(t *testing.T, text string) {
 // postToolResult exercises the control plane's actual receipt and scheduling.
 func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, payload map[string]any) {
 	t.Helper()
-	if err := api.EnsureAPIKey(context.Background(), h.pool, "brain-test", "brain-test-key"); err != nil {
-		t.Fatal(err)
-	}
+	key := apitest.OwnedKey(t, h.pool)
 	payload["type"] = string(eventType)
 	raw, err := json.Marshal(map[string]any{"events": []any{payload}})
 	if err != nil {
@@ -173,7 +172,7 @@ func (h *harness) postToolResult(t *testing.T, eventType domain.EventType, paylo
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+h.sessionID.String()+"/events", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", "brain-test-key")
+	req.Header.Set("x-api-key", key)
 	if eventType == domain.EventUserToolResult {
 		// A BYOC worker's event, admitted under its environment key alone (#662).
 		if h.workerKey == "" {

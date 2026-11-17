@@ -13,8 +13,8 @@ func TestNativeProxyAssertionBrowserMutation(t *testing.T) {
 	token := e.token("admins")
 	assertion := http.Header{"X-Goog-Iap-Jwt-Assertion": {token}}
 	status, _, raw := cookieAdminRequest(t, e, "GET", "/admin/v1/profiles", "", assertion)
-	if status != 200 {
-		t.Fatalf("sign in=%d %s", status, raw)
+	if status != 401 {
+		t.Fatalf("assertion-only admission=%d %s", status, raw)
 	}
 	var id string
 	if err := e.pool.QueryRow(context.Background(), `SELECT id FROM principals`).Scan(&id); err != nil {
@@ -54,8 +54,12 @@ func TestNativeProxyAssertionBrowserMutation(t *testing.T) {
 					headers.Set("Cookie", cookie)
 				}
 				status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/providers", body, headers)
-				if status != 403 {
-					t.Errorf("asserted browser form=%d %s, want 403", status, raw)
+				want := 401
+				if cookie == "map_session="+valid.Token {
+					want = 403
+				}
+				if status != want {
+					t.Errorf("asserted browser form=%d %s, want %d", status, raw, want)
 				}
 				var count int
 				if err := e.pool.QueryRow(context.Background(), `SELECT count(*) FROM modelgateway.providers`).Scan(&count); err != nil || count != 0 {
@@ -71,8 +75,8 @@ func TestNativeProxyAssertionBrowserMutation(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			status, _, raw := cookieAdminRequest(t, e, "POST", "/admin/v1/providers", body, h)
-			if status != 200 {
-				t.Fatalf("compatible lane=%d %s", status, raw)
+			if status != 401 {
+				t.Fatalf("non-cookie refusal=%d %s", status, raw)
 			}
 			if _, err := e.pool.Exec(context.Background(), `DELETE FROM modelgateway.providers`); err != nil {
 				t.Fatal(err)

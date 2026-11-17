@@ -3,19 +3,8 @@
 //
 //	CONTROLPLANE_ADDR     listen address (default ":8080")
 //	DATABASE_URL          Postgres DSN (required)
-//	CONTROLPLANE_API_KEY  bootstrap management API key (required); seeded
-//	                      (hashed) into api_keys at startup. Changing it and
-//	                      restarting archives the previous bootstrap key. Naming
-//	                      a value here makes that key env-var-managed: if the
-//	                      value already exists as an unowned console-issued key,
-//	                      the row loses its issuer and any expiry it carried.
-//	BRAIN_API_KEY         the brain's platform key for the model gateway
-//	                      (optional; must differ from CONTROLPLANE_API_KEY and
-//	                      carry no surrounding whitespace), seeded into
-//	                      api_keys as "brain" the same way. Unset, the
-//	                      env-var-managed "brain" key is archived, so a key
-//	                      whose variable was removed stops working; every
-//	                      replica must agree on it, set or unset
+//	IDENTITY_MODE        password, oidc or trusted_proxy (required)
+//	CONSOLE_PUBLIC_ORIGIN canonical application origin (required)
 //	BLOB_BACKEND          object storage for skill archives and files: "s3"
 //	                      (default when empty) or "gcs". Empty with no
 //	                      BLOB_ENDPOINT deploys without object storage (the
@@ -67,7 +56,7 @@
 // directories as anthropic-source skills (validated exactly like uploads,
 // date-based version from the checkout's last commit unless -import-version
 // overrides) and exits instead of serving. Needs DATABASE_URL and the BLOB_*
-// object storage; CONTROLPLANE_API_KEY is not required in this mode.
+// object storage; this run-once path does not serve browser login.
 package main
 
 import (
@@ -89,7 +78,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	blobbackend "github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
@@ -201,14 +189,6 @@ func run(ctx context.Context) error {
 	if *importCheckout != "" {
 		return runImport(ctx, dsn)
 	}
-	bootKey := os.Getenv("CONTROLPLANE_API_KEY")
-	if bootKey == "" {
-		return errors.New("CONTROLPLANE_API_KEY is required")
-	}
-	brainKey := os.Getenv("BRAIN_API_KEY")
-	if err := apikey.CheckBrainKey(bootKey, brainKey); err != nil {
-		return fmt.Errorf("BRAIN_API_KEY %w", err)
-	}
 	loginCfg, err := login.ConfigFromEnv(os.Getenv)
 	if err != nil {
 		return err
@@ -223,9 +203,6 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	if err := api.EnsureManagementPresets(ctx, pool, bootKey, brainKey); err != nil {
-		return err
-	}
 	cleanupSetupCode, err := deliverSetupCode(ctx, pool)
 	if err != nil {
 		return err
@@ -270,19 +247,14 @@ func run(ctx context.Context) error {
 		slog.Info("secrets cipher not configured; vault credential storage will report the absence")
 	}
 
-	// The IdP is optional. Constructing its verifier here makes a misconfigured
-	// IdP a boot failure rather than a 500 on the first human request: New
-	// performs discovery and one warming key fetch. Without an IdP
-	// (IDENTITY_MODE unset or disabled), owned public API keys still use their
-	// owner's current role.
+	// Password mode needs no IdP. Other login modes validate their verifier at
+	// startup, including discovery and the first key fetch.
 	verifier, err := identity.FromEnv(ctx)
 	if err != nil {
 		return err
 	}
 	if loginCfg.Mode == login.ModePassword {
 		slog.Info("native password login configured for development")
-	} else if verifier == nil {
-		slog.Info("identity not configured; human SSO is off and API-key authentication remains available")
 	} else {
 		slog.Info("identity configured", "mode", string(verifier.Mode()))
 	}

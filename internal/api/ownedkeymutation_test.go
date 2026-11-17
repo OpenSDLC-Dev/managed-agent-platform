@@ -9,50 +9,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
-// The legacy IdP mapping is applied on admission, not replayed by the fence.
-// Withdrawal tests change the stored role after this real admission.
+// Withdrawal follows real cookie admission and rechecks stored authority.
 func ownedMutationCaller(t *testing.T, lane, role string) (*nativeServer, http.Handler, string, http.Header) {
 	t.Helper()
-	if lane == "cookie" {
-		s, h := newCredentialHandler(t)
-		id := seedMember(t, s, "mutation-caller", role, "console")
-		return s, h, id, ownedCookie(t, s, id)
-	}
-	s := newNativeServer(t, login.ModeOIDC)
-	cfg := identity.Config{Mode: identity.ModeOIDC, Issuer: s.idp.Issuer(), Audience: laneAudience, JWKSURL: s.idp.JWKSURL(), HTTPClient: s.idp.Client(), RoleMap: laneRoles()}
-	v, err := identity.New(t.Context(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := api.NewHandler(s.pool, nil, nil, v, api.WithLogin(s.manager, nil))
-	claims := s.idp.Claims(laneAudience, time.Now())
-	claim := "platform-admins"
-	if role == "developer" {
-		claim = "platform-devs"
-	}
-	claims["roles"] = []any{claim}
-	headers := nativeHeaders("", "")
-	headers.Set("Authorization", "Bearer "+s.idp.Mint(t, claims))
-	rr := credentialCall(t.Context(), h, "GET", consoleAPIKeysPath, nil, headers)
-	if rr.Code != 200 {
-		t.Fatalf("legacy human admission: %d %s", rr.Code, rr.Body.String())
-	}
-	var id string
-	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals WHERE subject='user-1'`).Scan(&id); err != nil {
-		t.Fatal(err)
-	}
-	return s, h, id, headers
+	s, h := newCredentialHandler(t)
+	id := seedMember(t, s, "mutation-caller", role, "console")
+	return s, h, id, ownedCookie(t, s, id)
 }
 
 func TestOwnedKeyMutationFence(t *testing.T) {
-	for _, lane := range []string{"cookie", "legacy-human"} {
+	for _, lane := range []string{"cookie"} {
 		for _, withdrawal := range []string{"user", "deactivate", "logout", "expire", "developer-self", "developer-service", "developer-other-update"} {
 			if lane != "cookie" && (withdrawal == "logout" || withdrawal == "expire" || withdrawal == "developer-service") {
 				continue

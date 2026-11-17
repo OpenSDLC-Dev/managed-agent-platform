@@ -63,7 +63,7 @@ func TestAMessagesRequestReachesGemini(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, geminiText("Jupiter"))
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	m, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: "g", MaxTokens: 64,
@@ -114,7 +114,7 @@ func TestAGeminiModelIsEscapedInThePath(t *testing.T) {
 	for model := range paths {
 		e.alias(model, target(e.deployment(p, model), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for model, want := range paths {
 		if _, err := e.client(key).Messages.New(context.Background(), anthropic.MessageNewParams{Model: model, MaxTokens: 8, Messages: hello()}); err != nil {
@@ -138,7 +138,7 @@ func TestAGeminiToolLoopCarriesItsSignature(t *testing.T) {
 	other := e.deployment(onGemini(e, f.URL), "gemini-3.8-pro")
 	e.alias("g", target(g, 0))
 	e.alias("other", target(other, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
@@ -192,7 +192,7 @@ func TestWhatAGeminiAttemptCannotServe(t *testing.T) {
 	e.credential(ap, "sk-anthropic-key1", 1)
 	e.alias("g", target(gd, 0))
 	e.alias("mix", target(gd, 0), target(e.deployment(ap, "claude"), 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	ctx := context.Background()
@@ -245,7 +245,7 @@ func TestGeminiErrors(t *testing.T) {
 	e.credential(rp, "AIza-gemini-key2", 1)
 	e.alias("revoked", target(e.deployment(rp, "gemini-3.8-flash"), 0))
 	e.alias("bad", target(e.deployment(onGemini(e, bad.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 
@@ -276,7 +276,7 @@ func TestAGeminiAnswerThatCannotBeCarried(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, status(200, `{"candidates":[{"content":{"parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"bad call"}],"usageMetadata":`+geminiUsage+`}`))
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/messages", `{"model":"g","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"})
@@ -294,7 +294,7 @@ func TestAResponsesRequestReachesGemini(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, geminiText("Jupiter"))
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	oc := e.oaClient(key, "/v1")
 	r, err := oc.Responses.New(context.Background(), respParams("g"))
@@ -356,7 +356,7 @@ func TestAGeminiSignatureRefusalIsStrippedOnce(t *testing.T) {
 		geminiLoop(w, r, c)
 	})
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
@@ -384,7 +384,7 @@ func TestBothConversionsRefusingAnswerOneWay(t *testing.T) {
 	of := newFake(t, status(500, `{}`))
 	e.alias("both", target(e.deployment(onGemini(e, gf.URL), "gemini-3.8-flash"), 0),
 		target(e.deployment(onOpenAI(e, "openai-generic", of.URL), "gpt"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	doc := `{"model":"both","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","media_type":"text/plain","data":"x"}}]}]}`
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
@@ -424,7 +424,7 @@ func TestAToolNameGeminiWouldRefuseComesBackWhole(t *testing.T) {
 		writeBody(w, 200, called)
 	})
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	params := anthropic.MessageNewParams{Model: "g", MaxTokens: 64, Messages: hello(),

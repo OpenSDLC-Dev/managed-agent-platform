@@ -27,11 +27,8 @@ otlp:
   endpoint: ""
   insecure: false
 
-# -- Bootstrap management API key (x-api-key). REQUIRED: set via --set or a values
-# file, or point existingSecret at a Secret holding key `controlplane-api-key`.
-# Stored in the chart's Secret when apiKey is set inline.
+# -- Control-plane replicas and service configuration.
 controlplane:
-  apiKey: ""
   replicas: 1
   # -- Annotations for this component's Kubernetes ServiceAccount. The reason
   # this exists is GKE Workload Identity, which is an annotation and nothing
@@ -122,16 +119,6 @@ brain:
   # the brain's one route itself — every model string to the gateway's Service,
   # under its current claim token — and refuses routes here, which it would otherwise drop.
   modelProviders: []
-  # -- Compatibility key for old brains during rollout, BRAIN_API_KEY.
-  # New brains use per-claim tokens. The receivers retain this until plan 69 slice 7.
-  # REQUIRED with modelgateway.enabled: set via --set or a values file, or point
-  # existingSecret at a Secret holding key `brain-api-key`. The control plane
-  # registers it in api_keys as "brain" and the gateway lets it call any model
-  # without a key policy; it also authenticates the management API, like
-  # controlplane.apiKey, so it is a credential of the same weight. Must differ
-  # from controlplane.apiKey, carry no surrounding whitespace, and be a string —
-  # quoted, or passed with --set-string, if it is all digits.
-  apiKey: ""
   # -- The gateway route's other fields, with modelgateway.enabled: the chart
   # writes model, protocol, base_url and delegated_inference, and takes only these four
   # beside them, spelled exactly, checked by the loader as brain.modelProviders'
@@ -256,9 +243,9 @@ executor:
 # -- The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages for the
 # platform's API keys, routed to the vendor deployments its catalogue holds, and
 # the /admin/v1/ API that managed-agent-console configures it through. On, the
-# brain sends every model call through it (brain.apiKey); off, the brain routes
-# itself (brain.modelProviders). It reads the platform's database and the
-# bootstrap key (controlplane.apiKey), and it seals vendor keys with the
+# brain sends each model call with a delegated claim token; off, the brain routes
+# itself (brain.modelProviders). The gateway reads the platform's database.
+# It seals vendor keys with the
 # release's credential cipher, so it needs one — openbao (the default),
 # externalOpenBao, localCipher or gcpKMS: with a chart-managed Secret the render
 # fails without one, and with existingSecret the gateway refuses to start. A
@@ -639,14 +626,9 @@ gcpKMS:
 developmentMode: false
 console:
   enabled: true
-  # Native control-plane login. Legacy template fields remain only until slice 7.
-  authMode: platform
   publicOrigin: ""
   # Independent multi-architecture published image. Platform image.tag never changes it.
-  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319
-  # Legacy only: keys platform-api-key and optional console-password.
-  # Empty uses the release bootstrap key; native mode receives neither key.
-  legacySecret: ""
+  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:3395af7496c827f4607cc2a5b35246241a5d8f63a3026b7e966ba7da4179cfae
   resources: {}
 appEdge:
   image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
@@ -678,7 +660,7 @@ identity:
     clientSecret: ""
     # existingSecret only. A nonempty key is mandatory; absent key keeps the pod from starting.
     clientSecretKey: ""
-  # Optional Secret with ca.crt, mounted by CP/gateway, never by Console.
+  # Optional Secret with ca.crt, mounted only by the control plane.
   caSecret: ""
   # -- Mode `trusted_proxy`: the cloud vendor terminated authentication and hands
   # the control plane a signed assertion header (the unsigned convenience headers
@@ -867,8 +849,8 @@ casdoor:
 
 # -- Reference a pre-created Secret instead of letting the chart create one. When
 # set, the chart creates NO Secret and every process reads credentials from this
-# one, which must carry keys: controlplane-api-key, database-url, and
-# brain-api-key with modelgateway.enabled or model-providers.json without it
+# one, which must carry database-url, and model-providers.json when the gateway
+# is disabled
 # (plus the blob-* keys if object storage is in use, and the
 # secrets-backend key if a credential cipher is in use, plus that backend's own:
 # bao-* for OpenBao, secrets-* for the local cipher, gcpkms-key-name for Cloud
