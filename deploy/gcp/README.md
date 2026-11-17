@@ -1341,8 +1341,8 @@ with no exact match. Set organization RPM/input TPM/output TPM limits per alias;
 all keys and delegated calls share them. Usage shows the acting principal and,
 for delegated work, its session. Vendor credentials are supplied by the operator.
 
-**What the smoke step proves, and what it does not.** It checks that the compatibility
-LoadBalancer still has an IP, then sends `GET /v1/agents?limit=1` through the HTTPS edge.
+**What the smoke step proves, and what it does not.** It sends
+`GET /v1/agents?limit=1` through the HTTPS edge.
 The request must answer 200 with the Console-issued CD key in each supported header
 and exactly 401 without it. The same key must be refused on private and admin routes.
 The authenticated request exercises the key and takes a round trip through Cloud SQL.

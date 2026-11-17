@@ -72,8 +72,8 @@ The independent full `make verify` passed on 2026-11-18 (Asia/Shanghai), with
 **91.66%** total statement coverage. All 80 package test runs passed; seven packages
 contained no tests. The run used Linux Go 1.26.8 and `GOFLAGS=-p=1` after correcting
 stale authentication fixtures found by the first full run. Its focused regression
-passed all 90 selected top-level tests before the full gate. All 993 Go, SQL, module
-and Makefile paths matched the final checked tree; their manifest fingerprint was
+passed all 90 selected top-level tests before the full gate. At that checkpoint,
+all 993 Go, SQL, module and Makefile paths matched the full-gate tree; their manifest fingerprint was
 `6c7a26290b31d1b2633c7342c912d37ec1a6b81365c444feb8f5ced3aea0021f`.
 
 A separate real-binary probe passed 98 checks. It covered native setup and login,
@@ -85,6 +85,11 @@ The verifier confirmed unchanged production build tokens between that probe and 
 Its owned processes and fixtures were removed, with no gate Docker or kind resource delta.
 Independent local CI also passed 24 Helm, 24 Terraform and nine Compose steps;
 the registry check and SDK citation report had no findings or pending transitions.
+
+Review restored the existing concurrent environment-key issuance test that had been
+removed with preset-key tests. It passed independently against a fresh database.
+All 422 production Go, SQL, module and Makefile files still matched the full-gate snapshot.
+Two operator-documentation claims were narrowed to the behavior the code actually checks.
 
 This record covers local verification. It does not certify the pending committed reviews,
 staging rollout or obsolete-data cleanup. The infrastructure run left 21 anonymous-volume

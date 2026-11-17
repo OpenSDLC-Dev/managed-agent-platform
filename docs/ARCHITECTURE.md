@@ -687,7 +687,7 @@ and holds the two OS-touching adapters `gaterun/` declares.
   principal-first order. They finish reading the body before taking locks.
   Cookie callers recheck the session. Owner assignment and row permission are checked
   in that transaction. Principal and session locks last until commit.
-  Worker-key issuance and gateway configuration writes retain their human admin fence.
+  Worker-key issuance and gateway rate-limit writes retain their human admin fence.
   Manual demotion/removal protects the last active human admin; mapping is exempt.
   The cookie-only resource proxy re-enters management dispatch with the same
   role floors, audit actor and trace context. It cannot enter machine or inference
