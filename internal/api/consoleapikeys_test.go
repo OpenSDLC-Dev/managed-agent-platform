@@ -31,7 +31,7 @@ func consoleOrgAPIKey(id string) string { return "/api/console/organizations/def
 // wire surface's envelope.
 func listAPIKeys(t *testing.T, s *tserver) []map[string]any {
 	t.Helper()
-	res := s.doRaw(http.MethodGet, consoleAPIKeysPath, nil, map[string]string{"x-api-key": testKey})
+	res := s.doRaw(http.MethodGet, consoleAPIKeysPath, nil, s.cookieHeaders())
 	defer res.Body.Close()
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {
@@ -49,7 +49,7 @@ func listAPIKeys(t *testing.T, s *tserver) []map[string]any {
 
 func issueAPIKey(t *testing.T, s *tserver, body map[string]any) map[string]any {
 	t.Helper()
-	status, obj := s.do(http.MethodPost, consoleAPIKeysPath, body)
+	status, obj := s.doCookie(http.MethodPost, consoleAPIKeysPath, body)
 	if status != http.StatusOK {
 		t.Fatalf("issue %v: status %d, body %v", body, status, obj)
 	}
@@ -89,7 +89,7 @@ func TestAnAdminCanWorkTheAPIKeySurfaceEndToEnd(t *testing.T) {
 	}
 	set := func(status string) map[string]any {
 		t.Helper()
-		code, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": status})
+		code, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"status": status})
 		if code != http.StatusOK {
 			t.Fatalf("set status %s: %d, body %v", status, code, obj)
 		}
@@ -157,16 +157,16 @@ func TestAPIKeyIssuanceRendersTheRecordedShape(t *testing.T) {
 	// account — mirroring rather than reserving by guess, so #56 can populate them
 	// without a shape change. Present-and-null, not absent: wantExactFields above
 	// already required the keys.
-	for _, k := range []string{"workspace_id", "principal", "expires_at"} {
+	for _, k := range []string{"workspace_id", "expires_at"} {
 		if created[k] != nil {
 			t.Errorf("%s = %v, want null", k, created[k])
 		}
 	}
-	// created_by is the one actor we can answer today. With identity disabled the
-	// issuer is the machine credential's own row, so it renders as an api_key.
+	// The cookie principal owns and creates this key; the wire actor shapes differ.
 	by, _ := created["created_by"].(map[string]any)
-	if by == nil || by["type"] != "api_key" || !strings.HasPrefix(by["id"].(string), "apikey_") {
-		t.Errorf("created_by = %v, want an apikey_ actor", created["created_by"])
+	owner, _ := created["principal"].(map[string]any)
+	if by == nil || by["type"] != "user" || !strings.HasPrefix(by["id"].(string), "user_") || owner["type"] != "user_actor" || owner["user_id"] != by["id"] {
+		t.Errorf("unexpected creator/owner: %v / %v", by, owner)
 	}
 	raw, _ := created["raw_key"].(string)
 	if !strings.HasPrefix(raw, api.IssuedKeyPrefix) {
@@ -204,10 +204,11 @@ func TestAPIKeyIssuanceRendersTheRecordedShape(t *testing.T) {
 // with would misdescribe what can reach this API.
 func TestAPIKeyListingIsABareArrayWithEveryRow(t *testing.T) {
 	s := newTestServer(t)
+	insertHistoricalKey(t, s.pool, "historical", "historical-no-authority")
 
 	first := issueAPIKey(t, s, map[string]any{"name": "one"})["id"].(string)
 	second := issueAPIKey(t, s, map[string]any{"name": "two"})["id"].(string)
-	if code, obj := s.do(http.MethodPost, consoleAPIKey(first),
+	if code, obj := s.doCookie(http.MethodPost, consoleAPIKey(first),
 		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
 		t.Fatalf("archive: %d %v", code, obj)
 	}
@@ -334,7 +335,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	// nothing usable, and hand back a resource reporting `expired`: a success for
 	// an action that had no effect. This route cannot set expires_at, so there is
 	// no version of the request that would work; the honest answer says why.
-	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusActive})
+	status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"status": api.KeyStatusActive})
 	if status != http.StatusBadRequest {
 		t.Errorf("re-activating a lapsed key: %d %v, want 400", status, obj)
 	} else if want := "Expired API keys can only be deleted, not renamed or reactivated."; errMessage(obj) != want {
@@ -345,7 +346,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	disabled := issueAPIKey(t, s, map[string]any{
 		"name": "disabled-then-lapsed", "expires_at": at.Format(time.RFC3339)})
 	other := disabled["id"].(string)
-	if code, body := s.do(http.MethodPost, consoleAPIKey(other),
+	if code, body := s.doCookie(http.MethodPost, consoleAPIKey(other),
 		map[string]any{"status": api.KeyStatusInactive}); code != http.StatusOK {
 		t.Fatalf("disable: %d %v", code, body)
 	}
@@ -360,7 +361,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	if row := rowByID(listAPIKeys(t, s), other); row["status"] != api.KeyStatusExpired {
 		t.Errorf("a key disabled and then lapsed lists as %v, want expired", row["status"])
 	}
-	status, obj = s.do(http.MethodPost, consoleAPIKey(other), map[string]any{"status": api.KeyStatusActive})
+	status, obj = s.doCookie(http.MethodPost, consoleAPIKey(other), map[string]any{"status": api.KeyStatusActive})
 	if status != http.StatusBadRequest {
 		t.Errorf("re-enabling a key that lapsed while disabled: %d %v, want 400", status, obj)
 	}
@@ -379,7 +380,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 		{"status": api.KeyStatusArchived, "name": "renamed-while-lapsed"},
 		{},
 	} {
-		code, body := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		code, body := s.doCookie(http.MethodPost, consoleAPIKey(id), patch)
 		// In the reference's words, as the #389 probe measured them (#540).
 		const want = "Expired API keys can only be deleted, not renamed or reactivated."
 		if code != http.StatusBadRequest {
@@ -392,7 +393,7 @@ func TestAPIKeyExpiryIsClientSuppliedAndDerived(t *testing.T) {
 	// Retiring either is the one thing that still works — an operator must be able
 	// to clean up, and the reference permits exactly this.
 	for _, retire := range []string{id, other} {
-		if code, body := s.do(http.MethodPost, consoleAPIKey(retire),
+		if code, body := s.doCookie(http.MethodPost, consoleAPIKey(retire),
 			map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
 			t.Errorf("archiving a lapsed key: %d %v, want 200", code, body)
 		}
@@ -423,7 +424,7 @@ func TestAPIKeyIssuanceRejectsBadRequests(t *testing.T) {
 		{"body is not an object", `[]`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, obj := s.do(http.MethodPost, consoleAPIKeysPath, tc.body)
+			status, obj := s.doCookie(http.MethodPost, consoleAPIKeysPath, tc.body)
 			if status != http.StatusBadRequest {
 				t.Fatalf("status %d, want 400 (body %v)", status, obj)
 			}
@@ -434,9 +435,9 @@ func TestAPIKeyIssuanceRejectsBadRequests(t *testing.T) {
 	}
 }
 
-// TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow covers the update contract,
+// TestAPIKeyUpdateGuardsTheEnumAndHistoricalRows covers the update contract,
 // including the two refusals that are ours rather than the reference's.
-func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
+func TestAPIKeyUpdateGuardsTheEnumAndHistoricalRows(t *testing.T) {
 	s := newTestServer(t)
 	id := issueAPIKey(t, s, map[string]any{"name": "guarded"})["id"].(string)
 
@@ -458,7 +459,7 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 		{"name too long", map[string]any{"name": strings.Repeat("x", 501)}, "at most 500 characters"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, obj := s.do(http.MethodPost, consoleAPIKey(id), tc.body)
+			status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), tc.body)
 			if status != http.StatusBadRequest {
 				t.Fatalf("status %d, want 400 (body %v)", status, obj)
 			}
@@ -470,53 +471,28 @@ func TestAPIKeyUpdateGuardsTheEnumAndTheEnvManagedRow(t *testing.T) {
 
 	// An empty patch is a no-op that succeeds, not a validation error. The
 	// reference answers 200 with the unchanged resource (#389), so we do too.
-	if code, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{}); code != http.StatusOK {
+	if code, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{}); code != http.StatusOK {
 		t.Errorf("empty patch on a live key: %d %v, want 200", code, obj)
 	} else if obj["status"] != api.KeyStatusActive || obj["name"] != "guarded" {
 		t.Errorf("empty patch changed the resource: %v", obj)
 	}
 
 	// A name-only patch works, and leaves the status alone.
-	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"name": "renamed"})
+	status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"name": "renamed"})
 	if status != http.StatusOK || obj["name"] != "renamed" || obj["status"] != api.KeyStatusActive {
 		t.Errorf("name-only update: %d %v", status, obj)
 	}
 
-	// The env-var-managed row is listed but not the console's to mutate. Renaming
-	// it would break EnsureAPIKey's rotation, which archives the incumbent by name.
-	var bootstrapID string
-	for _, r := range listAPIKeys(t, s) {
-		if r["created_by"] == nil {
-			bootstrapID = r["id"].(string)
+	// Historical preset rows remain visible but have no authority or operator
+	// rotation procedure. Only newly issued principal-owned keys work.
+	legacyID := insertHistoricalKey(t, s.pool, "retired-preset", "historical-no-authority")
+	for _, patch := range []map[string]any{{"name": "hijacked"}, {"status": "archived"}} {
+		status, obj = s.doCookie(http.MethodPost, consoleAPIKey(legacyID), patch)
+		if status != http.StatusBadRequest || !strings.Contains(errMessage(obj), "historical unowned") {
+			t.Errorf("historical preset update: %d %v, want immutable history", status, obj)
 		}
 	}
-	if bootstrapID == "" {
-		t.Fatal("no env-var-managed row to test against")
-	}
-	status, obj = s.do(http.MethodPost, consoleAPIKey(bootstrapID), map[string]any{"name": "hijacked"})
-	if status != http.StatusBadRequest || !strings.Contains(errMessage(obj), "CONTROLPLANE_API_KEY") {
-		t.Errorf("renaming the env-var-managed key: %d %v, want 400 naming the variable", status, obj)
-	}
-	status, obj = s.do(http.MethodPost, consoleAPIKey(bootstrapID), map[string]any{"status": "archived"})
-	if status != http.StatusBadRequest {
-		t.Errorf("archiving the env-var-managed key: %d %v, want 400", status, obj)
-	}
-	// The brain's row is the other variable's, and the refusal says which.
-	if err := api.EnsureAPIKey(context.Background(), s.pool, "brain", "ak-console-brain"); err != nil {
-		t.Fatalf("EnsureAPIKey: %v", err)
-	}
-	var brainID string
-	if err := s.pool.QueryRow(context.Background(), `SELECT id FROM api_keys WHERE name = 'brain' AND status = 'active'`).Scan(&brainID); err != nil {
-		t.Fatal(err)
-	}
-	status, obj = s.do(http.MethodPost, consoleAPIKey(brainID), map[string]any{"status": "inactive"})
-	if msg := errMessage(obj); status != http.StatusBadRequest || !strings.Contains(msg, "BRAIN_API_KEY") || strings.Contains(msg, "CONTROLPLANE_API_KEY") {
-		t.Errorf("disabling the brain's key: %d %v, want 400 naming BRAIN_API_KEY", status, obj)
-	}
-	// It really is untouched — the control plane's own credential still works.
-	if code, _ := s.do(http.MethodGet, "/v1/agents", nil); code != http.StatusOK {
-		t.Errorf("the bootstrap key stopped working: %d", code)
-	}
+
 }
 
 // TestArchivingAnAPIKeyIsPermanent is what makes `archived` and `inactive` two
@@ -532,7 +508,7 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 
 	created := issueAPIKey(t, s, map[string]any{"name": "retired"})
 	id, raw := created["id"].(string), created["raw_key"].(string)
-	if code, obj := s.do(http.MethodPost, consoleAPIKey(id),
+	if code, obj := s.doCookie(http.MethodPost, consoleAPIKey(id),
 		map[string]any{"status": api.KeyStatusArchived}); code != http.StatusOK {
 		t.Fatalf("archive: %d %v", code, obj)
 	}
@@ -558,7 +534,7 @@ func TestArchivingAnAPIKeyIsPermanent(t *testing.T) {
 		// The empty patch: nothing asked for, still refused.
 		{},
 	} {
-		status, obj := s.do(http.MethodPost, consoleAPIKey(id), patch)
+		status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), patch)
 		// In the reference's words, as the #389 probe measured them (#540).
 		const want = "Archived API keys cannot be updated."
 		if status != http.StatusBadRequest {
@@ -636,7 +612,7 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 		"unknown workspace":       {"/api/console/organizations/default/workspaces/other/api_keys", http.StatusNotFound},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if status, obj := s.do(http.MethodGet, tc.path, nil); status != tc.want {
+			if status, obj := s.doCookie(http.MethodGet, tc.path, nil); status != tc.want {
 				t.Errorf("status %d, want %d (body %v)", status, tc.want, obj)
 			}
 		})
@@ -669,7 +645,7 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 		"invalid UTF-8": {"apikey_%ff" + strings.Repeat("a", 23), http.StatusBadRequest},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, obj := s.do(http.MethodPost, consoleAPIKey(tc.keyID), map[string]any{"status": "active"})
+			status, obj := s.doCookie(http.MethodPost, consoleAPIKey(tc.keyID), map[string]any{"status": "active"})
 			if status != tc.want {
 				t.Errorf("update with %q: status %d, want %d (body %v)", tc.keyID, status, tc.want, obj)
 			}
@@ -680,7 +656,7 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 	// before matching — so the guarantee here is that it does not resolve to this
 	// route, and specifically that it is not a server error.
 	t.Run("path traversal", func(t *testing.T) {
-		status, obj := s.do(http.MethodPost, consoleAPIKey("../../etc/passwd"), map[string]any{"status": "active"})
+		status, obj := s.doCookie(http.MethodPost, consoleAPIKey("../../etc/passwd"), map[string]any{"status": "active"})
 		if status == http.StatusOK || status >= http.StatusInternalServerError {
 			t.Errorf("traversal: status %d (body %v)", status, obj)
 		}
@@ -694,7 +670,7 @@ func TestAPIKeyRoutesRejectUnknownScopesAndIDs(t *testing.T) {
 		"/api/console/organizations/default/workspaces/other/api_keys/" + id:            http.StatusNotFound,
 		"/api/console/organizations/" + zeroUUID + "/workspaces/default/api_keys/" + id: http.StatusUnauthorized,
 	} {
-		if status, obj := s.do(http.MethodPost, path, map[string]any{"status": "inactive"}); status != want {
+		if status, obj := s.doCookie(http.MethodPost, path, map[string]any{"status": "inactive"}); status != want {
 			t.Errorf("a real key under %s: %d, want %d (body %v)", path, status, want, obj)
 		}
 	}
@@ -734,7 +710,7 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 			"unprobed: update, unknown id, malformed body":    {http.MethodPost, unknown, "{", http.StatusNotFound, "not_found_error"},
 		} {
 			t.Run(route+"/"+name, func(t *testing.T) {
-				status, body := s.do(tc.method, tc.path, tc.body)
+				status, body := s.doCookie(tc.method, tc.path, tc.body)
 				wantErr(t, status, body, tc.status, tc.errType)
 				wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 				// And the reference's words for each (#540): batch5 idx 7–9
@@ -758,7 +734,7 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 		"unprobed: issue, unknown workspace":      {http.MethodPost, "/api/console/organizations/default/workspaces/other/api_keys", map[string]any{"name": "x"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(tc.method, tc.path, tc.body)
+			status, body := s.doCookie(tc.method, tc.path, tc.body)
 			// batch8 idx 33 and 34, words included (#540).
 			wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Not found")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
@@ -767,7 +743,7 @@ func TestAPIKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 
 	// On a key that exists, the body is still validated, before any state guard.
 	id := issueAPIKey(t, s, map[string]any{"name": "present"})["id"].(string)
-	status, body := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"nonexistent_field": 1})
+	status, body := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"nonexistent_field": 1})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	wantDetails(t, body, nil)
 }
@@ -792,7 +768,7 @@ func TestAPIKeyUpdateJudgesTheBodyWithoutTheRowLock(t *testing.T) {
 	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	res, err := s.roundTrip(reqCtx, http.MethodPost, consoleAPIKey(id), map[string]any{"nonexistent_field": 1},
-		map[string]string{"x-api-key": testKey})
+		s.cookieHeaders())
 	if err != nil {
 		t.Fatalf("an invalid body waited on the row lock: %v", err)
 	}
@@ -802,7 +778,7 @@ func TestAPIKeyUpdateJudgesTheBodyWithoutTheRowLock(t *testing.T) {
 	}
 
 	oversize := `{"name":"` + strings.Repeat("x", 4<<20) + `"}`
-	status, body := s.do(http.MethodPost, consoleAPIKey("apikey_01ABCDEFGHJKMNPQRSTVWXYZ"), oversize)
+	status, body := s.doCookie(http.MethodPost, consoleAPIKey("apikey_01ABCDEFGHJKMNPQRSTVWXYZ"), oversize)
 	wantErr(t, status, body, http.StatusRequestEntityTooLarge, "request_too_large")
 }
 
@@ -819,7 +795,7 @@ func TestAPIKeyRoutesRejectWrongMethods(t *testing.T) {
 		{http.MethodGet, consoleAPIKey(id)},
 		{http.MethodDelete, consoleAPIKey(id)},
 	} {
-		status, obj := s.do(tc.method, tc.path, nil)
+		status, obj := s.doCookie(tc.method, tc.path, nil)
 		if status != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s: status %d, want 405 (body %v)", tc.method, tc.path, status, obj)
 		}
@@ -850,7 +826,7 @@ func TestAPIKeyRoutesRequireManagementAuth(t *testing.T) {
 func TestAPIKeyIssuanceIsNotCacheable(t *testing.T) {
 	s := newTestServer(t)
 	res := s.doRaw(http.MethodPost, consoleAPIKeysPath, map[string]any{"name": "nostore"},
-		map[string]string{"x-api-key": testKey})
+		s.cookieHeaders())
 	defer res.Body.Close()
 	if got := res.Header.Get("Cache-Control"); got != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", got)
@@ -896,7 +872,7 @@ func TestAPIKeyNameIsTheRecordedBound(t *testing.T) {
 		"rec86.create.name.wrong-type": {"name": 123},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, obj := s.do(http.MethodPost, consoleAPIKeysPath, body)
+			status, obj := s.doCookie(http.MethodPost, consoleAPIKeysPath, body)
 			wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
 			wantDetails(t, obj, nil)
 			if strings.HasPrefix(name, "rec86.create.name.501") || strings.HasPrefix(name, "rec86.create.name.1000") {
@@ -908,9 +884,9 @@ func TestAPIKeyNameIsTheRecordedBound(t *testing.T) {
 	}
 
 	id := issueAPIKey(t, s, map[string]any{"name": "rename-me"})["id"].(string)
-	status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"name": strings.Repeat("x", 501)})
+	status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"name": strings.Repeat("x", 501)})
 	wantErr(t, status, obj, http.StatusBadRequest, "invalid_request_error")
-	if status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"name": "  "}); status != http.StatusOK || obj["name"] != "  " {
+	if status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"name": "  "}); status != http.StatusOK || obj["name"] != "  " {
 		t.Errorf("rename to two spaces: %d %v, want 200 with the name as sent", status, obj)
 	}
 }
@@ -933,18 +909,18 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 		"not a string":                           {7, http.StatusBadRequest, "invalid_request_error", nil},
 		// The user id the reference stamped as a key's created_by (batch9
 		// `setup.keyC.create`), and a service account id in the same alphabet.
-		"a user id":            {"user_014nwQChpX4bYXrKwPAEUM47", http.StatusUnauthorized, "authentication_error", nil},
-		"a service account id": {"svac_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusUnauthorized, "authentication_error", nil},
+		"a user id":            {"user_014nwQChpX4bYXrKwPAEUM47", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
+		"a service account id": {"svac_01ABCDEFGHJKMNPQRSTVWXYZ", http.StatusNotFound, "not_found_error", map[string]any{"error_visibility": "user_facing"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+			status, body := s.doCookie(http.MethodPost, consoleAPIKeysPath,
 				map[string]any{"name": "rec86 probe", "principal_id": tc.principal})
 			wantErr(t, status, body, tc.status, tc.errType)
 			wantDetails(t, body, tc.details)
 		})
 	}
 	// The recorded refusal, in the reference's words (batch5 idx 26; #540).
-	status, body := s.do(http.MethodPost, consoleAPIKeysPath,
+	status, body := s.doCookie(http.MethodPost, consoleAPIKeysPath,
 		map[string]any{"name": "rec86 probe", "principal_id": "zzz-not-a-principal"})
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 		"principal_id must be a user_... (user) or svac_... (service account) ID.")
@@ -956,14 +932,16 @@ func TestAPIKeyPrincipalIDIsJudgedAsRecorded(t *testing.T) {
 	// name with a bad principal_id. Its refusal reads as the reference's schema
 	// validation (pydantic's message, no details), and the principal_id one
 	// (idx 26, with details) as its handler's, which would run after.
-	status, body = s.do(http.MethodPost, consoleAPIKeysPath,
+	status, body = s.doCookie(http.MethodPost, consoleAPIKeysPath,
 		map[string]any{"name": strings.Repeat("x", 501), "principal_id": "zzz-not-a-principal"})
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	wantDetails(t, body, nil)
-	// An explicit null is no principal at all.
+	// An explicit null selects the signed-in user's own key, like omission.
 	issued := issueAPIKey(t, s, map[string]any{"name": "unlinked", "principal_id": nil})
-	if issued["principal"] != nil {
-		t.Errorf("principal = %v, want null", issued["principal"])
+	owner, _ := issued["principal"].(map[string]any)
+	creator, _ := issued["created_by"].(map[string]any)
+	if owner["type"] != "user_actor" || owner["user_id"] != creator["id"] {
+		t.Errorf("principal = %v, want the signed-in owner %v", owner, creator)
 	}
 }
 
@@ -981,7 +959,7 @@ func TestAPIKeyUpdatesOnTheRecordedRoute(t *testing.T) {
 	id := issued["id"].(string)
 	raw := issued["raw_key"].(string)
 
-	status, obj := s.do(http.MethodPost, consoleOrgAPIKey(id), map[string]any{"status": "inactive"})
+	status, obj := s.doCookie(http.MethodPost, consoleOrgAPIKey(id), map[string]any{"status": "inactive"})
 	if status != http.StatusOK || obj["status"] != api.KeyStatusInactive || obj["name"] != "   " || obj["id"] != id {
 		t.Fatalf("disable on the recorded route: %d %v, want 200 with the key inactive", status, obj)
 	}
@@ -990,12 +968,12 @@ func TestAPIKeyUpdatesOnTheRecordedRoute(t *testing.T) {
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Errorf("a disabled key still authenticates: %d", res.StatusCode)
 	}
-	if status, obj := s.do(http.MethodPost, consoleAPIKey(id), map[string]any{"status": "active"}); status != http.StatusOK || obj["status"] != api.KeyStatusActive {
+	if status, obj := s.doCookie(http.MethodPost, consoleAPIKey(id), map[string]any{"status": "active"}); status != http.StatusOK || obj["status"] != api.KeyStatusActive {
 		t.Errorf("re-enable on the workspace alias: %d %v", status, obj)
 	}
 
 	for _, method := range []string{http.MethodDelete, http.MethodPatch, http.MethodPut, http.MethodGet} {
-		status, body := s.do(method, consoleOrgAPIKey(zeroUUID), map[string]any{"status": "inactive"})
+		status, body := s.doCookie(method, consoleOrgAPIKey(zeroUUID), map[string]any{"status": "inactive"})
 		wantErrMsg(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error", "Method Not Allowed")
 	}
 }
@@ -1013,14 +991,14 @@ func TestConsoleWorkspaceReadIsTheRecordedNotFound(t *testing.T) {
 	s := newTestServer(t)
 	for _, ws := range []string{"wrkspc_01Spc4DriXcw2C5LMAYvNNkp", "default", "other"} {
 		t.Run(ws, func(t *testing.T) {
-			status, body := s.do(http.MethodGet, "/api/console/organizations/default/workspaces/"+ws, nil)
+			status, body := s.doCookie(http.MethodGet, "/api/console/organizations/default/workspaces/"+ws, nil)
 			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 	}
-	status, body := s.do(http.MethodGet, "/api/console/organizations/"+zeroUUID+"/workspaces/default", nil)
+	status, body := s.doCookie(http.MethodGet, "/api/console/organizations/"+zeroUUID+"/workspaces/default", nil)
 	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
-	status, body = s.do(http.MethodPost, "/api/console/organizations/default/workspaces/default", map[string]any{})
+	status, body = s.doCookie(http.MethodPost, "/api/console/organizations/default/workspaces/default", map[string]any{})
 	wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
 	res := s.doRaw(http.MethodGet, "/api/console/organizations/default/workspaces/default", nil, nil)
 	res.Body.Close()

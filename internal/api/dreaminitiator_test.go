@@ -11,7 +11,7 @@ func TestDreamSessionRecordsInitiator(t *testing.T) {
 	storeID, sessions := createDreamInputs(t, s, 1)
 	dreamID, sessionID := startedDream(t, s, dreamBody(storeID, sessions))
 	var dreamKey, sessionKey *string
-	if err := s.pool.QueryRow(t.Context(), `SELECT d.initiator_api_key_id,s.initiator_api_key_id FROM dreams d JOIN sessions s ON s.id=d.session_id WHERE d.id=$1 AND s.id=$2`, dreamID, sessionID).Scan(&dreamKey, &sessionKey); err != nil {
+	if err := s.pool.QueryRow(t.Context(), `SELECT d.initiator_principal_id,s.initiator_principal_id FROM dreams d JOIN sessions s ON s.id=d.session_id WHERE d.id=$1 AND s.id=$2`, dreamID, sessionID).Scan(&dreamKey, &sessionKey); err != nil {
 		t.Fatal(err)
 	}
 	if dreamKey == nil || sessionKey == nil || *dreamKey != *sessionKey {

@@ -71,8 +71,12 @@ func TestNativeProxyPublicManagementOrigin(t *testing.T) {
 				}
 				privateBefore := ownedDurableSnapshot(t, s.pool)
 				res, raw = s.request("POST", consoleAPIKeysPath, `{"name":"must-not-issue"}`, headers)
-				if res.StatusCode != 403 {
-					t.Errorf("private ambient assertion origin=%d %s, want 403", res.StatusCode, raw)
+				want := 401
+				if cookie.value == valid {
+					want = 403
+				}
+				if res.StatusCode != want {
+					t.Errorf("private ambient assertion origin=%d %s, want %d", res.StatusCode, raw, want)
 				}
 				if ownedDurableSnapshot(t, s.pool) != privateBefore {
 					t.Error("refused private origin changed keys/principals")
@@ -86,6 +90,9 @@ func TestNativeProxyPublicManagementOrigin(t *testing.T) {
 // happens to carry an assertion. A single empty key is not an offered key.
 func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 	s := newNativeServer(t, login.ModeTrustedProxy)
+	fixtureOwner := s.seedLocal("resource-fixture", "admin", "active")
+	s.key, _ = issueOwnedHTTP(t, s, ownedCookie(t, s, fixtureOwner), "resource setup", nil)
+
 	token := s.idp.Mint(t, s.idp.Claims(laneAudience, time.Now()))
 	h := nativeHeaders("", "")
 	h.Set("X-Goog-IAP-JWT-Assertion", token)
@@ -109,10 +116,10 @@ func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 		{"same-origin", http.Header{"Origin": {nativeOrigin}, "Sec-Fetch-Site": {"same-origin"}}, 401},
 		{"signalless", http.Header{}, 401},
 		{"owned-bearer", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + owned}}, 200},
-		{"valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {testKey}}, 200},
+		{"valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {s.key}}, 200},
 		{"invalid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {"invalid-key"}}, 401},
-		{"repeated-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {testKey, testKey}}, 401},
-		{"empty-then-valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {"", testKey}}, 401},
+		{"repeated-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {s.key, s.key}}, 401},
+		{"empty-then-valid-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {"", s.key}}, 401},
 		{"single-empty-key", http.Header{"Origin": {"https://foreign.example"}, "X-Api-Key": {""}}, 401},
 		{"single-empty-key-same-origin", http.Header{"Origin": {nativeOrigin}, "X-Api-Key": {""}}, 401},
 		{"inadmissible-worker", http.Header{"Origin": {"https://foreign.example"}, "Authorization": {"Bearer " + worker}}, 401},
@@ -146,6 +153,9 @@ func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 
 func TestNativeProxyOriginAdmittedWorkerPrecedence(t *testing.T) {
 	s := newNativeServer(t, login.ModeTrustedProxy)
+	fixtureOwner := s.seedLocal("resource-fixture", "admin", "active")
+	s.key, _ = issueOwnedHTTP(t, s, ownedCookie(t, s, fixtureOwner), "resource setup", nil)
+
 	token := s.idp.Mint(t, s.idp.Claims(laneAudience, time.Now()))
 	_, envID, sessionID, _, worker := storeWorker(t, s.tserver, "proxy-workers")
 	_, _, workToken := pollItem(t, s.tserver, envID, worker)
@@ -198,7 +208,7 @@ func TestNativeProxyOriginAdmittedWorkerPrecedence(t *testing.T) {
 	}
 }
 
-func TestNativeDisabledProxyOriginLegacyCompatibility(t *testing.T) {
+func TestProxyAssertionCannotAuthenticateResourceRequests(t *testing.T) {
 	s := newLaneServerWith(t, func(cfg *identity.Config) {
 		cfg.Mode = identity.ModeTrustedProxy
 		cfg.AssertionHeader = "X-Goog-IAP-JWT-Assertion"
@@ -215,9 +225,9 @@ func TestNativeDisabledProxyOriginLegacyCompatibility(t *testing.T) {
 	if after := agentRowCounts(t, s.tserver); after != before {
 		t.Errorf("public assertion changed agent/version rows: before=%v after=%v", before, after)
 	}
-	// Native-disabled legacy private assertions retain their old origin policy.
+	// Private assertions cannot replace a browser cookie, on any origin.
 	assertOwnedResponse(t, s.doRaw("GET", consoleAPIKeysPath, nil, map[string]string{
 		"Origin": "https://foreign.example", "Sec-Fetch-Site": "cross-site",
 		"X-Goog-IAP-JWT-Assertion": s.token("platform-admins"),
-	}), 200)
+	}), 401)
 }

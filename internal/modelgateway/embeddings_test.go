@@ -84,7 +84,7 @@ func TestEmbeddingsAndRerankPassThrough(t *testing.T) {
 	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-8B", embedding), 0))
 	e.alias("vision", target(e.deployment(p, "Qwen3-VL-Embedding-8B", embedding), 0))
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	float := strings.Replace(clientText, `"base64"`, `"float"`, 1)
@@ -161,7 +161,7 @@ func TestEmbeddingsAndRerankKeepToTheirKind(t *testing.T) {
 	e.alias("anthropic-vectors", target(e.deployment(onProfile(e, "anthropic-generic", f.URL), "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
 	mm := newFake(t, vectors)
 	e.alias("minimax-vectors", target(e.deployment(onOpenAI(e, "minimax", mm.URL), "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
@@ -256,7 +256,7 @@ func TestAVectorAnswerIsRelayedAsItArrives(t *testing.T) {
 	p := onOpenAI(e, "gitee", f.URL)
 	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 
@@ -305,7 +305,7 @@ func TestAVectorAnswerPastTheBoundIsCutOff(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, vectors)
 	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", f.URL), "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/embeddings", clientText, map[string]string{"Authorization": "Bearer " + key})
 	if whole := upstreamAnswer(f.recorded()[0], []byte(`"text"`)); resp.StatusCode != 200 || len(whole) <= 101 || !bytes.Equal(b, whole[:101]) {
@@ -325,7 +325,7 @@ func TestAWildcardCatchesNamesForItsOwnKind(t *testing.T) {
 	chat := newFake(t, chatAnswer("Jupiter", deepseekStyle))
 	e.alias("*", target(e.deployment(onOpenAI(e, "openai-generic", chat.URL), "up"), 0))
 	e.alias("text", target(e.deployment(onOpenAI(e, "gitee", f.URL), "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	bearer := map[string]string{"Authorization": "Bearer " + key}
 	for _, tc := range []struct {
@@ -352,7 +352,7 @@ func TestAnUpstreamsBatchCapIsRelayed(t *testing.T) {
 	refusal := `{"error":{"code":"400","message":"无效的参数数组长度: 'documents' 长度是 '1' 到 '25' (sk-gitee-key1)","type":"server_error"}}`
 	f := newFake(t, status(400, refusal))
 	e.alias("ranker", target(e.deployment(onOpenAI(e, "gitee", f.URL), "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	docs, _ := json.Marshal(make([]string, 26))
 	resp, b := e.do("POST", "/v1/rerank", fmt.Sprintf(`{"model":"ranker","query":"q","documents":%s}`, docs), map[string]string{"Authorization": "Bearer " + key})
@@ -394,7 +394,7 @@ func TestGiteeIsSentEachRequestOnAFreshConnection(t *testing.T) {
 	embedding := func(d *store.Deployment) { d.Kind = store.KindEmbedding }
 	e.alias("generic", target(e.deployment(onOpenAI(e, "openai-generic", host.URL), "m", embedding), 0))
 	e.alias("gitee", target(e.deployment(onOpenAI(e, "gitee", host.URL), "m", embedding), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for range 3 {
 		for _, alias := range []string{"generic", "gitee"} {
@@ -427,7 +427,7 @@ func TestEmbeddingsAndRerankAreTracedAsTheirOperations(t *testing.T) {
 	p := onOpenAI(e, "gitee", f.URL)
 	e.alias("text", target(e.deployment(p, "Qwen3-Embedding-8B", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for i, tc := range []struct{ path, body, route, op, client, input string }{
 		{"/openai/v1/embeddings", clientText, "POST /v1/embeddings", "embeddings", "embeddings Qwen3-Embedding-8B", "13"},

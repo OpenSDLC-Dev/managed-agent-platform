@@ -35,7 +35,7 @@ var zeroUUID = "00000000-0000-0000-0000-" + strings.Repeat("0", 12)
 // issueViaConsole issues one key over real HTTP and returns the plaintext.
 func issueViaConsole(t *testing.T, s *tserver, envID, name string) string {
 	t.Helper()
-	status, body := s.do(http.MethodPost, consoleTokens(envID), map[string]any{"name": name})
+	status, body := s.doCookie(http.MethodPost, consoleTokens(envID), map[string]any{"name": name})
 	if status != http.StatusOK {
 		t.Fatalf("issue %q: status %d, body %v", name, status, body)
 	}
@@ -70,7 +70,7 @@ func wantExactFields(t *testing.T, obj map[string]any, keys ...string) {
 // listing order, plus the pagination block.
 func consoleKeyIDs(t *testing.T, s *tserver, envID, query string) ([]string, map[string]any) {
 	t.Helper()
-	status, body := s.do(http.MethodGet, consoleTokens(envID)+query, nil)
+	status, body := s.doCookie(http.MethodGet, consoleTokens(envID)+query, nil)
 	if status != http.StatusOK {
 		t.Fatalf("list keys%s: status %d, body %v", query, status, body)
 	}
@@ -97,7 +97,7 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	envID := selfHostedEnv(t, s, "console-e2e")
 
 	issueRes := s.doRaw(http.MethodPost, consoleTokens(envID),
-		map[string]any{"name": "build-host-1"}, map[string]string{"x-api-key": testKey})
+		map[string]any{"name": "build-host-1"}, s.cookieHeaders())
 	issueRaw, _ := io.ReadAll(issueRes.Body)
 	issueRes.Body.Close()
 	status := issueRes.StatusCode
@@ -150,7 +150,7 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 	}
 
 	// It is listed with the name it was issued under and a real expiry.
-	listRes := s.doRaw(http.MethodGet, consoleTokens(envID), nil, map[string]string{"x-api-key": testKey})
+	listRes := s.doRaw(http.MethodGet, consoleTokens(envID), nil, s.cookieHeaders())
 	listRaw, _ := io.ReadAll(listRes.Body)
 	listRes.Body.Close()
 	var listBody map[string]any
@@ -187,7 +187,7 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 
 	// Revoking is a bodiless 204, and the worker is off the queue immediately.
 	res := s.doRaw(http.MethodPost, consoleRevoke(envID, keyID), nil,
-		map[string]string{"x-api-key": testKey})
+		s.cookieHeaders())
 	raw, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
@@ -203,7 +203,7 @@ func TestConsoleIssuedKeyDrivesAWorkerAndIsRevocable(t *testing.T) {
 
 	// A retried revocation is a success, not an error — an operator who did not
 	// see the first 204 must be able to press the button again.
-	if again, _ := s.do(http.MethodPost, consoleRevoke(envID, keyID), nil); again != http.StatusNoContent {
+	if again, _ := s.doCookie(http.MethodPost, consoleRevoke(envID, keyID), nil); again != http.StatusNoContent {
 		t.Errorf("repeat revoke: status %d, want 204", again)
 	}
 	if ids, page := consoleKeyIDs(t, s, envID, ""); len(ids) != 0 || page["total"] != float64(0) {
@@ -280,12 +280,12 @@ func TestConsoleKeyRoutesRejectOtherOrganizations(t *testing.T) {
 		// pydantic path refusal, whose uuid-crate tail names the first
 		// character no UUID holds and its 1-based position.
 		t.Run(name+"/a foreign UUID", func(t *testing.T) {
-			status, body := s.do(tc.method, under(zeroUUID, tc.path), tc.body)
+			status, body := s.doCookie(tc.method, under(zeroUUID, tc.path), tc.body)
 			wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "Unable to authenticate session.")
 			wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
 		})
 		t.Run(name+"/not a UUID", func(t *testing.T) {
-			status, body := s.do(tc.method, under("org_other", tc.path), tc.body)
+			status, body := s.doCookie(tc.method, under("org_other", tc.path), tc.body)
 			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 				"path.organization_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `o` at 1")
 			wantDetails(t, body, nil)
@@ -293,24 +293,24 @@ func TestConsoleKeyRoutesRejectOtherOrganizations(t *testing.T) {
 	}
 	// The recorded refusal of `default` itself ("found `u` at 5": d, e, f and
 	// a are hex digits), on a segment that is not ours to serve.
-	status, body := s.do(http.MethodGet, under("defaulx", consoleTokens(envID)), nil)
+	status, body := s.doCookie(http.MethodGet, under("defaulx", consoleTokens(envID)), nil)
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 		"path.organization_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found `u` at 5")
 	// The segment takes the UUID spellings a key id does (isUUID): the recorded
 	// refusal of `default` is the same parser's message.
-	status, body = s.do(http.MethodGet, under(strings.Repeat("0", 32), consoleTokens(envID)), nil)
+	status, body = s.doCookie(http.MethodGet, under(strings.Repeat("0", 32), consoleTokens(envID)), nil)
 	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
 
 	// The organization is judged before the environment: a foreign UUID over an
 	// environment that does not exist is still the 401, not the 404.
-	status, body = s.do(http.MethodGet,
+	status, body = s.doCookie(http.MethodGet,
 		under(zeroUUID, consoleTokens("env_"+strings.Repeat("0", 24))), nil)
 	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
 
 	// The recorded probe, verbatim but for its environment: ours answers the
 	// 401 the reference did.
 	t.Run("rec83.edge6.foreign-org-uuid", func(t *testing.T) {
-		status, body := s.do(http.MethodGet,
+		status, body := s.doCookie(http.MethodGet,
 			"/api/oauth/organizations/"+zeroUUID+"/environments/"+envID+"/tokens", nil)
 		wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
 		wantDetails(t, body, map[string]any{"error_visibility": "user_facing"})
@@ -358,15 +358,15 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, tc.path, tc.body)
+			status, body := s.doCookie(http.MethodPost, tc.path, tc.body)
 			wantErr(t, status, body, tc.wantStatus, tc.wantType)
 		})
 	}
 	// The environment refusals in the reference's words (#540): batch2 idx 2
 	// `rec83.edge3.issue.unknown-env` and idx 3 `.malformed-env`.
-	status, body := s.do(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"})
+	status, body := s.doCookie(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"name": "x"})
 	wantErrMsg(t, status, body, http.StatusNotFound, "not_found_error", "Environment env_0123456789abcdefghjkmnp not found.")
-	status, body = s.do(http.MethodPost, consoleTokens("not-an-env-id"), map[string]any{"name": "x"})
+	status, body = s.doCookie(http.MethodPost, consoleTokens("not-an-env-id"), map[string]any{"name": "x"})
 	wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", "Invalid request: Environment id must have `env_` prefix.")
 
 	// Precedence, pinned so it cannot flip back silently: the body is validated
@@ -377,7 +377,7 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	// exists from one that does not — and it applies only to issuance; list and
 	// revoke still resolve the environment first.
 	t.Run("bad body wins over unknown environment", func(t *testing.T) {
-		status, body := s.do(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"nope": 1})
+		status, body := s.doCookie(http.MethodPost, consoleTokens("env_0123456789abcdefghjkmnp"), map[string]any{"nope": 1})
 		wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	})
 
@@ -389,7 +389,7 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 	// A name at exactly the bound is accepted, and stored trimmed.
 	name := strings.Repeat("n", 128)
 	issueViaConsole(t, s, selfHosted, "  "+name+"  ")
-	_, listBody := s.do(http.MethodGet, consoleTokens(selfHosted), nil)
+	_, listBody := s.doCookie(http.MethodGet, consoleTokens(selfHosted), nil)
 	if got := listData(t, listBody)[0]["name"]; got != name {
 		t.Errorf("stored name = %v, want the trimmed 128-char label", got)
 	}
@@ -403,7 +403,7 @@ func TestConsoleKeyIssueRejectsBadRequests(t *testing.T) {
 		t.Fatalf("fixture is %d bytes, want 384 — the point is that it exceeds 128 bytes", len(cjk))
 	}
 	issueViaConsole(t, s, selfHosted, cjk)
-	if status, body := s.do(http.MethodPost, consoleTokens(selfHosted),
+	if status, body := s.doCookie(http.MethodPost, consoleTokens(selfHosted),
 		map[string]any{"name": strings.Repeat("主", 129)}); status != http.StatusBadRequest {
 		t.Errorf("a 129-character name: status %d, body %v; want 400", status, body)
 	}
@@ -431,7 +431,7 @@ func TestConsoleKeyIssuesOnCloudAndArchivedEnvironments(t *testing.T) {
 		"an archived self_hosted env":       {archivedSelfHosted, "host"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, consoleTokens(tc.env), map[string]any{"name": tc.key})
+			status, body := s.doCookie(http.MethodPost, consoleTokens(tc.env), map[string]any{"name": tc.key})
 			if status != http.StatusOK {
 				t.Fatalf("issue: status %d, body %v; want 200", status, body)
 			}
@@ -496,7 +496,9 @@ func TestConsoleKeyIssueLocksTheEnvironmentRow(t *testing.T) {
 					done <- result{err: err}
 					return
 				}
-				req.Header.Set("x-api-key", testKey)
+				req.Header.Set("Cookie", s.cookie)
+				req.Header.Set("Origin", nativeOrigin)
+				req.Header.Set("X-CSRF-Token", s.csrf)
 				res, err := http.DefaultClient.Do(req)
 				if err != nil {
 					done <- result{err: err}
@@ -619,7 +621,7 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		"limit as a float":                {"?limit=5.0", "limit: Input should be a valid integer, unable to parse string as an integer"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodGet, consoleTokens(envID)+tc.query, nil)
+			status, body := s.doCookie(http.MethodGet, consoleTokens(envID)+tc.query, nil)
 			wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", tc.want)
 		})
 	}
@@ -639,7 +641,7 @@ func TestConsoleKeyListPagesAndRendersNullExpiry(t *testing.T) {
 		`UPDATE environment_keys SET expires_at = NULL WHERE environment_id = $1`, envID); err != nil {
 		t.Fatalf("rewind the rows to their pre-0021 shape: %v", err)
 	}
-	_, listBody := s.do(http.MethodGet, consoleTokens(envID), nil)
+	_, listBody := s.doCookie(http.MethodGet, consoleTokens(envID), nil)
 	rewound := listData(t, listBody)
 	// Assert the count first: without it a regression returning an empty data
 	// array would satisfy every assertion in the loop below without ever
@@ -722,7 +724,7 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 		"misplaced hyphens":    "1111111-12222-3333-4444-555555555555",
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
+			status, body := s.doCookie(http.MethodPost, consoleRevoke(mine, id), nil)
 			wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 		})
 	}
@@ -730,7 +732,7 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	// idx 19 `rec83.edge4.revoke.malformed-id`, and 2026-09-04 batch2 idx 151
 	// `rec81.envkey.revoke` (a literal "undefined").
 	for id, at := range map[string]string{"not-a-uuid": "`n` at 1", "undefined": "`u` at 1"} {
-		status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
+		status, body := s.doCookie(http.MethodPost, consoleRevoke(mine, id), nil)
 		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error",
 			"path.token_uuid: Input should be a valid UUID, invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-], found "+at)
 	}
@@ -748,7 +750,7 @@ func TestConsoleKeyRevokeRejectsIdsItDoesNotOwn(t *testing.T) {
 	messages := map[string]string{}
 	for name, id := range cases {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodPost, consoleRevoke(mine, id), nil)
+			status, body := s.doCookie(http.MethodPost, consoleRevoke(mine, id), nil)
 			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 			inner, _ := body["error"].(map[string]any)
 			msg, _ := inner["message"].(string)
@@ -805,7 +807,7 @@ func TestConsoleKeyErrorsCarryTheRecordedDetails(t *testing.T) {
 		t.Helper()
 		for name, tc := range cases {
 			t.Run(name, func(t *testing.T) {
-				status, body := s.do(tc.method, tc.path, tc.body)
+				status, body := s.doCookie(tc.method, tc.path, tc.body)
 				wantErr(t, status, body, tc.status, tc.errType)
 				wantDetails(t, body, tc.want)
 			})
@@ -888,7 +890,7 @@ func TestConsoleKeyRoutesRejectWrongMethods(t *testing.T) {
 		"DELETE on revoke": {http.MethodDelete, consoleRevoke(envID, keyID)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(tc.method, tc.path, nil)
+			status, body := s.doCookie(tc.method, tc.path, nil)
 			wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
 		})
 	}
@@ -898,7 +900,7 @@ func TestConsoleKeyRoutesRejectWrongMethods(t *testing.T) {
 		"token without revoke": consoleTokens(envID) + "/" + keyID,
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := s.do(http.MethodGet, path, nil)
+			status, body := s.doCookie(http.MethodGet, path, nil)
 			wantErr(t, status, body, http.StatusNotFound, "not_found_error")
 		})
 	}
@@ -928,7 +930,7 @@ func onlyKeyIDAfterIssue(t *testing.T, s *tserver, envID, name string) string {
 func TestEnvironmentKeyTTLMatchesTheAdvertisedExpiry(t *testing.T) {
 	s := newTestServer(t)
 	envID := selfHostedEnv(t, s, "ttl")
-	status, body := s.do(http.MethodPost, consoleTokens(envID), map[string]any{"name": "host"})
+	status, body := s.doCookie(http.MethodPost, consoleTokens(envID), map[string]any{"name": "host"})
 	if status != http.StatusOK {
 		t.Fatalf("issue: status %d, body %v", status, body)
 	}

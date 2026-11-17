@@ -19,7 +19,7 @@ The fakes model only what the script depends on:
     version's exact content — blank, newline-terminated, not an array — reaches
     the checks verbatim. Its NOT_FOUND text is the real one, because the script
     routes on it.
-  - `kubectl create secret -o yaml` records its whole argv, so the seven keys,
+  - `kubectl create secret -o json` records its whole argv, so the six keys,
     their order and the absence of `--from-literal` are all assertable. It also
     records each file's bytes, which is how "the key is the file NAME" is checked.
   - `kubectl apply -f -` reads the manifest off the pipe and reports one line —
@@ -35,6 +35,8 @@ Run: make gcp-mode2-secret-test
 """
 
 import os
+import json
+import base64
 import pathlib
 import shutil
 import subprocess
@@ -45,13 +47,12 @@ HERE = pathlib.Path(__file__).parent.resolve()
 SCRIPT = HERE / "mode2-secret.sh"
 BASH = shutil.which("bash")
 
-# The seven keys the Secret must carry — a set, not a sequence: a Secret is a
-# map, so what is asserted below is that these seven and no others are applied.
-# The chart reads all seven off one object; a missing `blob-backend` does not
+# The six keys the Secret must carry — a set, not a sequence: a Secret is a
+# map, so what is asserted below is that these six and no others are applied.
+# The chart reads all six off one object; a missing `blob-backend` does not
 # fail, it reads as the default "s3" and then looks for an endpoint that is not
 # there.
 KEYS = [
-    "controlplane-api-key",
     "database-url",
     "model-providers.json",
     "blob-backend",
@@ -62,20 +63,14 @@ KEYS = [
 
 # What a healthy project holds. Each is the exact bytes `--out-file` would write.
 GOOD = {
-    "controlplane-api-key": b"sk-cp-0123456789abcdef",
     "database-url": b"postgres://map:pw@10.0.0.3:5432/map",
     "model-providers": b'[{"model":"*","protocol":"anthropic",'
                        b'"base_url":"https://api.anthropic.com","api_key":"sk-ant-0123456789"}]',
 }
 
-# The same, with the model gateway on (MODELGATEWAY=true): the brain's key for
-# the gateway in place of its routes, which the chart then writes itself.
-KEYS_GW = [k if k != "model-providers.json" else "brain-api-key" for k in KEYS]
-GOOD_GW = {
-    "controlplane-api-key": GOOD["controlplane-api-key"],
-    "database-url": GOOD["database-url"],
-    "brain-api-key": b"sk-brain-fedcba9876543210",
-}
+# The gateway writes its own route and needs only the database credential.
+KEYS_GW = [k for k in KEYS if k != "model-providers.json"]
+GOOD_GW = {"database-url": GOOD["database-url"]}
 
 FAKE_GCLOUD = r'''#!/usr/bin/env python3
 import os, sys, pathlib
@@ -127,7 +122,7 @@ sys.exit(2)
 '''
 
 FAKE_KUBECTL = r'''#!/usr/bin/env python3
-import os, sys, pathlib
+import os, sys, pathlib, json, base64
 S = pathlib.Path(os.environ["FAKE_STATE"])
 a = sys.argv[1:]
 
@@ -152,19 +147,44 @@ if a[:3] == ["create", "secret", "generic"]:
         # job runs. Refusing it here is what stops that from being reintroduced.
         sys.stderr.write("fake kubectl: a real create would fail on re-run\n")
         sys.exit(9)
-    # Record each --from-file's bytes under its Secret key, which is the file's
-    # basename -- that identity is the reason the fetch destinations are named
-    # after the keys rather than after the Secret Manager secrets.
+    data = {}
     for x in a:
         if x.startswith("--from-file="):
             p = pathlib.Path(x.split("=", 1)[1])
-            (S / ("key." + p.name)).write_bytes(p.read_bytes())
-    print("apiVersion: v1\nkind: Secret\nmetadata:\n  name: " + a[3])
+            data[p.name] = base64.b64encode(p.read_bytes()).decode()
+    manifest = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": a[3]}, "data": data}
+    if "--type=Opaque" in a:
+        manifest["type"] = "Opaque"
+    print(json.dumps(manifest))
     sys.exit(0)
 
-if a[:2] == ["apply", "-f"]:
+if a[:2] == ["get", "secret"]:
+    if (S / "fault.read-secret").exists():
+        sys.stderr.write("cluster unavailable\n")
+        sys.exit(1)
+    if (S / "existing-secret.json").exists():
+        print((S / "existing-secret.json").read_text())
+    sys.exit(0)
+
+if a[:2] in (["apply", "-f"], ["create", "-f"]):
     manifest = sys.stdin.read()
     (S / "applied.manifest").write_text(manifest)
+    if manifest.startswith("{"):
+        doc = json.loads(manifest)
+        if a[0] == "create" and (S / "fault.concurrent-create").exists():
+            sys.stderr.write("AlreadyExists: " + manifest)
+            sys.exit(1)
+        if (S / "fault.apply-secret").exists():
+            sys.stderr.write("failed patch: " + manifest)
+            sys.exit(1)
+        for key, value in doc["data"].items():
+            (S / ("key." + key)).write_bytes(base64.b64decode(value))
+        # The API server defaults an omitted type; client dry-run does not.
+        doc.setdefault("type", "Opaque")
+        (S / "secret.manifest.json").write_text(json.dumps(doc))
+        verb = (S / "apply.verb").read_text().strip() if (S / "apply.verb").exists() else "created"
+        print("secret/%s %s" % (doc["metadata"]["name"], verb))
+        sys.exit(0)
     kind = "secret/unknown"
     for line in manifest.splitlines():
         if line.startswith("kind: "):
@@ -197,12 +217,14 @@ class Run:
         return p.read_bytes() if p.exists() else None
 
 
-def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=None):
+def run(tmp, name, versions=None, faults=(), env_extra=None, github=False, verb=None, existing=None):
     state = pathlib.Path(tempfile.mkdtemp(dir=tmp, prefix=name + "."))
     for secret, body in (GOOD if versions is None else versions).items():
         (state / ("ver." + secret)).write_bytes(body)
     for f in faults:
         (state / ("fault." + f)).touch()
+    if existing is not None:
+        (state / "existing-secret.json").write_text(json.dumps(existing))
     if verb:
         (state / "apply.verb").write_text(verb)
     env = dict(os.environ)
@@ -280,7 +302,7 @@ def main():
         print("a healthy project assembles the Secret")
         r = run(tmp, "clean")
         check("exits 0", r.code == 0, r.out)
-        check("writes those seven keys and no others",
+        check("writes those six keys and no others",
               sorted(p.name[len("key."):] for p in r.state.glob("key.*")) == sorted(KEYS),
               repr(sorted(p.name for p in r.state.glob("key.*"))))
         check("the namespace is applied before the Secret",
@@ -289,8 +311,9 @@ def main():
         # to stdout and touches nothing; without this, dropping the
         # `| kubectl apply -f -` from the namespace line still passes, and the
         # Secret then lands in a namespace a fresh cluster does not have.
-        check("both manifests reach apply, not just the Secret's",
-              r.calls().count("kubectl apply -f -") == 2, r.calls())
+        check("namespace is applied and an absent Secret is created from its manifest",
+              r.calls().count("kubectl apply -f -") == 1
+              and r.calls().count("kubectl create -f -") == 1, r.calls())
         check("reports what apply did on stdout", "created" in r.proc.stdout, r.proc.stdout)
 
         print("native OIDC reads its configured client secret without exposing it")
@@ -324,7 +347,6 @@ def main():
                   body.decode() not in r.calls())
 
         print("each key carries the bytes of its version, verbatim")
-        check("controlplane-api-key", r.key("controlplane-api-key") == GOOD["controlplane-api-key"])
         check("database-url", r.key("database-url") == GOOD["database-url"])
         check("model-providers.json", r.key("model-providers.json") == GOOD["model-providers"])
 
@@ -351,16 +373,16 @@ def main():
               "create secret generic other-secret" in n.calls(), n.calls())
         check("...in that namespace", "--namespace other-ns" in n.calls(), n.calls())
 
-        print("nothing is created for real — every write goes through apply")
+        print("the Secret is built with dry-run before its manifest is submitted")
         check("the Secret is created --dry-run=client", "--dry-run=client" in r.calls())
         check("apply read a manifest off the pipe",
               (r.state / "applied.manifest").exists())
 
         # Both secrets, not just the first: the guard lives in one `fetch`, but a
         # regression that special-cased the other one would pass a suite that
-        # only ever corrupts `controlplane-api-key`.
+        # checks the database URL as well as the OIDC secret.
         print("a version that would apply cleanly and fail much later is refused")
-        for secret in ("controlplane-api-key", "database-url"):
+        for secret in ("database-url",):
             for label, body in (("empty", b""), ("whitespace-only", b"   \n"),
                                 ("a lone space", b" ")):
                 bad = dict(GOOD)
@@ -371,7 +393,7 @@ def main():
                       not (b.state / "applied.manifest").exists())
 
         print("a trailing newline is refused on the two values read verbatim")
-        for secret in ("controlplane-api-key", "database-url"):
+        for secret in ("database-url",):
             bad = dict(GOOD)
             bad[secret] = GOOD[secret] + b"\n"
             b = run(tmp, "newline", versions=bad)
@@ -431,7 +453,7 @@ def main():
         gh = run(tmp, "gh", github=True)
         check("exits 0", gh.code == 0, gh.out)
         check("masks each credential before anything can print it",
-              gh.out.count("::add-mask::") >= 3, gh.out)
+              gh.out.count("::add-mask::") == 2, gh.out)
         check("masks the api_key inside model-providers, not the JSON",
               "::add-mask::sk-ant-0123456789" in gh.out, gh.out)
         check("plain run emits no annotations",
@@ -468,7 +490,7 @@ def main():
         # to act on it at all.
         check("a credential is masked before the run that fails can print anything",
               gl.code != 0
-              and "::add-mask::" + GOOD["controlplane-api-key"].decode() in gl.proc.stdout
+              and "::add-mask::" + GOOD["database-url"].decode() in gl.proc.stdout
               and before(gl.proc.stdout, "::add-mask::", "contains a newline"),
               gl.proc.stdout)
 
@@ -495,19 +517,18 @@ def main():
         # keep the suite green. Everything a refusal needs is a bash builtin,
         # which is why the script can still speak with no tool in reach.
         print("a missing tool is named rather than misdiagnosed")
-        for missing in ("gcloud", "kubectl", "jq", "cmp"):
+        for missing in ("gcloud", "kubectl", "jq"):
             only = pathlib.Path(tmp) / ("bin.no-" + missing)
             only.mkdir(exist_ok=True)
             for name, src in (("gcloud", binp / "gcloud"), ("kubectl", binp / "kubectl"),
-                              ("jq", pathlib.Path(shutil.which("jq"))),
-                              ("cmp", pathlib.Path(shutil.which("cmp")))):
+                              ("jq", pathlib.Path(shutil.which("jq")))):
                 if name != missing and not (only / name).exists():
                     (only / name).symlink_to(src)
             t = run(tmp, "no" + missing, env_extra={"PATH": str(only)})
             check("a missing %s is named" % missing,
                   t.code != 0 and "%s is required and not on PATH" % missing in t.out, t.out)
             check("...and no credential was fetched first",
-                  not (t.state / "key.controlplane-api-key").exists())
+                  not (t.state / "key.database-url").exists())
             check("...and nothing healthy is blamed for it",
                   "not a non-empty JSON array" not in t.out
                   and "EMPTY or whitespace-only" not in t.out, t.out)
@@ -530,7 +551,7 @@ def main():
         k = run(tmp, "keepdir", env_extra={"SECRET_DIR": str(keep)})
         check("exits 0", k.code == 0, k.out)
         check("the caller's directory survives with the values in it",
-              (keep / "controlplane-api-key").exists(), sorted(p.name for p in keep.glob("*")))
+              (keep / "database-url").exists(), sorted(p.name for p in keep.glob("*")))
         # The values are written by `gcloud --out-file`, which does not chmod
         # what it creates, so the directory is the only thing standing between
         # three credentials and every other process on the machine.
@@ -541,64 +562,22 @@ def main():
               "scratch dirs left behind: %r"
               % sorted(p.name for p in pathlib.Path(tmp).glob("mode2-secret.*")))
 
-        # With the gateway on, the chart writes the brain's one route itself and
-        # reads the brain's key for it out of `brain-api-key`, so that key takes
-        # the routes' place as the one required.
-        print("with the model gateway on, brain-api-key takes model-providers.json's place")
+        print("the gateway needs no API credential")
         gw = {"MODELGATEWAY": "true"}
         on = run(tmp, "gw", versions=GOOD_GW, env_extra=gw)
-        check("exits 0", on.code == 0, on.out)
-        check("writes the seven gateway keys and no others",
-              sorted(p.name[len("key."):] for p in on.state.glob("key.*")) == sorted(KEYS_GW),
-              repr(sorted(p.name for p in on.state.glob("key.*"))))
-        check("brain-api-key carries its version's bytes verbatim",
-              on.key("brain-api-key") == GOOD_GW["brain-api-key"])
-        check("...and is not on any command line",
-              GOOD_GW["brain-api-key"].decode() not in on.calls())
-        ghgw = run(tmp, "ghgw", versions=GOOD_GW, env_extra=gw, github=True)
-        check("brain-api-key is masked under GITHUB_ACTIONS",
-              ghgw.code == 0 and "::add-mask::" + GOOD_GW["brain-api-key"].decode() in ghgw.proc.stdout,
-              ghgw.out)
-
-        print("...and a brain-api-key the platform would refuse at startup is refused here")
-        b = run(tmp, "gwmissing", env_extra=gw,
-                versions={k: v for k, v in GOOD_GW.items() if k != "brain-api-key"})
-        check("an absent brain-api-key is refused, by name",
-              b.code != 0 and "brain-api-key" in b.out, b.out)
-        check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
-        for label, body in (
-            ("an empty", b""),
-            ("a whitespace-only", b"   "),
-            ("a newline-terminated", GOOD_GW["brain-api-key"] + b"\n"),
-            ("a space-led", b" " + GOOD_GW["brain-api-key"]),
-            ("a tab-ended", GOOD_GW["brain-api-key"] + b"\t"),
-            ("a CR-ended", GOOD_GW["brain-api-key"] + b"\r"),
-            # The control plane registers each key under its own name by its
-            # value, so one value under both names is refused by both binaries.
-            ("the control plane's key as the", GOOD_GW["controlplane-api-key"]),
-        ):
-            bad = dict(GOOD_GW)
-            bad["brain-api-key"] = body
-            b = run(tmp, "gwbad", versions=bad, env_extra=gw)
-            check("%s brain-api-key is refused" % label, b.code != 0, b.out)
-            check("...and no Secret is applied", not (b.state / "applied.manifest").exists())
-        # The verbatim check is one loop over a list the gateway extends, so
-        # the two keys it always covered are held in this mode too.
-        for secret in ("controlplane-api-key", "database-url"):
-            bad = dict(GOOD_GW)
-            bad[secret] = GOOD_GW[secret] + b"\n"
-            b = run(tmp, "gwnewline", versions=bad, env_extra=gw)
-            check("a newline in %s is refused with the gateway on too" % secret, b.code != 0, b.out)
+        check("exits 0 without an API credential", on.code == 0, on.out)
+        check("writes only native gateway dependencies", sorted(p.name[4:] for p in on.state.glob("key.*")) == sorted(KEYS_GW), on.out)
+        check("only database and optional direct routes are fetched", all("--secret=database-url" in line or "--secret=model-providers" in line for line in on.calls().splitlines() if line.startswith("gcloud")), on.calls())
 
         # `kubectl apply` drops a key its previous apply wrote, and the Secret is
         # applied before `helm upgrade --atomic`: a flip of the switch that rolls
         # back would restart the old revision on a Secret without its key. So
         # each mode carries the other's when Secret Manager has it — and only
         # then, and never at the price of a deploy that does not read it.
-        print("each mode carries the other's key, so a rollback across the switch finds its own")
+        print("gateway mode retains optional direct routes for rollback")
         both = dict(GOOD_GW, **{"model-providers": GOOD["model-providers"]})
         c = run(tmp, "carryon", versions=both, env_extra=gw)
-        check("gateway on: the routes ride along beside brain-api-key",
+        check("gateway on: optional direct routes ride along",
               c.code == 0 and sorted(p.name[len("key."):] for p in c.state.glob("key.*"))
               == sorted(KEYS_GW + ["model-providers.json"])
               and c.key("model-providers.json") == GOOD["model-providers"], c.out)
@@ -613,38 +592,37 @@ def main():
             u = run(tmp, "carrybad", versions=versions, env_extra=gw, faults=faults)
             check("gateway on, %s: deployed without them, and said so" % label,
                   u.code == 0 and u.key("model-providers.json") is None
-                  and u.key("brain-api-key") == GOOD_GW["brain-api-key"]
+                  and u.key("database-url") == GOOD_GW["database-url"]
                   and "Not carrying 'model-providers'" in u.out, u.out)
-        offc = run(tmp, "carryoff", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}))
-        check("gateway off: brain-api-key rides along beside the routes",
-              offc.code == 0 and sorted(p.name[len("key."):] for p in offc.state.glob("key.*"))
-              == sorted(KEYS + ["brain-api-key"])
-              and offc.key("brain-api-key") == GOOD_GW["brain-api-key"], offc.out)
-        ghoff = run(tmp, "ghcarryoff", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}),
-                    github=True)
-        check("...masked", ghoff.code == 0
-              and "::add-mask::" + GOOD_GW["brain-api-key"].decode() in ghoff.proc.stdout, ghoff.out)
-        check("...and its absence is silent, the Secret the same seven keys",
-              r.code == 0 and "Not carrying" not in r.out and r.key("brain-api-key") is None, r.out)
-        deny = run(tmp, "carryoffdenied", versions=dict(GOOD, **{"brain-api-key": GOOD_GW["brain-api-key"]}),
-                   faults=("denied.brain-api-key",))
-        check("gateway off, an unreadable brain-api-key: deployed without it, and said so",
-              deny.code == 0 and deny.key("brain-api-key") is None
-              and deny.key("model-providers.json") == GOOD["model-providers"]
-              and "Not carrying 'brain-api-key'" in deny.out, deny.out)
-        for label, body in (
-            ("an empty", b""),
-            ("a blank", b"   "),
-            ("a newline-terminated", GOOD_GW["brain-api-key"] + b"\n"),
-            ("a space-led", b" " + GOOD_GW["brain-api-key"]),
-            ("a CR-ended", GOOD_GW["brain-api-key"] + b"\r"),
-            ("the control plane's key as the", GOOD["controlplane-api-key"]),
-        ):
-            u = run(tmp, "carryoffbad", versions=dict(GOOD, **{"brain-api-key": body}))
-            check("gateway off, %s brain-api-key: deployed without it, and said so" % label,
-                  u.code == 0 and u.key("brain-api-key") is None
-                  and u.key("model-providers.json") == GOOD["model-providers"]
-                  and "Not carrying 'brain-api-key'" in u.out, u.out)
+        print("slice 7a retains old Secret data for rollback without fetching it")
+        retained = b"retained-rollback-credential"
+        existing = {"metadata": {"resourceVersion": "41"}, "data": {
+            "retired-credential": base64.b64encode(retained).decode(),
+            "database-url": base64.b64encode(b"old-dsn").decode(),
+        }}
+        preserved = run(tmp, "retained", versions=GOOD_GW, env_extra=gw, existing=existing)
+        check("old data survives and current fields rotate", preserved.code == 0 and preserved.key("retired-credential") == retained and preserved.key("database-url") == GOOD["database-url"], preserved.out)
+        manifest = json.loads((preserved.state / "secret.manifest.json").read_text()) if preserved.code == 0 else {}
+        check("apply carries the observed resource version", manifest.get("metadata", {}).get("resourceVersion") == "41")
+        check("retained values never reach argv or logs", retained.decode() not in preserved.calls() + preserved.out and base64.b64encode(retained).decode() not in preserved.out)
+        same_env = pathlib.Path(tmp) / "same-secret.env"
+        same = run(tmp, "identical", versions=GOOD_GW, env_extra={**gw, "GITHUB_ENV": str(same_env)}, existing=manifest)
+        check("identical data does not rewrite last-applied resourceVersion",
+              same.code == 0 and "secret/map-platform unchanged" in same.out
+              and same.calls().count("kubectl apply -f -") == 1
+              and not (same.state / "secret.manifest.json").exists(), same.out + same.calls())
+        check("an unchanged Secret does not restart consumers",
+              same_env.exists() and same_env.read_text() == "SECRET_CHANGED=false\n")
+        raced = run(tmp, "concurrent-create", versions=GOOD_GW, env_extra=gw, faults=["concurrent-create"])
+        check("a concurrent creator cannot be overwritten",
+              raced.code != 0 and raced.key("database-url") is None
+              and "kubectl create -f -" in raced.calls(), raced.out + raced.calls())
+        check("failed create diagnostics expose no encoded credential",
+              base64.b64encode(GOOD["database-url"]).decode() not in raced.out, raced.out)
+        for fault in ["read-secret", "apply-secret"]:
+            failed = run(tmp, "failed-" + fault, versions=GOOD_GW, env_extra=gw, existing=existing, faults=[fault])
+            check("cluster failure stops the deployment: " + fault, failed.code != 0 and failed.key("database-url") is None, failed.out)
+            check("failed patch never exposes encoded credentials", retained.decode() not in failed.out and base64.b64encode(retained).decode() not in failed.out and base64.b64encode(GOOD["database-url"]).decode() not in failed.out, failed.out)
 
         print("MODELGATEWAY is required, and takes true or false and nothing that only looks like one")
         for value in (None, "", "1", "yes", "True", " true"):
@@ -663,7 +641,7 @@ def main():
         f = run(tmp, "freshdir", env_extra={"SECRET_DIR": str(fresh)})
         check("exits 0", f.code == 0, f.out)
         check("the directory is created with the values in it",
-              (fresh / "controlplane-api-key").exists(),
+              (fresh / "database-url").exists(),
               sorted(p.name for p in fresh.glob("*")) if fresh.exists() else "absent")
         check("...and at mode 700", fresh.exists()
               and (fresh.stat().st_mode & 0o777) == 0o700,

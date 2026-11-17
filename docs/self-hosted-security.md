@@ -31,7 +31,7 @@ deliberate divergences from the reference are in
 | **Runtime isolation** | Sets `runtimeClassName` on sandbox pods (`SANDBOX_K8S_RUNTIME_CLASS`; the chart's `sandboxRuntimeClass`) | Running gVisor/Kata on the nodes and naming it; on Docker, a daemon-level runtime or userns-remap |
 | **Sandbox placement** | On **Kubernetes**, puts your `nodeSelector` and `tolerations` on every sandbox pod (`SANDBOX_K8S_NODE_SELECTOR` / `SANDBOX_K8S_TOLERATIONS`; the chart's `sandboxPlacement`), and refuses a malformed one at startup | Building the node pool, labelling and tainting it, and keeping the platform's own workloads off it |
 | **Environment-key lifecycle** | Server-generated secrets, hash-only storage, one key per host with a one-year expiry, individual revocation, per-environment scope | Provisioning keys, rotation cadence, transport secrecy |
-| **Management-key lifecycle** | Server-generated secrets, hash-only storage, a masked hint as the only surviving trace; a reversible `inactive` and a permanent `archived`; an expiry the caller sets and the database's clock enforces, derived and never stored; rotation-by-restart for `CONTROLPLANE_API_KEY` and `BRAIN_API_KEY` | Choosing an expiry at all (absent means never), one key per consumer, rotation cadence, and configuring SSO if "which human issued this" must have an answer |
+| **Management-key lifecycle** | Server-generated secrets, hash-only storage, a masked hint as the only surviving trace; a reversible `inactive` and a permanent `archived`; an expiry the caller sets and the database's clock enforces, derived and never stored; current-owner authorization on every request | Choosing an expiry at all (absent means never), one key per consumer, rotation cadence, and configuring SSO if "which human issued this" must have an answer |
 | **Model / tool credentials** | Never enter the sandbox; redacted from error events | Securing the brain's provider config and any egress-time secrets |
 | **Auth transport** | Hashes `x-api-key` and environment keys at rest; scopes each | Terminating TLS; keeping keys off logs and out of images |
 | **Single-tenant daemon trust** | The `ours` label guards *accidents*, not a hostile co-tenant | Treating the Docker daemon / cluster as a single trust domain |
@@ -63,7 +63,7 @@ tests and the reference design commits to.
   [Reserved seam](#reserved-seams-and-tracked-gaps).
 
 - **Auth is scoped and hashed at rest.** Public management calls take owned keys
-  as `x-api-key` or Bearer; legacy unowned keys use `x-api-key` only.
+  as `x-api-key` or Bearer; unowned keys are refused.
   Workers carry an environment key as `Authorization: Bearer`. Both are stored as
   SHA-256 hashes, never in the clear (`internal/api/auth.go`,
   `internal/api/envauth.go`; `environment_keys.key_hash` in migration `0001`). An
@@ -1030,7 +1030,7 @@ What you own:
 - **Provisioning.** Treat key creation as a privileged, audited operation. The
   operator surface is the console API — off the `/v1` wire, under
   `/api/oauth/organizations/default/environments/{environment_id}/tokens`, and
-  authenticated with a legacy unowned management `x-api-key` or an admin human. Owned keys are refused here.
+  authenticated with a native admin browser session. API keys are refused here.
   The managed-agent-console drives it from an environment's page, so a key is
   generated, shown once and copied without anyone touching the control-plane
   database; a headless operator calls it directly:
@@ -1220,8 +1220,8 @@ resources. The mapping rules are below. Native browser login is available
 when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account management
 requires a human admin cookie. Public owned-key admission enforces the owner's
 current stored role. Human developers issue and manage their own owned keys;
-admins may also assign service accounts and manage other keys. Legacy unowned keys
-keep their existing authority. Public `/v1` refuses human JWTs and assertions.
+admins may also assign service accounts and manage other keys. Unowned keys
+are refused. Public `/v1` refuses human JWTs and assertions.
 
 Descriptive email and name claims lose NUL before UTF-8-safe byte bounding.
 A subject containing NUL is an authentication failure, never normalized into
@@ -1229,8 +1229,8 @@ a different identity.
 
 **The setup code is privileged local material, not a log secret.** With OIDC
 or trusted-proxy mode configured, startup mints a code only if the install
-has never had an admin and no mapping grants admin. Empty or disabled identity
-mode mints none. The database stores only a SHA-256 hash. Each replica has
+has never had an admin and no mapping grants admin. Empty or disabled login
+modes refuse startup. The database stores only a SHA-256 hash. Each replica has
 its own code, valid for one hour from database mint time after lock acquisition.
 Redeeming any one spends them all. A new mint prunes expired hashes but keeps
 other replicas' unexpired codes.
@@ -1338,19 +1338,17 @@ omit default ports. For example, use `https://console.example`, not
 IP addresses use canonical IPv4 or compressed lowercase, non-mapped IPv6.
 Aliases and unsupported spellings fail startup; the server does not rewrite them.
 Literal loopback HTTP requires `DEVELOPMENT_MODE=true`. Use `http://localhost`,
-not `http://localhost:80`. Password mode also requires that flag, even with HTTPS. Without
-an origin, OIDC and trusted-proxy installs keep verifier-only admission.
+not `http://localhost:80`. Password mode also requires that flag, even with HTTPS. Every login mode requires an origin; empty or disabled login refuses startup.
 Native OIDC needs `IDENTITY_OIDC_CLIENT_ID` equal to `IDENTITY_OIDC_AUDIENCE`.
 Only the control plane reads the optional `IDENTITY_OIDC_CLIENT_SECRET`.
 
 Compose's `console` profile and Helm's `console.enabled` add the published Console
-and a Caddy application edge. Helm enables both by default. Native routing defaults to
-`CONSOLE_AUTH_MODE=platform` in Compose and `console.authMode=platform` in Helm.
+and a Caddy application edge. Helm enables both by default.
 The edge sends native login/private paths to CP, admin paths to the gateway,
-and pages/assets/health to Console. Empty mode preserves legacy BFF routing.
+and pages/assets/health to Console. Console renders pages and holds no credentials.
 Compose defaults to development password login; Helm requires a native login mode and origin.
 Slice 6 stages Google OIDC behind the existing staging HTTPS hostname.
-The Compose guide lists the explicit empty settings for a coordinated slice 6 rollback.
+Use the [upgrade note](./UPGRADING_PLAN69.md) for the two-phase retirement and rollback boundary.
 Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional) or
 [the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
 for RP secrets, CA trust and the CP-owned `/api/auth/callback` registration.
@@ -1390,15 +1388,11 @@ If authority disappears before session issuance, login returns 401 with the mark
 Real database failures stay 500 without it. Bad credentials and role refusals do
 not sign anyone out.
 
-Existing private key-management routes and gateway administration retain legacy
-credentials beside cookies. An offered legacy credential keeps precedence and
-cannot fall back to a cookie when invalid. Gateway cookie reads require developer;
-writes require admin. API-key routes admit developer under the owner rules in §10;
-environment-key routes retain their admin floor.
-In native mode, a selected proxy assertion on an unsafe private/admin request
-requires exact Origin when cookies, Origin or Fetch Metadata identify browser traffic.
-Cross-site Fetch Metadata is refused. Signalless nonbrowser assertion clients and
-explicit machine-key lanes retain their legacy contract.
+Private key-management routes and gateway administration accept browser sessions only.
+An offered API-key or Authorization header is refused, even beside a valid cookie.
+Incidental proxy assertions cannot establish identity outside login.
+Gateway reads require developer; writes require admin. API-key routes admit developer
+under the owner rules in §10; environment-key routes retain their admin floor.
 
 The new `/api/organizations/{org}/proxy/v1/...` resource proxy takes cookies only.
 API-key and Authorization headers are refused, even beside a valid cookie.
@@ -1519,8 +1513,7 @@ could be handed over.
   `user`; a never-mapped person keeps the stored role. Legacy `viewer` entries
   now mean `user`, so map people to `developer` if they must read. A wrong claim
   name can therefore demote mapped people to `user`. The IdP reaches the platform
-  only at sign-in: native login, retained private IdP requests and gateway
-  operator tokens. Public `/v1` never signs a human in. An older
+  only at native sign-in. Public `/v1` never signs a human in. An older
   unexpired token can reapply its old mapped role after a newer token demotes it;
   IdP changes are not immediate revocation. Local deactivation refuses the
   principal regardless of mapping. There is no automatic IdP synchronization.
@@ -1534,18 +1527,10 @@ beside §6, whose environment-key lifecycle it parallels.
 Plan 69 slice 3 separates key ownership from the issuer's audit identity.
 New human-issued keys belong to the caller, or an active service account an admin
 names with a browser cookie. Omitted or null `principal_id` means the human caller,
-including on retained private IdP/assertion lanes. An unowned machine credential
-still creates only unowned keys and cannot name an owner. Existing rows are not
-backfilled. Owned digests stay outside legacy authentication, and gateway policy
-writes refuse owned targets.
-Both servers stop at startup if either configured preset matches an owned key,
-including inactive, archived or expired rows. The control plane checks both values
-before preparing bootstrap and brain in one transaction, before setup-code delivery.
-A failed preparation leaves both presets unchanged. Unowned adoption, rotation and
-brain retirement keep their existing behavior.
+which is authenticated by the native browser session. Historical rows are not
+backfilled. Owned digests remain separate from historical authentication columns.
+Unowned credentials cannot authenticate, issue keys or delegate model work.
 
-These safeguards cover normal rolling deploys with consistent preset configuration.
-They cannot constrain an old gateway manually reconfigured with a new owned raw bootstrap value.
 Public owned-key admission now reads the active owner's current stored role.
 Both `x-api-key` and issued-prefix Bearer work on public management `/v1` routes.
 Owned keys cannot enter private key/member/service-account/proxy routes or gateway administration.
@@ -1558,23 +1543,19 @@ Migration 0061 refuses new human-unowned INSERTs from old replicas, including
 prepared statements. Historical rows and allowed metadata updates survive.
 Removing an owner archives every owned key; restoring the owner restores no key.
 Removing a human issuer does not archive keys owned by a service account.
-Compose and Helm pin the published owned-key Console image.
-The [final-candidate acceptance record](./HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance)
-separates fresh packaged execution from completed native CI on a different platform tree.
-Delivery is tracked in [PR #1041](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1041).
-The release hold continues through slice 7.
+Compose and Helm pin the published native-only Console image.
 
 #### Gateway model budgets and usage
 
 Organization budgets apply to each public model alias across keys and protocols.
-All wildcard matches share `*`. Legacy keys also keep their existing grant and key limits.
+All wildcard matches share `*`. Unowned keys have no admission; per-key grants and budgets are retired.
 Use a native admin cookie with Origin and CSRF to replace a budget at
 `POST /admin/v1/rate_limits/{model}`. Encode the alias in the URL, including slashes.
 The body must name `requests_per_minute`, `input_tokens_per_minute` and
 `output_tokens_per_minute`. Each value is a positive integer, or `null` for unlimited.
 Each field name must appear exactly once, with the spelling shown above.
 `GET /admin/v1/rate_limits` lists budgets for a human developer or admin cookie.
-Preset keys and operator tokens cannot use these new routes.
+Only native browser sessions can use these routes.
 Proxy assertions attached to native browser requests supply no authority here;
 the cookie still requires current membership, Origin and CSRF for writes.
 
@@ -1625,17 +1606,12 @@ organization budgets. The default gateway route sends it through
 `delegated_inference: true`. Direct routes retain their vendor credentials and
 never receive the claim token. A delegated route refuses static keys and auth headers.
 
-Migration 0064 backfills from `created_by`: principals remain principals, owned keys
-resolve to owners, and historical unowned or deleted-principal IDs remain legacy
-initiators through slice 6. Scheduled and dream sessions inherit their parent when
-their own creator is absent. Unresolvable initiators fail their next model turn.
-Insert triggers and the claim fallback cover old writers during a rolling upgrade.
-Keep migrations 0064/0065 during binary rollback. Old brains do not enforce the new
-membership check, and old gateways reject delegated tokens; drain old replicas before
-relying on these controls. Deploy slice 5's token receiver before slice 6's sender.
-The static brain key remains on the receivers through slice 6 for old replicas.
-Rolling back a brain also requires restoring its static route configuration;
-Helm rollback restores both together. Do not remove the compatibility key until slice 7.
+Migration 0064 backfills initiators from `created_by`. Historical unowned IDs remain
+for audit but authorize no new model turn or scheduled run. Outstanding legacy tokens
+are also refused. Missing initiators fail their next turn; deployments auto-pause.
+Role changes alone do not stop existing member-owned work.
+Keep the historical columns and migrations during binary rollback.
+See the [upgrade note](./UPGRADING_PLAN69.md) before retiring compatibility data.
 
 #### Owned-key rollout and rollback
 
@@ -1654,65 +1630,20 @@ origin. Source support alone is not deployment evidence. No key fallback is adde
   `key_hash`, clear owners, undo tombstones or restore archived keys. An old binary
   is not a working owned-key service or human-issuance rollback. Restore the
   corrected new control plane to recover that functionality.
-- Existing no-login deployments retain their separate unowned `x-api-key` lane
-  until slice 7. Never configure an owned key as an old server's preset credential.
+- Every unowned credential is refused. Before upgrading, configure login and issue
+  replacement owned keys in Console. Do not copy owned digests into historical columns.
 
-#### Legacy unowned credentials
+#### Issued API credentials
 
-A legacy unowned management `x-api-key` authenticates every **management** `/v1`
-route and the existing private key-management routes — the work API is the exception, taking a worker's
-environment key instead — so it is the credential with the widest blast radius in
-the platform. Two things write it, and they are deliberately different.
-
-`CONTROLPLANE_API_KEY` is **env-var-managed**: `EnsureManagementPresets` runs once at boot,
-hashes the accepted unowned value, and archives any other live **env-var-managed**
-key sharing its name. That is **rotation-by-restart** — set a new value, restart,
-and the previous one is dead — and `api_keys_one_live_unissued` makes "one live
-key per name" a schema invariant for those rows, so two control-plane replicas
-racing to adopt different values cannot both win. Read the qualifier literally: a
-**console-issued** key that happens to share the name is left alone, because it is
-not this lane's to retire and several live keys may share a name here. Restarting
-with a new value therefore rotates the bootstrap credential and nothing else — if
-you also meant to retire an issued key, archive it over the console API. Its inverse is worth knowing before you meet
-it: rotation is by *value*, so putting a previously-archived unowned value back into
-the variable revives that row at the next boot. If the value had been issued from the
-console, the adoption is logged with a warning naming its previous status; if it
-was env-var-managed all along, it is not, having never left that lane.
-
-`BRAIN_API_KEY`, retained for old brains through slice 6, takes the same lane
-under the name `brain`, with one addition: a boot with the variable unset archives the
-env-var-managed `brain` key, so removing the variable retires the credential rather
-than leaving it live with nobody holding it on purpose. It is a platform key like any
-other row, so it authenticates the management API too — no wider than the database
-credential the brain already holds, but worth holding as closely as the bootstrap
-key. The control plane and the gateway both refuse to start when it equals
-`CONTROLPLANE_API_KEY`, since one value cannot be registered under two names, or
-carries leading or trailing whitespace, which HTTP trims in transit. Every
-control-plane replica must agree on it, set or unset, as on the bootstrap key: a
-replica booting without it archives the key another replica just registered, as one
-booting with an old bootstrap value revives that value over the new one. The gateway
-needs no key policy for it, but holds it to one written for its row; rotating to a
-value never registered before makes a new row, so such a policy is written again for
-it, while returning to an earlier value revives that value's row and its policy. A
-rotation has a window in both directions: a brain still sending the old value after a
-restarted control plane archived it, or sending the new one before the control plane
-registered it, has its model calls refused with a 401, which fails the turn rather
-than delaying it — so rotate while no turns run. Compose starts the brain only once the
-control plane listens, which it does after registering, so a fresh stack never sends
-an unregistered key; neither it nor Helm sequences the restarts of running containers
-(on a chart-managed key change Helm rolls every pod that checksums the Secret at once),
-and under `existingSecret` a changed Secret restarts nothing, so there a rotation is a
-restart of the control plane, the brain and the gateway.
-
-Console-**issued** keys are the other writer. The platform generates the secret —
+All API keys are issued through Console. Historical unowned rows remain readable
+for audit, but never authenticate. The platform generates each secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in
 the issuing response, and stores only its SHA-256 hash. Nothing can render the
 value again, so a lost key is reissued, never recovered; what survives is a
 `partial_key_hint`, masked by anchoring on the known prefix rather than on the
 value's last separator, because base64url's alphabet contains `-` and a
 last-separator rule would publish most of a minted key. Several live keys may
-share a name here, matching the reference, so these rows sit outside the
-one-live index above.
+share a name here, matching the reference.
 
 A key has three settable states and one derived one. `active` authenticates.
 `inactive` is a **disable you can undo** — the reversible state, and the one to
@@ -1748,16 +1679,13 @@ What you own:
 
 - **Who may mint and manage one.** Human developers see and manage only their
   owned keys, not historical unowned keys they merely created. Admins see every
-  row and manage non-preset keys. Presets remain immutable; `can_manage` is a
+  row and manage keys issued by a principal. Historical preset rows remain immutable; `can_manage` is a
   list-only permission hint, not permission to bypass lifecycle guards.
   These are conservative local rules; lower-human-role reference behavior is
   still unconfirmed. The four key routes require developer, while workspace
   reads, environment-key administration and Memory redaction retain admin.
   An admin cookie may name an active service account, never another human.
-  Naming any principal requires the selected cookie lane; an extra cookie beside
-  a selected legacy credential does not authorize assignment. Owned keys cannot
-  authenticate these private routes. Legacy unowned keys retain their bypass
-  until slice 7 and may mint only unowned keys.
+  All issuance and mutations require the browser session; API keys cannot authorize them.
 - **Withdrawal during a key mutation.** The body is read before any authority
   lock. The transaction then locks principals, rechecks current human authority
   and any selected browser session, and holds these locks through commit.
@@ -1771,26 +1699,12 @@ What you own:
   surface uses. Both mirror the reference, which runs two dialects on two
   surfaces, and each of ours keeps the one it was recorded under.
 
-  ```sh
-  # issue — raw_key is the only copy that will ever exist
-  curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
-    -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
-    -d '{"name":"ci-runner","expires_at":"2027-01-01T00:00:00Z"}'
-  # list — a bare JSON array, archived rows included, never a secret
-  curl -s "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys" \
-    -H "x-api-key: $MANAGEMENT_KEY"
-  # disable reversibly; swap for "archived" to retire one for good
-  # (…/organizations/default/api_keys/$KEY_ID, the reference's own spelling, takes the same update)
-  curl -sX POST "$CONTROLPLANE/api/console/organizations/default/workspaces/default/api_keys/$KEY_ID" \
-    -H "x-api-key: $MANAGEMENT_KEY" -H 'content-type: application/json' \
-    -d '{"status":"inactive"}'
-  ```
+  Use Console to issue, disable or archive a key. The raw secret appears only in
+  the issuance response. Keep it out of recordings and logs.
 
-- **Rotation cadence.** The two lanes rotate differently and you should not mix
-  them. Rotate `CONTROLPLANE_API_KEY` by changing the variable and restarting;
-  rotate an issued key by minting its replacement, rolling that value out, and
+- **Rotation cadence.** Rotate a key by issuing its replacement, rolling that value out, and
   archiving the old one — in that order, so nothing is ever without a live
-  credential. Issue one key per consumer (a CI runner, a console BFF, an
+  credential. Issue one key per consumer (a CI runner, a service, an
   operator's laptop) rather than sharing one, for the same reason environment
   keys are per-host: the blast radius of a leak is then one consumer, and
   archiving is a rolling operation.

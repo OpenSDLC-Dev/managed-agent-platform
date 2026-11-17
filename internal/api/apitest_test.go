@@ -15,7 +15,10 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
@@ -31,10 +34,12 @@ func TestMain(m *testing.M) {
 // tserver is a running control-plane handler over a fresh database and an
 // in-memory object store (the S3 backend has its own contract suite).
 type tserver struct {
-	t     *testing.T
-	url   string
-	pool  *pgxpool.Pool
-	blobs *blobtest.MemStore
+	t            *testing.T
+	url          string
+	pool         *pgxpool.Pool
+	blobs        *blobtest.MemStore
+	cookie, csrf string
+	key          string // optional issued fixture key; empty selects testKey
 	// workerKeys holds workerAuth's one environment key per session.
 	workerKeys map[string]string
 }
@@ -44,10 +49,40 @@ type tserver struct {
 func newPoolWithKey(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := pgtest.NewPool(t)
-	if err := api.EnsureAPIKey(context.Background(), pool, "test", testKey); err != nil {
-		t.Fatalf("EnsureAPIKey: %v", err)
-	}
+	insertOwnedTestKey(t, pool)
 	return pool
+}
+
+func insertOwnedTestKey(t *testing.T, pool *pgxpool.Pool) {
+	insertOwnedTestKeyFor(t, pool, "user", "admin")
+}
+
+func insertOwnedTestKeyFor(t *testing.T, pool *pgxpool.Pool, kind, role string) {
+	t.Helper()
+	owner := ownedPrincipalFixture(t, pool, kind, role)
+	_, err := pool.Exec(t.Context(), `INSERT INTO api_keys
+		(id,name,owned_key_hash,owner_principal_id,created_by,partial_key_hint)
+		VALUES ($1,'test',$2,$3,$3,'...6789')`, domain.NewID(domain.PrefixAPIKey).String(), apikey.Hash(testKey), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newPoolWithLegacyKey is historical data only. No current request may use it.
+func newPoolWithLegacyKey(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := pgtest.NewPool(t)
+	insertHistoricalKey(t, pool, "test", testKey)
+	return pool
+}
+
+func insertHistoricalKey(t *testing.T, pool *pgxpool.Pool, name, raw string) string {
+	t.Helper()
+	id := domain.NewID(domain.PrefixAPIKey).String()
+	if _, err := pool.Exec(t.Context(), `INSERT INTO api_keys(id,name,key_hash) VALUES ($1,$2,$3)`, id, name, apikey.Hash(raw)); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 // issueKey mints a live worker credential for an environment and returns the
@@ -83,9 +118,18 @@ func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
 	// The dream runner is on for the shared test server: POST /v1/dreams
 	// refuses a create where no runner sweeps (plan 41 §4.7), and the disabled
 	// deployment has its own case.
-	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner()))
+	manager := login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})
+	var owner string
+	if err := pool.QueryRow(t.Context(), `SELECT owner_principal_id FROM api_keys WHERE owned_key_hash=$1`, apikey.Hash(testKey)).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := manager.Issue(t.Context(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(api.NewHandler(pool, blobs, cipher, nil, api.WithDreamRunner(), api.WithLogin(manager, nil)))
 	t.Cleanup(srv.Close)
-	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}
+	return &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs, cookie: "map_session=" + issued.Token, csrf: issued.Session.CSRFToken}
 }
 
 // do issues a request with the test API key. body may be nil, a raw string
@@ -93,7 +137,31 @@ func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
 // and the decoded JSON response object (nil if the body is not a JSON object).
 func (s *tserver) do(method, path string, body any) (int, map[string]any) {
 	s.t.Helper()
-	res := s.doRaw(method, path, body, map[string]string{"x-api-key": testKey})
+	key := s.key
+	if key == "" {
+		key = testKey
+	}
+	res := s.doRaw(method, path, body, map[string]string{"x-api-key": key})
+	return s.decode(res)
+}
+
+// doCookie selects private browser authority explicitly at each call site.
+// do and doRaw never infer credentials from a URL or rewrite offered headers.
+func (s *tserver) doCookie(method, path string, body any) (int, map[string]any) {
+	s.t.Helper()
+	return s.decode(s.doRaw(method, path, body, s.cookieHeaders()))
+}
+
+func (s *tserver) cookieHeaders() map[string]string {
+	s.t.Helper()
+	if s.cookie == "" || s.csrf == "" {
+		s.t.Fatal("fixture has no browser session")
+	}
+	return map[string]string{"Cookie": s.cookie, "X-CSRF-Token": s.csrf, "Origin": nativeOrigin}
+}
+
+func (s *tserver) decode(res *http.Response) (int, map[string]any) {
+	s.t.Helper()
 	defer res.Body.Close()
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {

@@ -9,22 +9,11 @@
 //	                       its api_keys check a caller, its modelgateway schema
 //	                       holds the catalogue, and the platform's migrations
 //	                       run at start as every binary runs them
-//	CONTROLPLANE_API_KEY   the bootstrap key the control plane registers
-//	                       (required): it reaches the admin API, and while its
-//	                       row is active calls any model unless a key policy
-//	                       written for it says less
-//	BRAIN_API_KEY          the brain's platform key, which the control plane
-//	                       registers as "brain" (optional): while its row is
-//	                       active it calls any model unless a key policy
-//	                       written for it says less, and it never reaches the
-//	                       admin API. It must differ from CONTROLPLANE_API_KEY
-//	                       and carry no surrounding whitespace
-//	                       (apikey.CheckBrainKey)
 //	SECRETS_BACKEND        the cipher sealing vendor credentials (required):
 //	                       "openbao", "local" or "gcpkms", with the variables
 //	                       cmd/controlplane documents for each
-//	IDENTITY_*             optional legacy operator verification for the admin API
-//	CONSOLE_PUBLIC_ORIGIN  enables browser sessions on the admin API, with the
+//	IDENTITY_MODE          password, oidc or trusted_proxy (required)
+//	CONSOLE_PUBLIC_ORIGIN  browser-session origin (required), with the
 //	                       control plane's mode/origin/development checks; no
 //	                       OIDC RP client ID or secret is read here
 //	MODELGATEWAY_RELOAD_INTERVAL  how often each replica rereads the catalogue
@@ -53,8 +42,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/admin"
@@ -82,10 +69,6 @@ func run(ctx context.Context) error {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
-	}
-	bootKey := os.Getenv("CONTROLPLANE_API_KEY")
-	if bootKey == "" {
-		return errors.New("CONTROLPLANE_API_KEY is required")
 	}
 	addr := os.Getenv("MODELGATEWAY_ADDR")
 	if addr == "" {
@@ -130,9 +113,6 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
-	if err := apikey.CheckPresetOwnership(ctx, pool, bootKey, os.Getenv("BRAIN_API_KEY")); err != nil {
-		return err
-	}
 	cipher, err := backend.FromEnv(ctx)
 	if err != nil {
 		return err
@@ -140,28 +120,19 @@ func run(ctx context.Context) error {
 	if cipher == nil {
 		return errors.New("SECRETS_BACKEND is required: the gateway seals and opens vendor credentials")
 	}
-	verifier, err := identity.FromEnv(ctx)
-	if err != nil {
-		return err
-	}
 	manager := login.New(pool, loginCfg)
-	if manager.NativeEnabled() {
-		slog.Info("browser sessions configured for the admin API", "mode", manager.Mode())
-	} else if verifier == nil {
-		slog.Info("identity not configured; the admin API takes the bootstrap key only")
-	}
+	slog.Info("browser sessions configured for the admin API", "mode", manager.Mode())
 	cat, err := catalog.New(ctx, pool, reload)
 	if err != nil {
 		return err
 	}
 	st := mgstore.New(pool)
-	cfg := modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, BootstrapKey: bootKey,
-		BrainKey: os.Getenv("BRAIN_API_KEY"), MaxAttempts: attempts}
+	cfg := modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, MaxAttempts: attempts}
 	prober, err := modelgateway.NewProber(cfg)
 	if err != nil {
 		return err
 	}
-	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Verifier: verifier, Principals: pool, Login: manager, BootstrapKey: bootKey, Prober: prober})
+	cfg.Admin, err = admin.New(admin.Config{Store: st, Cipher: cipher, Login: manager, Prober: prober})
 	if err != nil {
 		return err
 	}

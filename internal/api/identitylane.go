@@ -2,14 +2,8 @@ package api
 
 import (
 	"context"
-	"errors"
-	"log/slog"
-	"net/http"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // identityPrincipal is the authenticated human's stored audit ID and role.
@@ -27,57 +21,8 @@ func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 	return p, ok
 }
 
-// requireIdentity verifies the human credential, resolves the principal, and
-// puts it on the context.
-//
-// Provisioning is on the AUTHENTICATION path on purpose: a verified token is
-// already proof the human exists, so there is nothing to approve, and a request
-// that could not record who made it should not proceed to act as them. A
-// removed person is refused here too, with errDeactivated's 403, before any
-// route sees them. A database failure here is a 500 rather than a 401 — the
-// credential was good, and reporting an outage as an auth failure sends an
-// operator hunting the IdP.
-func requireIdentity(pool *pgxpool.Pool, v *identity.Verifier, manager *login.Manager, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := v.Credential(r)
-		if !ok {
-			writeError(w, r, errAuth("missing credential"))
-			return
-		}
-		// Dispatch has selected the human lane. An accompanying worker Bearer
-		// cannot exempt its ambient assertion on the retained private surface.
-		if manager != nil && manager.NativeEnabled() && v.Mode() == identity.ModeTrustedProxy && manager.CheckProxyOrigin(r) != nil {
-			writeError(w, r, errForbidden("invalid browser origin"))
-			return
-		}
-		id, err := v.Verify(r.Context(), token)
-		if err != nil {
-			// Reason() carries the detail; Error() is the constant string every
-			// rejection shares, so the response tells a caller nothing about
-			// which check failed. The operator's log gets the rest.
-			var reason string
-			var ie *identity.Error
-			if errors.As(err, &ie) {
-				reason = ie.Reason()
-			}
-			slog.InfoContext(r.Context(), "identity: credential rejected",
-				"request_id", requestIDFrom(r.Context()), "reason", reason)
-			writeError(w, r, errAuth(err.Error()))
-			return
-		}
-		markVerified(r.Context())
-		p, err := resolvePrincipal(r.Context(), pool, id)
-		if err != nil {
-			writeError(w, r, err)
-			return
-		}
-		ctx := context.WithValue(r.Context(), ctxKeyIdentity, p)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// requireRole checks owned-key authority first, then the retained human lane.
-// Legacy unowned keys and scoped machine credentials keep their own rules.
+// requireRole checks owned-key authority or the authenticated browser session.
+// Scoped worker credentials keep their own rules.
 // RoleNone satisfies no principal-bound caller: an encoded work/gate segment
 // can miss dispatch's machine predicate but still match ServeMux's route.
 // That route's RoleNone must refuse before its handler checks work scope.

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	evlog "github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
@@ -92,7 +93,7 @@ func TestLiveBrainThinkingThroughTheGateway(t *testing.T) {
 			routes = append(routes, r)
 		}
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	for _, r := range routes {
@@ -231,9 +232,7 @@ func brainLoop(t *testing.T, e *env, key string, r brainRoute) {
 // client does.
 func postResult(t *testing.T, pool *pgxpool.Pool, sid, callID domain.ID, text string) {
 	t.Helper()
-	if err := api.EnsureAPIKey(context.Background(), pool, "live-brain", "live-brain-key"); err != nil {
-		t.Fatal(err)
-	}
+	key := apitest.OwnedKey(t, pool)
 	raw, err := json.Marshal(map[string]any{"events": []any{map[string]any{
 		"type": string(domain.EventUserCustomToolRes), "custom_tool_use_id": callID.String(),
 		"content": []map[string]string{{"type": "text", "text": text}},
@@ -243,7 +242,7 @@ func postResult(t *testing.T, pool *pgxpool.Pool, sid, callID domain.ID, text st
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+sid.String()+"/events", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", "live-brain-key")
+	req.Header.Set("x-api-key", key)
 	rec := httptest.NewRecorder()
 	api.NewHandler(pool, nil, nil, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

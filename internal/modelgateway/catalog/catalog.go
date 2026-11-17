@@ -41,7 +41,6 @@ type Snapshot struct {
 	deployments map[string]store.Deployment
 	aliases     map[string]store.Alias
 	byName      []store.Alias // aliases, ordered by name
-	policies    map[string]store.KeyPolicy
 }
 
 func newSnapshot(cfg store.Config) *Snapshot {
@@ -50,7 +49,6 @@ func newSnapshot(cfg store.Config) *Snapshot {
 		credentials: make(map[string][]store.Credential, len(cfg.Providers)),
 		deployments: make(map[string]store.Deployment, len(cfg.Deployments)),
 		aliases:     make(map[string]store.Alias, len(cfg.Aliases)),
-		policies:    make(map[string]store.KeyPolicy, len(cfg.KeyPolicies)),
 	}
 	for _, p := range cfg.Providers {
 		s.providers[p.ID] = p
@@ -66,9 +64,6 @@ func newSnapshot(cfg store.Config) *Snapshot {
 		s.byName = append(s.byName, a)
 	}
 	sort.Slice(s.byName, func(i, j int) bool { return s.byName[i].Name < s.byName[j].Name })
-	for _, k := range cfg.KeyPolicies {
-		s.policies[k.APIKeyID] = k
-	}
 	return s
 }
 
@@ -103,12 +98,6 @@ func (s *Snapshot) Alias(model string) (store.Alias, bool) {
 
 // Aliases returns every alias, ordered by name.
 func (s *Snapshot) Aliases() []store.Alias { return s.byName }
-
-// KeyPolicy returns the grant of the platform API key with id.
-func (s *Snapshot) KeyPolicy(apiKeyID string) (store.KeyPolicy, bool) {
-	k, ok := s.policies[apiKeyID]
-	return k, ok
-}
 
 // Catalog holds the current Snapshot.
 type Catalog struct {

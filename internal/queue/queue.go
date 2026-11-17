@@ -356,18 +356,17 @@ func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) 
 	}
 	it.Reclaimed = prevState == "active"
 	if kind == ModelTurn {
-		var principalID, apiKeyID *string
+		var principalID *string
 		var allowed bool
-		err := db.QueryRow(ctx, `SELECT i.principal_id,i.api_key_id,
-			coalesce(i.api_key_id IS NOT NULL OR
-			 (p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'),false)
+		err := db.QueryRow(ctx, `SELECT i.principal_id,
+			coalesce((p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'),false)
 			FROM session_initiators i LEFT JOIN principals p ON p.id=i.principal_id
-			WHERE i.session_id=$1`, it.SessionID).Scan(&principalID, &apiKeyID, &allowed)
+			WHERE i.session_id=$1`, it.SessionID).Scan(&principalID, &allowed)
 		if err != nil {
 			return nil, fmt.Errorf("queue: resolve initiator: %w", err)
 		}
 		if allowed {
-			it.InferenceToken, err = inferencetoken.Mint(ctx, db, string(it.ID), generation, principalID, apiKeyID)
+			it.InferenceToken, err = inferencetoken.Mint(ctx, db, string(it.ID), generation, *principalID)
 			if err != nil {
 				return nil, fmt.Errorf("queue: mint inference token: %w", err)
 			}

@@ -122,7 +122,7 @@ func TestChatCompletionsPassThrough(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, chatAnswer("Jupiter", deepseekStyle))
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL+"/base"), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	for _, base := range []string{"/v1", "/openai/v1"} {
@@ -181,7 +181,7 @@ func TestChatCompletionsStreamed(t *testing.T) {
 	ds, mm := newFake(t, chatAnswer("Jupiter", deepseekStyle)), newFake(t, chatAnswer("Jupiter", minimaxStyle))
 	e.alias("ds", target(e.deployment(onOpenAI(e, "deepseek", ds.URL), "deepseek-flash"), 0))
 	e.alias("mm", target(e.deployment(onOpenAI(e, "minimax", mm.URL), "MiniMax-M3"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	for _, tc := range []struct {
@@ -273,7 +273,7 @@ func TestAChatStreamBrokenOffEndsWithAnError(t *testing.T) {
 		_, _ = io.WriteString(w, chunk(c.Model, "Jup", "", ""))
 	})
 	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"Authorization": "Bearer " + key})
@@ -320,8 +320,7 @@ func TestChatErrors(t *testing.T) {
 	e.alias("locked", target(e.deployment(onOpenAI(e, "openai-generic", locked.URL), "up"), 0))
 	e.alias("anthropic-only", target(e.deployment(onProfile(e, "anthropic-generic", ok.URL), "up"), 0))
 	e.alias("vectors", target(e.deployment(onOpenAI(e, "openai-generic", ok.URL), "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
-	narrow := e.key([]string{"busy"})
+	key := e.key()
 	e.start()
 
 	ask := func(key, model string) error {
@@ -337,7 +336,6 @@ func TestChatErrors(t *testing.T) {
 	}{
 		{"sk-map-api01-nobody", "busy", 401, "authentication_error", "invalid x-api-key"},
 		{key, "nope", 404, "not_found_error", "model: nope"},
-		{narrow, "refusing", 403, "permission_error", "may not use model refusing"},
 		{key, "vectors", 400, "invalid_request_error", "serves embedding, not chat"},
 		{key, "anthropic-only", 503, "api_error", "no enabled upstream on the OpenAI protocol"},
 		{key, "refusing", 400, "invalid_request_error", "bad: "},
@@ -429,7 +427,7 @@ func TestAChatRequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			d := e.deployment(p, model)
 			e.alias("mixed", target(d, 0), target(e.deployment(onOpenAI(e, "openai-generic", other.URL), "other-model"), 1))
 			e.alias("alone", target(d, 0))
-			key := e.key(everyAlias)
+			key := e.key()
 			e.start()
 			try := func(model, extra string) (int, string, int, int) {
 				nv, no := len(vendor.recorded()), len(other.recorded())
@@ -464,7 +462,7 @@ func TestModelsInOpenAIsShape(t *testing.T) {
 	e.alias("chat-b", target(e.deployment(p, "b"), 0))
 	e.alias("vectors", target(e.deployment(p, "emb", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
 	e.alias("*", target(e.deployment(p, "any"), 0))
-	key := e.key([]string{"chat-a", "vectors", "*"})
+	key := e.key()
 	e.start()
 
 	for _, base := range []string{"/v1", "/openai/v1"} {
@@ -480,13 +478,13 @@ func TestModelsInOpenAIsShape(t *testing.T) {
 				t.Errorf("%s: %s", base, m.RawJSON())
 			}
 		}
-		if !reflect.DeepEqual(ids, []string{"chat-a", "vectors"}) {
+		if !reflect.DeepEqual(ids, []string{"chat-a", "chat-b", "vectors"}) {
 			t.Errorf("%s: listed %v", base, ids)
 		}
 		if m, err := cl.Models.Get(context.Background(), "vectors"); err != nil || m.ID != "vectors" {
 			t.Errorf("%s get: %v %+v", base, err, m)
 		}
-		for _, id := range []string{"chat-b", "*", "nope"} {
+		for _, id := range []string{"*", "nope"} {
 			var aerr *openai.Error
 			if _, err := cl.Models.Get(context.Background(), id); !errors.As(err, &aerr) || aerr.StatusCode != 404 || aerr.Type != "not_found_error" {
 				t.Errorf("%s get %s: %v", base, id, err)
@@ -540,7 +538,7 @@ func TestAChatStreamsOptionsAreKept(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, chatAnswer("Jupiter", minimaxStyle))
 	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	sent := func(body string) (json.RawMessage, bool) {
 		e.do("POST", "/v1/chat/completions", body, map[string]string{"Authorization": "Bearer " + key})
@@ -583,7 +581,7 @@ func TestAChatStreamsErrorEventIsRelayed(t *testing.T) {
 			"data: {\"error\":{\"message\":\"boom sk-openai-generic-key1\",\"type\":\"server_error\"}}\n\n"+chunk(c.Model, "iter", "stop", ""))
 	})
 	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"Authorization": "Bearer " + key})
 	lines := dataLines(b)
@@ -618,7 +616,7 @@ func TestChatAnswersTheGatewayDoesNotRewrite(t *testing.T) {
 	for _, m := range []string{"text", "bare", "stream"} {
 		e.alias(m, target(e.deployment(p, m), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do("POST", "/v1/chat/completions", `{"model":"stream","stream":true,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"Authorization": "Bearer " + key})
 	if lines := dataLines(b); len(lines) != 3 || !strings.Contains(lines[0], "prompt_filter_results") || lines[2] != "[DONE]" || !strings.HasSuffix(string(b), "data: [DONE]\n\n") {
@@ -654,7 +652,7 @@ func TestAChatRelayEndsAtItsLastEvent(t *testing.T) {
 	p := onOpenAI(e, "openai-generic", f.URL)
 	e.alias("done", target(e.deployment(p, "done"), 0))
 	e.alias("failed", target(e.deployment(p, "failed"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, alias := range []string{"done", "failed"} {
 		start := time.Now()
@@ -674,7 +672,7 @@ func TestAChatCompletionIsTracedAsChat(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, chatAnswer("Jupiter", deepseekStyle))
 	e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if resp, b := e.do("POST", "/openai/v1/chat/completions", `{"model":"fast","messages":[]}`, map[string]string{"Authorization": "Bearer " + key}); resp.StatusCode != 200 {
 		t.Fatalf("%d %s", resp.StatusCode, b)
@@ -728,7 +726,7 @@ func TestAStreamFlagTheGatewayCannotReadIsRefused(t *testing.T) {
 	p := e.provider(an.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("msgs", target(e.deployment(p, "up"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, rt := range []struct {
 		path, model string
@@ -785,7 +783,7 @@ func TestAChatStreamsMalformedErrorIsStillRedacted(t *testing.T) {
 	for m := range bad {
 		e.alias(m, target(e.deployment(p, m), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for m := range bad {
 		resp, b := e.do("POST", "/v1/chat/completions", `{"model":"`+m+`","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
@@ -820,7 +818,7 @@ func TestAChatStreamsOnlyChunkCutOffAtTheEndIsTheAnswer(t *testing.T) {
 	next := newFake(t, chatAnswer("Saturn", deepseekStyle))
 	e.alias("m", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), "up"), 0),
 		target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do("POST", "/v1/chat/completions", `{"model":"m","stream":true,"messages":[]}`, map[string]string{"Authorization": "Bearer " + key})
 	if lines := dataLines(b); resp.StatusCode != 200 || len(lines) != 1 || !strings.Contains(lines[0], "Jupiter") || !strings.HasSuffix(string(b), "\n\n") {
@@ -861,7 +859,7 @@ func TestAChatStreamOpeningWithAnErrorFallsBack(t *testing.T) {
 			target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
 		e.alias(m+"-alone", target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"Authorization": "Bearer " + key}
 	// An event opening the stream with no data, named other than error, is
@@ -903,7 +901,7 @@ func TestAStreamOpeningWithAnErrorKeepsTheStatusItStates(t *testing.T) {
 		e.alias(m, target(e.deployment(onOpenAI(e, "openai-generic", f.URL), m), 0),
 			target(e.deployment(onOpenAI(e, "openai-generic", next.URL), "up"), 1))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"Authorization": "Bearer " + key}
 	for m, want := range map[string]int{"bad": 400, "number": 404, "unauthorized": 200, "fine": 200} {
@@ -989,7 +987,7 @@ func TestAChatStreamEndsWhenEveryChoiceHasFinished(t *testing.T) {
 	}
 	e.alias("usage-unshaped", target(e.deployment(p, "usage-unshaped"), 0))
 	e.alias("choiceless", target(e.deployment(p, "choiceless"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"Authorization": "Bearer " + key}
 	_, b := e.do("POST", "/v1/chat/completions", `{"model":"cut","n":2,"stream":true,"messages":[]}`, hdr)

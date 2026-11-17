@@ -19,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 // revokedKeyMessage is the reference's sentence for an environment key known
@@ -60,7 +61,7 @@ func revokeViaConsole(t *testing.T, s *tserver, envID, name string) {
 		if k.Name != name {
 			continue
 		}
-		res := s.doRaw(http.MethodPost, consoleRevoke(envID, k.ID), nil, map[string]string{"x-api-key": testKey})
+		res := s.doRaw(http.MethodPost, consoleRevoke(envID, k.ID), nil, s.cookieHeaders())
 		res.Body.Close()
 		if res.StatusCode != http.StatusNoContent {
 			t.Fatalf("revoke %q: status %d", name, res.StatusCode)
@@ -132,10 +133,14 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 				status, body := sendBounded(t, s, method, path, asBearer(key))
 				switch {
 				case request == "GET /api/auth/config":
-					if status != http.StatusOK || len(body) != 2 || body["mode"] != "disabled" || body["native_login"] != false {
+					if status != http.StatusOK || len(body) != 2 || body["mode"] != "password" || body["native_login"] != true {
 						t.Fatalf("anonymous auth config = %d %v", status, body)
 					}
-				case path == privateProxy || strings.HasPrefix(path, privateProxy+"/"):
+				case request == "POST /api/auth/login":
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "login requires the configured login credential")
+				case request == "POST "+setupPath:
+					wantErrMsg(t, status, body, http.StatusForbidden, "permission_error", "invalid browser origin")
+				case strings.HasPrefix(path, "/api/"):
 					if method == http.MethodHead {
 						if status != http.StatusUnauthorized || len(body) != 0 {
 							t.Fatalf("HEAD proxy refusal = %d %v; want a bodyless 401", status, body)
@@ -143,11 +148,6 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 					} else {
 						wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
 					}
-				case request == "GET /api/auth/session" || request == "POST /api/auth/logout" ||
-					path == membersPath || strings.HasPrefix(path, membersPath+"/") ||
-					path == serviceAccountsPath || strings.HasPrefix(path, serviceAccountsPath+"/") ||
-					strings.HasPrefix(path, "/api/console/organizations/default/deployments/") && strings.HasSuffix(path, "/initiator"):
-					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
 				default:
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", revokedKeyMessage)
 				}
@@ -175,8 +175,13 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 // beside the environment key is served.
 func TestTheManagementLaneAnswersALiveEnvironmentKeyAsRecorded(t *testing.T) {
 	servers := map[string]func(*testing.T) *tserver{
-		"identity disabled": newTestServer,
-		"oidc":              func(t *testing.T) *tserver { return newLaneServer(t).tserver },
+		"password": newTestServer,
+		"oidc": func(t *testing.T) *tserver {
+			return newLaneServerWith(t, func(c *identity.Config) {
+				c.Mode = identity.ModeOIDC
+				c.AssertionHeader = ""
+			}).tserver
+		},
 		"trusted_proxy": func(t *testing.T) *tserver {
 			return newLaneServerWith(t, func(c *identity.Config) {
 				c.Mode = identity.ModeTrustedProxy
@@ -187,6 +192,15 @@ func TestTheManagementLaneAnswersALiveEnvironmentKeyAsRecorded(t *testing.T) {
 	for mode, start := range servers {
 		t.Run(mode, func(t *testing.T) {
 			s := start(t)
+			if s.cookie == "" {
+				admin := ownedPrincipalFixture(t, s.pool, "user", "admin")
+				manager := login.New(s.pool, login.Config{Mode: login.Mode(mode), PublicOrigin: nativeOrigin, Development: true})
+				issued, err := manager.Issue(t.Context(), admin)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.cookie, s.csrf = "map_session="+issued.Token, issued.Session.CSRFToken
+			}
 			skill := s.createSkill(t)["id"].(string)
 			selfHosted := issueKey(t, s.pool, selfHostedEnv(t, s, "mgmt-lane"), "host")
 			cloud := issueViaConsole(t, s, createEnvironment(t, s, map[string]any{"name": "mgmt-lane-cloud"})["id"].(string), "cloud-host")
@@ -227,7 +241,11 @@ func TestTheManagementLaneAnswersALiveEnvironmentKeyAsRecorded(t *testing.T) {
 				for _, u := range unrecorded {
 					status, body := readJSON(t, s.doRaw(u.method, u.path, nil, asBearer(key)))
 					t.Run(kind+" "+u.method+" "+u.path, func(t *testing.T) {
-						wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
+						message := missingKeyMessage
+						if strings.HasPrefix(u.path, "/api/") {
+							message = "a browser session cookie is required"
+						}
+						wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", message)
 					})
 				}
 			}
@@ -309,22 +327,24 @@ func TestARevokedGrandfatheredKeyIsAnsweredAsDead(t *testing.T) {
 	wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", missingKeyMessage)
 }
 
-// A trusted proxy assertion wins over an environment Bearer only on the
-// retained private human lane. Public routes keep the environment-key answer.
-func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
+// A proxy assertion cannot admit an environment Bearer to private routes,
+// even beside a browser cookie. Public routes keep the environment-key answer.
+func TestAnEnvironmentKeyCannotSelectPrivateHumanAuthority(t *testing.T) {
 	const header = "x-goog-iap-jwt-assertion"
 	s := newLaneServerWith(t, func(c *identity.Config) {
 		c.Mode = identity.ModeTrustedProxy
 		c.AssertionHeader = header
 	})
+	browser := s.signInHeaders(s.token("platform-admins"))
+	s.cookie, s.csrf = browser["Cookie"], browser["X-CSRF-Token"]
 	envID := s.env()
 	live := issueViaConsole(t, s.tserver, envID, "stale-but-live")
 	revoked := issueViaConsole(t, s.tserver, envID, "stale-and-revoked")
 	revokeViaConsole(t, s.tserver, envID, "stale-and-revoked")
 	human := s.token("platform-admins")
 	for _, key := range []string{live, revoked} {
-		headers := map[string]string{header: human, "Authorization": "Bearer " + key}
-		assertOwnedResponse(t, s.doRaw("GET", consoleTokens(envID), nil, headers), 200)
+		headers := map[string]string{header: human, "Authorization": "Bearer " + key, "Cookie": s.cookie}
+		assertOwnedResponse(t, s.doRaw("GET", consoleTokens(envID), nil, headers), 401)
 		for _, path := range []string{"/v1/agents", "/v1/skills"} {
 			code, body := readJSON(t, s.doRaw("GET", path, nil, headers))
 			wantCode, wantType, message := 401, "authentication_error", "Authentication failed"
@@ -336,6 +356,7 @@ func TestAHumanBesideAnEnvironmentKeyIsServedAsTheHuman(t *testing.T) {
 			wantErrMsg(t, code, body, wantCode, wantType, message)
 		}
 	}
+	assertOwnedResponse(t, s.doRaw("GET", consoleTokens(envID), nil, browser), 200)
 	code, body := readJSON(t, s.doRaw("GET", consoleTokens(envID), nil,
 		map[string]string{header: "not-a-token", "Authorization": "Bearer " + live}))
 	if code != 401 || envelopeMessage(body) == "Authentication failed" {

@@ -114,7 +114,7 @@ func TestASearchResultReachesARefusingVendorAsText(t *testing.T) {
 		})
 		e.alias(prof, target(e.deployment(onProfile(e, prof, fakes[prof].URL), "up"), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	// The fixture's top-level and unreadable blocks go as sent, so the
@@ -183,7 +183,7 @@ func TestEachProfileSendsTheKeyAsItsVendorDocuments(t *testing.T) {
 	for prof := range bearer {
 		e.alias(prof, target(e.deployment(onProfile(e, prof, f.URL), "up"), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	for prof, b := range bearer {
@@ -251,7 +251,7 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 			d := e.deployment(p, tc.model)
 			e.alias("mixed", target(d, 0), target(e.deployment(onProfile(e, "anthropic-generic", other.URL), "other-model"), 1))
 			e.alias("alone", target(d, 0), target(e.deployment(p, tc.model+"-b"), 1))
-			key := e.key(everyAlias)
+			key := e.key()
 			e.start()
 
 			try := func(path, model, extra string) (int, string, int, int) {
@@ -289,7 +289,7 @@ func TestARequestAVendorWouldIgnoreGoesElsewhere(t *testing.T) {
 	pm := onProfile(e, "minimax", mm.URL)
 	e.alias("both", target(e.deployment(onProfile(e, "deepseek", ds.URL), "d"), 0), target(e.deployment(pm, "m"), 1))
 	e.alias("m3", target(e.deployment(pm, "MiniMax-M3"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	if resp, b := e.do("POST", "/v1/messages", `{"model":"m3","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`,
 		map[string]string{"x-api-key": key}); resp.StatusCode != 200 || len(mm.recorded()) != 1 {
@@ -313,7 +313,7 @@ func TestTheGatewayWritesNoHTMLEscapes(t *testing.T) {
 		writeBody(w, 200, fmt.Sprintf(`{"id":"msg_1","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"x < y && y > z"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":2}}`, c.Model))
 	})
 	e.alias("m", target(e.deployment(onProfile(e, "deepseek", f.URL), "up"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	resp, b := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"is a < b & c > d?"},

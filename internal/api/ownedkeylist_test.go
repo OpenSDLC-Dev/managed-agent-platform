@@ -101,8 +101,6 @@ func TestOwnedKeyListRestrictsDatabaseRows(t *testing.T) {
 	srv := httptest.NewServer(api.NewHandler(pool, nil, nil, nil, api.WithLogin(s.manager, nil)))
 	t.Cleanup(srv.Close)
 	s.url = srv.URL
-	legacyHeaders := devHeaders.Clone()
-	legacyHeaders.Set("X-Api-Key", testKey)
 	for _, tc := range []struct {
 		name    string
 		headers http.Header
@@ -112,7 +110,6 @@ func TestOwnedKeyListRestrictsDatabaseRows(t *testing.T) {
 		{"zero-owned", ownedCookie(t, s, empty), map[string]string{}, 0},
 		{"owned", devHeaders, owned, 5},
 		{"admin", adminHeaders, all, 9},
-		{"selected-legacy", legacyHeaders, all, 9},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			trace.take()

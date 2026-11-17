@@ -48,7 +48,7 @@ func TestModelLimitsRequireCurrentCookieAuthority(t *testing.T) {
 		t.Fatalf("developer write: %d %s", status, raw)
 	}
 	status, _, raw = cookieAdminRequest(t, e, "POST", "/admin/v1/rate_limits/fast", body, http.Header{"X-Api-Key": {bootstrap}})
-	if status != http.StatusForbidden {
+	if status != http.StatusUnauthorized {
 		t.Fatalf("legacy credential: %d %s", status, raw)
 	}
 	_, err = e.pool.Exec(ctx, `UPDATE principals SET role='developer' WHERE id='principal_admin'`)
@@ -143,8 +143,8 @@ func TestModelLimitsBehindProxyUseOnlyCookieAuthority(t *testing.T) {
 		{"invalid-cookie", func(h http.Header) { h.Set("Cookie", "map_session=invalid") }, http.StatusUnauthorized},
 		{"missing-csrf", func(h http.Header) { h.Del("X-Csrf-Token") }, http.StatusForbidden},
 		{"foreign-origin", func(h http.Header) { h.Set("Origin", "https://other.example") }, http.StatusForbidden},
-		{"explicit-key", func(h http.Header) { h.Set("X-Api-Key", bootstrap) }, http.StatusForbidden},
-		{"explicit-bearer", func(h http.Header) { h.Set("Authorization", "Bearer "+bootstrap) }, http.StatusForbidden},
+		{"explicit-key", func(h http.Header) { h.Set("X-Api-Key", bootstrap) }, http.StatusUnauthorized},
+		{"explicit-bearer", func(h http.Header) { h.Set("Authorization", "Bearer "+bootstrap) }, http.StatusUnauthorized},
 		{"operator-bearer", func(h http.Header) { h.Set("Authorization", "Bearer "+assertion) }, http.StatusUnauthorized},
 	} {
 		h := headers.Clone()
@@ -167,7 +167,7 @@ func TestModelLimitsBehindProxyUseOnlyCookieAuthority(t *testing.T) {
 		}
 	}
 	var count int
-	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM principals`).Scan(&count); err != nil || count != 1 {
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM principals WHERE issuer <> 'admin-fixture'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("incidental assertion signed in a principal: count=%d err=%v", count, err)
 	}
 }
@@ -201,7 +201,7 @@ func TestModelLimitRedirectsDoNotReplayProxySignIn(t *testing.T) {
 		}
 	}
 	var count int
-	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM principals`).Scan(&count); err != nil || count != 1 {
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM principals WHERE issuer <> 'admin-fixture'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("redirect replayed proxy sign-in: count=%d err=%v", count, err)
 	}
 }

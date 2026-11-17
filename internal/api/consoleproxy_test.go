@@ -26,7 +26,15 @@ func newPrivateServer(t *testing.T) *nativeServer {
 	manager := login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})
 	srv := httptest.NewServer(api.NewHandler(pool, blobs, nil, nil, api.WithLogin(manager, nil)))
 	t.Cleanup(srv.Close)
-	return &nativeServer{tserver: &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs}, manager: manager}
+	var owner string
+	if err := pool.QueryRow(t.Context(), "SELECT owner_principal_id FROM api_keys WHERE name='test'").Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := manager.Issue(t.Context(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &nativeServer{tserver: &tserver{t: t, url: srv.URL, pool: pool, blobs: blobs, cookie: "map_session=" + issued.Token, csrf: issued.CSRFToken}, manager: manager}
 }
 
 // Missing cookie provenance, a weaker read floor, or re-parsing the body/query breaks this contract.

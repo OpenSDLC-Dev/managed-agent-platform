@@ -120,7 +120,7 @@ func TestLiveProbes(t *testing.T) {
 	}
 	n := 0
 	for _, row := range e.ledger() {
-		if row.Endpoint == "deployment_test" && row.APIKeyID == "admin" {
+		if row.Endpoint == "deployment_test" && row.APIKeyID == "" && row.PrincipalID == "principal_prober" {
 			n++
 		}
 	}

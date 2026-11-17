@@ -313,11 +313,12 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 			[]any{agentID}},
 		{`INSERT INTO agent_versions (agent_id, version, name, spec) VALUES ($1, 1, 'fixture', '{"model":{"id":"fixture-model"}}')`,
 			[]any{agentID}},
-		// A normal fixture represents work started by a legacy key. Tests of
-		// missing attribution clear this explicitly; real model turns require
-		// an initiator from plan 69 slice 5 onward.
+		// A normal fixture has an active service-account initiator. Tests of
+		// missing or historical attribution set that state explicitly.
+		{`INSERT INTO principals(id,issuer,subject,kind,role)
+		  VALUES ('principal_pgtest','pgtest','session-fixture','service_account','developer') ON CONFLICT DO NOTHING`, nil},
 		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status, created_by)
-		  VALUES ($1, $2, 1, $3, $4, 'idle', 'pgtest_legacy')`, []any{sessionID, agentID, resolved, envID}},
+		  VALUES ($1, $2, 1, $3, $4, 'idle', 'principal_pgtest')`, []any{sessionID, agentID, resolved, envID}},
 		// The primary thread every session has (plan 35): status the session's,
 		// no agent of its own.
 		{`INSERT INTO session_threads (id, session_id, agent_name, status) VALUES ($1, $2, 'fixture', 'idle')`,

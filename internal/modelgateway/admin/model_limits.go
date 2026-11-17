@@ -53,7 +53,7 @@ func (h *handler) putModelLimit(r *http.Request) (any, error) {
 	}
 	limit.Model = r.PathValue("model")
 	limit, err = h.cfg.Store.PutModelLimit(r.Context(), limit, func(tx pgx.Tx) error {
-		// Same principal-first mutation fence as key grants. An admin who loses
+		// Principal-first mutation fence: an admin who loses
 		// authority while this waits cannot widen the organization's budget.
 		if _, err := tx.Exec(r.Context(), `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return err

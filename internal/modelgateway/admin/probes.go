@@ -30,7 +30,7 @@ type Prober interface {
 type principalKey struct{}
 
 // PrincipalID returns the authenticated human for diagnostic usage, without
-// turning that audit value into inference authority. Legacy presets have none.
+// turning that audit value into inference authority.
 func PrincipalID(ctx context.Context) string {
 	id, _ := ctx.Value(principalKey{}).(string)
 	return id

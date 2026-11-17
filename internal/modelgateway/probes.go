@@ -166,7 +166,6 @@ var testTimeout = 30 * time.Second
 // A test is written to the ledger under these: no API key made it, and the
 // route is the test's, so Usage can tell it from an agent's call.
 const (
-	testKeyID    = "admin"
 	testEndpoint = "deployment_test"
 )
 
@@ -256,14 +255,14 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	if t := out.tokens; t != nil {
 		res.Usage = &admin.TestUsage{InputTokens: t.Input, OutputTokens: t.Output, CacheWriteTokens: t.CacheWrite, CacheReadTokens: t.CacheRead}
 	}
-	u := store.Usage{RequestID: requestID(r), APIKeyID: testKeyID, Model: d.UpstreamModel, DeploymentID: d.ID, CredentialID: c.ID,
+	u := store.Usage{RequestID: requestID(r), Model: d.UpstreamModel, DeploymentID: d.ID, CredentialID: c.ID,
 		Protocol: string(in), Endpoint: testEndpoint, Status: status, ErrorType: ledgerText(errType), Tokens: out.tokens, Latency: latency}
 	if id := admin.PrincipalID(ctx); id != "" {
-		u.PrincipalID, u.APIKeyID = id, ""
+		u.PrincipalID = id
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if _, err := p.h.cfg.Store.RecordUsage(rctx, u, false); err != nil {
+	if _, err := p.h.cfg.Store.RecordUsage(rctx, u); err != nil {
 		slog.ErrorContext(rctx, "modelgateway: a deployment test could not be recorded", "request_id", u.RequestID,
 			"deployment", d.ID, "credential", c.ID, "error", err)
 	}

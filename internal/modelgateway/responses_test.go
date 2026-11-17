@@ -58,7 +58,7 @@ func TestAResponsesRequestIsServedAsMessages(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 
@@ -104,7 +104,7 @@ func TestAResponsesRequestReachesAnOpenAIOnlyCredential(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, chatAnswer("Jupiter", style))
 		e.alias("fast", target(e.deployment(onOpenAI(e, "deepseek", f.URL+"/base"), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		cl := e.oaClient(key, "/v1")
 
@@ -134,7 +134,7 @@ func TestAResponsesRequestsDefaultMaxTokens(t *testing.T) {
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("capped", target(e.deployment(p, "a", func(d *store.Deployment) { d.Capabilities.MaxTokens = 4096 }), 0))
 	e.alias("open", target(e.deployment(p, "b"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 	for i, model := range []string{"capped", "open"} {
@@ -170,7 +170,7 @@ func TestAResponsesToolLoopKeepsItsThinking(t *testing.T) {
 	e.credential(p, "sk-upstream-1", 1)
 	d := e.deployment(p, "up-model")
 	e.alias("fast", target(d, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 	tool := responses.ToolUnionParam{OfFunction: &responses.FunctionToolParam{Name: "get_time",
@@ -270,7 +270,7 @@ func TestAFailedResponsesStreamWritesNothingMore(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	_, b := e.do(http.MethodPost, "/v1/responses", `{"model":"fast","input":"hello","stream":true}`, map[string]string{"Authorization": "Bearer " + key})
 	before, after, ok := strings.Cut(string(b), "event: response.failed\n")
@@ -304,7 +304,7 @@ func TestAResponsesRequestIsRefusedInItsOwnWords(t *testing.T) {
 	chat := newFake(t, chatAnswer("x", deepseekStyle))
 	e.alias("chat", target(e.deployment(onOpenAI(e, "deepseek", chat.URL), "deepseek-flash"), 0))
 	e.alias("idle", target(e.deployment(p, "off", func(d *store.Deployment) { d.Enabled = false }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.oaClient(key, "/v1")
 
@@ -384,7 +384,7 @@ func TestAnUnconvertibleResponsesAnswerIsA502(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	resp, b := e.do(http.MethodPost, "/v1/responses", `{"model":"fast","input":"hi"}`, map[string]string{"Authorization": "Bearer " + key})
 	want := `{"error":{"code":null,"message":"upstream answer could not be converted: content[0]: a \"[redacted]\" block has no Responses counterpart","param":null,"type":"api_error"}}`
@@ -420,7 +420,7 @@ func TestAQuotedCredentialIsRedactedFromAResponsesFailure(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, secret, 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	for _, c := range []struct {
 		name, body string
@@ -457,7 +457,7 @@ func TestAResponsesEventGrownPastTheBoundFails(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	types, _, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
 	if last.Type != "response.failed" || last.Response.Error.Message != "upstream stream could not be converted: "+upstream.ErrEventTooLarge.Error() {
@@ -474,7 +474,7 @@ func TestAResponsesStreamIsBounded(t *testing.T) {
 	p := e.provider(f.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "up-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	types, text, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
 	if text != "" || last.Type != "response.failed" || last.Response.Error.Message != "upstream stream could not be converted: the answer passes the gateway's bound of 3 bytes" {
@@ -517,7 +517,7 @@ func TestAConvertedResponsesErrorIsTheUpstreams(t *testing.T) {
 		e := newEnv(t)
 		f := newFake(t, c.answer)
 		e.alias("chat", target(e.deployment(onOpenAI(e, "deepseek", f.URL), "deepseek-flash"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		resp, b := e.do(http.MethodPost, "/v1/responses", `{"model":"chat","input":"hi","stream":true}`, map[string]string{"Authorization": "Bearer " + key})
 		if resp.StatusCode != c.status || string(b) != c.want {
@@ -559,7 +559,7 @@ func TestAResponsesStreamFailsAsAResponse(t *testing.T) {
 		p := e.provider(f.URL)
 		e.credential(p, "sk-upstream-1", 1)
 		e.alias("fast", target(e.deployment(p, "up-model"), 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 		types, text, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("fast"))
 		if text != "half" || last.Type != "response.failed" || last.Response.Error.Code != "server_error" || last.Response.Error.Message != c.msg {

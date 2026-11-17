@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/anthropics/anthropic-sdk-go"
 	"net"
 	"net/http"
 	"slices"
@@ -16,7 +17,6 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 func catalogFor(t *testing.T, e *env) *catalog.Catalog {
@@ -28,15 +28,12 @@ func catalogFor(t *testing.T, e *env) *catalog.Catalog {
 	return c
 }
 
-func TestUnusableOwnedKeysCannotUseStaleGrants(t *testing.T) {
+func TestUnusableOwnedKeysAreRefused(t *testing.T) {
 	e := newEnv(t)
 	p := e.provider("https://vendor.invalid")
 	e.credential(p, "synthetic-vendor-credential", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	unowned := e.key(everyAlias)
-	// Build an honestly stale in-memory catalog using a separate fixture
-	// database. Its keys are unowned; its cached policies name the owned IDs
-	// in the authentication database. No database guard is disabled or bypassed.
+	unowned := e.key()
 	auth := pgtest.NewPool(t)
 	if _, err := auth.Exec(e.ctx, `INSERT INTO principals (id,issuer,subject,kind,role) VALUES
 		('principal_user','inference-test','user','user','developer'),
@@ -60,11 +57,6 @@ func TestUnusableOwnedKeysCannotUseStaleGrants(t *testing.T) {
 				VALUES ($1,$1,$2,$3,$2,$4,CASE WHEN $5 THEN now() - interval '1 hour' ELSE NULL END)`, id, owner, apikey.Hash(key), status, state == "expired"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ($1,$1,$1)`, id); err != nil {
-				t.Fatal(err)
-			}
-			_, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: id})
-			e.must(err)
 		}
 	}
 	e.start(func(cfg *modelgateway.Config) {
@@ -76,14 +68,11 @@ func TestUnusableOwnedKeysCannotUseStaleGrants(t *testing.T) {
 				return nil, errors.New("vendor calls are forbidden in the owned-key negative contract")
 			},
 		}}
-		if _, ok := cfg.Catalog.Snapshot().KeyPolicy("key_principal_user_inactive"); !ok {
-			t.Fatal("stale catalog fixture lacks the owned row's cached grant")
-		}
 	})
 	for _, prefix := range []string{"", "/anthropic", "/openai"} {
 		res, body := e.do("GET", prefix+"/v1/models", "", map[string]string{"x-api-key": unowned})
-		if res.StatusCode != 200 || !strings.Contains(string(body), "fast") {
-			t.Fatalf("unowned model-list control=%d %s", res.StatusCode, body)
+		if res.StatusCode != 401 {
+			t.Fatalf("unowned key refusal=%d %s", res.StatusCode, body)
 		}
 	}
 	for _, key := range keys {
@@ -126,10 +115,8 @@ func TestAuthentication(t *testing.T) {
 	d := e.deployment(p, "m")
 	e.alias("fast", target(d, 0))
 	e.alias("slow", target(d, 0))
-	granted := e.key(everyAlias)
-	narrow := e.key([]string{"slow"})
-	ungranted := e.key(noGrant)
-	// The control plane registers the bootstrap key's row; no policy names it.
+	granted := e.key()
+	// An old binary left this unowned row; its name cannot authorize inference.
 	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap)); err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +130,10 @@ func TestAuthentication(t *testing.T) {
 	}{
 		{"no key", nil, 401, "authentication_error"},
 		{"unknown key", map[string]string{"x-api-key": "sk-map-api01-unknown"}, 401, "authentication_error"},
-		{"no grant", map[string]string{"x-api-key": ungranted}, 403, "permission_error"},
-		{"another alias's grant", map[string]string{"x-api-key": narrow}, 403, "permission_error"},
-		{"granted", map[string]string{"x-api-key": granted}, 200, ""},
+		{"owned without grant", map[string]string{"x-api-key": granted}, 200, ""},
 		{"as a Bearer", map[string]string{"Authorization": "Bearer " + granted}, 200, ""},
 		{"x-api-key wins", map[string]string{"x-api-key": granted, "Authorization": "Bearer sk-wrong"}, 200, ""},
-		{"bootstrap, no policy", map[string]string{"x-api-key": bootstrap}, 200, ""},
+		{"unowned preset", map[string]string{"x-api-key": bootstrap}, 401, "authentication_error"},
 	}
 	for _, c := range cases {
 		resp, b := e.do("POST", "/v1/messages", body, c.header)
@@ -186,131 +171,6 @@ func TestAuthentication(t *testing.T) {
 	}
 }
 
-// The bootstrap key needs no policy, but one written for it applies; a key
-// an application issued under the name bootstrap is an ordinary key.
-func TestTheBootstrapKey(t *testing.T) {
-	e := newEnv(t)
-	up := newFake(t, message("ok"))
-	p := e.provider(up.URL)
-	e.credential(p, "sk-upstream-1", 1)
-	d := e.deployment(p, "m")
-	e.alias("fast", target(d, 0))
-	e.alias("slow", target(d, 0))
-	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: "key_boot", Aliases: []string{"slow"}}); err != nil {
-		t.Fatal(err)
-	}
-	impostor := "sk-map-api01-impostor"
-	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_imp', 'bootstrap-ish', $1)`, apikey.Hash(impostor)); err != nil {
-		t.Fatal(err)
-	}
-	e.start()
-	for _, c := range []struct {
-		key, model string
-		status     int
-	}{
-		{bootstrap, "slow", 200},
-		{bootstrap, "fast", 403},
-		{impostor, "slow", 403},
-	} {
-		resp, b := e.do("POST", "/v1/messages", `{"model":"`+c.model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": c.key})
-		if resp.StatusCode != c.status {
-			t.Errorf("%s on %s: %d %s", c.key, c.model, resp.StatusCode, b)
-		}
-	}
-}
-
-// The brain's key is the bootstrap key's twin on the inference routes: known
-// by its configured value, it needs no policy, but one written for it
-// applies, and it authenticates by its row. With no brain key configured the
-// same value is an ordinary key without a grant.
-func TestTheBrainKey(t *testing.T) {
-	const brain = "sk-map-brain-test-key"
-	e := newEnv(t)
-	up := newFake(t, message("ok"))
-	p := e.provider(up.URL)
-	e.credential(p, "sk-upstream-1", 1)
-	d := e.deployment(p, "m")
-	e.alias("fast", target(d, 0))
-	e.alias("slow", target(d, 0))
-	call := func(model string) int {
-		resp, _ := e.do("POST", "/v1/messages", `{"model":"`+model+`","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": brain})
-		return resp.StatusCode
-	}
-	e.startProbing(func(c *modelgateway.Config) { c.BrainKey = brain })
-	if s := call("fast"); s != 401 {
-		t.Errorf("no row: %d", s)
-	}
-	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_brain', 'brain', $1)`, apikey.Hash(brain)); err != nil {
-		t.Fatal(err)
-	}
-	for _, model := range []string{"fast", "slow"} {
-		if s := call(model); s != 200 {
-			t.Errorf("no policy, %s: %d", model, s)
-		}
-	}
-	// The admin API answers the bootstrap key alone.
-	for key, want := range map[string]int{bootstrap: 200, brain: 401} {
-		if resp, b := e.do("GET", "/admin/v1/profiles", "", map[string]string{"x-api-key": key}); resp.StatusCode != want {
-			t.Errorf("admin with %s: %d %s, want %d", key, resp.StatusCode, b, want)
-		}
-	}
-
-	e.start()
-	if s := call("fast"); s != 403 {
-		t.Errorf("no brain key configured: %d", s)
-	}
-
-	if _, err := e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: "key_brain", Aliases: []string{"slow"}}); err != nil {
-		t.Fatal(err)
-	}
-	e.start(func(c *modelgateway.Config) { c.BrainKey = brain })
-	if s := call("slow"); s != 200 {
-		t.Errorf("policy, slow: %d", s)
-	}
-	if s := call("fast"); s != 403 {
-		t.Errorf("policy, fast: %d", s)
-	}
-}
-
-// The bootstrap key authenticates by its row like any key, so the platform
-// retiring it — archived, or past an expiry — ends its calls here too, and its
-// value alone opens nothing.
-func TestARetiredBootstrapKeyCallsNothing(t *testing.T) {
-	e := newEnv(t)
-	up := newFake(t, message("ok"))
-	p := e.provider(up.URL)
-	e.credential(p, "sk-upstream-1", 1)
-	e.alias("fast", target(e.deployment(p, "m"), 0))
-	e.start()
-	call := func() int {
-		resp, _ := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": bootstrap})
-		return resp.StatusCode
-	}
-	if s := call(); s != 401 {
-		t.Errorf("no row: %d", s)
-	}
-	if _, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id, name, key_hash) VALUES ('key_boot', 'bootstrap', $1)`, apikey.Hash(bootstrap)); err != nil {
-		t.Fatal(err)
-	}
-	if s := call(); s != 200 {
-		t.Errorf("active: %d", s)
-	}
-	for name, q := range map[string]string{
-		"archived": `UPDATE api_keys SET status = 'archived' WHERE id = 'key_boot'`,
-		"expired":  `UPDATE api_keys SET status = 'active', expires_at = now() - interval '1 hour' WHERE id = 'key_boot'`,
-	} {
-		if _, err := e.pool.Exec(e.ctx, q); err != nil {
-			t.Fatal(err)
-		}
-		if s := call(); s != 401 {
-			t.Errorf("%s: %d", name, s)
-		}
-	}
-}
-
 func TestModels(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, message("ok"))
@@ -335,8 +195,8 @@ func TestModels(t *testing.T) {
 	all = append(all, "Qwen/Qwen3-Coder", "both", "partly-known")
 	e.alias("*", target(big, 0))
 	e.alias("vectors", target(e.deployment(p, "e", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
-	narrow := e.key([]string{"chat-03", "vectors", "*"})
+	key := e.key()
+	another := e.key()
 	e.start()
 	slices.Sort(all)
 
@@ -379,14 +239,14 @@ func TestModels(t *testing.T) {
 		t.Errorf("a name with a slash: %v", err)
 	}
 
-	// A narrow key sees only its chat aliases; the wildcard and an
+	// Every owned developer key sees all chat aliases. The wildcard and an
 	// embedding alias are no Anthropic model.
-	page, err := e.client(narrow).Models.List(e.ctx, anthropic.ModelListParams{})
-	if err != nil || len(page.Data) != 1 || page.Data[0].ID != "chat-03" || page.HasMore {
-		t.Errorf("narrow list: %v %v", page, err)
+	page, err := e.client(another).Models.List(e.ctx, anthropic.ModelListParams{Limit: anthropic.Int(100)})
+	if err != nil || len(page.Data) != len(all) || page.HasMore {
+		t.Errorf("owned model list error: %v", err)
 	}
-	for _, id := range []string{"chat-04", "vectors", "*", "nope"} {
-		_, err := e.client(narrow).Models.Get(e.ctx, id, anthropic.ModelGetParams{})
+	for _, id := range []string{"vectors", "*", "nope"} {
+		_, err := e.client(another).Models.Get(e.ctx, id, anthropic.ModelGetParams{})
 		var aerr *anthropic.Error
 		if !errors.As(err, &aerr) || aerr.StatusCode != 404 {
 			t.Errorf("get %s: %v", id, err)

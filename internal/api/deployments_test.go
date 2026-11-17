@@ -1045,9 +1045,7 @@ func TestListDeploymentsPagesOnASingleConnection(t *testing.T) {
 		t.Fatalf("open a one-connection pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if err := api.EnsureAPIKey(t.Context(), pool, "test", testKey); err != nil {
-		t.Fatalf("EnsureAPIKey: %v", err)
-	}
+	insertOwnedTestKey(t, pool)
 	srv := httptest.NewServer(api.NewHandler(pool, blobtest.Mem(), nil, nil))
 	t.Cleanup(srv.Close)
 	s := &tserver{t: t, url: srv.URL, pool: pool}

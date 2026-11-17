@@ -14,7 +14,7 @@ import unittest
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 PINS = runpy.run_path(str(SCRIPTS / "pins_test.py"))
 PIPES = runpy.run_path(str(SCRIPTS / "pipes_test.py"))
-CONSOLE_SHA = "cb7d741ff96098c6d7e428931ea05414d9f815aa"
+CONSOLE_SHA = "8158c6a3b8917da7c5b38abddde3c00326ac54b6"
 
 
 class NativeConsoleJob(unittest.TestCase):

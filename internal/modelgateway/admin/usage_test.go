@@ -13,7 +13,7 @@ import (
 
 func (e *env) record(u store.Usage) {
 	e.t.Helper()
-	if _, err := e.store.RecordUsage(context.Background(), u, false); err != nil {
+	if _, err := e.store.RecordUsage(context.Background(), u); err != nil {
 		e.t.Fatal(err)
 	}
 }
@@ -41,7 +41,8 @@ func TestDailyUsage(t *testing.T) {
 	}
 	today := time.Now().UTC().Format(time.DateOnly)
 
-	got := (reply{body: e.ok(e.do("GET", "/admin/v1/usage/daily", nil, map[string]string{"Authorization": "Bearer " + e.token("devs")}), "developer reads")}).list()
+	e.setPrincipal(`role='developer'`)
+	got := (reply{body: e.ok(e.admin("GET", "/admin/v1/usage/daily", nil), "developer reads")}).list()
 	if len(got) != 3 || got[0]["day"] != time.Now().UTC().AddDate(0, 0, -29).Format(time.DateOnly) {
 		t.Fatalf("the default span holds %v, want the rollup of 29 days ago and today's two", got)
 	}

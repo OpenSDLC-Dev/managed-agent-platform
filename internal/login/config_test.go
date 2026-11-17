@@ -20,9 +20,10 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 		wantMode Mode
 		wantErr  bool
 	}{
-		{"default", nil, ModeDisabled, false},
-		{"legacy oidc", map[string]string{"IDENTITY_MODE": "oidc"}, ModeOIDC, false},
-		{"legacy proxy", map[string]string{"IDENTITY_MODE": "trusted_proxy"}, ModeTrustedProxy, false},
+		{"missing login", nil, "", true},
+		{"disabled login", map[string]string{"IDENTITY_MODE": "disabled"}, "", true},
+		{"oidc needs origin", map[string]string{"IDENTITY_MODE": "oidc"}, "", true},
+		{"proxy needs origin", map[string]string{"IDENTITY_MODE": "trusted_proxy"}, "", true},
 		{"password needs development", map[string]string{"IDENTITY_MODE": "password", "CONSOLE_PUBLIC_ORIGIN": "https://console.example"}, "", true},
 		{"password needs origin", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true"}, "", true},
 		{"development password", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000"}, ModePassword, false},
@@ -133,15 +134,15 @@ func TestCanonicalPublicOrigins(t *testing.T) {
 		})
 	}
 	for _, mode := range []string{"disabled", "oidc", "trusted_proxy"} {
-		t.Run("legacy "+mode, func(t *testing.T) {
-			cfg, err := ConfigFromEnv(func(k string) string {
+		t.Run("missing native configuration "+mode, func(t *testing.T) {
+			_, err := ConfigFromEnv(func(k string) string {
 				if k == "IDENTITY_MODE" {
 					return mode
 				}
 				return ""
 			})
-			if err != nil || New(nil, cfg).NativeEnabled() {
-				t.Fatalf("verifier-only/disabled changed: %v", err)
+			if err == nil {
+				t.Fatal("accepted login without a mode and public origin")
 			}
 		})
 	}
@@ -215,7 +216,7 @@ func TestBrowserLoginConfigurationSecretBoundaries(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("unsafe invalid-config error: %v", err)
 	}
-	for _, mode := range []string{"disabled", "oidc", "trusted_proxy", "password"} {
+	for _, mode := range []string{"oidc", "trusted_proxy", "password"} {
 		t.Run("session-only "+mode, func(t *testing.T) {
 			cfg, err := SessionConfigFromEnv(func(k string) string {
 				if strings.HasPrefix(k, "IDENTITY_OIDC_") {

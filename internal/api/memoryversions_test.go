@@ -594,6 +594,8 @@ func TestMemoryVersionActorsOnBothLanes(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
 	owner := s.seedLocal("memory-writer", "developer", "active")
 	cookie, session := s.issue(owner)
+	rawKey, keyID := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "memory writer", nil)
+	s.key = rawKey
 	store := createMemoryStore(t, s.tserver, "actors")
 	createMemory(t, s.tserver, store, "/machine.md", "written by a key")
 
@@ -603,10 +605,7 @@ func TestMemoryVersionActorsOnBothLanes(t *testing.T) {
 		t.Fatalf("a developer creating a memory: status %d (%v)", status, laneMessage(t, raw))
 	}
 
-	var keyID, principalID string
-	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM api_keys`).Scan(&keyID); err != nil {
-		t.Fatalf("read api key: %v", err)
-	}
+	var principalID string
 	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals`).Scan(&principalID); err != nil {
 		t.Fatalf("read principal: %v", err)
 	}

@@ -72,8 +72,8 @@ func TestXShouldRetryFollowsTheRecordings(t *testing.T) {
 		{"a key's poll elsewhere", http.MethodGet, "/v1/environments/" + envID + "/work/poll", nil, bearer(shKey), 403, true},
 		{"a dead key's work list", http.MethodGet, "/v1/environments/" + shEnv + "/work", nil, bearer("not-a-key"), 401, true},
 		// The console namespace: 2026-09-05 batch2 `rec83.edge5.list.limit.0`, and an unknown path there.
-		{"a console list's limit of 0", http.MethodGet, consoleTokens(envID) + "?limit=0", nil, mgmt, 400, true},
-		{"an unknown console path", http.MethodGet, "/api/oauth/organizations/default/environments/" + envID + "/secrets", nil, mgmt, 404, true},
+		{"a console list's limit of 0", http.MethodGet, consoleTokens(envID) + "?limit=0", nil, s.cookieHeaders(), 400, true},
+		{"an unknown console path", http.MethodGet, "/api/oauth/organizations/default/environments/" + envID + "/secrets", nil, s.cookieHeaders(), 404, true},
 
 		// Recorded without it: 2026-09-05-dreams `rec91.control.dreams.extra-segment`, 2026-09-03 batch2 idx 5
 		// `envkey.agents.list-should-refuse` and idx 209–224 `sweep.del.agent.*`, 2026-09-02 batch2

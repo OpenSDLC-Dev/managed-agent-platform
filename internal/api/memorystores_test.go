@@ -596,6 +596,8 @@ func TestMemoryStoreRecordsItsCreator(t *testing.T) {
 	s := newNativeServer(t, login.ModePassword)
 	owner := s.seedLocal("store-writer", "developer", "active")
 	cookie, session := s.issue(owner)
+	rawKey, keyID := issueOwnedHTTP(t, s, nativeHeaders(cookie, session.CSRFToken), "store writer", nil)
+	s.key = rawKey
 
 	// The machine lane: the x-api-key's own row id.
 	machineID := createMemoryStore(t, s.tserver, "machine-made")
@@ -603,10 +605,6 @@ func TestMemoryStoreRecordsItsCreator(t *testing.T) {
 	if err := s.pool.QueryRow(t.Context(),
 		`SELECT created_by FROM memory_stores WHERE id = $1`, machineID).Scan(&createdBy); err != nil {
 		t.Fatalf("read created_by: %v", err)
-	}
-	var keyID string
-	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM api_keys`).Scan(&keyID); err != nil {
-		t.Fatalf("read api key: %v", err)
 	}
 	if createdBy == nil || *createdBy != keyID {
 		t.Errorf("created_by = %v on the machine lane, want the api key id %q", createdBy, keyID)

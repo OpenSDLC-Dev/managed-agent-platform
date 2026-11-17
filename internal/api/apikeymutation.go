@@ -13,8 +13,10 @@ import (
 // beginAPIKeyMutation holds current human authority through the key write.
 // Read the complete body first. Principal -> browser session -> key is the
 // shared lock order with principal removal, which archives owned keys.
-// The zero caller is the already-selected legacy machine lane, never fallback.
 func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal, error) {
+	if _, err := requireCookieSession(r); err != nil {
+		return nil, identityPrincipal{}, err
+	}
 	ctx := r.Context()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
@@ -24,42 +26,20 @@ func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal
 		tx.Rollback(ctx)
 		return nil, identityPrincipal{}, err
 	}
-	caller, human := identityFrom(ctx)
-	if !human {
-		return tx, identityPrincipal{}, nil
-	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return fail(err)
 	}
-	if _, cookie := cookieSessionFrom(ctx); cookie {
-		session, err := s.login.AuthenticateInTx(ctx, tx, r)
-		if err != nil {
-			switch {
-			case errors.Is(err, login.ErrUnauthenticated):
-				err = &apiErrorWithHeaders{err: errAuth("invalid or expired browser session"), headers: map[string]string{"x-platform-signed-out": "1"}}
-			case errors.Is(err, principal.ErrDeactivated):
-				err = &apiErrorWithHeaders{err: errDeactivated, headers: map[string]string{"x-platform-signed-out": "1"}}
-			}
-			return fail(err)
-		}
-		caller.ID = session.PrincipalID
-	}
-	// An IdP assertion was verified once, before body upload. Re-read its stored
-	// authority; Resolve would replay stale mapping claims over a later demotion.
-	var kind, status, org string
-	err = tx.QueryRow(ctx, `SELECT kind,status,org_id,role FROM principals WHERE id=$1`, caller.ID).Scan(&kind, &status, &org, &caller.Role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fail(errAuth("invalid principal"))
-	}
+	session, err := s.login.AuthenticateInTx(ctx, tx, r)
 	if err != nil {
+		switch {
+		case errors.Is(err, login.ErrUnauthenticated):
+			err = &apiErrorWithHeaders{err: errAuth("invalid or expired browser session"), headers: map[string]string{"x-platform-signed-out": "1"}}
+		case errors.Is(err, principal.ErrDeactivated):
+			err = &apiErrorWithHeaders{err: errDeactivated, headers: map[string]string{"x-platform-signed-out": "1"}}
+		}
 		return fail(err)
 	}
-	if status != "active" {
-		return fail(errDeactivated)
-	}
-	if kind != "user" || org != reservedOrganization {
-		return fail(errForbidden("an active human in this organization is required"))
-	}
+	caller := identityPrincipal{ID: session.PrincipalID, Role: session.Role}
 	if !caller.Role.AtLeast(identity.RoleDeveloper) {
 		return fail(errForbidden("this route requires the developer role"))
 	}
@@ -72,7 +52,7 @@ func canManageAPIKey(k ManagementKey, caller identityPrincipal) bool {
 	if k.CreatedBy == nil {
 		return false
 	}
-	return caller.ID == "" || caller.Role == identity.RoleAdmin ||
+	return caller.Role == identity.RoleAdmin ||
 		caller.Role == identity.RoleDeveloper && k.OwnerPrincipalID != nil && *k.OwnerPrincipalID == caller.ID
 }
 
@@ -80,9 +60,6 @@ func canManageAPIKey(k ManagementKey, caller identityPrincipal) bool {
 // public alias asserts a kind; the stored row must confirm it before assignment.
 func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, alias *string) (*string, error) {
 	if alias == nil {
-		if caller.ID == "" {
-			return nil, nil
-		}
 		return &caller.ID, nil
 	}
 	if _, err := requireCookieSession(r); err != nil {

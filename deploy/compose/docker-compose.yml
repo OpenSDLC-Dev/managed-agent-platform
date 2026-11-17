@@ -133,10 +133,6 @@ services:
     stop_grace_period: 60s
     environment:
       <<: *app-env
-      CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
-      # Receiver compatibility for old brains through slice 6. New brains use
-      # delegated inference tokens attached to each claim.
-      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       CONTROLPLANE_ADDR: ":8080"
       # Skill archives go to the bundled MinIO (plain HTTP inside the network).
       BLOB_ENDPOINT: minio:9000
@@ -199,10 +195,7 @@ services:
       idp:
         condition: service_healthy
         required: false
-    # Listening means both keys are registered: the control plane writes them
-    # before it opens its port, so the brain, which waits on this, cannot send
-    # the gateway a key it has not registered yet. A TCP connect, since the
-    # image has bash but no HTTP client.
+    # A TCP connect: migrations and native login are ready before listening.
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
       # A generous start_period, since migrations wait on an advisory lock
@@ -213,9 +206,7 @@ services:
       timeout: 2s
       retries: 3
     ports:
-      # Bound to loopback by default: the committed CONTROLPLANE_API_KEY is a
-      # well-known placeholder, so the API must not be reachable from the LAN.
-      # Set CONTROLPLANE_BIND=0.0.0.0 (with a real key) to expose it deliberately.
+      # Development binds to loopback. Use a TLS ingress for remote access.
       - "${CONTROLPLANE_BIND:-127.0.0.1}:${CONTROLPLANE_PORT:-8080}:8080"
 
   # The model gateway (docs/plan/59_model-gateway.md): Anthropic Messages on
@@ -231,11 +222,6 @@ services:
     stop_grace_period: 45s
     environment:
       <<: *app-env
-      # The admin API takes the bootstrap key; /v1/ takes the api_keys rows the
-      # control plane registers, this key's among them.
-      CONTROLPLANE_API_KEY: ${CONTROLPLANE_API_KEY:?set CONTROLPLANE_API_KEY in .env}
-      # The brain's key needs no key policy here; the admin API refuses it.
-      BRAIN_API_KEY: ${BRAIN_API_KEY:?set BRAIN_API_KEY in .env}
       MODELGATEWAY_ADDR: ":8090"
       # Vendor keys are sealed with the control plane's cipher, the same transit
       # key; the gateway does not start without one.
@@ -243,30 +229,15 @@ services:
       BAO_ADDR: http://openbao:8200
       BAO_TOKEN: ${BAO_PLATFORM_TOKEN:-map-bao-dev-token}
       BAO_TRANSIT_KEY: ${BAO_TRANSIT_KEY:-map-secrets}
-      # The admin API accepts the operator sign-in the control plane does, so the
-      # `iam` profile's variables reach it too, with the CA that verifies the
-      # bundled IdP (the control plane's SSL_CERT_FILE comment says why it is
-      # not defaulted).
+      # The gateway validates platform sessions; only the control plane talks to the IdP.
       DEVELOPMENT_MODE: ${DEVELOPMENT_MODE-true}
       CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN-http://localhost:3000}
       IDENTITY_MODE: ${IDENTITY_MODE-password}
-      IDENTITY_OIDC_ISSUER: ${IDENTITY_OIDC_ISSUER:-}
-      IDENTITY_OIDC_AUDIENCE: ${IDENTITY_OIDC_AUDIENCE:-}
-      IDENTITY_OIDC_JWKS_URL: ${IDENTITY_OIDC_JWKS_URL:-}
-      IDENTITY_CLAIM_ROLES: ${IDENTITY_CLAIM_ROLES:-}
-      IDENTITY_ROLE_MAP: ${IDENTITY_ROLE_MAP:-}
-      SSL_CERT_FILE: ${SSL_CERT_FILE:-}
-    volumes:
-      - idpca:/etc/idp-ca:ro
     depends_on:
       postgres:
         condition: service_healthy
       openbao-init:
         condition: service_completed_successfully
-      # required: false for the reason the control plane's says.
-      idp:
-        condition: service_healthy
-        required: false
     # The control plane's TCP check, for the brain to wait on.
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8090"]
@@ -275,23 +246,13 @@ services:
       timeout: 2s
       retries: 3
     ports:
-      # The control plane's bind, for the same reason: the admin API accepts the
-      # placeholder bootstrap key.
+      # Keep this development listener on loopback.
       - "${CONTROLPLANE_BIND:-127.0.0.1}:${MODELGATEWAY_PORT:-8090}:8090"
 
   # Opt-in browser receiver. It never inherits x-app or database credentials.
   console:
     profiles: ["console"]
-    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:48b137660daca7214f012357051a7f89f7da579f62acb604992c98a7c70ff319
-    environment:
-      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE-platform}
-      PLATFORM_BASE_URL: http://controlplane:8080
-      PLATFORM_API_KEY: ${CONSOLE_PLATFORM_API_KEY:-}
-      CONSOLE_PASSWORD: ${CONSOLE_PASSWORD:-}
-      MODEL_GATEWAY_BASE_URL: ${CONSOLE_GATEWAY_BASE_URL-http://modelgateway:8090}
-    entrypoint: ["/bin/sh", "/console-start.sh"]
-    volumes:
-      - ./console-start.sh:/console-start.sh:ro
+    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:3395af7496c827f4607cc2a5b35246241a5d8f63a3026b7e966ba7da4179cfae
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -304,7 +265,6 @@ services:
     image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     entrypoint: ["/bin/sh", "/etc/caddy/start.sh"]
     environment:
-      CONSOLE_AUTH_MODE: ${CONSOLE_AUTH_MODE-platform}
       CONSOLE_PUBLIC_ORIGIN: ${CONSOLE_PUBLIC_ORIGIN-http://localhost:3000}
       IDENTITY_MODE: ${IDENTITY_MODE-password}
       MODELGATEWAY_UPSTREAM: ${APP_EDGE_GATEWAY_UPSTREAM-modelgateway:8090}
@@ -563,7 +523,6 @@ services:
       # byte. Left empty Casdoor derives the issuer from the request Host header
       # and `iss` varies per client, which the verifier's exact comparison
       # rejects. Native login uses the same HTTPS issuer from browser and CP.
-      # Verifier-only legacy installs may still use a separate TLS JWKS URL.
       origin: ${IDENTITY_OIDC_ISSUER:-http://localhost:8000}
       httpport: "8000"
       initDataFile: /init_data.json

@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,7 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
-func TestNativeLegacyCredentialPrecedence(t *testing.T) {
+func TestNativeCredentialBoundary(t *testing.T) {
 	s := newNativeServer(t, login.ModeOIDC)
 	cookie, _ := s.issue(s.seedLocal("legacycookie", "admin", "active"))
 	token := s.idp.Mint(t, s.idp.Claims(laneAudience, time.Now()))
@@ -22,11 +21,11 @@ func TestNativeLegacyCredentialPrecedence(t *testing.T) {
 		want       int
 	}{
 		{"JWT is refused on public", "/v1/agents", http.Header{"Authorization": {"Bearer " + token}}, 401},
-		{"JWT outranks cookie on private", keys, http.Header{"Cookie": {cookie}, "Authorization": {"Bearer " + token}}, 403},
+		{"JWT cannot accompany private cookie", keys, http.Header{"Cookie": {cookie}, "Authorization": {"Bearer " + token}}, 401},
 		{"JWT cannot reach session", "/api/%61uth/session", http.Header{"Authorization": {"Bearer " + token}}, 401},
 		{"JWT beside cookie cannot reach session", "/api/auth/session", http.Header{"Cookie": {cookie}, "Authorization": {"Bearer " + token}}, 401},
-		{"key preserves old authority", keys, http.Header{"Cookie": {cookie}, "X-Api-Key": {testKey}}, 200},
-		{"public key not cookie", "/v1/agents", http.Header{"Cookie": {cookie}, "X-Api-Key": {testKey}}, 200},
+		{"unowned key cannot accompany cookie", keys, http.Header{"Cookie": {cookie}, "X-Api-Key": {testKey}}, 401},
+		{"public unowned key is refused", "/v1/agents", http.Header{"Cookie": {cookie}, "X-Api-Key": {testKey}}, 401},
 		{"bad JWT cannot fall back", keys, http.Header{"Cookie": {cookie}, "Authorization": {"Bearer invalid.jwt.value"}}, 401},
 		{"duplicate empty key cannot fall back", keys, http.Header{"Cookie": {cookie}, "X-Api-Key": {"", testKey}}, 401},
 		{"empty Authorization cannot fall back", keys, http.Header{"Cookie": {cookie}, "Authorization": {""}}, 401},
@@ -43,24 +42,16 @@ func TestNativeLegacyCredentialPrecedence(t *testing.T) {
 			}
 		})
 	}
-	// Stored authority still applies on the retained private verifier lane.
-	_, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='admin' WHERE issuer=$1 AND subject='user-1'`, s.idp.Issuer())
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, raw := s.request("GET", keys, "", http.Header{"Authorization": {"Bearer " + token}})
-	if res.StatusCode != 200 {
-		t.Fatalf("retained private JWT lane refused admin: %d %s", res.StatusCode, raw)
-	}
+
 }
 
-func TestNativeLegacyConfig(t *testing.T) {
+func TestNativeTrustedProxyConfig(t *testing.T) {
 	s := newLaneServer(t)
 	res := s.doRaw("GET", "/api/auth/config", nil, nil)
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	var cfg map[string]any
-	if res.StatusCode != 200 || json.Unmarshal(raw, &cfg) != nil || cfg["mode"] != "oidc" || cfg["native_login"] != false || len(cfg) != 2 {
-		t.Fatalf("legacy config=%d %s", res.StatusCode, raw)
+	if res.StatusCode != 200 || json.Unmarshal(raw, &cfg) != nil || cfg["mode"] != "trusted_proxy" || cfg["native_login"] != true {
+		t.Fatalf("native config=%d %s", res.StatusCode, raw)
 	}
 }

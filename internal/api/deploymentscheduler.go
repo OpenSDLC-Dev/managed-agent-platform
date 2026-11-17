@@ -517,8 +517,7 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	var created createdSession
 	fireErr := error(nil)
 	var member bool
-	if err := tx.QueryRow(ctx, `SELECT d.initiator_api_key_id IS NOT NULL OR
-		coalesce(p.org_id='default' AND p.status='active' AND p.kind IN ('user','service_account'),false)
+	if err := tx.QueryRow(ctx, `SELECT coalesce(p.org_id='default' AND p.status='active' AND p.kind IN ('user','service_account'),false)
 		FROM deployments d LEFT JOIN principals p ON p.id=d.initiator_principal_id WHERE d.id=$1`, f.deploymentID).Scan(&member); err != nil {
 		return "", "", err
 	}

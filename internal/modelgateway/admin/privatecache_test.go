@@ -10,7 +10,7 @@ import (
 
 func TestGatewayPrivateResponsesForbidSharedCache(t *testing.T) {
 	e, m := newCookieAdmin(t, login.ModeOIDC, cookieOrigin, true)
-	e.ok(e.do("GET", "/admin/v1/profiles", nil, map[string]string{"Authorization": "Bearer " + e.token("devs")}), "seed")
+	e.setPrincipal(`role='developer'`)
 	var id string
 	if err := e.pool.QueryRow(context.Background(), `SELECT id FROM principals`).Scan(&id); err != nil {
 		t.Fatal(err)

@@ -61,7 +61,7 @@ func TestAStreamedRequestReachesGemini(t *testing.T) {
 		f := newFake(t, geminiSSE(contentType, geminiThought, geminiPiece, geminiFinish))
 		g := e.deployment(onGemini(e, f.URL), "gemini-3.8-flash")
 		e.alias("g", target(g, 0))
-		key := e.key(everyAlias)
+		key := e.key()
 		e.start()
 
 		m := stream(t, e.client(key), anthropic.MessageNewParams{Model: "g", MaxTokens: 64, Messages: hello()})
@@ -101,7 +101,7 @@ func TestAGeminiStreamCarriesItsSignature(t *testing.T) {
 	})
 	g := e.deployment(onGemini(e, f.URL), "gemini-3.8-flash")
 	e.alias("g", target(g, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	tools := []anthropic.ToolUnionParam{{OfTool: &anthropic.ToolParam{Name: "get_time",
@@ -143,7 +143,7 @@ func TestGeminiStreamErrors(t *testing.T) {
 		}
 		e.alias(name, target(e.deployment(p, "gemini-3.8-flash"), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 	body := `{"model":"%s","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -210,7 +210,7 @@ func TestGeminiStreamFraming(t *testing.T) {
 	for name, f := range map[string]*fake{"bare": bare, "late": late, "lone": lone} {
 		e.alias(name, target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	hdr := map[string]string{"x-api-key": key, "anthropic-version": "2023-06-01"}
 	body := `{"model":"%s","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -235,7 +235,7 @@ func TestAStreamedResponsesRequestReachesGemini(t *testing.T) {
 	e := newEnv(t)
 	f := newFake(t, geminiSSE("text/event-stream", geminiPiece, geminiFinish))
 	e.alias("g", target(e.deployment(onGemini(e, f.URL), "gemini-3.8-flash"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	types, text, last := streamResponse(t, e.oaClient(key, "/v1"), respParams("g"))
 	if text != "Jupiter" || last.Type != "response.completed" || last.Response.Status != responses.ResponseStatusCompleted ||

@@ -66,13 +66,13 @@ class EdgeRouting(unittest.TestCase):
                 threading.Thread(target=server.serve_forever, daemon=True).start()
             upstream = {s.owner: f"host.docker.internal:{s.server_port}" for s in servers}
             receipt["listeners"] = [{"pid": os.getpid(), "port": s.server_port, "owner": s.owner} for s in servers]
-            for mode, gateway in [("", True), ("platform", True), ("platform", False)]:
-                name = f"edge-{mode or 'legacy'}-{gateway}"
+            for gateway in [True, False]:
+                name = f"edge-native-{gateway}"
                 cidfile = EVIDENCE / (name + ".cid")
                 if cidfile.exists():
                     raise AssertionError("use a fresh evidence directory; never reuse an old container receipt")
                 args = ["create", "--cidfile", str(cidfile), "--add-host=host.docker.internal:host-gateway", "-p", "127.0.0.1::8080", "-v", f"{ROOT / 'app-edge'}:/etc/caddy:ro", "--entrypoint", "/bin/sh"]
-                env = {"CONSOLE_AUTH_MODE": mode, "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000" if mode else "", "IDENTITY_MODE": "password" if mode else "", "CONTROLPLANE_UPSTREAM": upstream["controlplane"], "CONSOLE_UPSTREAM": upstream["console"], "MODELGATEWAY_UPSTREAM": upstream["gateway"] if gateway else ""}
+                env = {"CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "IDENTITY_MODE": "password", "CONTROLPLANE_UPSTREAM": upstream["controlplane"], "CONSOLE_UPSTREAM": upstream["console"], "MODELGATEWAY_UPSTREAM": upstream["gateway"] if gateway else ""}
                 for key, value in env.items():
                     args.extend(["-e", f"{key}={value}"])
                 args.extend([IMAGE, "/etc/caddy/start.sh"])
@@ -109,31 +109,30 @@ class EdgeRouting(unittest.TestCase):
                     raise AssertionError(docker("logs", cid).stdout + docker("logs", cid).stderr)
                 routes = {"/login": "console", "/setup": "console", "/_next/static/test.js": "console", "/api/health": "console", "/v1/agents": "controlplane"}
                 for path in ["/api/auth/config", "/api/auth/callback?code=test", "/api/console/organizations/default/members", "/api/oauth/test", "/api/organizations/default/proxy/v1/agents"]:
-                    routes[path] = "controlplane" if mode else "console"
+                    routes[path] = "controlplane"
                 for path in ["/api/login", "/api/platform/agents", "/api/gateway/providers"]:
                     routes[path] = "console"
                 for path, expected in routes.items():
-                    with self.subTest(mode=mode, gateway=gateway, path=path):
+                    with self.subTest(gateway=gateway, path=path):
                         status, owner, body = request(path)
                         self.assertEqual((status, owner), (200, expected))
                         self.assertIn(b"0123456789abcdef0123456789abcdef", body)
-                self.assertEqual(request("/admin/v1/providers")[:2], (200, "gateway") if mode and gateway else (503 if mode else 404, None))
+                self.assertEqual(request("/admin/v1/providers")[:2], (200, "gateway") if gateway else (503, None))
                 for path in ["/internal/v1/gate/config", "/%69nternal/v1/gate/config", "//internal/v1/gate/config", "/x/../internal/v1/gate/config", "/%2e%2e/internal/v1/gate/config", "/internal%2fv1/gate/config", "/%2569nternal/v1/gate/config", "/internal\\v1/gate/config"]:
                     before = len(seen)
-                    with self.subTest(mode=mode, path=path):
+                    with self.subTest(path=path):
                         self.assertEqual(request(path)[:2], (404, None))
                         self.assertEqual(len(seen), before, "refused path reached an upstream")
-                if mode:
-                    cancelled.clear()
-                    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-                    conn.request("GET", "/api/organizations/default/proxy/v1/sessions/test/events/stream")
-                    response = conn.getresponse()
-                    self.assertEqual(response.getheader("Content-Type"), "text/event-stream")
-                    self.assertIsNone(response.getheader("Content-Encoding"))
-                    self.assertEqual(response.readline(), b"data: 0\n")
-                    response.close()
-                    conn.close()
-                    self.assertTrue(cancelled.wait(3), "Caddy did not propagate the original client disconnect")
+                cancelled.clear()
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                conn.request("GET", "/api/organizations/default/proxy/v1/sessions/test/events/stream")
+                response = conn.getresponse()
+                self.assertEqual(response.getheader("Content-Type"), "text/event-stream")
+                self.assertIsNone(response.getheader("Content-Encoding"))
+                self.assertEqual(response.readline(), b"data: 0\n")
+                response.close()
+                conn.close()
+                self.assertTrue(cancelled.wait(3), "Caddy did not propagate the original client disconnect")
                 entry["logs"] = docker("logs", cid).stderr
                 record()
         finally:
@@ -401,13 +400,13 @@ class AliasNameRouting(unittest.TestCase):
                          "a/%2fb", "a%2F%2fb", "a%2f/b", "a%2f?query=%25", "a\\b"]
         sources = [("compose", ROOT / "app-edge"),
                    ("helm", ROOT.parent / "helm/managed-agent-platform/files/app-edge")]
-        model_paths = ["/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/", "/admin/v1/rate_limits/"]
+        model_paths = ["/admin/v1/aliases/", "/admin/v1/rate_limits/"]
         for source, directory in sources:
-            for mode, gateway in [("", True), ("platform", True), ("platform", False)]:
-                label = f"{source}-{mode or 'legacy'}-{gateway}"
+            for gateway in [True, False]:
+                label = f"{source}-native-{gateway}"
                 args = ["-p", "127.0.0.1::8080", "-v", f"{directory}:/etc/caddy:ro"]
-                env = {"CONSOLE_AUTH_MODE": mode, "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000" if mode else "",
-                       "IDENTITY_MODE": "password" if mode else "", "CONTROLPLANE_UPSTREAM": "origin:8102",
+                env = {"CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000",
+                       "IDENTITY_MODE": "password", "CONTROLPLANE_UPSTREAM": "origin:8102",
                        "CONSOLE_UPSTREAM": "origin:8101", "MODELGATEWAY_UPSTREAM": "origin:8103" if gateway else ""}
                 for key, value in env.items():
                     args.extend(["-e", f"{key}={value}"])
@@ -437,23 +436,23 @@ class AliasNameRouting(unittest.TestCase):
                         for method in ["GET", "POST", "DELETE"]:
                             path = prefix + name + "?query=%252f"
                             case, result = self.request(port, method, path)
-                            enabled = prefix.startswith("/api/") or (mode and gateway)
+                            enabled = gateway
                             if enabled:
                                 self.forwarded.append(case)
                             else:
                                 self.refused.append(case)
-                            with self.subTest(source=source, mode=mode, gateway=gateway, method=method, path=path):
-                                expected = (200, "console" if prefix.startswith("/api/") else "gateway", method + " " + path)
+                            with self.subTest(source=source, gateway=gateway, method=method, path=path):
+                                expected = (200, "gateway", method + " " + path)
                                 if enabled:
                                     self.assertEqual(result, expected, "escaped alias data must arrive byte-for-byte")
                                 else:
-                                    self.assertEqual(result[:2], (503 if mode else 404, None))
+                                    self.assertEqual(result[:2], (503, None))
                 denied = internal + prefixes + other + [prefix + name for prefix in model_paths for name in invalid_names]
                 for path in denied:
                     for method in ["GET", "POST", "DELETE"]:
                         case, result = self.request(port, method, path)
                         self.refused.append(case)
-                        with self.subTest(source=source, mode=mode, gateway=gateway, method=method, denied=path):
+                        with self.subTest(source=source, gateway=gateway, method=method, denied=path):
                             self.assertEqual(result[:2], (404, None))
         logs = self.command("logs", self.origin)
         (self.directory / "origin.log").write_text(logs.stdout + logs.stderr)
@@ -755,10 +754,10 @@ class AliasFixtureContracts(unittest.TestCase):
                         raise exception("after three completed fake requests")
                     path = self.path
                     # This only lets the fixture finish. It is not a routing oracle.
-                    alias = path.startswith(("/admin/v1/aliases/", "/api/gateway/admin/v1/aliases/", "/admin/v1/rate_limits/")) and path.endswith("?query=%252f")
-                    if path == "/api/health" or alias and path.startswith("/api/"):
+                    alias = path.startswith(("/admin/v1/aliases/", "/admin/v1/rate_limits/")) and path.endswith("?query=%252f")
+                    if path == "/api/health":
                         status, owner = 200, "console"
-                    elif alias and state["env"].get("CONSOLE_AUTH_MODE"):
+                    elif alias:
                         status, owner = (200, "gateway") if state["env"].get("MODELGATEWAY_UPSTREAM") else (503, None)
                     else:
                         status, owner = 404, None
@@ -833,9 +832,9 @@ class AliasFixtureContracts(unittest.TestCase):
         self.assertEqual(transport.images, {IMAGE})
         self.assertEqual(sum(args[:2] == ["network", "create"] for args in transport.calls), 1)
         creations = [args for args in transport.calls if args[0] == "create"]
-        self.assertEqual(len(creations), 7)
+        self.assertEqual(len(creations), 5)
         self.assertTrue(all("--pull=never" in args and IMAGE in args for args in creations))
-        self.assertEqual(len(fixture.receipt["requests"]), 2130)
+        self.assertEqual(len(fixture.receipt["requests"]), 1108)
         self.assert_cleaned(transport)
 
     def test_image_preparation_failure_allocates_no_resources(self):
@@ -1114,7 +1113,7 @@ class AliasFixtureContracts(unittest.TestCase):
                                         for mount in entry["mounts"])}, indent=2))
                 self.assertFalse(interrupted)
                 self.assert_cleaned(transport)
-                self.assertEqual(len(receipt["requests"]), 2130)
+                self.assertEqual(len(receipt["requests"]), 1108)
                 self.assertEqual(result.errors, [])
                 if failed_listing:
                     self.assertEqual(len(result.failures), 1)
@@ -1174,7 +1173,7 @@ class AliasFixtureContracts(unittest.TestCase):
                               "containerRemovalObserved", "volumeRemovalObserved", "networkRemovalObserved"}, receipt.keys())
         self.assertEqual(receipt["requests"], fixture.receipt["requests"])
         count = len(receipt["requests"])
-        self.assertEqual(count, 2130, "fake readiness succeeds on its first request")
+        self.assertEqual(count, 1108, "fake readiness succeeds on its first request")
         self.assertEqual(len(receipt["expectedForwarded"]) + len(receipt["expectedRefused"]), count)
         serialized = sum(item["requests"] for item in snapshots)
         results = sum(item["results"] for item in snapshots)

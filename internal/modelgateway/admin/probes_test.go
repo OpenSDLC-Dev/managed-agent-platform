@@ -129,12 +129,14 @@ func TestTheProbeRoutesNeedTheAdminRole(t *testing.T) {
 	p := e.provider("deepseek", deepseekBoth)
 	c := e.credential(p, true)
 	d := e.deployment(p, "chat")
-	bearer := func(tok string) map[string]string { return map[string]string{"Authorization": "Bearer " + tok} }
 	for _, path := range []string{"/admin/v1/providers/" + p + "/credentials/" + c + "/check", "/admin/v1/deployments/" + d + "/test"} {
 		// A user is turned away before routing, so its refusal names the floor.
-		e.refused(e.do("POST", path, nil, bearer(e.token("readers"))), http.StatusForbidden, "permission_error", "developer")
-		e.refused(e.do("POST", path, nil, bearer(e.token("devs"))), http.StatusForbidden, "permission_error", "admin")
-		e.ok(e.do("POST", path, nil, bearer(e.token("admins"))), "admin on "+path)
+		e.setPrincipal(`role='user'`)
+		e.refused(e.admin("POST", path, nil), http.StatusForbidden, "permission_error", "developer")
+		e.setPrincipal(`role='developer'`)
+		e.refused(e.admin("POST", path, nil), http.StatusForbidden, "permission_error", "admin")
+		e.setPrincipal(`role='admin'`)
+		e.ok(e.admin("POST", path, nil), "admin on "+path)
 	}
 	if checked, tested := e.prober.calls(); len(checked) != 1 || len(tested) != 1 {
 		t.Errorf("checked %v, tested %v: want one each", checked, tested)

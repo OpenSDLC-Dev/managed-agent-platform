@@ -16,7 +16,7 @@ import (
 
 func TestDelegatedTokenCannotReachManagement(t *testing.T) {
 	e := newEnv(t)
-	_, item := e.delegated("legacy")
+	_, item := e.delegated("principal_pgtest")
 	adminCalls := 0
 	e.start(func(cfg *modelgateway.Config) {
 		cfg.Admin = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { adminCalls++; w.WriteHeader(200) })
@@ -48,17 +48,15 @@ func TestDelegatedTokenCannotReachManagement(t *testing.T) {
 	}
 }
 
-func TestLegacyKeyWithInferencePrefixKeepsItsAuthority(t *testing.T) {
+func TestLegacyKeyWithInferencePrefixIsRefused(t *testing.T) {
 	e := newEnv(t)
 	const key = "itk_operator_chose_this_legacy_value"
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys(id,name,key_hash) VALUES ('legacy_prefix','legacy',$1)`, apikey.Hash(key))
 	e.must(err)
-	_, err = e.s.PutKeyPolicy(e.ctx, store.KeyPolicy{APIKeyID: "legacy_prefix"})
-	e.must(err)
 	e.start()
 	res, raw := e.do("GET", "/v1/models", "", map[string]string{"x-api-key": key})
-	if res.StatusCode != 200 {
-		t.Fatalf("legacy value was mistaken for a delegated token: %d %s", res.StatusCode, raw)
+	if res.StatusCode != 401 {
+		t.Fatalf("legacy value retained delegated authority: %d %s", res.StatusCode, raw)
 	}
 }
 
@@ -146,7 +144,7 @@ func TestDelegatedCallsShareOrganizationBudgetAndRecheckMembership(t *testing.T)
 
 func TestDelegatedInferenceRouteScope(t *testing.T) {
 	e := newEnv(t)
-	_, item := e.delegated("legacy")
+	_, item := e.delegated("principal_pgtest")
 	e.start()
 	// A malformed body reaches each inference handler; stored responses retain
 	// their documented stateless 404. Scope rejection would return 403 first.

@@ -62,7 +62,7 @@ func TestLiveGiteeEmbeddingsAndRerank(t *testing.T) {
 	// Qwen3-Reranker-0.6B, free on Gitee, is outside the key's resource
 	// package (#903, probed 2026-10-09).
 	e.alias("ranker", target(e.deployment(p, "bge-reranker-v2-m3", func(d *store.Deployment) { d.Kind = store.KindRerank }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	bearer := map[string]string{"Authorization": "Bearer " + key, "Content-Type": "application/json"}
 
@@ -192,7 +192,7 @@ func TestLiveZhipuEmbeddings(t *testing.T) {
 	})
 	e.credential(p, v.keyEnv, 1)
 	e.alias("text", target(e.deployment(p, "embedding-3", func(d *store.Deployment) { d.Kind = store.KindEmbedding }), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	// Zhipu's answers to one input differ from call to call, whatever the
 	// encoding asked, by up to 2.4e-4 a value (cosine 0.999999; probed

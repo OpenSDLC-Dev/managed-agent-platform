@@ -51,7 +51,7 @@ func TestLiveConversion(t *testing.T) {
 			routes = append(routes, r)
 		}
 	}
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 

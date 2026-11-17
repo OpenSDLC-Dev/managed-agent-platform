@@ -192,9 +192,6 @@ func TestOwnedKeyDigestMigration(t *testing.T) {
 			if (want == "" && !errors.Is(err, pgx.ErrNoRows)) || (want != "" && (err != nil || prepared != want)) {
 				t.Errorf("prepared lookup %s = %q, %v; want %q", key.id, prepared, err, want)
 			}
-			if got, err := apikey.Authenticate(ctx, pool, key.value); err != nil || got != want {
-				t.Errorf("ordinary lookup %s = %q, %v; want %q", key.id, got, err, want)
-			}
 		}
 	}
 	checkAuthentication(t)
@@ -306,9 +303,6 @@ func TestOwnedKeysAreInvisibleToLegacyReaders(t *testing.T) {
 				want := ""
 				if owner == "" && state == "active" {
 					want = id
-				}
-				if got, err := apikey.Authenticate(ctx, pool, "fixture-"+id); err != nil || got != want {
-					t.Errorf("legacy Authenticate = %q, %v; want %q", got, err, want)
 				}
 				var got string
 				err := pool.QueryRow(ctx, legacyKeyLookup, apikey.Hash("fixture-"+id)).Scan(&got)

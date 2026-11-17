@@ -578,6 +578,7 @@ gcp-mode2-secret-test:
 gcp-native-edge-test:
 	python3 deploy/gcp/native_edge_test.py
 	python3 deploy/gcp/native_smoke_test.py
+	python3 deploy/gcp/cd_smoke_test.py
 
 # The split guard run against the real tree proves only that the real tree is
 # compliant — a checker that had silently stopped reading would pass that too,

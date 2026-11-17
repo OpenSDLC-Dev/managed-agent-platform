@@ -16,7 +16,7 @@ func TestCanManageAPIKey(t *testing.T) {
 	}{
 		{"preset-machine", ManagementKey{}, identityPrincipal{}, false},
 		{"preset-admin", ManagementKey{}, identityPrincipal{ID: owner, Role: identity.RoleAdmin}, false},
-		{"machine-unowned", ManagementKey{CreatedBy: &creator}, identityPrincipal{}, true},
+		{"machine-unowned", ManagementKey{CreatedBy: &creator}, identityPrincipal{}, false},
 		{"admin-unowned", ManagementKey{CreatedBy: &creator}, identityPrincipal{ID: owner, Role: identity.RoleAdmin}, true},
 		{"developer-owned", ManagementKey{CreatedBy: &creator, OwnerPrincipalID: &owner}, identityPrincipal{ID: owner, Role: identity.RoleDeveloper}, true},
 		{"developer-creator", ManagementKey{CreatedBy: &creator, OwnerPrincipalID: &owner}, identityPrincipal{ID: creator, Role: identity.RoleDeveloper}, false},

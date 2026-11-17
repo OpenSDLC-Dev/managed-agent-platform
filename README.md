@@ -7,18 +7,13 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
 Principal-bound authentication is being rolled out under [plan 69](./docs/plan/69_principal-bound-auth.md).
-Both servers refuse owned preset values at startup. Gateway policy writes refuse owned targets.
-Public control-plane resources admit owned keys using the owner's current role.
-Gateway inference admits active developer/admin owners without a model grant.
-Organization budgets share each public model alias across keys and protocols; usage groups owned calls by principal.
-Model turns check the session initiator's membership; scheduled deployments can use an admin-selected service account.
-The brain's gateway route sends claim-bound inference tokens. Direct provider routes keep their configured vendor credentials.
-Slice 3's owned-key HTTP issuance and fenced per-row mutations are independently verified.
-Fresh packaged Compose/`ant` acceptance passed at platform `45f5264` with the published Console image.
-Native browser/SDK acceptance uses completed CI on a different integration tree; the [final-candidate record](./docs/HISTORY.md#plan-69-slice-3-final-candidate-client-acceptance) separates sources and limits.
-This is not a complete rolling rollout.
-Releases are held until slice 7; see [STATE.md](./STATE.md) for active work and the
-[slice 2 acceptance record](./docs/HISTORY.md#plan-69-slice-2-browser-acceptance) for its verification.
+Both servers require native login configuration. Public APIs admit only owned keys
+using the current owner role; private APIs and gateway administration require browser sessions.
+Gateway inference accepts developer/admin owners or membership-bound delegated tokens.
+Organization budgets share each public model alias across keys and protocols.
+Use the [upgrade note](./docs/UPGRADING_PLAN69.md) before removing old credentials.
+Releases remain held until slice 7 is fully accepted; [STATE.md](./STATE.md) tracks
+the rollout and [HISTORY.md](./docs/HISTORY.md) records completed acceptance.
 
 What runs today, end to end:
 
@@ -35,13 +30,13 @@ What runs today, end to end:
 - **MCP servers** — declared per agent, discovered, offered to the model and answered under human confirmation by default, with vault credentials matched and expiring OAuth tokens refreshed at the dial.
 - **Multi-agent teams** — a coordinator agent's `multiagent` roster runs as concurrent **session threads** on one shared sandbox, each thread with its own agent, event log, status and stream, matching the reference's `sthr_` thread resource and its `/threads` routes. The coordinator spawns its agents, messages them, lists them and waits on them; they report back, and the session's status is a fold over its threads'. Cloud and BYOC alike — the customer-run worker stays thread-unaware, because the session view it already reads carries the child calls it must run.
 - **Scheduled deployments** — a deployment binds an agent to an environment, credentials, resources and initial events; `POST /run` fires it by hand, and an optional 5-field POSIX cron schedule fires it on the clock — at most one run per occurrence across every control-plane replica, a bounded catch-up after downtime, and a classified fire failure recording an error-bearing run that auto-pauses the schedule (an unclassified one rolls back whole and retries — [docs/DIVERGENCES.md](./docs/DIVERGENCES.md) registers the trade). `/v1/deployment_runs` reads the history back.
-- **Human authentication** — the control plane's private login routes issue revocable browser sessions through OIDC code flow, signed-proxy login or development-only passwords. OIDC uses no vendor SDK, with optional bundled [Casdoor](https://casdoor.org). The control plane and gateway administration share stored `user`, `developer` and `admin` roles. Mapping is optional; a first unmatched sign-in gets `user`, which reads nothing. Resource reads require `developer`; there is no read-only role. [The security guide](./docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider) covers native login, first-admin setup and recovery. Existing key-management surfaces retain legacy credentials during rollout.
+- **Human authentication** — the control plane's private login routes issue revocable browser sessions through OIDC code flow, signed-proxy login or development-only passwords. OIDC uses no vendor SDK, with optional bundled [Casdoor](https://casdoor.org). The control plane and gateway administration share stored `user`, `developer` and `admin` roles. Mapping is optional; a first unmatched sign-in gets `user`, which reads nothing. Resource reads require `developer`; there is no read-only role. [The security guide](./docs/self-hosted-security.md#9-single-sign-on-and-the-bundled-identity-provider) covers native login, first-admin setup and recovery. Private key-management surfaces require the browser session.
 
 Public `/v1` does not admit IdP JWTs or proxy assertions. Browser sessions reach resources through the private proxy, not raw `/v1` requests. Worker-facing public routes still admit valid environment keys, including grandfathered JWT-shaped values, without IdP sign-in. Reissue weak values or keys without expiry; enabling SSO alone does not require reissuance. See [the security guide](./docs/self-hosted-security.md) §6.
 
-The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Native platform login uses private routes when `CONSOLE_PUBLIC_ORIGIN` is configured. Without native login, OIDC and trusted-proxy installs retain verifier-only IdP admission on existing private credential-management routes, not public `/v1`. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
+The `ant` CLI cannot perform platform login: there is no `POST /v1/oauth/token` parity ([DIVERGENCES.md](./docs/DIVERGENCES.md)). Sign in through the Console and issue an owned key for CLI use. Native login requires `CONSOLE_PUBLIC_ORIGIN`. Private routes accept only browser sessions. See [the security guide](./docs/self-hosted-security.md#native-browser-login) for that boundary.
 
-Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Compose defaults to development password login; its `console` profile adds the published Console and one-origin edge. Helm enables both by default and requires a native login mode and public origin. Legacy unowned management keys continue to work during rollout. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
+Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Compose defaults to development password login; its `console` profile adds the published Console and one-origin edge. Helm enables both by default and requires a native login mode and public origin. Follow the [Plan 69 upgrade procedure](./docs/UPGRADING_PLAN69.md) before replacing a deployment that uses unowned keys. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
 
 ## Why
 

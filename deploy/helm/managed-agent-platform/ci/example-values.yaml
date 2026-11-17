@@ -10,12 +10,7 @@ identity:
   mode: password
 console:
   enabled: true
-  authMode: platform
   publicOrigin: http://localhost:3000
-controlplane:
-  apiKey: "ci-placeholder-key"
-brain:
-  apiKey: "ci-placeholder-brain-key"
 postgresql:
   password: "ciPlaceholderPgPass"
 minio:

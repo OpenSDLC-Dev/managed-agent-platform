@@ -78,8 +78,8 @@
 #
 #   * Every credential — and in mode 2 that is not a list of values withheld, it
 #     is a whole mechanism moved: the chart writes no Secret at all, so there is
-#     nothing here to withhold. `controlplane-api-key`, `database-url` and
-#     `brain-api-key` reach the cluster in the pre-created Secret named
+#     nothing here to withhold. Database and OIDC credentials
+#     reach the cluster in the pre-created Secret named
 #     below, which the workflow assembles from Secret Manager at deploy time.
 #   * `image.tag` and `executor.gateImage`. Both name a build, and the workflow
 #     sets both from the *same* commit SHA it built with. An empty `image.tag`
@@ -108,14 +108,10 @@ image:
 
 # The switch that selects mode 2. Set, the chart renders NO Secret of its own and
 # every process reads its configuration from this one instead. The workflow's
-# "Assemble the mode-2 Secret" step creates it in namespace `map` with the seven
-# keys the chart's `map.secretsEnv` helper looks for — `model-providers.json`
-# in `brain-api-key`'s place while the gateway is off, and either mode also
-# carries the other's key when Secret Manager has it (`modelgateway:` below):
+# "Assemble the mode-2 Secret" step creates it in namespace `map`. Direct
+# model-providers.json routes are required only with the gateway off.
 #
-#   controlplane-api-key   the management API key          (Secret Manager)
 #   database-url           the Cloud SQL DSN                (Secret Manager)
-#   brain-api-key          the brain's key for the gateway  (Secret Manager)
 #   blob-backend           gcs                              (literal)
 #   blob-bucket            the GCS bucket, from BLOB_BUCKET (literal)
 #   secrets-backend        gcpkms                           (literal)
@@ -201,7 +197,6 @@ identity:
     clientSecretKey: oidc-client-secret
 console:
   enabled: true
-  authMode: platform
   publicOrigin: https://console.your-domain.invalid
 appEdge:
   service:

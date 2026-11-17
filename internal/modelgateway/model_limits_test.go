@@ -5,11 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
-func TestModelLimitCoversOwnedLegacyAndPresetKeys(t *testing.T) {
+func TestModelLimitCoversAllOwnedKeys(t *testing.T) {
 	e := newEnv(t)
 	up := newFake(t, message("ok"))
 	p := e.provider(up.URL)
@@ -17,11 +16,9 @@ func TestModelLimitCoversOwnedLegacyAndPresetKeys(t *testing.T) {
 	d := e.deployment(p, "m")
 	e.alias("fast", target(d, 0))
 	e.alias("slow", target(d, 0))
-	keys := []string{e.ownedKey("principal_dev", "user", "developer", "key_owned"), e.key(everyAlias), bootstrap}
-	_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys (id,name,key_hash) VALUES ('key_boot','bootstrap',$1)`, apikey.Hash(bootstrap))
-	e.must(err)
+	keys := []string{e.ownedKey("principal_dev", "user", "developer", "key_owned"), e.key(), e.ownedKey("principal_service", "service_account", "developer", "key_service")}
 	rpm := int64(2)
-	_, err = e.s.PutModelLimit(e.ctx, store.ModelLimit{Model: "fast", RPM: &rpm}, nil)
+	_, err := e.s.PutModelLimit(e.ctx, store.ModelLimit{Model: "fast", RPM: &rpm}, nil)
 	e.must(err)
 	e.start()
 	e.clearOfAMinute()

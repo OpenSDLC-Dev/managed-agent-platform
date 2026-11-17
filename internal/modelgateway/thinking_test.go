@@ -352,7 +352,7 @@ func TestThinkingReturnsToItsProducerAlone(t *testing.T) {
 	a, b := newSigner(t, "a"), newSigner(t, "b")
 	da, db := e.signedBy(a), e.signedBy(b)
 	e.alias("m", target(da, 0), target(db, 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -391,7 +391,7 @@ func TestAThinkingOnlyReplyLeavesNoEmptyMessage(t *testing.T) {
 	a, b := newSigner(t, "a"), newSigner(t, "b")
 	da, db := e.signedBy(a), e.signedBy(b)
 	e.alias("m", target(db, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	body := fmt.Sprintf(`{"model":"m","max_tokens":64,"messages":[
@@ -437,7 +437,7 @@ func TestACallerGoneIsNotRetriedWithoutThinking(t *testing.T) {
 	e := newEnv(t)
 	a := newSigner(t, "a")
 	e.alias("m", target(e.signedBy(a), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	h := next(hello(), talk(t, cl, hello()))
@@ -480,7 +480,7 @@ func TestAStreamedAnswerWrapsAsTheWholeAnswerDoes(t *testing.T) {
 	a := newSigner(t, "a")
 	da := e.signedBy(a)
 	e.alias("m", target(da, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -554,7 +554,7 @@ func TestAThinkingBlockInMessageStartIsWrapped(t *testing.T) {
 	e.credential(p, "sk-start-key1", 1)
 	d := e.deployment(p, "up")
 	e.alias("m", target(d, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	resp, raw := e.do("POST", "/v1/messages", `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`,
@@ -573,7 +573,7 @@ func TestTheNewestReachableProducerIsPreferred(t *testing.T) {
 	da, db, dc := e.signedBy(a), e.signedBy(b), e.signedBy(c)
 	e.alias("m", target(db, 0), target(da, 1))
 	e.alias("ma", target(da, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -600,7 +600,7 @@ func TestForeignThinkingNeverReachesAnUpstream(t *testing.T) {
 	a, c := newSigner(t, "a"), newSigner(t, "c")
 	da, dc := e.signedBy(a), e.signedBy(c)
 	e.alias("m", target(da, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -673,7 +673,7 @@ func TestStripModeStaysWithinTheBudget(t *testing.T) {
 	e.credential(p, "sk-a-key1", 1)
 	e.credential(p, "sk-a-key2", 1)
 	e.alias("m", target(e.deployment(p, "a-model"), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 2 })
 	cl := e.client(key)
 	h := next(hello(), talk(t, cl, hello()))
@@ -703,7 +703,7 @@ func TestAStripModeRetryWithNoBudgetLeftFallsBack(t *testing.T) {
 	a, b := newSigner(t, "a"), newSigner(t, "b")
 	da, db := e.signedBy(a), e.signedBy(b)
 	e.alias("m", target(da, 0), target(db, 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start(func(c *modelgateway.Config) { c.MaxAttempts = 1 })
 	cl := e.client(key)
 
@@ -739,7 +739,7 @@ func TestAStreamWrapsInBlockOrder(t *testing.T) {
 	e.credential(p, "sk-order-key1", 1)
 	d := e.deployment(p, "up")
 	e.alias("m", target(d, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 
 	thinking := `{"type":"thinking","thinking":"","signature":""}`
@@ -815,7 +815,7 @@ func TestAnUnsignedBlockEndsWhatAnAnswerWraps(t *testing.T) {
 	a := newSigner(t, "a")
 	da := e.signedBy(a)
 	e.alias("m", target(da, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	both := func(h []anthropic.MessageParam) []*anthropic.Message {
@@ -865,7 +865,7 @@ func TestARefusedThinkingIsStrippedOnce(t *testing.T) {
 	a := newSigner(t, "a")
 	da := e.signedBy(a)
 	e.alias("m", target(da, 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -909,7 +909,7 @@ func TestStripModeHoldsThroughFallback(t *testing.T) {
 	a, b := newSigner(t, "a"), newSigner(t, "b")
 	da, db := e.signedBy(a), e.signedBy(b)
 	e.alias("m", target(da, 0), target(db, 1))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -959,7 +959,7 @@ func TestAStripModeAnswerWithoutThinkingPaysAgain(t *testing.T) {
 	e := newEnv(t)
 	a := newSigner(t, "a")
 	e.alias("m", target(e.signedBy(a), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 
@@ -984,7 +984,7 @@ func TestOnlyAThinkingRefusalEarnsTheRetry(t *testing.T) {
 	e := newEnv(t)
 	a := newSigner(t, "a")
 	e.alias("m", target(e.signedBy(a), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	h := next(hello(), talk(t, cl, hello()))
@@ -1031,7 +1031,7 @@ func TestASessionYieldsToTheNewestProducer(t *testing.T) {
 	e := newEnv(t)
 	a, b := newSigner(t, "a"), newSigner(t, "b")
 	e.alias("m", target(e.signedBy(a), 0), target(e.signedBy(b), 0))
-	key := e.key(everyAlias)
+	key := e.key()
 	e.start()
 	cl := e.client(key)
 	session := option.WithHeader(modelgateway.SessionHeader, "sesn_1")

@@ -57,8 +57,6 @@ spec:
             - name: http
               containerPort: 8080
           env:
-            - name: CONSOLE_AUTH_MODE
-              value: {{ .Values.console.authMode | quote }}
             - name: CONSOLE_PUBLIC_ORIGIN
               value: {{ .Values.console.publicOrigin | quote }}
             - name: IDENTITY_MODE

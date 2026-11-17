@@ -20,6 +20,7 @@ func TestDeploymentInitiatorCookieAdminAndFutureSchedules(t *testing.T) {
 	admin := seedMember(t, s, "admin", "admin", "console")
 	cookie, session := s.issue(admin)
 	headers := nativeHeaders(cookie, session.CSRFToken)
+	s.key, _ = issueOwnedHTTP(t, s, headers, "fixture resources", nil)
 	agentID, envID := fixture(t, s.tserver)
 	body, _ := json.Marshal(scheduledBody(agentID, envID, "* * * * *", "UTC"))
 	var deployment map[string]any
@@ -102,6 +103,7 @@ func TestScheduledInitiatorMembership(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			s := newNativeServer(t, login.ModeOIDC)
 			member := seedMember(t, s, "creator", "developer", "console")
+			s.key, _ = issueOwnedHTTP(t, s, ownedCookie(t, s, member), "fixture resources", nil)
 			agentID, envID := fixture(t, s.tserver)
 			id := createDeployment(t, s.tserver, scheduledBody(agentID, envID, "* * * * *", "UTC"))["id"].(string)
 			if _, err := s.pool.Exec(t.Context(), `UPDATE deployments SET initiator_principal_id=$1, initiator_api_key_id=NULL WHERE id=$2`, member, id); err != nil {
@@ -138,7 +140,7 @@ func TestScheduledInitiatorMembership(t *testing.T) {
 			if len(runs) != 1 {
 				t.Fatalf("runs=%+v", runs)
 			}
-			failed := mode == "removed" || mode == "missing"
+			failed := mode != "demoted"
 			if failed {
 				if runs[0].sessionID != nil || runs[0].errType == nil || *runs[0].errType != "unknown_error" {
 					t.Fatalf("failed run=%+v", runs[0])
@@ -166,6 +168,10 @@ func TestDeploymentInitiatorRechecksCookieAfterDeploymentLock(t *testing.T) {
 	headers := nativeHeaders(cookie, session.CSRFToken)
 	agentID, envID := fixture(t, s.tserver)
 	id := createDeployment(t, s.tserver, deploymentBody(agentID, envID))["id"].(string)
+	var original string
+	if err := s.pool.QueryRow(ctx, `SELECT initiator_principal_id FROM deployments WHERE id=$1`, id).Scan(&original); err != nil {
+		t.Fatal(err)
+	}
 	var account map[string]any
 	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"schedule"}`, headers, 200), &account)
 	blockerConn := credentialFenceConnection(t, ctx, s)
@@ -211,7 +217,7 @@ func TestDeploymentInitiatorRechecksCookieAfterDeploymentLock(t *testing.T) {
 	if err := observer.QueryRow(ctx, `SELECT initiator_principal_id FROM deployments WHERE id=$1`, id).Scan(&principalID); err != nil {
 		t.Fatal(err)
 	}
-	if principalID != nil {
+	if principalID == nil || *principalID != original {
 		t.Fatal("expired cookie changed initiator")
 	}
 }

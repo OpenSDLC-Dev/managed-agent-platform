@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -239,10 +238,7 @@ func (s *Store) UpdateAlias(ctx context.Context, name string, fn func(*Alias) er
 	return out, err
 }
 
-// DeleteAlias removes an alias and its targets. An alias a key policy grants
-// is a conflict: the grant would outlive it and pass to the next alias of its
-// name. The alias is locked first, so a grant PutKeyPolicy is writing either
-// commits before the check sees it or finds the alias gone.
+// DeleteAlias removes an alias and its targets.
 func (s *Store) DeleteAlias(ctx context.Context, name string) error {
 	return s.write(ctx, func(tx pgx.Tx) error {
 		var found string
@@ -252,14 +248,6 @@ func (s *Store) DeleteAlias(ctx context.Context, name string) error {
 		}
 		if err != nil {
 			return err
-		}
-		keys, err := collectStrings(ctx, tx,
-			`SELECT api_key_id FROM modelgateway.key_policies WHERE $1 = ANY(aliases) ORDER BY api_key_id`, name)
-		if err != nil {
-			return err
-		}
-		if len(keys) > 0 {
-			return fail(ErrConflict, "alias %q is granted to api keys (%s); remove it from their policies first", name, strings.Join(keys, ", "))
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM modelgateway.aliases WHERE name = $1`, name)
 		return err

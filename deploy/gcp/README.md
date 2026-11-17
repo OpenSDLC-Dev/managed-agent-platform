@@ -405,8 +405,7 @@ supply alongside it, and the render fails naming each one you miss:
 
 | Value | Why |
 | --- | --- |
-| `controlplane.apiKey` | the management API key |
-| `brain.apiKey` | slice 6 receiver compatibility only; new brains send per-claim tokens. With `modelgateway.enabled=false`, supply `brain.modelProviders`: at least one direct model route, as a JSON array |
+| `brain.modelProviders` | at least one direct model route as a JSON array, only with `modelgateway.enabled=false` |
 | `identity.mode` / `console.publicOrigin` | required native login mode and HTTPS application origin; OIDC also needs issuer, matching client ID/audience, and client secret |
 | `postgresql.password` | bundled Postgres; must be URL-safe — it is embedded in `DATABASE_URL` |
 | `minio.rootUser` / `minio.rootPassword` | bundled object storage |
@@ -552,7 +551,7 @@ kms_key_name="$(terraform -chdir="$env" output -raw kms_key_name)"
 # MODELGATEWAY is required: true while the values you deploy run the model
 # gateway (the chart's modelgateway.enabled, on unless a values file turns it
 # off, and staging-values.yaml leaves it on); false with it off, and the Secret
-# then requires model-providers.json in brain-api-key's place.
+# then requires model-providers.json.
 export PROJECT="$project" BLOB_BUCKET="$blob_bucket" KMS_KEY_NAME="$kms_key_name" MODELGATEWAY=true
 "$repo/deploy/gcp/mode2-secret.sh"
 ```
@@ -596,8 +595,8 @@ else and ADC fails at pod startup rather than denying a permission later.
 Staging uses Google OIDC with issuer `https://accounts.google.com`.
 The platform owns the callback, HttpOnly session cookie, CSRF and organization roles.
 The Console is served by the platform chart. Its repository publishes the pinned image;
-its old GKE deployment is a manual rollback path through plan 69 slice 6 only.
-Do not run that workflow alongside platform CD: GitHub concurrency groups do not span repositories.
+its old standalone GKE deployment is retained only until native-only rollout acceptance.
+The Console repository no longer deploys staging.
 
 Before deploying slice 6, the owner configures a Google Auth Platform Web application client:
 
@@ -635,28 +634,18 @@ service account with the developer role named for CD, and issue its API key ther
 CD only needs the public resource-read permission. Store that one-time key in a private
 local file, then add it to a dedicated Secret Manager secret using `--data-file`, never an argv literal.
 Verify the deploy identity can read that secret; scope any new accessor grant to it. Record its name as
-`CD_API_KEY_SECRET_NAME`. Slice 7 will make this key mandatory for the post-deploy API check.
+`CD_API_KEY_SECRET_NAME`. This key is mandatory for the post-deploy API check.
 Do not use a database insert or the legacy bootstrap key to manufacture this credential.
 
-Slice 6 retains and checks the control-plane HTTP LoadBalancer for rollback, but CD sends its
-compatibility key only through the HTTPS origin. Human sign-in uses that origin too.
-Slice 7 replaces the smoke credential with the Console-issued service-account key and removes
-the HTTP listener with the preset keys. Prepare and perform a slice 6 rollback as follows:
+The HTTP LoadBalancer and old standalone Console are retained until slice 7a is accepted.
+CD sends credentials only through HTTPS. Then slice 7b removes obsolete data and resources.
+The [upgrade note](../../docs/UPGRADING_PLAN69.md) defines that rollback boundary.
 
-1. Before cutover, save the current Ingress and the old cloud backend's IAP IAM policy.
-   Record its backend-scoped `roles/iap.httpsResourceAccessor` members; Kubernetes YAML does not contain that grant.
-2. Coordinate both repositories' deploys. Restore the prior platform release and dispatch
-   the Console's confirmed legacy rollback workflow to restore the ingress and old BFF.
-3. Resolve the rebuilt cloud backend from the restored Ingress and check its IAP policy.
-   With the owner's authorization, restore the recorded accessor bindings on that backend if missing.
-   Do not widen them to the project. GKE can recreate the backend with no access grant.
-4. Confirm anonymous requests receive IAP's own refusal, then sign in as an authorized Workspace member
-   and exercise the Console. A green legacy deploy checks refusal only; it does not prove member access.
-
-The rollback is not accepted until both refusal and authorized access work.
 The edge apply is outside Helm's atomic release. If its HTTPS smoke fails, CD reports
-failure and leaves that ingress applied; it does not restore the old IAP grant.
-Use the coordinated rollback above and verify both access paths before declaring recovery.
+failure and leaves the ingress applied. Restore the saved native ingress if needed,
+and verify login and both public API headers before declaring recovery. If a saved
+configuration used IAP, restore and verify its recorded backend-scoped accessor bindings;
+a Kubernetes object alone cannot restore those cloud IAM grants.
 
 ### Restoring the edge after a cluster rebuild
 
@@ -667,11 +656,9 @@ After an approved cluster rebuild, the owner restores these prerequisites before
    [the manual Helm procedure](#handover-to-helm) and its saved values and image references.
 2. Restore the saved `console` Ingress, ManagedCertificate and FrontendConfig, and their
    referenced Service and BackendConfig. Retain the `console-ip` global address and DNS record.
-   A legacy snapshot also needs the Console workload and Secrets from its repository's
-   confirmed legacy rollback workflow, or their saved equivalents; the Platform release does not supply that old Service.
-   A native snapshot needs the Platform release whose application-edge Service matches the saved Ingress.
-3. Wait for the certificate and HTTPS origin to serve correctly. If restoring the legacy
-   IAP topology, recheck its backend-scoped access grant and authorized member access as above.
+   Restore the native Platform release whose application-edge Service matches the saved Ingress.
+3. Wait for the certificate and HTTPS origin to serve correctly. For an IAP topology,
+   recheck its backend-scoped access grant and authorized member access as above.
 4. Confirm the Ingress host, certificate domain and TLS attachments match `STAGING_PUBLIC_ORIGIN`,
    then dispatch CD. Its existing-edge preflight must pass before it builds or deploys.
 
@@ -689,7 +676,7 @@ last two lines of it — the build and the install — against **one** staging e
 | `PROJECT=… make gcp-env-tfvars` | a human, once per checkout — `*.tfvars` is gitignored, so a fresh clone has none |
 | `PROJECT=… make gcp-env-apply` | a human, interactively — `PROJECT` names the state bucket as well as the project |
 | `PROJECT=… make gcp-db-init` | a human, after every `environment/` rebuild and every password rotation — **mode 2 genuinely depends on it** |
-| creating `controlplane-api-key`, `database-url` and `brain-api-key` — `model-providers` in the last one's place while `staging-values.yaml` turns the model gateway off | a human, once — `bootstrap.sh` does not create these |
+| creating `database-url`, the configured OIDC secret and the Console-issued CD key secret; `model-providers` when the gateway is off | a human, once — `bootstrap.sh` does not create these |
 | setting the required Actions **variables** below | a human, before the first live run; core deployment coordinates are checked before authentication, native OIDC inputs after the parked check, and the gateway account after chart rendering |
 | creating the Google Web client and its Secret Manager secret | the owner, before slice 6; see [native sign-in](#native-google-sign-in-and-the-staging-https-edge) |
 | establishing or restoring the existing HTTPS edge | the owner, before live CD, including after a cluster rebuild; see [edge recovery](#restoring-the-edge-after-a-cluster-rebuild) |
@@ -717,47 +704,24 @@ separates parked from deployed. Should that name go missing at runtime anyway, t
 says so under a label of its own (`cd-notifier-miswired`) rather than filing it as an outage —
 a blind notifier and a broken deploy are different problems for different people.
 
-**Three of those secrets are not `bootstrap.sh`'s.** It owns exactly `<prefix>-db-password`
-and `<prefix>-db-admin-password`, because those are the two the provisioning flow reads
-back — `environment/` reads the admin one, `make gcp-db-init` reads both. The three
-the pipeline reads — `controlplane-api-key`, `database-url`, `brain-api-key` — are created
-out of band by whoever stands the environment up, and this repository ships no tool that
-creates them. [`mode2-secret.sh`](./mode2-secret.sh) does assemble the Secret out of them,
-which is a different act: it reads values that already exist and hands them to Kubernetes by
-path, never by value. Creating them means MINTING them. `controlplane-api-key` and
-`brain-api-key` are two different high-entropy values (`openssl rand -hex 32`), and
-`database-url` is composed below. The live model API key is none of the three, and no
-automation here may mint it on anyone's behalf: it goes into the gateway's catalogue, below.
-With the gateway off the pipeline reads `model-providers` in `brain-api-key`'s place — the
-brain's routes, vendor keys inside them — and that is the one a human must supply.
+**Application secrets are supplied separately from infrastructure bootstrap.**
 
-The containers themselves are one command each. Unlike `bootstrap.sh`'s two these carry no
-`<prefix>`, because the workflow reads them by bare name — which is also why a second
-environment in the same project would collide on them:
+`bootstrap.sh` owns only `<prefix>-db-password` and `<prefix>-db-admin-password`.
+The deployment reads `database-url`, composed below, and the configured OIDC client secret.
+After first-admin setup, issue the CD service-account key through Console and store it
+under `CD_API_KEY_SECRET_NAME`, as the native staging runbook describes.
+The CD key never enters the platform Kubernetes Secret.
+
+Create the database URL secret once before adding its first version:
 
 ```sh
 project=your-project-id
-
-for s in controlplane-api-key database-url brain-api-key; do
-  gcloud secrets create "$s" --project="$project" --replication-policy=automatic
-done
+gcloud secrets create database-url --project="$project" --replication-policy=automatic
 ```
 
-Until a container exists, adding its version fails with `NOT_FOUND` rather than working, and
-so does the deploy that reads it. The two keys' versions are one command each. On a fresh
-environment run both; on one that predates the gateway run only the second, because a new
-version of `controlplane-api-key` there rotates the key every client of the management API
-holds:
-
-```sh
-printf '%s' "$(openssl rand -hex 32)" \
-  | gcloud secrets versions add controlplane-api-key --project="$project" --data-file=-
-printf '%s' "$(openssl rand -hex 32)" \
-  | gcloud secrets versions add brain-api-key --project="$project" --data-file=-
-```
-
-With the gateway off, `model-providers` takes `brain-api-key`'s place in the loop, and its
-version is the routes array below rather than the second command.
+Configure vendor credentials through the signed-in Console. With the gateway off,
+create a `model-providers` secret containing the direct-route array shown below.
+These values must already exist; `mode2-secret.sh` only assembles Kubernetes configuration.
 
 **`gcp-db-init` is a prerequisite here, not a formality.** Mode 1 never ran it at all — the
 bundled Postgres creates its own role from `postgresql.password`. Mode 2's `database-url`
@@ -1245,8 +1209,7 @@ change — and the DSN names the proxy's loopback socket. `deploy.yml` resolves 
 name from the Admin API at deploy time, so no operator's project is written down here.
 
 **The DSN is the half that is not automatic, and it is deliberately not CD's to write** —
-`database-url` is one of the three secrets a human creates out of band, for the reason given
-above, at "Three of those secrets are not `bootstrap.sh`'s". So the migration is two steps,
+`database-url` is an operator-managed Secret Manager value; `bootstrap.sh` does not write its database credential. The migration is two steps,
 and the order is not optional: the proxy has to be listening before anything is told to use
 it.
 
@@ -1302,26 +1265,21 @@ printf '%s' "postgres://map:$pw@$ip:5432/map?sslmode=require" \
 **The `map-platform` Secret is assembled by the pipeline**, because nothing else can: the
 chart writes no Secret in this mode and Terraform holds no secret *values* by design. The
 workflow runs [`mode2-secret.sh`](./mode2-secret.sh) — the same file an operator runs by hand
-above — which reads `controlplane-api-key`, `database-url` and `brain-api-key` (or, with
-the gateway off, `model-providers`, since the chart then writes no route of its own) out of
-Secret Manager into a mode-700 temp directory, carries the other gateway mode's key beside
-them when Secret Manager has one that release could use, so that a release rolled back
-across the switch finds its own, writes the four non-secret literals
-(`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms`, `gcpkms-key-name`) beside them,
-and applies them all with `kubectl create secret generic … --from-file=… --dry-run=client
--o yaml | kubectl apply -f -`. `--from-file` and never `--from-literal`: a literal puts every
-credential on the process's argv. It also reads `OIDC_CLIENT_SECRET_NAME` into
-`oidc-client-secret`. Rotating any consumed credential is `gcloud secrets versions add`
-followed by a re-run of the workflow.
+above — which reads `database-url`, optional direct routes and the configured OIDC
+secret into a mode-700 temporary directory. It adds the four non-secret coordinates:
+`blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms` and `gcpkms-key-name`.
+Credential values reach kubectl through files, never process arguments.
+Slice 7a preserves existing Secret data until its native-only code is accepted.
+New fields override old values; the observed resource version fences concurrent rotations.
+The later cleanup removes retired data. See the [upgrade note](../../docs/UPGRADING_PLAN69.md).
+Failed patch output is withheld because kubectl can include encoded credentials.
 
 **That re-run has to roll the pods, and it will not do so by itself.** Env from a
 `secretKeyRef` is read once, at process start; a `workflow_dispatch` after a rotation
 deploys the *same* commit, so `helm upgrade` produces a byte-identical pod template and
 Kubernetes correctly changes nothing. (The chart's `checksum/secret` annotation cannot help
 here — with `existingSecret` no Secret is rendered, so it hashes an empty template on every
-run, which is what the three deployment templates' comments say.) The pods would go on
-serving the *archived* key, and `controlplane`'s rotation-by-restart semantics
-(`EnsureAPIKey`, `internal/api/auth.go`) mean the new key is not even registered until one
+run, which is what the three deployment templates' comments say.) The pods would keep using the old DSN or OIDC secret until a consumer
 restarts. So the workflow keeps the one word `kubectl apply` prints — created, configured or
 unchanged — and rolls every Deployment in the release when, and only when, the Secret
 actually changed. An ordinary push skips it: the values are identical and the rollout
@@ -1371,71 +1329,22 @@ routes from a file rather than stdin; any other refusal — a denied permission,
 version — it leaves to gcloud's own error, because the create it would otherwise advise is
 not the fix for those.
 
-**While the gateway runs, its catalogue is the model route, and it starts empty.** It lives in
-Cloud SQL beside everything else, so a rebuilt environment has none, and every turn fails —
-`404 not_found_error` for a model no alias names — until a human adds the vendor key and an
-alias for the agents' model; no automation here may, for the reason above. The admin API
-shares the gateway's port, a ClusterIP Service that nothing outside the cluster reaches but a
-port-forward, and takes `controlplane-api-key`. The #906 acceptance run made these four calls
-with these bodies, each answering with the id the next needs; the script around them was
-checked against a stand-in gateway, not a live one. Save it and run it with `bash`
-(`GCP_PROJECT_ID=… bash seed-catalogue.sh vendor-key.txt`) rather than pasting it: zsh reads
-`#` as a command unless `interactivecomments` is set, and runs no `EXIT` trap on Ctrl-C. It
-keeps both keys off every argv, stops at the first call that fails, so a rejected key never
-leaves an alias behind that answers `503`, checks just before each call that its own forward
-is still running — that forward listens on `127.0.0.1` alone, so one that cannot have the port
-exits; a forward that dies between the check and the connection is a window no shell check
-closes — and on exit, Ctrl-C included, removes the key file and stops the forward:
+**Configure the gateway through Console.** Its catalogue lives in Cloud SQL and
+starts empty on a fresh database. Sign in as an admin at the staging HTTPS origin.
+Open Model Gateway, add a provider and its vendor credential, then create a deployment
+and a public alias targeting it. Use the provider check and deployment test before
+starting sessions. Do not send a platform API key to gateway administration: it accepts
+only the browser session, with CSRF protection on writes.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-key_file="${1:?usage: seed-catalogue.sh VENDOR_KEY_FILE}"
-d="$(mktemp -d)"
-pf=""
-trap 'rm -rf "$d"; [ -z "$pf" ] || kill "$pf" 2>/dev/null || true' EXIT
-k="$(gcloud secrets versions access latest --secret=controlplane-api-key --project="$GCP_PROJECT_ID")"
-k="${k//\\/\\\\}"; k="${k//\"/\\\"}"   # curl's config quoting: \ and " escaped
-printf 'header = "x-api-key: %s"\n' "$k" > "$d/curlrc"   # a builtin: the key reaches no argv
-unset k
-
-kubectl -n map port-forward --address=127.0.0.1 svc/map-managed-agent-platform-modelgateway 18090:8090 \
-  > "$d/forward.log" 2>&1 &
-pf=$!
-# Wait for THIS forward to say it listens on 127.0.0.1. One that cannot have the
-# port exits, and kill -0 stops the script at once; one that never says so is
-# refused by the grep after the loop. Either way, before any write.
-for _ in $(seq 30); do
-  grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log" && break
-  kill -0 "$pf"
-  sleep 1
-done
-grep -q '^Forwarding from 127.0.0.1:18090' "$d/forward.log"
-
-# Checked just before each call: a forward that died since may have handed the port
-# to another listener.
-gw() { kill -0 "$pf" && curl -sS --fail-with-body --noproxy '*' -K "$d/curlrc" \
-         -H 'content-type: application/json' --data-binary @- "http://127.0.0.1:18090/admin/v1/$1"; }
-
-pid="$(echo '{"name":"deepseek","profile":"deepseek",
-            "endpoints":{"anthropic":"https://api.deepseek.com/anthropic"}}' | gw providers | jq -er .id)"
-# The vendor key from the file, never an argument.
-jq -n --rawfile k "$key_file" '{key: ($k | rtrimstr("\n"))}' | gw "providers/$pid/credentials" | jq -er .id
-dep="$(jq -n --arg p "$pid" '{provider_id: $p, upstream_model: "deepseek-v4-flash", kind: "chat"}' \
-        | gw deployments | jq -er .id)"
-jq -n --arg d "$dep" '{name: "deepseek-flash", targets: [{deployment_id: $d}]}' | gw aliases | jq -er .name
-```
-
-An agent then names the alias as its model (`{"id": "deepseek-flash"}`). An alias named `*`
-answers every model string no other alias names, which is how agents created before the
-gateway keep the model strings they have. `GET /admin/v1/profiles` lists the other vendor
-profiles, and `GET /admin/v1/usage/requests` is the ledger to check a turn against, one row
-per model call naming the alias, deployment and session: both GETs, with the same key, over a
-forward of their own.
+An agent names the public alias as its model. A wildcard alias `*` handles names
+with no exact match. Set organization RPM/input TPM/output TPM limits per alias;
+all keys and delegated calls share them. Usage shows the acting principal and,
+for delegated work, its session. Vendor credentials are supplied by the operator.
 
 **What the smoke step proves, and what it does not.** It checks that the compatibility
 LoadBalancer still has an IP, then sends `GET /v1/agents?limit=1` through the HTTPS edge.
-That request must answer 200 with the management key and exactly 401 without it.
+The request must answer 200 with the Console-issued CD key in each supported header
+and exactly 401 without it. The same key must be refused on private and admin routes.
 The authenticated request exercises the key and takes a round trip through Cloud SQL.
 It does **not** run a session, so it says nothing about the model route (an empty catalogue
 after a rebuild), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the

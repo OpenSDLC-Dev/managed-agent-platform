@@ -20,11 +20,8 @@
 //
 // A request authenticates with a platform API key in x-api-key or as a
 // Bearer. An owned key uses its active owner's current developer or admin
-// role and needs no grant. An unowned key calls a model under its retained
-// key policy. The bootstrap key and the brain's — the values the control plane
-// registers as "bootstrap" and "brain" — need no policy, being known by their
-// configured values; a policy written for either still applies, and like any
-// key each calls nothing once its row is archived or expired.
+// role. Delegated inference tokens use the current work claim and require
+// the initiator to remain an active organization member.
 //
 // Each inference path is a passthrough to an upstream speaking its protocol:
 // the body is read only as far as its top-level keys, model becomes the
@@ -39,7 +36,6 @@ package modelgateway
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
@@ -64,13 +60,11 @@ import (
 
 // Config is what the gateway serves from.
 type Config struct {
-	Catalog      *catalog.Catalog
-	Store        *store.Store   // the ledger and the rate windows
-	Keys         apikey.Querier // the platform database, whose api_keys a caller's key is checked against
-	Cipher       secrets.Cipher // opens the credentials the catalog holds sealed
-	BootstrapKey string         // CONTROLPLANE_API_KEY
-	BrainKey     string         // BRAIN_API_KEY; empty: the brain reaches no model here without a policy
-	Admin        http.Handler   // served under /admin/v1/; nil serves none
+	Catalog *catalog.Catalog
+	Store   *store.Store   // the ledger and the rate windows
+	Keys    apikey.Querier // the platform database, whose api_keys a caller's key is checked against
+	Cipher  secrets.Cipher // opens the credentials the catalog holds sealed
+	Admin   http.Handler   // served under /admin/v1/; nil serves none
 
 	// Client calls upstreams; nil takes upstream.NewClient.
 	Client *http.Client
@@ -92,10 +86,7 @@ const (
 )
 
 type handler struct {
-	cfg Config
-	// known holds the digests of the keys known by their configured value
-	// rather than by a policy: the bootstrap key's and the brain's.
-	known  [][32]byte
+	cfg    Config
 	client *http.Client
 	fresh  *http.Client // client keeping no connection (profile.CloseConnections)
 	draw   func() float64
@@ -169,11 +160,6 @@ func newHandler(cfg Config) (*handler, error) {
 		return nil, errors.New("modelgateway: the platform database is required")
 	case cfg.Cipher == nil:
 		return nil, errors.New("modelgateway: a secrets cipher is required")
-	case cfg.BootstrapKey == "":
-		return nil, errors.New("modelgateway: the bootstrap key is required")
-	}
-	if err := apikey.CheckBrainKey(cfg.BootstrapKey, cfg.BrainKey); err != nil {
-		return nil, fmt.Errorf("modelgateway: the brain key %w", err)
 	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = DefaultMaxAttempts
@@ -181,11 +167,8 @@ func newHandler(cfg Config) (*handler, error) {
 	if cfg.Backoff <= 0 {
 		cfg.Backoff = DefaultBackoff
 	}
-	h := &handler{cfg: cfg, known: [][32]byte{sha256.Sum256([]byte(cfg.BootstrapKey))}, client: cfg.Client,
+	h := &handler{cfg: cfg, client: cfg.Client,
 		draw: func() float64 { return 1 - mrand.Float64() }, opened: map[string]openedKey{}}
-	if cfg.BrainKey != "" {
-		h.known = append(h.known, sha256.Sum256([]byte(cfg.BrainKey)))
-	}
 	if h.client == nil {
 		h.client = upstream.NewClient()
 	}
