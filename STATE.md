@@ -4,11 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Cutting v0.6.0** ([docs/RELEASING.md](./docs/RELEASING.md)). The pending changes include
-new features and changed behavior, so this is a minor release.
+**None.**
 
 ## Tasks
 
-- [x] Assemble the release section and bump the platform and Helm chart versions.
-- [ ] After the release PR passes review and CI, squash-merge it and push the annotated `v0.6.0` tag.
-- [ ] Archive the release section with `make changelog-archive VERSION=0.6.0` after the release workflow passes.
+None in flight.
