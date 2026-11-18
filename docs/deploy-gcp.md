@@ -341,7 +341,7 @@ run predates the proxy and took the direct path.
 
 **Do not put the control-plane Service behind a public load balancer without terminating
 TLS in front of it.** `controlplane` is an `http.Server` with no TLS configuration. An
-external load balancer that terminates nothing carries the global `x-api-key`, every
+external load balancer that terminates nothing carries API keys, every
 session's prompts and outputs, and the entire SSE event stream in cleartext across whatever
 network the balancer sits on. This is a prerequisite for any exposed deployment, not an
 optional hardening step.
@@ -352,10 +352,10 @@ The plan 69 staging configuration serves native Google sign-in and application t
 through the existing HTTPS Console origin. The platform chart owns that application edge;
 [the staging runbook](../deploy/gcp/README.md#native-google-sign-in-and-the-staging-https-edge)
 covers the client, certificate, ingress and rollback order.
-Slice 6 retains its old plaintext control-plane LoadBalancer for coordinated rollback.
-CD checks that it has an IP, but sends authenticated requests only through the HTTPS edge.
-Slice 7 moves CD to an issued service-account key over HTTPS and retires that listener.
-Do not use the compatibility listener for human login or a new deployment.
+The staging control-plane Service is `ClusterIP`; it has no public plaintext listener.
+CD sends its Console-issued service-account key only through the HTTPS edge.
+Existing installations must accept the native-only build before this cleanup;
+the [upgrade note](./UPGRADING_PLAN69.md) defines that order and the rollback target.
 
 When you do expose it, a GKE Gateway with a Google-managed certificate is the least
 surprising way:

@@ -376,8 +376,8 @@ kubectl create secret generic "$secret" \
   --from-file="$d/gcpkms-key-name" \
   --dry-run=client -o json > "$d/new-secret.json"
 
-# Slice 7a retains existing data until its native-only binaries are accepted.
-# The following cleanup deployment can then remove retired fields safely.
+# Preserve operator-managed data outside the fields this assembler updates.
+# Retire obsolete fields separately after accepting the replacement deployment.
 # Never print either manifest. The resource version makes a concurrent rotation
 # fail instead of overwriting it with the snapshot we read here.
 kubectl get secret "$secret" --namespace "$namespace" --ignore-not-found -o json > "$d/previous-secret.json"

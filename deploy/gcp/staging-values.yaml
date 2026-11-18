@@ -205,11 +205,10 @@ appEdge:
       cloud.google.com/backend-config: '{"default":"map-native-edge"}'
 
 controlplane:
-  # Retained through slice 6 for the existing CD smoke and rollback path.
-  # Human login uses the HTTPS application edge. Slice 7 moves CD onto its
-  # issued service-account key before retiring this plaintext listener.
+  # Browser, SDK and CD traffic share the HTTPS application edge.
+  # Retire the compatibility listener only after slice 7a is accepted.
   service:
-    type: LoadBalancer
+    type: ClusterIP
   # Workload Identity needs BOTH halves and `environment/` applies only one: it
   # creates the IAM binding that lets this release's Kubernetes ServiceAccount
   # impersonate the Google one. The annotation is the other half, and it lives

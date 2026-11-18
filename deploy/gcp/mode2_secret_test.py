@@ -594,14 +594,14 @@ def main():
                   u.code == 0 and u.key("model-providers.json") is None
                   and u.key("database-url") == GOOD_GW["database-url"]
                   and "Not carrying 'model-providers'" in u.out, u.out)
-        print("slice 7a retains old Secret data for rollback without fetching it")
-        retained = b"retained-rollback-credential"
+        print("operator-managed Secret data survives without being fetched")
+        retained = b"operator-managed-credential"
         existing = {"metadata": {"resourceVersion": "41"}, "data": {
-            "retired-credential": base64.b64encode(retained).decode(),
+            "operator-credential": base64.b64encode(retained).decode(),
             "database-url": base64.b64encode(b"old-dsn").decode(),
         }}
         preserved = run(tmp, "retained", versions=GOOD_GW, env_extra=gw, existing=existing)
-        check("old data survives and current fields rotate", preserved.code == 0 and preserved.key("retired-credential") == retained and preserved.key("database-url") == GOOD["database-url"], preserved.out)
+        check("operator data survives and current fields rotate", preserved.code == 0 and preserved.key("operator-credential") == retained and preserved.key("database-url") == GOOD["database-url"], preserved.out)
         manifest = json.loads((preserved.state / "secret.manifest.json").read_text()) if preserved.code == 0 else {}
         check("apply carries the observed resource version", manifest.get("metadata", {}).get("resourceVersion") == "41")
         check("retained values never reach argv or logs", retained.decode() not in preserved.calls() + preserved.out and base64.b64encode(retained).decode() not in preserved.out)

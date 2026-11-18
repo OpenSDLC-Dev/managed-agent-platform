@@ -1,10 +1,7 @@
 // Package principal resolves a verified person to their principals row and
 // the role stored on it (docs/plan/69_principal-bound-auth.md decision 4).
 //
-// It is a package of its own because two identity lanes apply the same rule:
-// the control plane's (internal/api), and the model gateway admin API's for
-// its operator token. Two copies of the statement would be two copies of who
-// may do what, free to drift apart.
+// The control plane applies this mapping when an OIDC or trusted-proxy sign-in succeeds.
 package principal
 
 import (
@@ -33,17 +30,12 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// Resolve records that a verified person was seen and returns their principal,
-// creating the row at their first sign-in. Every verified request counts as a
-// sign-in, so the IdP's mapping is applied here each time. A token re-applies
-// the mapping it carries on every request until it expires, so a demotion at
-// the IdP takes hold once the person's older tokens have expired: until then,
-// a request made with one of them restores the role it maps to.
+// Resolve applies the IdP mapping at native sign-in and creates the principal
+// on first use. Cookie and owned-key authentication read the stored role.
+// An older valid proxy assertion can reapply its claims at a later sign-in.
 //
-// It is a single statement because it is on the authentication path of every
-// request a person makes: a read-then-write would double the round trips and
-// race two concurrent first sign-ins into a UNIQUE violation. ON CONFLICT
-// (issuer, subject) targets exactly the UNIQUE constraint 0022 declares.
+// A single upsert handles concurrent first sign-ins. ON CONFLICT (issuer, subject)
+// targets the unique constraint from migration 0022.
 //
 // RETURNING is what makes it one trip: on insert it returns the id just
 // minted, on conflict the id the row already had. So a returning person keeps
@@ -54,7 +46,7 @@ type Querier interface {
 // email and display_name are refreshed from the token rather than written
 // once. The provider owns them; a person who changes their display name at the
 // IdP should not read as their old name in an audit trail forever.
-// last_seen_at moves on every request too.
+// last_seen_at moves on each sign-in.
 //
 // The role rule. EXCLUDED holds this sign-in's answer: the mapped role and
 // 'idp' when the mapping matched, or user and 'console' when it did not

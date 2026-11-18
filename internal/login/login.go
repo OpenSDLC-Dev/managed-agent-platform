@@ -52,7 +52,7 @@ func New(pool *pgxpool.Pool, cfg Config) *Manager {
 // Mode reports only the nonsecret deployment mode, not provider configuration.
 func (m *Manager) Mode() Mode { return m.mode }
 
-// NativeEnabled distinguishes native login from verifier-only rollout installs.
+// NativeEnabled reports whether the manager has a public origin and a supported login mode.
 func (m *Manager) NativeEnabled() bool {
 	return m.origin != "" && (m.mode == ModePassword || m.mode == ModeOIDC || m.mode == ModeTrustedProxy)
 }

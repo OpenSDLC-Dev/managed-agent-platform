@@ -34,7 +34,7 @@ const (
 
 // wantMigrations tracks the number of embedded migration files; bump it when
 // a migration is added.
-const wantMigrations = 65
+const wantMigrations = 66
 
 func open(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
@@ -997,13 +997,17 @@ func TestKeyRotationMigrationRepairsExistingDuplicates(t *testing.T) {
 	for _, guard := range []struct{ table, name string }{
 		{"api_keys", "api_keys_credential_immutable"},
 		{"principals", "principals_archive_owned_keys"},
-		{"modelgateway.key_policies", "modelgateway_key_policy_unowned"},
 	} {
 		var enabled bool
 		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger
 			WHERE tgrelid=$1::regclass AND tgname=$2 AND tgenabled='O')`, guard.table, guard.name).Scan(&enabled); err != nil || !enabled {
 			t.Errorf("shipping trigger %s retained = %t, err %v", guard.name, enabled, err)
 		}
+	}
+	var retired bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('modelgateway.key_policies') IS NULL
+		AND to_regclass('modelgateway.rate_windows') IS NULL`).Scan(&retired); err != nil || !retired {
+		t.Fatalf("obsolete policy tables remain: %t, %v", retired, err)
 	}
 	_, err = pool.Exec(ctx, `INSERT INTO api_keys (id,name) VALUES ('apikey_malformed','malformed')`)
 	requireKeyPGError(t, err, pgCheckViolation, "api_keys_credential_shape")

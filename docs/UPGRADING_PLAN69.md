@@ -63,13 +63,27 @@ Do not copy owned hashes into historical columns, clear owners or undo tombstone
 
 ## Cleanup after acceptance
 
-Only after slice 7a passes, deploy the new immutable migration that drops the obsolete
-key-policy table (including alias grants) and per-key window table. Keep historical key rows, usage records
-and initiator attribution. Remove `controlplane-api-key` and `brain-api-key` from
-Kubernetes and retire their Secret Manager versions. Remove the compatibility HTTP
-LoadBalancer and the separately deployed old Console; preserve the shared HTTPS
-origin, address, certificate and active application ingress.
+Only after slice 7a passes, deploy migration `0066_retire_gateway_key_policies.sql`.
+It drops `modelgateway.key_policies` (including alias grants), its guard function,
+and `modelgateway.rate_windows`. It keeps historical key rows, usage, initiator
+attribution and organization model budgets. The staging chart changes the control-plane
+Service to `ClusterIP`; browser, SDK and CD traffic use the HTTPS application edge.
 
-After this cleanup, the rollback target is the accepted slice 7a build. Earlier
-binaries query tables that no longer exist. Returning to them requires coordinated
-database and configuration restoration; a Helm-only rollback is insufficient.
+Remove `controlplane-api-key` and `brain-api-key` from the externally managed
+Kubernetes Secret. Remove its `kubectl.kubernetes.io/last-applied-configuration`
+annotation too: that annotation can retain the old values. Guard the update with the
+observed resource version so a concurrent rotation cannot be overwritten. Preserve
+every other field. Disable the corresponding old Secret Manager versions; do not
+destroy them during acceptance. Later CD runs must not restore the removed fields.
+
+Confirm the active ingress points to the native application edge. Delete the old
+standalone Console Deployment and wait for its pods to terminate. Then remove its
+unused Service, BackendConfig, NetworkPolicy and credential Secret.
+Preserve the shared HTTPS origin, address, certificate, active application ingress
+and native BackendConfig. Confirm the old HTTP address no longer has a listener.
+
+After this cleanup, the rollback target is the accepted slice 7a application build.
+Keep the cleanup chart and values when selecting those application images, so rollback
+does not recreate the HTTP listener or restore retired credentials. Earlier binaries
+query tables that no longer exist. Returning to them requires coordinated database and
+configuration restoration; a Helm-only rollback is insufficient.

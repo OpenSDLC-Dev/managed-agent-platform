@@ -49,6 +49,43 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 slice 7b migration and rollback checks
+
+The independent full `make verify` passed with 91.64% statement coverage after
+correcting the migration count from 65 to 66. Two later Go comment edits passed
+AST, token and formatting checks against the tested snapshot. Five defective
+migration variants each failed the preservation test. The 7a application binaries
+passed 109 checks against a database migrated through 0066, including
+owned-key and delegated usage. This rollback check ran locally.
+
+The independent staging chart comparison found one change among 19 rendered
+objects. The control-plane Service changed from `LoadBalancer` to `ClusterIP`.
+The pre-migration Cloud SQL backup finished successfully at 23:49 UTC on November 17.
+
+## Plan 69 slice 7a staging acceptance
+
+[PR #1048](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1048) deployed
+native-only platform revision `5687be6e` with Console revision `8158c6a`.
+The [staging run](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/44195903669)
+passed. An independent verifier checked the six live Deployments, the HTTPS edge
+and the retained rollback resources. All 30 credential checks passed, including
+owned-key admission through both public headers and rejection of the old presets.
+The owner signed out and signed in with Google, then opened Models and Service accounts.
+
+On November 18 (Asia/Shanghai), an operator created a new session from the Console
+using staging's existing verification agent and cloud environment. The agent
+answered `PLAN69_OK` and the session returned to idle with `end_turn`. The
+Usage request row matched the session and initiating principal. It recorded
+HTTP 200 on `messages`, public alias `deepseek-flash`, upstream `deepseek-v4-flash`,
+2,601 input tokens and 5 output tokens. The delegated request had no API key.
+
+At 23:47 UTC on November 17, the operator intended to preview the standalone
+Console retirement. Kubernetes processed five real deletions. Its audit log
+confirmed the old Deployment, Service, BackendConfig, NetworkPolicy and dedicated
+Secret were removed before the cleanup migration. All six native Deployments
+remained ready. The active HTTPS login page returned 200. The shared ingress and
+certificate, compatibility HTTP Service and platform Secret were still present.
+
 ## Plan 69 slice 7 local installation acceptance
 
 An independent verifier built the server and gate images from the native-only candidate

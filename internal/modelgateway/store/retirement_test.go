@@ -7,14 +7,14 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 )
 
-// The first contraction must work after cleanup, while keeping these tables
-// available to the previous binary until the rollout has been accepted.
+// Current gateway operations must work with the obsolete tables absent.
 func TestGatewayStoreDoesNotReadRetiredPolicyTables(t *testing.T) {
 	s, pool := newStore(t)
 	ctx := t.Context()
-	if _, err := pool.Exec(ctx, `ALTER TABLE modelgateway.key_policies RENAME TO retired_key_policies;
-		ALTER TABLE modelgateway.rate_windows RENAME TO retired_rate_windows`); err != nil {
-		t.Fatal(err)
+	var retired bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('modelgateway.key_policies') IS NULL
+		AND to_regclass('modelgateway.rate_windows') IS NULL`).Scan(&retired); err != nil || !retired {
+		t.Fatalf("obsolete policy tables remain: %t, %v", retired, err)
 	}
 	if _, err := s.Load(ctx); err != nil {
 		t.Errorf("catalog still depends on retired policies: %v", err)

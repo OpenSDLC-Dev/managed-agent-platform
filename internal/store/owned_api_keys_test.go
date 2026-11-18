@@ -195,7 +195,7 @@ func TestOwnedKeyDigestMigration(t *testing.T) {
 		}
 	}
 	checkAuthentication(t)
-	if err := store.Migrate(ctx, pool); err != nil {
+	if err := store.MigrateThrough(ctx, pool, "0060_owned_api_keys.sql"); err != nil {
 		t.Fatal(err)
 	}
 	requireOwnedKeyColumns(t, pool)
@@ -476,9 +476,20 @@ func TestPrincipalDeactivationArchivesOnlyOwnedKeys(t *testing.T) {
 	}
 }
 
+// These historical guards belong to migration 0060. The final cleanup drops
+// their table and trigger; current-schema tests assert that retirement instead.
+func legacyPolicyPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool := rawPool(t, pgtest.FreshDB(t))
+	if err := store.MigrateThrough(t.Context(), pool, "0060_owned_api_keys.sql"); err != nil {
+		t.Fatal(err)
+	}
+	return pool
+}
+
 func TestOwnedKeysCannotReceiveLegacyPolicies(t *testing.T) {
 	ctx := context.Background()
-	pool := open(t, pgtest.FreshDB(t))
+	pool := legacyPolicyPool(t)
 	requireOwnedKeyColumns(t, pool)
 	seedKeyPrincipals(t, pool)
 	insertKeyFixture(t, pool, "apikey_legacy", "", "active")
@@ -526,7 +537,7 @@ func TestOwnedKeysCannotReceiveLegacyPolicies(t *testing.T) {
 // would reverse DELETE's parent-before-cascaded-child order.
 func TestUnchangedPolicyUpdateDoesNotLockParent(t *testing.T) {
 	ctx := context.Background()
-	pool := open(t, pgtest.FreshDB(t))
+	pool := legacyPolicyPool(t)
 	insertKeyFixture(t, pool, "apikey_legacy", "", "active")
 	keyExec(t, pool, `INSERT INTO modelgateway.key_policies (api_key_id,aliases,rpm,tpm)
 		VALUES ('apikey_legacy',ARRAY['old'],5,100)`)
@@ -582,7 +593,7 @@ func TestUnchangedPolicyUpdateDoesNotLockParent(t *testing.T) {
 
 func TestAnUncommittedOwnedPolicyTargetIsRefused(t *testing.T) {
 	ctx := context.Background()
-	pool := open(t, pgtest.FreshDB(t))
+	pool := legacyPolicyPool(t)
 	requireOwnedKeyColumns(t, pool)
 	seedKeyPrincipals(t, pool)
 	issuer, err := pool.Begin(ctx)

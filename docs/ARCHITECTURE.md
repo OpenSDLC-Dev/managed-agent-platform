@@ -513,7 +513,7 @@ Layout order is by layer, as the repo is.
 | `secrets/` | The credential-cipher seam — `openbao/` in production, `gcpkms/` for GCP, `local/` (AES-256-GCM, one configured master key) for tests **and bao-less minimal deployments** — with the ciphertext persisted by the caller, never here. |
 | `dialguard/` | The SSRF floor under the dials **no operator vouched for** — an agent's `mcp_servers` entry, a vault credential's MCP server or token endpoint, and inside the per-session gate every dial but one — a widening flag's (a declared MCP endpoint, a package registry `allow_package_managers` opened) and, since plan 45, an `unrestricted` session's, which reaches every host and has each resolved address judged underneath it. **Not a universal egress check**, and reading it as one misplaces three neighbours: a configured provider or web backend dials with its own ordinary client, the `github_repository` clone's host is pinned to the literal `github.com` by the create-time grammar rather than by an address check, and a host the gate admits from the operator's own `allowed_hosts` is dialled unfloored — listing it is the vouching. The package owns the dial itself (`dialguard.Dialer`): on these paths it resolves a name **once**, judges every address that came back before any connect, and dials those addresses — so nothing below a caller's decision can re-resolve the name into somewhere the floor never saw, and these five paths have one dialler between them rather than five copies of a hook. It does not change which answer a resolver gives, so a `search` list completing a relative name is still #601's open question rather than this package's. RFC 1918 is deliberately allowed — this platform runs in the operator's own network. |
 | `identity/` | Verify IdP credentials and extract their mapped role. OIDC code-flow helpers add S256 PKCE and verified nonce checks without exposing HTTP routes. `RoleNone` means no mapping matched, not the resolved request's role; it also serves as a route minimum that admits no human. Machine credentials never come here. `identitytest/` is its fake OpenID Provider. |
-| `principal/` | Resolve a verified person to their stored role, apply the optional IdP mapping, and refuse deactivated rows. Shared by the control plane and the gateway's operator-token lane. Private member/service-account aliases preserve stored principal IDs. |
+| `principal/` | Resolve a verified person to their stored role, apply the optional IdP mapping, and refuse deactivated rows. The control plane applies this mapping at native sign-in. Private member/service-account aliases preserve stored principal IDs. |
 | `login/` | Durable browser sessions, one-time browser-bound OIDC attempts, cookie/CSRF checks, local passwords and shared throttling. Control-plane private routes and gateway administration share the session reader. |
 | `oauthrefresh/` | The RFC 6749 refresh grant, spelled once for the two places that perform it. |
 | `apikey/` | The platform API key check — the stored hash, looked up active and unexpired by the database's clock — shared by the control plane and the model gateway, so a revoked key stops on both at once. |
@@ -659,20 +659,16 @@ and holds the two OS-touching adapters `gaterun/` declares.
   both deployment points — the executor's pull-only sync, the reference worker's
   read-only roots — rather than by the token: it reaches an attached store whatever
   the attachment's access.
-- **Human sign-in stays off public `/v1`.** IdP Bearers and proxy assertions
-  remain on existing private routes until plan 69 slice 7. Public requests with
-  those credentials neither provision nor refresh a principal. With identity
-  disabled, no IdP credential is accepted. Signature, issuer, audience and expiry
-  checks belong to `internal/identity`; credential rejection is 401, and a failed
-  principal lookup/write remains a database error rather than a bad credential.
-  `internal/principal` resolves stored `user`, `developer` or `admin` roles.
-  First sign-in without a mapping gets `user`; reads require `developer`, and
-  no read-only role exists. Every admitted IdP request applies the optional
-  mapping, including the gateway's operator-token lane. A match sets the mapped
-  role; a former match now absent returns to `user`. A never-mapped person keeps
-  their stored role. Older unexpired assertions can reapply an old mapped role.
-  A deactivated row is refused, never re-created; principal deletion and
-  truncation are prohibited. Owned-key lookups never apply this sign-in mapping.
+- **The control plane resolves IdP identity at native sign-in.** `internal/identity`
+  verifies the signature, issuer, audience and expiry. Invalid credentials receive
+  401. A failed principal lookup or write remains a database error.
+  `internal/principal` applies the optional role mapping at sign-in. The first
+  sign-in without a match gets `user`. A match sets the mapped role. A formerly
+  mapped person with no current match returns to `user`. A never-mapped person
+  keeps their stored role. An older valid proxy assertion can reapply an older
+  role at sign-in. Deactivated principals cannot sign in, and the database
+  prohibits principal deletion and truncation. The public API and gateway
+  read current authority without applying the sign-in mapping.
 - **Native browser login stays private.** A canonical browser-serialized
   `CONSOLE_PUBLIC_ORIGIN` enables password, OIDC code-flow or signed-proxy login. Password
   mode also requires declared development. `internal/login` owns shared opaque
