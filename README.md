@@ -6,14 +6,11 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 
 > **Status: v0.5.1, with the model gateway merged to `main` and unreleased — the v1 loop is complete; agents reach MCP servers, the control plane authenticates people, a coordinator agent's roster runs as concurrent session threads, a session mounts versioned memory stores it reads and writes back, a deployment fires an agent on a cron schedule with its run history readable over the wire, a dream consolidates one of those memory stores over past session transcripts, and the brain's model calls go by default through a standalone model gateway that also serves Anthropic Messages, OpenAI's Chat Completions, Responses and embeddings, and rerank to internal applications.** A `v*` tag publishes container images and the Helm chart to GHCR, and worker binaries with clamped release notes to the GitHub Release ([docs/RELEASING.md](./docs/RELEASING.md)).
 
-Principal-bound authentication is being rolled out under [plan 69](./docs/plan/69_principal-bound-auth.md).
-Both servers require native login configuration. Public APIs admit only owned keys
-using the current owner role; private APIs and gateway administration require browser sessions.
+The control plane and model gateway require native login configuration. Public
+management APIs authorize an issued key using its owner's current role. Private
+APIs and gateway administration require browser sessions.
 Gateway inference accepts developer/admin owners or membership-bound delegated tokens.
 Organization budgets share each public model alias across keys and protocols.
-Use the [upgrade note](./docs/UPGRADING_PLAN69.md) before removing old credentials.
-Releases remain held until slice 7 is fully accepted; [STATE.md](./STATE.md) tracks
-the rollout and [HISTORY.md](./docs/HISTORY.md) records completed acceptance.
 
 What runs today, end to end:
 

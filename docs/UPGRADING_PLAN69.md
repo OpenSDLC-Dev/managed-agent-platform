@@ -1,9 +1,10 @@
 # Plan 69 authentication upgrade
 
-Plan 69 is unreleased. Its final rollout has two deployments: native-only code
-(slice 7a), then obsolete-data cleanup (slice 7b). Do not skip the first deployment.
-The active rollout and acceptance records are in [STATE.md](../STATE.md) and
-[HISTORY.md](./HISTORY.md). This note describes the operator contract, not completion.
+Upgrade existing installations in two deployments. Deploy the native-only code
+(slice 7a) and verify both model-call paths with owned and delegated credentials.
+Then deploy the obsolete-data cleanup (slice 7b). The
+[staging acceptance record](./HISTORY.md#plan-69-completion-and-staging-cleanup)
+documents the rollout and links to the rollback checks.
 
 ## Before deploying native-only code
 
