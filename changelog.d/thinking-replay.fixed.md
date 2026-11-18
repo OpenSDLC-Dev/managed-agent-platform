@@ -1,1 +1,0 @@
-- **DeepSeek tool loops no longer fail at their first tool result** (#67) — DeepSeek refuses a tool continuation that leaves out the turn's thinking when the tool ids are not ones it issued, and the brain's are event ids, so on a DeepSeek thinking model every request that answered a tool call was a 400 and the turn ended in a `session.error`. The replayed thinking satisfies it.

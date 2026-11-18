@@ -1022,7 +1022,7 @@ Declined, over the seven rounds:
 - **A shared constant for the uploads directory.** The executor names it once; create's own constant lives in the API package.
 - **One resolver for the workdir default.** The two copies the new code does not use predate this plan.
 
-Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The release note says the net change once, in #922's fragment.
+Superseded on the way: #584's changelog fragment, unreleased, whose refusal and `/workspace` reservation this plan removes. The #922 entry in the [v0.6.0 changelog](../CHANGELOG.md#060---2026-11-18) records the net change.
 
 **Plan 64 progress summary (archived).** Delivered in one PR: every `mount_path` rooted under `/workspace` as recorded, a climb refused and overlaps judged once rooted, in the reference's words on session create, no reserved targets, a deployment's spelling bounded as sent, a repository sharing the skills directory, cloned before skills are written, and `/workspace` kept writable under a read-only root and kept by checkpoints.
 
