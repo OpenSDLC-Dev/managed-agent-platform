@@ -27,8 +27,7 @@ schedule. Preconditions:
 
 - `main` is green.
 - STATE.md's active work is not mid-slice in something the release would half-ship.
-- STATE.md names no plan that holds releases. Plan 69 holds releases from
-  slice 1 until slice 7 lands.
+- [STATE.md](../STATE.md) names no plan that holds releases.
 
 ## The ritual
 

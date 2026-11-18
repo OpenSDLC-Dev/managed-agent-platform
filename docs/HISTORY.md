@@ -49,6 +49,41 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 69 completion and staging cleanup
+
+The staging gateway returned HTTP 200 and `PLAN69_OK` for direct Messages request
+`req_ndjptw4w7pchc34rh5qs9k3w`. Its Usage row at 12:03:52 UTC on November 18, 2026
+matched the `staging-cd` key and its service-account owner. The session column was
+empty. Public alias `deepseek-flash` routed to `deepseek-v4-flash` and used 37 input
+tokens and 23 output tokens. The [delegated turn](#plan-69-slice-7a-staging-acceptance)
+was attributed to the human initiator and session. Both calls preceded migration 0066.
+
+[PR #1049](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1049)
+deployed revision `4a96fdd2`. The gateway logged migration 0066 at 12:11:58 UTC.
+All six Deployments were ready. The control-plane Service was private and the
+former public HTTP address had no forwarding rule. The shared HTTPS ingress
+kept its active certificate and the native login page returned 200.
+The [staging deployment](https://github.com/OpenSDLC-Dev/managed-agent-platform/actions/runs/44301017543)
+passed its public API smoke check with the issued CD key.
+
+The operator removed the two preset key fields and the last-applied annotation
+from the platform Secret and verified all seven remaining values were unchanged.
+Secret Manager version 1 of each preset was disabled. The issued CD key and OIDC
+client secret stayed enabled. The [rollback checks](#plan-69-slice-7b-migration-and-rollback-checks)
+cover the 7a binaries on the post-cleanup schema. The plan's release hold ended
+after the [Console close-out](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/262)
+and staging acceptance.
+
+[Plan 69](./plan/69_principal-bound-auth.md) reverses three archived decisions.
+[Plan 31](./plan/31_console-sso-rbac.md) derived roles per request and gave the
+management key full authority. IdP mapping now runs at sign-in, and an issued
+key uses its owner's current stored role. The preset management key retained by
+[plan 32](./plan/32_management-api-keys.md) is retired.
+[Plan 59](./plan/59_model-gateway.md) admitted a bootstrap key and a shared brain key
+and applied per-key policies. Direct inference now requires a developer or admin
+owner, the brain uses a delegated token for each claim, and organization rate
+limits aggregate by public model alias.
+
 ## Plan 69 slice 7b migration and rollback checks
 
 The independent full `make verify` passed with 91.64% statement coverage after

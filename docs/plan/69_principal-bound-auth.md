@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Principal-bound authentication: platform login, stored roles, no preset keys (plan 69)
