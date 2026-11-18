@@ -4,8 +4,9 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 7: remove preset credentials and legacy admission.
-Slice 6 passed independent live [acceptance](./docs/HISTORY.md#plan-69-slice-6-independent-acceptance) after [PR #1046](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1046).
+[Plan 69](./docs/plan/69_principal-bound-auth.md) slice 7b: retire obsolete gateway tables, credentials and the separate HTTP listener.
+Slice 7a deployed in [PR #1048](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1048).
+[Staging acceptance](./docs/HISTORY.md#plan-69-slice-7a-staging-acceptance) records the live login, owned credentials and delegated model turn.
 **no release until plan 69 slice 7**.
 
 ## Tasks
@@ -14,6 +15,9 @@ Slice 6 passed independent live [acceptance](./docs/HISTORY.md#plan-69-slice-6-i
 - [x] Deliver the native-only Console companion ([PR #261](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/261)) and pin its verified image.
 - [x] Require login, restrict private APIs to cookies and public keys to current owners, and remove legacy model policies.
 - [x] Switch CD to its issued key; verify fresh Compose, real `ant` and local gates ([acceptance](./docs/HISTORY.md#plan-69-slice-7-local-installation-acceptance)).
-- [ ] Complete committed reviews, hosted CI and native-only staging acceptance before cleanup.
-- [ ] After accepting the code rollout, remove obsolete policy tables and retained compatibility secrets without breaking rollback.
-- [ ] Retire the separate HTTP listener and legacy Console resources, complete live acceptance, and archive the plan.
+- [x] Verify hosted CI, native login, legacy credential refusal and a delegated staging model turn.
+- [ ] Confirm direct staging inference with an owned key before cleanup.
+- [ ] Verify and review the cleanup migration and private Service configuration, then deploy after native-only acceptance.
+- [ ] Retire retained compatibility secrets and verify rollback to the accepted native-only application build.
+- [x] Confirm retirement of the standalone legacy Console and verify the native entry point still works.
+- [ ] Retire the separate HTTP listener, complete live acceptance, and archive the plan.

@@ -1265,7 +1265,6 @@ Do not copy the value into shared logs, tickets or command arguments. Redeem
 it promptly as the JSON `code` field at
 `POST /api/console/organizations/default/setup_code/redeem`. Native OIDC and
 trusted-proxy installs require the browser cookie, exact Origin and CSRF token.
-Verifier-only installs without a public origin retain IdP-token admission.
 A management key cannot redeem it. Only an active `kind=user` principal whose
 role source is not `idp` qualifies for identity promotion. Same-UID processes,
 root and other file readers can claim admin with such a sign-in. File
@@ -1347,7 +1346,7 @@ and a Caddy application edge. Helm enables both by default.
 The edge sends native login/private paths to CP, admin paths to the gateway,
 and pages/assets/health to Console. Console renders pages and holds no credentials.
 Compose defaults to development password login; Helm requires a native login mode and origin.
-Slice 6 stages Google OIDC behind the existing staging HTTPS hostname.
+Staging uses Google OIDC at its HTTPS origin.
 Use the [upgrade note](./UPGRADING_PLAN69.md) for the two-phase retirement and rollback boundary.
 Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional) or
 [the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
@@ -1513,9 +1512,9 @@ could be handed over.
   `user`; a never-mapped person keeps the stored role. Legacy `viewer` entries
   now mean `user`, so map people to `developer` if they must read. A wrong claim
   name can therefore demote mapped people to `user`. The IdP reaches the platform
-  only at native sign-in. Public `/v1` never signs a human in. An older
-  unexpired token can reapply its old mapped role after a newer token demotes it;
-  IdP changes are not immediate revocation. Local deactivation refuses the
+  only at native sign-in. Public `/v1` never signs a human in. A still-valid older
+  proxy assertion can reapply its mapped role at a later sign-in. IdP changes
+  take effect when the platform receives updated claims. Local deactivation refuses the
   principal regardless of mapping. There is no automatic IdP synchronization.
 
 ### 10. Management-key lifecycle

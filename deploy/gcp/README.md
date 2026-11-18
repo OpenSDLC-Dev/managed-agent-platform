@@ -101,12 +101,11 @@ never run an apply, and every coordinate is derived from `PROJECT` and `NAME_PRE
 | both node pools | resized to zero — nodes, boot disks and Cloud NAT's per-VM charge go with them | |
 | Cloud SQL | activation policy `NEVER`, which suspends the instance charge | its storage, and its backups |
 | the GKE control plane | | $0.10/cluster-hour, which one zonal cluster's free-tier credit covers |
-| the two LoadBalancer forwarding rules | | the control plane's and the console's alike |
+| the HTTPS load balancer's forwarding rules | | parking leaves the application edge in place |
 
 The last two rows are why "the two charges that dominate the bill" is the honest phrasing
 rather than "everything hourly": the control plane and the forwarding rules bill by the hour
-too. They are small, and taking the forwarding rules down would mean deleting a `Service`,
-which is a change to the workload rather than a power operation. Cloud SQL keeps no IP
+too. Removing the application edge changes the workload, rather than its power state. Cloud SQL keeps no IP
 charge here, because `environment/` gives the instance a private address only.
 
 **Parking the cluster is safe because mode 2 already put every piece of state outside it** —
@@ -637,8 +636,9 @@ Verify the deploy identity can read that secret; scope any new accessor grant to
 `CD_API_KEY_SECRET_NAME`. This key is mandatory for the post-deploy API check.
 Do not use a database insert or the legacy bootstrap key to manufacture this credential.
 
-The HTTP LoadBalancer and old standalone Console are retained until slice 7a is accepted.
-CD sends credentials only through HTTPS. Then slice 7b removes obsolete data and resources.
+Accept slice 7a before deploying the cleanup migration and staging values.
+The cleanup values make the control-plane Service private. Retire the old standalone
+Console and credentials as described in the upgrade note. CD uses only HTTPS.
 The [upgrade note](../../docs/UPGRADING_PLAN69.md) defines that rollback boundary.
 
 The edge apply is outside Helm's atomic release. If its HTTPS smoke fails, CD reports
@@ -810,8 +810,7 @@ that assertion step is what keeps it from being silent.
 the one people act on.** A run's logs are public on a public repository, and several of these
 values appear in them by the ordinary operation of the tools: `docker push` prints the
 repository it is pushing to, `gcloud container clusters get-credentials` prints the cluster
-it wrote a kubeconfig entry for, and the smoke step prints the LoadBalancer's external
-address on purpose. Registering them as `::add-mask::` would close that and was rejected: a
+it wrote a kubeconfig entry for. Registering those coordinates as `::add-mask::` was rejected: a
 mask is a literal string replacement across the whole log, so the same substitution that
 hides the project id also hides it inside every diagnostic that names it — `cannot read
 Secret Manager secret 'x' in ***` is a worse error message than the one it replaces, and the
@@ -1149,7 +1148,7 @@ YAML
 [`staging-values.yaml`](./staging-values.yaml) is the versioned input the pipeline reads, and
 it is **mode 2**: `existingSecret: map-platform`, the bundled Postgres/MinIO/OpenBao all
 `enabled: false`, the Workload Identity annotations, the sandbox
-`nodeSelector`/`tolerations` pair, `controlplane.service.type: LoadBalancer`, and modest
+`nodeSelector`/`tolerations` pair, `controlplane.service.type: ClusterIP`, and modest
 resource requests. It holds **no credential and no `image.tag`**. The credentials are not
 withheld from it — in mode 2 the chart renders no Secret at all, so it takes no credential
 values; and `image.tag` must come from the same commit SHA the build used, which is the whole
@@ -1269,9 +1268,9 @@ above — which reads `database-url`, optional direct routes and the configured 
 secret into a mode-700 temporary directory. It adds the four non-secret coordinates:
 `blob-backend=gcs`, `blob-bucket`, `secrets-backend=gcpkms` and `gcpkms-key-name`.
 Credential values reach kubectl through files, never process arguments.
-Slice 7a preserves existing Secret data until its native-only code is accepted.
-New fields override old values; the observed resource version fences concurrent rotations.
-The later cleanup removes retired data. See the [upgrade note](../../docs/UPGRADING_PLAN69.md).
+The assembler preserves existing fields it does not manage. It updates configured
+fields against the observed resource version to protect concurrent rotations.
+Once an operator removes the retired preset fields, later runs leave them absent. See the [upgrade note](../../docs/UPGRADING_PLAN69.md).
 Failed patch output is withheld because kubectl can include encoded credentials.
 
 **That re-run has to roll the pods, and it will not do so by itself.** Env from a
@@ -1350,11 +1349,11 @@ It does **not** run a session, so it says nothing about the model route (an empt
 after a rebuild), the sandbox pool or the egress gate. Those are the acceptance battery's job, not the
 pipeline's.
 
-The bare-IP HTTP listener remains only for slice 6 compatibility and coordinated rollback;
-CD sends no credential to it. Use the native HTTPS origin for browser and SDK access.
+Use the native HTTPS origin for browser, SDK and CD access. The control-plane Service
+is private; the staging chart no longer provisions a bare-IP HTTP listener.
 The platform chart serves Console through that edge, with Google OIDC sign-in and platform
 cookies. The [native staging runbook](#native-google-sign-in-and-the-staging-https-edge)
-defines its deployment and rollback procedure. Slice 7 removes the compatibility listener.
+defines its deployment and rollback procedure.
 
 ## Five settings that are not the provider's defaults
 

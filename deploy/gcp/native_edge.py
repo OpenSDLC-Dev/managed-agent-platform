@@ -43,9 +43,9 @@ def manifest(origin, service):
             metadata["annotations"] = annotations
         return {"apiVersion": api, "kind": kind, "metadata": metadata, "spec": spec}
 
-    # Keep the existing Ingress, address and certificate names. The old Kubernetes
-    # BackendConfig stays, but GKE can collect its unused cloud backend and IAM
-    # grant. Rollback must restore that grant; see this directory's README.
+    # Keep the existing Ingress, address and certificate names. GKE can collect
+    # the old cloud backend and its IAM grant after the service switch.
+    # Restoring the IAP-backed service requires that grant (see README).
     return {"apiVersion": "v1", "kind": "List", "items": [
         obj("cloud.google.com/v1", "BackendConfig", "map-native-edge", {
             "iap": {"enabled": False}, "timeoutSec": 3600,

@@ -20,16 +20,14 @@ func TestGatewayStartsWithoutPresetCredentials(t *testing.T) {
 
 func TestGatewayRefusesEveryUnownedKey(t *testing.T) {
 	e := newEnv(t)
-	granted := "sk-map-api01-historical-grant"
+	historical := "sk-map-api01-historical-key"
 	pretendToken := inferencetoken.TokenPrefix + "historical-value"
-	for id, raw := range map[string]string{"old_granted": granted, "old_preset": bootstrap, "old_token_shape": pretendToken} {
+	for id, raw := range map[string]string{"old_historical": historical, "old_preset": bootstrap, "old_token_shape": pretendToken} {
 		_, err := e.pool.Exec(e.ctx, `INSERT INTO api_keys(id,name,key_hash) VALUES ($1,$1,$2)`, id, apikey.Hash(raw))
 		e.must(err)
 	}
-	_, err := e.pool.Exec(e.ctx, "INSERT INTO modelgateway.key_policies (api_key_id) VALUES ('old_granted')")
-	e.must(err)
 	e.start()
-	for _, raw := range []string{bootstrap, granted, pretendToken} {
+	for _, raw := range []string{bootstrap, historical, pretendToken} {
 		for _, headers := range []map[string]string{{"x-api-key": raw}, {"Authorization": "Bearer " + raw}} {
 			for _, path := range []string{"/v1/models", "/v1/messages", "/v1/responses", "/v1/embeddings"} {
 				res, body := e.do("POST", path, `{"model":"fast"}`, headers)

@@ -47,6 +47,18 @@ def native(mode="password"):
 
 
 class NativeRender(unittest.TestCase):
+    def test_staging_exposes_only_the_native_application_edge(self):
+        result = subprocess.run(["helm", "template", "staging", str(CHART), "-f",
+                                 str(ROOT / "deploy/gcp/staging-values.yaml")],
+                                capture_output=True, text=True, check=True)
+        controlplane = section(result.stdout, "controlplane-service.yaml")
+        self.assertRegex(controlplane, r"(?m)^  type: ClusterIP$")
+        self.assertNotRegex(result.stdout, r"(?m)^  type: (LoadBalancer|NodePort)$")
+        edge = section(result.stdout, "app-edge.yaml")
+        self.assertIn('cloud.google.com/neg:', edge)
+        self.assertIn('map-native-edge', edge)
+        self.assertIn(CONSOLE, section(result.stdout, "console.yaml"))
+
     def test_edge_binary_executes_with_rendered_capabilities(self):
         body = section(render(native()), "app-edge.yaml")
         container = body.split("        - name: app-edge\n", 1)[1]
