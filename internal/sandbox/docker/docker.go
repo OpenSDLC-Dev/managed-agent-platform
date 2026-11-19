@@ -1795,18 +1795,18 @@ func emptyingDeadline() time.Duration { return 6 * cleanupBudget }
 // the shared __map_preserve_mode carries them onto the temporary file first — the
 // k8s backend's write script calls the same function at the same point (#204).
 func (c *container) rename(ctx context.Context, tmp, path string) error {
-	res, err := sandbox.ExecStatus(ctx, c, "rename", "the rename onto "+path, sandbox.ExecRequest{Command: sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(
-		"if [ -d %[2]s ]; then rm -f %[1]s; exit %[3]d; fi\n"+
-			"if __map_unreplaceable %[2]s; then rm -f %[1]s; exit %[5]d; fi\n"+
-			"__map_preserve_mode %[2]s %[1]s\n"+
-			"mv -f %[1]s %[2]s || { rm -f %[1]s; exit 1; }\n"+
-			// Asked again, because the first answer describes a moment that has
-			// passed: something in the sandbox can make the target a directory in
-			// between, and then the move puts the file *inside* it and exits 0 —
-			// a reported success that wrote nothing where the caller asked.
-			"if [ -d %[2]s ]; then rm -f %[2]s/%[4]s; exit %[3]d; fi",
-		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, gopath.Base(tmp),
-		sandbox.ExitPathNotReplaceable)})
+	// Quote each path once. Repeating the quoted text at every use can make
+	// a legal path exceed the exec command limit (#862).
+	command := sandbox.PreserveModeShell + sandbox.UnreplaceableShell + fmt.Sprintf(`set -- %[1]s %[2]s
+if [ -d "$2" ]; then rm -f "$1"; exit %[3]d; fi
+if __map_unreplaceable "$2"; then rm -f "$1"; exit %[4]d; fi
+__map_preserve_mode "$2" "$1"
+mv -f "$1" "$2" || { rm -f "$1"; exit 1; }
+# The target can become a directory after the first check. mv then puts the
+# temporary inside it and exits successfully.
+if [ -d "$2" ]; then rm -f "$2/${1##*/}"; exit %[3]d; fi`,
+		shellQuote(tmp), shellQuote(path), sandbox.ExitPathIsDirectory, sandbox.ExitPathNotReplaceable)
+	res, err := sandbox.ExecStatus(ctx, c, "rename", "the rename onto "+path, sandbox.ExecRequest{Command: command})
 	if err != nil {
 		// The bytes are landed and unnamed, and this exec is how they were to be
 		// named; shed them rather than leave the sandbox carrying a payload nothing
@@ -1821,12 +1821,11 @@ func (c *container) rename(ctx context.Context, tmp, path string) error {
 		// So the shed here is the one the sandbox user can do, and a payload under
 		// a parent that user cannot write survives on this branch (#310) — but
 		// for the one error that says the script never ran: a command Exec
-		// refused as too long (sandbox.CommandTooLongError), which a path the
-		// script quotes eleven times can make. No `mv` is in flight then, so the
-		// daemon takes back what the sandbox user's `rm` could not, as on every
-		// failure below. A shell the image's startup kept from answering
-		// (sandbox.StartupExitError) does not say so: a startup can silence the
-		// script, or run it in the background, and leave no frame either (#942).
+		// refused as too long (sandbox.CommandTooLongError). No `mv` is in
+		// flight then, so the daemon takes back what the sandbox user's `rm`
+		// could not, as on every failure below. A startup exit
+		// (sandbox.StartupExitError) can also leave no frame while the script
+		// runs in the background (#942).
 		c.discard(ctx, tmp)
 		var tooLong *sandbox.CommandTooLongError
 		if errors.As(err, &tooLong) {

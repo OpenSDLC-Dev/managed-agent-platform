@@ -1,0 +1,1 @@
+- **Docker writes to long paths with single quotes** — The `write` and `edit` tools accept paths within Linux's limits even when quoting those paths would previously exceed Docker's command length limit (#862).

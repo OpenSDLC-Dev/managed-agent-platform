@@ -1387,9 +1387,8 @@ func (s *refusing) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.E
 // One that carries none of it — grep's install, the bash tool's own script,
 // whose command the shell hands over in a file — is the platform's: a tool
 // error that says so, never "shorten them", and no fault for a reclaim to run
-// again. A file tool's command grows with the path the model named, which it
-// can shorten — even one within Linux's bounds, which Docker's rename quotes
-// into its script eleven times (TestAQuoteHeavyFilePathMakesACommandTooLong).
+// again. A file tool's command can grow with the path the model named, which
+// it can shorten.
 func TestACommandTooLongIsTheModelsOnlyWhereItsInputMadeIt(t *testing.T) {
 	const platform = "a command of the platform's own came to 133120 bytes, over the 122880 bytes one exec argument can carry: " +
 		"a fault in the platform, not in this call's input"
