@@ -1637,8 +1637,11 @@ func (pd *pod) WriteFileStream(ctx context.Context, path string, src io.Reader, 
 	if err := sandbox.CheckWriteSize(size); err != nil {
 		return fmt.Errorf("k8s: write %s: %w", path, err)
 	}
-	dir := gopath.Dir(path)
-	tmp := gopath.Join(dir, sandbox.TempName())
+	tmp, err := sandbox.WriteTempPath(path)
+	if err != nil {
+		return err
+	}
+	dir := gopath.Dir(tmp)
 	// The script's stdout is the classified refusal's reason (exit 20 rides
 	// with the shell's own strerror text, plan 23), read from inside the
 	// script's frame (sandbox.Frame) so an image's startup output around it is

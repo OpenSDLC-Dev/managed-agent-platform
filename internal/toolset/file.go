@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"unicode"
 
@@ -145,19 +144,15 @@ func (r Runner) edit(ctx context.Context, raw json.RawMessage) (Result, error) {
 	return succeed(fmt.Sprintf("edited %s (%d replacement(s))", in.FilePath, count))
 }
 
-// Linux's bounds on a path: PATH_MAX, 4096 bytes counting the NUL that ends
-// it, and NAME_MAX, the longest name a directory entry can hold.
-const (
-	maxPathBytes = 4096 - 1
-	maxNameBytes = 255
-)
+// Linux's NAME_MAX is the longest name a directory entry can hold.
+const maxNameBytes = 255
 
 // pathTooLong refuses, as a tool error, a file_path the kernel would refuse
 // with ENAMETOOLONG ("file name too long"): resolved — the path the sandbox
-// would be handed — past maxPathBytes, or a name in it past maxNameBytes. It
-// is asked before the sandbox is, because no backend answers that refusal as
-// the path's. The k8s backend hands the path to its exec as an argument: a
-// read past the bounds finds "no such file or directory", and one long
+// would be handed — past sandbox.MaxPathBytes, or a name in it past
+// maxNameBytes. It checks before the sandbox handles the path. The k8s
+// backend hands the path to its exec as an argument: a read past the
+// bounds finds "no such file or directory", and one long
 // enough keeps the exec from starting — the API server refuses a write's
 // request (431), and a read's exec exits 255 before its script runs. Docker's
 // archive endpoint answers a read with a 500 (`lstat …: file name too long`).
@@ -165,18 +160,12 @@ const (
 // leave to a reclaim, which would make the same call again (measured on kind
 // and Docker Desktop, #827).
 //
-// A write or an edit (lands) is held to one bound more. Both backends land
-// its bytes under a temporary name in the target's directory first —
-// `<dir>/.map-write-<16 hex>`, sandbox.TempNameBytes (27) of name — and
-// rename them into place, so that path must fit as well: the file_path is
-// refused when len(dir)+1+27 is past maxPathBytes, though the target alone
-// would fit — where both backends answered the target's own "file name too
-// long" (measured, #827). A read lands nothing, and reads any path within the
-// bounds.
+// A write or an edit (lands) also checks that the temporary path beside the
+// target fits. The backends apply the same rule when they generate that path.
 func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
-	if n := len(resolved); n > maxPathBytes {
+	if n := len(resolved); n > sandbox.MaxPathBytes {
 		res, _ := failf("%s: file name too long: the file_path resolves to a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
-			verb, n, maxPathBytes)
+			verb, n, sandbox.MaxPathBytes)
 		return res, true
 	}
 	for name := range strings.SplitSeq(resolved, "/") {
@@ -186,11 +175,11 @@ func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
 			return res, true
 		}
 	}
-	if dir := path.Dir(resolved); lands && len(dir)+1+sandbox.TempNameBytes > maxPathBytes {
-		res, _ := failf("%s: file name too long: the file lands first under a %d-byte temporary name beside it, and in the file_path's %d-byte directory "+
-			"that is a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
-			verb, sandbox.TempNameBytes, len(dir), len(dir)+1+sandbox.TempNameBytes, maxPathBytes)
-		return res, true
+	if lands {
+		if err := sandbox.CheckWriteTempPath(resolved); err != nil {
+			res, _ := failf("%s: %s", verb, notWritableReason(err))
+			return res, true
+		}
 	}
 	return Result{}, false
 }

@@ -737,6 +737,40 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		}
 	})
 
+	t.Run("WriteTempPathLimit", func(t *testing.T) {
+		sb, _, _ := provision(t, unrestricted)
+		ctx := context.Background()
+		component := strings.Repeat("d", 255)
+		// Both targets have 4095 bytes. The second directory needs one more
+		// byte for the temporary than Linux allows.
+		dir := workdir + "/" + strings.Repeat(component+"/", 15) + strings.Repeat("e", 216)
+		fits := dir + "/" + strings.Repeat("f", 27)
+		over := dir + "e/" + strings.Repeat("f", 26)
+		const want = "4068-byte directory that is a 4096-byte path"
+		if err := sb.WriteFile(ctx, over, []byte("x")); !errors.Is(err, sandbox.ErrNotWritable) || !strings.Contains(err.Error(), want) {
+			t.Errorf("buffered write over the temporary path limit = %v, want %q", err, want)
+		}
+		if err := sb.WriteFileStream(ctx, over, untouchableReader{t}, 1); !errors.Is(err, sandbox.ErrNotWritable) || !strings.Contains(err.Error(), want) {
+			t.Errorf("stream write over the temporary path limit = %v, want %q", err, want)
+		}
+		if _, err := sb.ReadFile(ctx, workdir+"/"+component); !errors.Is(err, sandbox.ErrFileNotExist) {
+			t.Errorf("read after refused writes = %v, want parent directories left uncreated", err)
+		}
+
+		if err := sb.WriteFile(ctx, fits, []byte("buffered")); err != nil {
+			t.Fatalf("buffered write at the temporary path limit: %v", err)
+		}
+		if got, err := sb.ReadFile(ctx, fits); err != nil || string(got) != "buffered" {
+			t.Fatalf("read at the temporary path limit = %q, %v, want buffered", got, err)
+		}
+		if err := sb.WriteFileStream(ctx, fits, strings.NewReader("streamed"), 8); err != nil {
+			t.Fatalf("stream write at the temporary path limit: %v", err)
+		}
+		if got, err := sb.ReadFile(ctx, fits); err != nil || string(got) != "streamed" {
+			t.Fatalf("read at the temporary path limit = %q, %v, want streamed", got, err)
+		}
+	})
+
 	// ReadFileStream is the read-out counterpart: the deliverables harvest
 	// moves files above the fixed ReadFile cap out of the sandbox, so the
 	// ceiling is per-call. The payload is deliberately over MaxFileBytes —

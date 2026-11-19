@@ -1402,8 +1402,12 @@ func (c *container) openFile(ctx context.Context, path string, maxBytes int64) (
 // target's directory and renames them into place, so a transfer that fails part
 // way through leaves the target as it was rather than truncated.
 func (c *container) WriteFile(ctx context.Context, path string, data []byte) error {
-	dir, tmp := gopath.Dir(path), sandbox.TempName()
-	tarball, err := tarFile(tmp, data)
+	tmp, err := sandbox.WriteTempPath(path)
+	if err != nil {
+		return err
+	}
+	dir := gopath.Dir(tmp)
+	tarball, err := tarFile(gopath.Base(tmp), data)
 	if err != nil {
 		return err
 	}
@@ -1421,8 +1425,8 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 			// mid-transfer left a piece of the entry behind; shed it on the way out
 			// rather than let the directory keep it. Nothing is in flight here, so
 			// the daemon can also take back what the sandbox user's rm could not.
-			c.discard(ctx, gopath.Join(dir, tmp))
-			c.reclaim(ctx, gopath.Join(dir, tmp))
+			c.discard(ctx, tmp)
+			c.reclaim(ctx, tmp)
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
@@ -1430,7 +1434,6 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 	if containerGone(err) {
 		return c.gone()
 	}
-	tmp = gopath.Join(dir, tmp)
 	if err != nil {
 		// Whatever of the entry landed is nobody's file; the stream path sheds its
 		// residue the same way.
@@ -1461,14 +1464,17 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 	if err := sandbox.CheckWriteSize(size); err != nil {
 		return fmt.Errorf("docker: write %s: %w", path, err)
 	}
-	dir := gopath.Dir(path)
+	tmp, err := sandbox.WriteTempPath(path)
+	if err != nil {
+		return err
+	}
+	dir := gopath.Dir(tmp)
 	if err := c.mkdirAll(ctx, dir); err != nil {
 		return err
 	}
-	tmp := gopath.Join(dir, sandbox.TempName())
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(streamTarFile(pw, gopath.Base(tmp), src, size)) }()
-	err := c.api.putArchive(ctx, c.id, dir, pr)
+	err = c.api.putArchive(ctx, c.id, dir, pr)
 	if containerGone(err) {
 		return c.gone()
 	}
@@ -1922,7 +1928,10 @@ func (c *container) unreplaceable(ctx context.Context, path string) error {
 // (#860), and a status the startup chose by ending the shell first is no
 // refusal (#942).
 func (c *container) notWritable(ctx context.Context, path string) error {
-	probe := gopath.Join(gopath.Dir(path), sandbox.TempName())
+	probe, err := sandbox.WriteTempPath(path)
+	if err != nil {
+		return nil
+	}
 	res, err := sandbox.ExecStatus(ctx, c, "writable", "the writability probe of "+path, sandbox.ExecRequest{Command: fmt.Sprintf(
 		"export LC_ALL=C\nmsg=$({ : > %[1]s; } 2>&1) || { printf '%%s' \"${msg##*: }\"; exit %[2]d; }\nrm -f %[1]s\nexit 0",
 		shellQuote(probe), sandbox.ExitPathNotWritable)})

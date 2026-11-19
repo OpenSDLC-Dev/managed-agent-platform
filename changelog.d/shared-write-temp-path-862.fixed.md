@@ -1,0 +1,1 @@
+- **Shared temporary path checks for sandbox writes** — Docker and Kubernetes generate and validate single-file temporary paths with the same rule as the file tools. Both backends refuse an overlong temporary path before creating directories, reading a stream, or transferring file data (#862).
