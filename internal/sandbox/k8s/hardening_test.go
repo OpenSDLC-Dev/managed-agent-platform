@@ -241,11 +241,11 @@ func TestGateSidecarAppliesIndependentResourceLimits(t *testing.T) {
 		if got := c.Resources.Requests.Cpu().MilliValue(); got != gateCPURequestFloorMillis {
 			t.Errorf("cpu request = %dm, want %dm", got, gateCPURequestFloorMillis)
 		}
-		if got := c.Resources.Limits.StorageEphemeral().Value(); got != sandbox.DefaultGateEphemeralStorageBytes {
-			t.Errorf("ephemeral-storage limit = %d, want %d", got, sandbox.DefaultGateEphemeralStorageBytes)
+		if _, set := c.Resources.Limits[corev1.ResourceEphemeralStorage]; set {
+			t.Errorf("ephemeral-storage limit unexpectedly set by default: %v", c.Resources.Limits[corev1.ResourceEphemeralStorage])
 		}
-		if got := c.Resources.Requests.StorageEphemeral().Value(); got != sandbox.DefaultGateEphemeralStorageBytes {
-			t.Errorf("ephemeral-storage request = %d, want %d", got, sandbox.DefaultGateEphemeralStorageBytes)
+		if _, set := c.Resources.Requests[corev1.ResourceEphemeralStorage]; set {
+			t.Errorf("ephemeral-storage request unexpectedly set by default: %v", c.Resources.Requests[corev1.ResourceEphemeralStorage])
 		}
 	})
 

@@ -1,6 +1,7 @@
 package egress_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -259,24 +260,35 @@ func TestEngineSubstituteBounded(t *testing.T) {
 		Body:        true,
 	}})
 
-	// Exact fit succeeds.
-	out, unr, exceeded := e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 12)
-	if exceeded || len(unr) != 0 || out != "x=0123456789" {
-		t.Fatalf("exact fit = (%q, %v, %v), want (x=0123456789, nil, false)", out, unr, exceeded)
+	// Exact fit succeeds and reserves only incremental growth past prepaid.
+	var reserved int64
+	out, unr, err := e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 12, 9, func(extra int64) bool {
+		reserved += extra
+		return true
+	})
+	if err != nil || len(unr) != 0 || out != "x=0123456789" || reserved != 3 {
+		t.Fatalf("exact fit = (%q, %v, %v, reserved=%d), want (x=0123456789, nil, nil, 3)", out, unr, err, reserved)
 	}
-	// One byte over aborts before returning the expanded string.
-	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 11)
-	if !exceeded || out != "" {
-		t.Fatalf("over limit = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	// One byte over maxBytes returns ErrOutputTooLarge before allocating past the cap.
+	out, _, err = e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 11, 9, nil)
+	if !errors.Is(err, egress.ErrOutputTooLarge) || out != "" {
+		t.Fatalf("over limit = (%q, %v), want (\"\", ErrOutputTooLarge)", out, err)
+	}
+	// Shared budget denial aborts incrementally before allocating full expansion.
+	out, _, err = e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 100, 9, func(extra int64) bool {
+		return false
+	})
+	if !errors.Is(err, egress.ErrOutputBudgetDenied) || out != "" {
+		t.Fatalf("budget denied = (%q, %v), want (\"\", ErrOutputBudgetDenied)", out, err)
 	}
 	// Repeated placeholder bomb stops cleanly.
-	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, strings.Repeat("vltph_a", 100), 50)
-	if !exceeded || out != "" {
-		t.Fatalf("placeholder bomb = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	out, _, err = e.SubstituteBounded("api.example.com", egress.LocationBody, strings.Repeat("vltph_a", 100), 50, 0, nil)
+	if !errors.Is(err, egress.ErrOutputTooLarge) || out != "" {
+		t.Fatalf("placeholder bomb = (%q, %v), want (\"\", ErrOutputTooLarge)", out, err)
 	}
 	// No substitutions still honors maxBytes.
-	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, "plain-text", 5)
-	if !exceeded || out != "" {
-		t.Fatalf("unmatched over limit = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	out, _, err = e.SubstituteBounded("api.example.com", egress.LocationBody, "plain-text", 5, 0, nil)
+	if !errors.Is(err, egress.ErrOutputTooLarge) || out != "" {
+		t.Fatalf("unmatched over limit = (%q, %v), want (\"\", ErrOutputTooLarge)", out, err)
 	}
 }

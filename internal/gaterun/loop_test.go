@@ -118,6 +118,8 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 	// hitting the newly swapped gate must observe 503 until the first finishes.
 	reqInFlight := make(chan struct{}, 1)
 	releaseOrigin := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseOrigin) }) }
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/hold" {
 			reqInFlight <- struct{}{}
@@ -126,6 +128,7 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer origin.Close()
+	defer release()
 	originURL, err := url.Parse(origin.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -146,19 +149,28 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
 
 	// Start request 1 on the initial gate and hold it at the origin.
-	var wg sync.WaitGroup
-	wg.Add(1)
+	reqDone := make(chan error, 1)
 	go func() {
-		defer wg.Done()
 		resp, err := client.Get(origin.URL + "/hold")
 		if err != nil {
-			t.Errorf("in-flight request: %v", err)
+			reqDone <- err
 			return
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			reqDone <- errors.New("unexpected status from initial held request")
+			return
+		}
+		reqDone <- nil
 	}()
-	<-reqInFlight
+	select {
+	case <-reqInFlight:
+	case err := <-reqDone:
+		t.Fatalf("initial request exited before reaching origin: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial request to reach origin")
+	}
 
 	// Now swap in a newly fetched gate while request 1 still holds the 1 slot.
 	// Fetch 1 runs only after fetch 0's handler.Swap has completed.
@@ -173,13 +185,12 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 		}, nil
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- gaterun.RunFetchLoop(ctx, f, h, time.Millisecond) }()
 	select {
 	case <-swapped:
 	case <-time.After(2 * time.Second):
-		cancel()
-		close(releaseOrigin)
 		t.Fatal("loop never swapped")
 	}
 
@@ -187,28 +198,24 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 	// gate: because they share one Limiter, it must be rejected with 503.
 	overResp, err := client.Get(origin.URL + "/fast")
 	if err != nil {
-		cancel()
-		close(releaseOrigin)
 		t.Fatal(err)
 	}
 	overResp.Body.Close()
 	if overResp.StatusCode != http.StatusServiceUnavailable {
-		cancel()
-		close(releaseOrigin)
 		t.Fatalf("request after swap while 1 slot held: status = %d, want 503", overResp.StatusCode)
 	}
 
 	// Releasing request 1 frees the shared slot so request 3 succeeds on the swapped gate.
-	close(releaseOrigin)
-	wg.Wait()
+	release()
+	if err := <-reqDone; err != nil {
+		t.Fatalf("initial request failed: %v", err)
+	}
 	okResp, err := client.Get(origin.URL + "/fast")
 	if err != nil {
-		cancel()
 		t.Fatal(err)
 	}
 	okResp.Body.Close()
 	if okResp.StatusCode != http.StatusOK {
-		cancel()
 		t.Fatalf("request after release on swapped gate: status = %d, want 200", okResp.StatusCode)
 	}
 

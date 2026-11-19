@@ -259,18 +259,21 @@ type Spec struct {
 // Default resource limits applied to every egress-gate sidecar container
 // independently of the sandbox's own Hardening caps (plan 70 slice 2). The
 // gate buffers plain-HTTP bodies outside the sandbox's cgroup, so it always
-// receives explicit bounds on memory, CPU, PIDs (Docker), and ephemeral
-// storage (Kubernetes).
+// receives explicit bounds on memory, CPU, and PIDs (Docker). Kubernetes
+// ephemeral storage is intentionally opt-in (0 by default) because Kubernetes
+// folds restartable init-container ephemeral-storage limits into PodLimits,
+// which would otherwise cap an unbounded sandbox's own disk usage.
 const (
-	DefaultGateMemoryBytes           int64 = 256 << 20 // 256 MiB
-	DefaultGateCPUMillis             int64 = 500       // 0.5 CPU
-	DefaultGatePidsLimit             int64 = 128
-	DefaultGateEphemeralStorageBytes int64 = 64 << 20 // 64 MiB
+	DefaultGateMemoryBytes int64 = 256 << 20 // 256 MiB
+	DefaultGateCPUMillis   int64 = 500       // 0.5 CPU
+	DefaultGatePidsLimit   int64 = 128
 )
 
 // GateResources configures the resource limits for a session's egress-gate
-// container. Non-positive fields select the corresponding DefaultGate* value
-// so a gate container is never provisioned unbounded.
+// container. Non-positive MemoryBytes, CPUMillis, and PidsLimit select the
+// corresponding DefaultGate* value so a gate container is never provisioned
+// without memory/CPU/PID bounds. EphemeralStorageBytes is applied on
+// Kubernetes only when positive.
 type GateResources struct {
 	MemoryBytes           int64
 	CPUMillis             int64
@@ -278,8 +281,9 @@ type GateResources struct {
 	EphemeralStorageBytes int64
 }
 
-// Effective returns r with any non-positive field filled from the platform
-// defaults and CPUMillis capped so NanoCpus conversion cannot overflow int64.
+// Effective returns r with any non-positive MemoryBytes, CPUMillis, or
+// PidsLimit filled from the platform defaults and CPUMillis capped so NanoCpus
+// conversion cannot overflow int64. EphemeralStorageBytes stays 0 when unset.
 func (r GateResources) Effective() GateResources {
 	if r.MemoryBytes <= 0 {
 		r.MemoryBytes = DefaultGateMemoryBytes
@@ -292,8 +296,8 @@ func (r GateResources) Effective() GateResources {
 	if r.PidsLimit <= 0 {
 		r.PidsLimit = DefaultGatePidsLimit
 	}
-	if r.EphemeralStorageBytes <= 0 {
-		r.EphemeralStorageBytes = DefaultGateEphemeralStorageBytes
+	if r.EphemeralStorageBytes < 0 {
+		r.EphemeralStorageBytes = 0
 	}
 	return r
 }

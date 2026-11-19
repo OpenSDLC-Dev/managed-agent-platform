@@ -65,6 +65,14 @@ const dialTimeout = 10 * time.Second
 // budgets indefinitely.
 const defaultBodyReadTimeout = 30 * time.Second
 
+// defaultUploadTimeout bounds the outbound RoundTrip phase (writing the
+// substituted request body plus receiving response headers) when
+// Config.UploadTimeout is unset, so an origin that stops reading a request body
+// cannot pin concurrency slots and body-buffer reservations indefinitely. The
+// timer is stopped as soon as RoundTrip returns, so slow-streaming response
+// downloads are unaffected.
+const defaultUploadTimeout = 60 * time.Second
+
 // errBodyTooLarge signals a request body over the substitution size limit; the
 // handler maps it to 413 rather than the generic read-failure 502.
 var errBodyTooLarge = errors.New("request body exceeds the gate substitution limit")
@@ -121,6 +129,12 @@ type Config struct {
 	// sending its request body into the substitution buffer. Zero selects
 	// defaultBodyReadTimeout.
 	BodyReadTimeout time.Duration
+	// UploadTimeout bounds the outbound RoundTrip phase (writing the request
+	// body plus receiving response headers) so a stalled origin cannot hold
+	// shared buffer and request budgets indefinitely. Stopped once RoundTrip
+	// returns so slow-streaming responses continue unimpeded. Zero selects
+	// defaultUploadTimeout.
+	UploadTimeout time.Duration
 	// Limiter shares concurrency and aggregate body-buffer budgets across
 	// swapped Gate instances (gaterun.SwappableHandler). When nil, New builds
 	// a Limiter from MaxConcurrentRequests, MaxConcurrentTunnels, and
@@ -150,6 +164,7 @@ type Gate struct {
 	maxBody       int64
 	tunnelIdle    time.Duration
 	bodyRead      time.Duration
+	uploadTimeout time.Duration
 	limiter       *Limiter
 }
 
@@ -306,6 +321,10 @@ func New(cfg Config) *Gate {
 	if bodyRead <= 0 {
 		bodyRead = defaultBodyReadTimeout
 	}
+	uploadTimeout := cfg.UploadTimeout
+	if uploadTimeout <= 0 {
+		uploadTimeout = defaultUploadTimeout
+	}
 	limiter := cfg.Limiter
 	if limiter == nil {
 		limiter = NewLimiter(LimitConfig{
@@ -323,6 +342,7 @@ func New(cfg Config) *Gate {
 		maxBody:       maxBody,
 		tunnelIdle:    tunnelIdle,
 		bodyRead:      bodyRead,
+		uploadTimeout: uploadTimeout,
 		limiter:       limiter,
 	}
 }
@@ -582,8 +602,9 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := withAdmission(r.Context(), how)
-	out := r.Clone(ctx)
+	reqCtx, cancelReq := context.WithCancel(withAdmission(r.Context(), how))
+	defer cancelReq()
+	out := r.Clone(reqCtx)
 	out.RequestURI = "" // must be empty on a client request
 	unreachable := map[string]struct{}{}
 	g.substituteHeaders(host, out.Header, unreachable)
@@ -612,15 +633,28 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	if g.bodyRead > 0 {
 		_ = rc.SetReadDeadline(time.Time{})
 	}
-	defer releaseBody()
+	// Once out.Body is handed to RoundTrip, budgetBody.Close owns dropping the
+	// backing string and releasing the Limiter bytes when the transport finishes
+	// consuming/closing the upload. Only release directly if we unwind before
+	// RoundTrip is called.
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			releaseBody()
+		}
+	}()
 	removeHopByHop(out.Header)
 	g.report(host, unreachable)
 
+	dispatched = true
+	var uploadTimer *time.Timer
+	if g.uploadTimeout > 0 {
+		uploadTimer = time.AfterFunc(g.uploadTimeout, cancelReq)
+	}
 	resp, err := g.transport.RoundTrip(out)
-	// Release the request-body buffer budget as soon as RoundTrip completes so
-	// slow-streaming responses never keep pinning request buffer capacity.
-	out.Body = nil
-	releaseBody()
+	if uploadTimer != nil {
+		uploadTimer.Stop()
+	}
 	if err != nil {
 		refusedOrUnreachable(w, err)
 		return
@@ -656,12 +690,47 @@ func (g *Gate) substituteHeaders(host string, h http.Header, unreachable map[str
 	}
 }
 
+// budgetBody wraps a substituted plain-HTTP request body so the backing string
+// reference and its Limiter byte reservation stay live until http.Transport
+// closes the body after finishing the upload — freeing memory and budget before
+// a slow-streaming response ends while preventing premature reuse if an origin
+// sends an early response before the upload finishes (plan 70 slice 2).
+type budgetBody struct {
+	mu      sync.Mutex
+	r       *strings.Reader
+	release func()
+}
+
+func (b *budgetBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	r := b.r
+	b.mu.Unlock()
+	if r == nil {
+		return 0, io.EOF
+	}
+	return r.Read(p)
+}
+
+func (b *budgetBody) Close() error {
+	b.mu.Lock()
+	b.r = nil
+	rel := b.release
+	b.release = nil
+	b.mu.Unlock()
+	if rel != nil {
+		rel()
+	}
+	return nil
+}
+
 // substituteBody rewrites the request body in the body location. Phase 1 buffers
 // the whole body: the placeholder is a small token and the body must be a single
 // string for substitution; a streaming pass is a later refinement. Buffering is
 // bounded both per request (maxBody → 413) and in aggregate across concurrent
-// requests (g.limiter → 503), acquiring bytes incrementally as they arrive and
-// releasing them when the returned cleanup runs (plan 70 slice 2).
+// requests (g.limiter → 503), acquiring bytes incrementally as they arrive (and
+// incrementally as substitution expands) and releasing them when the outbound
+// budgetBody closes (plan 70 slice 2). For chunked bodies without a declared
+// Content-Length, the first limit hit as bytes arrive wins.
 func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[string]struct{}) (release func(), err error) {
 	noop := func() {}
 	if r.Body == nil || r.Body == http.NoBody {
@@ -693,20 +762,22 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 	}()
 
 	const chunkSize int64 = 32 << 10
-	buf := make([]byte, min(chunkSize, g.maxBody+1))
+	buf := make([]byte, min(chunkSize, g.maxBody))
 	var totalRead int64
 	for {
-		rem := g.maxBody + 1 - totalRead
+		rem := g.maxBody - totalRead
 		readBuf := buf
-		if int64(len(readBuf)) > rem {
+		if rem == 0 {
+			readBuf = buf[:1] // one-byte probe for an extra byte without g.maxBody+1 overflow
+		} else if int64(len(readBuf)) > rem {
 			readBuf = readBuf[:rem]
 		}
 		n, rerr := r.Body.Read(readBuf)
 		if n > 0 {
-			totalRead += int64(n)
-			if totalRead > g.maxBody {
+			if int64(n) > rem {
 				return noop, errBodyTooLarge
 			}
+			totalRead += int64(n)
 			if !g.limiter.acquireBodyBytes(int64(n)) {
 				return noop, errBodyBudgetExhausted
 			}
@@ -722,19 +793,18 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 		}
 	}
 
-	// Bound the substituted output BEFORE allocating so a body packed with
-	// placeholders expanding to a larger secret cannot blow past MaxBodyBytes
-	// or the remaining aggregate body-buffer budget.
-	free := g.limiter.freeBodyBytes()
-	budgetCap := g.maxBody
-	budgetBound := false
-	if free < g.maxBody-acquired {
-		budgetCap = acquired + free
-		budgetBound = true
-	}
-	out, unr, exceeded := g.engine.SubstituteBounded(host, egress.LocationBody, raw.String(), budgetCap)
-	if exceeded {
-		if budgetBound {
+	// Reserve any substitution growth atomically inside the bounded writer
+	// BEFORE strings.Builder allocates, so concurrent expanding substitutions
+	// cannot race past the aggregate memory budget.
+	out, unr, serr := g.engine.SubstituteBounded(host, egress.LocationBody, raw.String(), g.maxBody, acquired, func(extra int64) bool {
+		if !g.limiter.acquireBodyBytes(extra) {
+			return false
+		}
+		acquired += extra
+		return true
+	})
+	if serr != nil {
+		if errors.Is(serr, egress.ErrOutputBudgetDenied) {
 			return noop, errBodyBudgetExhausted
 		}
 		return noop, errBodyTooLarge
@@ -743,21 +813,17 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 		unreachable[c.Placeholder] = struct{}{}
 	}
 	finalBytes := int64(len(out))
-	if delta := finalBytes - acquired; delta > 0 {
-		if !g.limiter.acquireBodyBytes(delta) {
-			return noop, errBodyBudgetExhausted
-		}
-		acquired = finalBytes
-	} else if delta < 0 {
-		g.limiter.releaseBodyBytes(-delta)
+	if finalBytes < acquired {
+		g.limiter.releaseBodyBytes(acquired - finalBytes)
 		acquired = finalBytes
 	}
-	r.Body = io.NopCloser(strings.NewReader(out))
+	var once sync.Once
+	rel := func() { once.Do(releaseAll) }
+	r.Body = &budgetBody{r: strings.NewReader(out), release: rel}
 	r.ContentLength = finalBytes
 	r.Header.Set("Content-Length", strconv.FormatInt(finalBytes, 10))
 	committed = true
-	var once sync.Once
-	return func() { once.Do(releaseAll) }, nil
+	return rel, nil
 }
 
 func (g *Gate) report(host string, unreachable map[string]struct{}) {
