@@ -56,10 +56,9 @@ alike — is refused rather than guessed at, by `absolutizeLinks` and
 fine, and a link-reference definition (`[label]: docs/…`) follows the same
 rules as an inline target.
 
-**A bad form now fails the tagged release run**, not merely a later archive:
-`changelog-notes` is the first thing `release.yml` renders after the tag is
-pushed, and the tag is immutable. It is worth a glance before the fragment
-lands — nothing before the tag checks link forms.
+**Fragment loading checks release-notes link forms.** CI runs the loader
+against `changelog.d/`, so an unsupported link form fails the PR that adds it.
+The error names the fragment and the link target.
 
 At release time `make changelog VERSION=X.Y.Z` folds every fragment into a
 dated CHANGELOG.md section (groups in Keep-a-Changelog order, entries

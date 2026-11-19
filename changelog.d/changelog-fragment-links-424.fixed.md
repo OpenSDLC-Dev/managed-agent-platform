@@ -1,0 +1,1 @@
+- **Changelog fragment link validation** — Fragment loading checks that relative links can be rewritten for release notes. CI reports unsupported targets with the fragment name before the PR merges (#424).
