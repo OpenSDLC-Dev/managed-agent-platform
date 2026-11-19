@@ -442,3 +442,91 @@ func TestCredentialsNilCipher(t *testing.T) {
 		t.Fatalf("querier called %d times for empty vaultIDs, want 0", cq.calls)
 	}
 }
+
+func TestCredentialsDestinationBinding(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	cipher := testCipher(t)
+	sess := domain.NewID("sesn").String()
+
+	sealBound := func(secretValue string, unrestricted bool, hosts []string) ([]byte, string) {
+		t.Helper()
+		sealed, err := json.Marshal(map[string]string{
+			"secret_value":                     secretValue,
+			egress.SealedApprovedNetworkingKey: egress.NetworkingBindingDigest(unrestricted, hosts),
+		})
+		if err != nil {
+			t.Fatalf("marshal sealed: %v", err)
+		}
+		ct, keyID, err := cipher.Encrypt(ctx, sealed)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		return ct, keyID
+	}
+
+	t.Run("bound credential resolves when auth matches canonically", func(t *testing.T) {
+		v := newVault(t, pool, false)
+		ct, keyID := sealBound("s3cr3t-ok", false, []string{"api.example.com", "*.sub.example.com"})
+		// Reordered and different casing in auth JSON still matches the canonical digest.
+		insertEnvCred(t, pool, v, "BOUND_OK",
+			`{"type":"limited","allowed_hosts":["*.SUB.EXAMPLE.COM","API.example.com"]}`,
+			true, false, ct, keyID)
+
+		got, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+		if err != nil {
+			t.Fatalf("Credentials: %v", err)
+		}
+		if len(got) != 1 || got[0].Secret != "s3cr3t-ok" {
+			t.Fatalf("got %+v, want 1 credential with s3cr3t-ok", got)
+		}
+	})
+
+	t.Run("tampered auth networking fails closed without leaking secret", func(t *testing.T) {
+		v := newVault(t, pool, false)
+		const secret = "s3cr3t-must-not-leak"
+		ct, keyID := sealBound(secret, false, []string{"api.example.com"})
+		id := insertEnvCred(t, pool, v, "TAMPERED",
+			`{"type":"limited","allowed_hosts":["api.example.com","attacker.example.com"]}`,
+			true, true, ct, keyID)
+
+		_, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+		if err == nil {
+			t.Fatal("expected error for tampered destination binding, got nil")
+		}
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error %q must name credential id %q", err, id)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error %q leaked plaintext secret", err)
+		}
+	})
+
+	t.Run("tampered switch to unrestricted fails closed", func(t *testing.T) {
+		v := newVault(t, pool, false)
+		ct, keyID := sealBound("s3cr3t-limited", false, []string{"api.example.com"})
+		id := insertEnvCred(t, pool, v, "TAMPERED_UNREST", `{"type":"unrestricted"}`, true, true, ct, keyID)
+
+		_, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+		if err == nil {
+			t.Fatal("expected error for limited-to-unrestricted tampering, got nil")
+		}
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("error %q must name credential id %q", err, id)
+		}
+	})
+
+	t.Run("legacy credential without binding digest still resolves", func(t *testing.T) {
+		v := newVault(t, pool, false)
+		newSealedEnvCred(t, pool, cipher, v, "LEGACY", "s3cr3t-legacy",
+			`{"type":"limited","allowed_hosts":["api.example.com"]}`, true, true)
+
+		got, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+		if err != nil {
+			t.Fatalf("legacy Credentials: %v", err)
+		}
+		if len(got) != 1 || got[0].Secret != "s3cr3t-legacy" {
+			t.Fatalf("got %+v, want legacy credential", got)
+		}
+	})
+}

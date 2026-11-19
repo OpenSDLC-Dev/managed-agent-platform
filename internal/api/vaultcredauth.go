@@ -285,7 +285,7 @@ func parseEnvVarCreate(obj map[string]json.RawMessage) (*credAuth, error) {
 	if err != nil {
 		return nil, err
 	}
-	networking, err := parseCredNetworking(obj["networking"])
+	networking, unrestricted, hosts, err := parseCredNetworking(obj["networking"])
 	if err != nil {
 		return nil, err
 	}
@@ -310,8 +310,15 @@ func parseEnvVarCreate(obj map[string]json.RawMessage) (*credAuth, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &credAuth{authType: authEnvVar, doc: doc,
-		secrets: map[string]string{"secret_value": secretValue}, key: "name:" + secretName}, nil
+	return &credAuth{
+		authType: authEnvVar,
+		doc:      doc,
+		secrets: map[string]string{
+			"secret_value":                     secretValue,
+			egress.SealedApprovedNetworkingKey: egress.NetworkingBindingDigest(unrestricted, hosts),
+		},
+		key: "name:" + secretName,
+	}, nil
 }
 
 func parseInjectionLocationFields(obj map[string]json.RawMessage, loc *injectionLocationJSON) error {
@@ -339,15 +346,15 @@ func parseInjectionLocationFields(obj map[string]json.RawMessage, loc *injection
 }
 
 // parseCredNetworking validates the networking union and returns its
-// normalized wire form. Update semantics are full replacement, so create and
-// update share this parser.
-func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
+// normalized wire form alongside the parsed arm and host list. Update
+// semantics are full replacement, so create and update share this parser.
+func parseCredNetworking(raw json.RawMessage) (encoded json.RawMessage, unrestricted bool, allowedHosts []string, err error) {
 	if raw == nil || isNull(raw) {
-		return nil, errInvalid("auth.networking is required")
+		return nil, false, nil, errInvalid("auth.networking is required")
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
-		return nil, errInvalid("networking must be an object")
+		return nil, false, nil, errInvalid("networking must be an object")
 	}
 	var typ string
 	if rawType, ok := obj["type"]; ok {
@@ -356,27 +363,27 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 	switch typ {
 	case "unrestricted":
 		if err := rejectUnknownKeys(obj, "type"); err != nil {
-			return nil, err
+			return nil, false, nil, err
 		}
-		return json.RawMessage(`{"type":"unrestricted"}`), nil
+		return json.RawMessage(`{"type":"unrestricted"}`), true, nil, nil
 	case "limited":
 		if err := rejectUnknownKeys(obj, "type", "allowed_hosts"); err != nil {
-			return nil, err
+			return nil, false, nil, err
 		}
 		hosts := []string{}
 		if rawHosts, ok := obj["allowed_hosts"]; ok && !isNull(rawHosts) {
 			if err := json.Unmarshal(rawHosts, &hosts); err != nil {
-				return nil, errInvalid("allowed_hosts must be a list of hostnames")
+				return nil, false, nil, errInvalid("allowed_hosts must be a list of hostnames")
 			}
 		}
 		// The SDK marks allowed_hosts required on the limited variant (omitzero
 		// drops an empty list), so an omitted/null/empty list is a 400 rather
 		// than a silently-accepted no-op.
 		if len(hosts) == 0 {
-			return nil, errInvalid("limited networking requires a non-empty allowed_hosts")
+			return nil, false, nil, errInvalid("limited networking requires a non-empty allowed_hosts")
 		}
 		if len(hosts) > credentialAllowedHosts {
-			return nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
+			return nil, false, nil, errInvalid("allowed_hosts cannot exceed %d entries", credentialAllowedHosts)
 		}
 		for i, h := range hosts {
 			// Recorded 2026-11-07 on create (managed-agents-wire-recordings
@@ -390,16 +397,20 @@ func parseCredNetworking(raw json.RawMessage) (json.RawMessage, error) {
 					"and not starting or ending with a hyphen, for example api.example.com or *.example.com", i)
 			})
 			if err != nil {
-				return nil, err
+				return nil, false, nil, err
 			}
 			hosts[i] = e
 		}
-		return json.Marshal(struct {
+		encoded, err := json.Marshal(struct {
 			Type         string   `json:"type"`
 			AllowedHosts []string `json:"allowed_hosts"`
 		}{"limited", hosts})
+		if err != nil {
+			return nil, false, nil, err
+		}
+		return encoded, false, hosts, nil
 	default:
-		return nil, errInvalid(`networking.type must be "unrestricted" or "limited"`)
+		return nil, false, nil, errInvalid(`networking.type must be "unrestricted" or "limited"`)
 	}
 }
 
@@ -630,6 +641,24 @@ func applyMCPOAuthUpdate(obj map[string]json.RawMessage, existingDoc []byte, sec
 	return json.Marshal(doc)
 }
 
+func credNetworkingSummary(raw json.RawMessage) (unrestricted bool, allowedHosts []string, err error) {
+	var netDoc struct {
+		Type         string   `json:"type"`
+		AllowedHosts []string `json:"allowed_hosts"`
+	}
+	if err := json.Unmarshal(raw, &netDoc); err != nil {
+		return false, nil, errInvalid("networking must be an object")
+	}
+	switch netDoc.Type {
+	case "unrestricted":
+		return true, nil, nil
+	case "limited":
+		return false, netDoc.AllowedHosts, nil
+	default:
+		return false, nil, errInvalid(`networking.type must be "unrestricted" or "limited"`)
+	}
+}
+
 func applyEnvVarUpdate(obj map[string]json.RawMessage, existingDoc []byte, secrets map[string]string) ([]byte, error) {
 	if err := rejectUnknownKeys(obj, "type", "secret_value", "networking", "injection_location"); err != nil {
 		return nil, err
@@ -638,6 +667,11 @@ func applyEnvVarUpdate(obj map[string]json.RawMessage, existingDoc []byte, secre
 	if err := json.Unmarshal(existingDoc, &doc); err != nil {
 		return nil, err
 	}
+	oldUnrestricted, oldHosts, err := credNetworkingSummary(doc.Networking)
+	if err != nil {
+		return nil, err
+	}
+	secretReplaced := false
 	if val, set, null, err := stringField(obj, "secret_value"); err != nil {
 		return nil, err
 	} else if set {
@@ -645,14 +679,37 @@ func applyEnvVarUpdate(obj map[string]json.RawMessage, existingDoc []byte, secre
 			return nil, errInvalid("secret_value cannot be cleared")
 		}
 		secrets["secret_value"] = val
+		secretReplaced = true
 	}
+	var nextNetworking json.RawMessage
+	var nextUnrestricted bool
+	var nextHosts []string
+	hasNetworking := false
 	if raw, ok := obj["networking"]; ok {
-		// Full replacement, per the docs.
-		networking, err := parseCredNetworking(raw)
+		// Full replacement, per the docs. Parse first so malformed hostnames
+		// keep their recorded validation errors before destination-binding checks.
+		networking, unrestricted, hosts, err := parseCredNetworking(raw)
 		if err != nil {
 			return nil, err
 		}
-		doc.Networking = networking
+		nextNetworking, nextUnrestricted, nextHosts, hasNetworking = networking, unrestricted, hosts, true
+	}
+	// Preserving an existing secret must never widen where it can be sent
+	// (plan 70 slice 1). Verify any sealed binding first so an out-of-band DB
+	// edit cannot act as a wider baseline, then require new secret_value for
+	// any destination expansion.
+	if !secretReplaced {
+		if bound := secrets[egress.SealedApprovedNetworkingKey]; bound != "" &&
+			bound != egress.NetworkingBindingDigest(oldUnrestricted, oldHosts) {
+			return nil, errInvalid("auth.networking: stored destination policy does not match sealed secret; supply secret_value to rebind")
+		}
+		if hasNetworking && !egress.NetworkingCovers(oldUnrestricted, oldHosts, nextUnrestricted, nextHosts) {
+			return nil, errInvalid("auth.networking: expanding destinations requires supplying secret_value")
+		}
+	}
+	if hasNetworking {
+		doc.Networking = nextNetworking
+		oldUnrestricted, oldHosts = nextUnrestricted, nextHosts
 	}
 	// Update merges injection_location field by field (the create-time
 	// defaults-to-false rule is create-only).
@@ -666,5 +723,6 @@ func applyEnvVarUpdate(obj map[string]json.RawMessage, existingDoc []byte, secre
 			return nil, errInvalid("injection_location must enable at least one of body or header")
 		}
 	}
+	secrets[egress.SealedApprovedNetworkingKey] = egress.NetworkingBindingDigest(oldUnrestricted, oldHosts)
 	return json.Marshal(doc)
 }
