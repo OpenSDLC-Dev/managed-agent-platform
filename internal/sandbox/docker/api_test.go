@@ -1235,16 +1235,18 @@ func TestWriteFileCreatesParentsOnlyWhenNeeded(t *testing.T) {
 	if !strings.Contains(commands[0], "mkdir -p '/workspace/a/b'") {
 		t.Errorf("first exec = %q, want the mkdir the 404 asked for", commands[0])
 	}
-	if !strings.Contains(commands[1], "mv -f '/workspace/a/b/"+sandbox.TempPrefix) ||
-		!strings.Contains(commands[1], "'/workspace/a/b/f.txt'") {
-		t.Errorf("second exec = %q, want the temporary file renamed onto the target", commands[1])
+	rename := commands[1]
+	if !strings.Contains(rename, "set -- '/workspace/a/b/"+sandbox.TempPrefix) ||
+		!strings.Contains(rename, " '/workspace/a/b/f.txt'\n") ||
+		!strings.Contains(rename, `mv -f "$1" "$2"`) {
+		t.Errorf("second exec = %q, want the temporary file renamed onto the target", rename)
 	}
 	// Asked before the move and again after it. The race between them cannot be
 	// staged from here — this backend's script runs in a container — so what is
 	// pinned is that the script the daemon is handed asks twice; the k8s script
 	// test stages the outcome itself, against a shimmed `mv`.
-	if n := strings.Count(commands[1], "[ -d "); n != 2 {
-		t.Errorf("the rename asks whether the target is a directory %d times, want 2: %q", n, commands[1])
+	if n := strings.Count(rename, "[ -d "); n != 2 {
+		t.Errorf("the rename asks whether the target is a directory %d times, want 2: %q", n, rename)
 	}
 }
 

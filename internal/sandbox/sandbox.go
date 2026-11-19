@@ -393,9 +393,7 @@ type ExecRequest struct {
 // every backend's Exec refuses a Command past it before anything runs, with a
 // *CommandTooLongError (CheckCommand). The toolset answers that refusal with a
 // tool error — naming what the model can shorten where its input made the
-// command long (glob's and grep's searches carry its pattern and path, a file
-// primitive's commands its path, which a path within Linux's bounds does not
-// keep short: Docker's rename quotes it into its script eleven times), and
+// command long (glob's and grep's searches carry its pattern and path), and
 // the platform otherwise — and the package-install pass, whose command grows
 // with a client's list, refuses one past the bound itself, terminally and
 // before its probe, as it refuses an invalid entry.

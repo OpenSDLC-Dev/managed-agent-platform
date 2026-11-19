@@ -173,11 +173,6 @@ const (
 // would fit — where both backends answered the target's own "file name too
 // long" (measured, #827). A read lands nothing, and reads any path within the
 // bounds.
-//
-// The bounds are Linux's, not the commands': a backend that builds a command
-// around the path can still make one past sandbox.MaxCommandBytes from a path
-// within them — Docker's rename quotes it into its script eleven times — and
-// fileFault answers that.
 func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
 	if n := len(resolved); n > maxPathBytes {
 		res, _ := failf("%s: file name too long: the file_path resolves to a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
@@ -203,14 +198,10 @@ func pathTooLong(verb, resolved string, lands bool) (Result, bool) {
 // fileFault classifies a sandbox file error. The sentinels describe the file the
 // model asked for — it can read a different one, or make the one it wanted — so
 // they are tool results. So is a command the backend refused as too long to
-// run (sandbox.CommandTooLongError): what grows in a file primitive's commands
-// is the path, which the model chose, and Linux's bounds (pathTooLong) do not
-// bound them — Docker's rename quotes the path into its script eleven times,
-// and quoting makes each `'` in it four bytes, so a 4095-byte path of quotes
-// made a 175,336-byte command (measured, #827). Anything else is the sandbox
-// itself failing, and that is the executor's to handle. The path in the
-// message is the one the model used, not the resolved one: it is the name the
-// model can act on.
+// run (sandbox.CommandTooLongError) when its size depends on the path the model
+// chose. Anything else is the sandbox itself failing, and that is the
+// executor's to handle. The message uses the path the model supplied so it
+// can act on the error.
 //
 // The distinction is not cosmetic: a fault left unclassified reaches the executor,
 // which stops the tool set and abandons the work item to lease reclaim — so the

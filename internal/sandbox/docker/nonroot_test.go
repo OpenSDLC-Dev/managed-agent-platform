@@ -315,13 +315,10 @@ RUN q=$(printf '%255s' '' | tr ' ' "'") && d=/srv && for i in $(seq 15); do d="$
 USER app
 `
 
-// A write whose rename the sandbox refused as too long to run — a path of
-// quotes, which the rename script quotes eleven times — never ran its script,
-// so no `mv` can be in flight and the daemon can take back what it landed.
-// Under a parent the sandbox user cannot write, its own `rm -f` cannot shed
-// the temporary, and the refused payload stayed for the container's life
-// where every other rename failure empties it (#310).
-func TestARenameTooLongToRunLeavesNoPayloadOnANonRootImage(t *testing.T) {
+// A long path containing single quotes reaches the normal permission check.
+// The sandbox user cannot remove the temporary in this parent, so the daemon
+// empties the payload after the refused rename (#310).
+func TestWriteToAQuoteHeavyPathInARootOwnedParent(t *testing.T) {
 	image := dockertest.ImageFrom(t, "nonroot-quoted", quotedParentDockerfile, "--host", docker.DaemonHost())
 
 	p, err := docker.New(docker.Config{})
@@ -343,9 +340,8 @@ func TestARenameTooLongToRunLeavesNoPayloadOnANonRootImage(t *testing.T) {
 
 	q := strings.Repeat("'", 255)
 	path := "/srv/" + strings.Repeat(q+"/", 15) + strings.Repeat("'", 200)
-	var tooLong *sandbox.CommandTooLongError
-	if err := sb.WriteFile(ctx, path, []byte(strings.Repeat("A", 4096))); !errors.As(err, &tooLong) {
-		t.Fatalf("write of a %d-byte path of quotes = %v; want the rename refused as too long", len(path), err)
+	if err := sb.WriteFile(ctx, path, []byte(strings.Repeat("A", 4096))); !errors.Is(err, sandbox.ErrNotWritable) {
+		t.Fatalf("write of a %d-byte path = %v, want ErrNotWritable", len(path), err)
 	}
 
 	// The temporary's name is still there — the sandbox user cannot unlink
