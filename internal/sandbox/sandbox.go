@@ -138,11 +138,10 @@ func CheckWriteSize(size int64) error {
 	return nil
 }
 
-// PathNotWritableError is ErrNotWritable with the sandbox's own words for why —
-// the last strerror field of the shell's message ("Read-only file system",
-// "Permission denied", "No space left on device"), which is the sandbox-side
-// equivalent of the errno the reference toolset's fsErrorMessage maps. The
-// toolset normalizes the reason the way that table does; here it travels raw.
+// PathNotWritableError gives the reason for ErrNotWritable. It carries a
+// temporary path length diagnostic or the shell's raw strerror text, such as
+// "Read-only file system". The toolset normalizes shell errors using the
+// reference toolset's fsErrorMessage rules.
 type PathNotWritableError struct {
 	Path   string
 	Reason string
@@ -622,7 +621,7 @@ type Sandbox interface {
 	// existing file.
 	//
 	// The write is atomic: the bytes land under a temporary name in the target's
-	// own directory (TempName) and are renamed into place, so a transfer that
+	// own directory (WriteTempPath) and are renamed into place, so a transfer that
 	// fails part way through leaves the target holding what it held before — or
 	// nothing, where there was nothing — never a truncated file. The path itself
 	// is answered rather than the sandbox blamed: a path blocked by a
@@ -631,6 +630,9 @@ type Sandbox interface {
 	// target a rename cannot replace — a device node, or a file bind-mounted
 	// into the sandbox — is ErrNotReplaceable (the node or mount is left what
 	// it was, neither supplanted nor written through; #205).
+	//
+	// An overlong temporary path is refused before creating directories or
+	// transferring bytes. That refusal carries ErrNotWritable.
 	//
 	// Being a rename, it replaces the *name*, and four consequences follow that a
 	// write-through would not have had:

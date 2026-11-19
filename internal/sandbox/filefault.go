@@ -3,9 +3,12 @@ package sandbox
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"path"
+	"strings"
 )
 
-// This file is the write path's shared shell. Both backends land a file's bytes
+// Both backends share the filesystem rules that follow. They land a file's bytes
 // under a temporary name in the target's own directory and rename it into place,
 // both carry the target's mode over to that temporary file first, and both name a
 // blocked path the same way — so the piece of that reasoning a shell has to do
@@ -177,14 +180,44 @@ __map_unreplaceable() {
 // random per call so two writes into one directory cannot collide. The leading dot
 // keeps it out of a plain `ls` for the moment it exists.
 func TempName() string {
-	var b [8]byte
+	var b [tempNonceBytes]byte
 	// crypto/rand.Read does not fail on a running system, and the k8s backend's
 	// exec nonce reads it the same way: a collision would cost one write.
 	_, _ = rand.Read(b[:])
 	return TempPrefix + hex.EncodeToString(b[:])
 }
 
-// TempNameBytes is how long every TempName is: the prefix and sixteen hex
-// digits, 27 bytes. A write's target directory must leave room for it under
-// Linux's PATH_MAX, which the toolset checks before it writes.
-const TempNameBytes = len(TempPrefix) + 16
+const tempNonceBytes = 8
+
+// TempNameBytes is the length of every TempName, including its hex suffix.
+const TempNameBytes = len(TempPrefix) + 2*tempNonceBytes
+
+// MaxPathBytes is Linux's PATH_MAX of 4096 minus the terminating NUL.
+const MaxPathBytes = 4095
+
+// CheckWriteTempPath lets the toolset check the temporary path before it
+// asks the sandbox. An equally long name checks the same bound without
+// generating a random name that would go unused.
+func CheckWriteTempPath(target string) error {
+	_, err := writeTempPath(target, strings.Repeat("x", TempNameBytes))
+	return err
+}
+
+// WriteTempPath returns a fresh temporary path in the target's directory.
+func WriteTempPath(target string) (string, error) {
+	return writeTempPath(target, TempName())
+}
+
+func writeTempPath(target, name string) (string, error) {
+	dir := path.Dir(target)
+	tmp := path.Join(dir, name)
+	if len(tmp) > MaxPathBytes {
+		return "", &PathNotWritableError{
+			Path: target,
+			Reason: fmt.Sprintf("file name too long: the file lands first under a %d-byte temporary name beside it, and in the file_path's %d-byte directory "+
+				"that is a %d-byte path, over the %d bytes a Linux path can hold; shorten it",
+				len(name), len(dir), len(tmp), MaxPathBytes),
+		}
+	}
+	return tmp, nil
+}

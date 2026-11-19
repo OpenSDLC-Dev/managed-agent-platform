@@ -155,7 +155,7 @@ func TestTempName(t *testing.T) {
 		case strings.ContainsAny(n, "/ "):
 			t.Fatalf("%q is not a single plain path component", n)
 		case len(n) != sandbox.TempNameBytes || sandbox.TempNameBytes != 27:
-			t.Fatalf("%q is %d bytes; TempNameBytes says %d, and the toolset's bound on a write's directory says 27",
+			t.Fatalf("%q is %d bytes, want TempNameBytes (%d) and the current 27-byte format",
 				n, len(n), sandbox.TempNameBytes)
 		case seen[n]:
 			t.Fatalf("%q was minted twice", n)
