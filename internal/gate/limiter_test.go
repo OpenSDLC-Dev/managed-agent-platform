@@ -459,6 +459,9 @@ func TestGateUploadTimeoutContainsStalledOrigin(t *testing.T) {
 			if err != nil {
 				return
 			}
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetReadBuffer(4096)
+			}
 			mu.Lock()
 			heldConns = append(heldConns, c)
 			mu.Unlock()
@@ -478,16 +481,19 @@ func TestGateUploadTimeoutContainsStalledOrigin(t *testing.T) {
 	g := gate.New(gate.Config{
 		Networking:            domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"127.0.0.1"}},
 		MaxBodyBytes:          4 << 20,
-		MaxTotalBodyBytes:     4 << 20,
+		MaxTotalBodyBytes:     3 << 20,
 		MaxConcurrentRequests: 1,
 		UploadTimeout:         150 * time.Millisecond,
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 	client := proxyClient(t, gsrv.URL, nil)
+	// Bound the client well below the 60s default ResponseHeaderTimeout so a
+	// 502 proves UploadTimeout fired rather than ResponseHeaderTimeout.
+	client.Timeout = 3 * time.Second
 
-	// Send a large body (> OS socket buffer) to the non-reading origin so
-	// RoundTrip blocks writing until UploadTimeout aborts it.
+	// Send a 2 MiB body to the non-reading origin so RoundTrip blocks writing
+	// until UploadTimeout aborts it.
 	resp, err := client.Post("http://"+stalledLn.Addr().String()+"/stall", "application/octet-stream",
 		bytes.NewReader(bytes.Repeat([]byte("X"), 2<<20)))
 	if err != nil {
@@ -498,8 +504,9 @@ func TestGateUploadTimeoutContainsStalledOrigin(t *testing.T) {
 		t.Fatalf("stalled origin upload status = %d, want 502", resp.StatusCode)
 	}
 
-	// Both the concurrency slot and the 2 MiB buffer budget must now be free
-	// for an ordinary request to a healthy origin.
+	// Both the concurrency slot and the 2 MiB buffer budget must now be free:
+	// a second 2 MiB upload cannot fit inside the 3 MiB MaxTotalBodyBytes cap
+	// unless the first reservation was released.
 	okResp, err := client.Post(healthy.URL+"/ok", "text/plain", bytes.NewReader(bytes.Repeat([]byte("Y"), 2<<20)))
 	if err != nil {
 		t.Fatal(err)
