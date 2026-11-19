@@ -270,7 +270,20 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 	}
 	tooBig.Body.Close()
 	if tooBig.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("over MaxBodyBytes status = %d, want 413", tooBig.StatusCode)
+		t.Fatalf("over MaxBodyBytes (declared) status = %d, want 413", tooBig.StatusCode)
+	}
+	tooBigChunkedReq, err := http.NewRequest(http.MethodPost, origin.URL+"/fast", io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("D"), 1025))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooBigChunkedReq.ContentLength = -1
+	tooBigChunked, err := client.Do(tooBigChunkedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tooBigChunked.Body.Close()
+	if tooBigChunked.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over MaxBodyBytes (chunked) status = %d, want 413", tooBigChunked.StatusCode)
 	}
 
 	// Ordinary GET and small POST still succeed while Request 1 holds 1024 bytes.
@@ -295,6 +308,17 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 	// Release Request 1 and prove the full 1024-byte budget is available again.
 	close(releaseOrigin)
 	wg.Wait()
+
+	// Placeholder expansion exceeding MaxBodyBytes (2 * 900 = 1800 > 1024) is
+	// rejected with 413 before allocating an unbounded body.
+	bombResp, err := client.Post(origin.URL+"/fast", "text/plain", strings.NewReader("vltph_short vltph_short"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bombResp.Body.Close()
+	if bombResp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("placeholder expansion over MaxBodyBytes status = %d, want 413", bombResp.StatusCode)
+	}
 
 	// Also prove a slow-streaming response releases the request-body buffer
 	// budget once RoundTrip returns, BEFORE the response stream ends.
@@ -373,5 +397,65 @@ func TestGateBodyReadTimeoutContainsStalledUpload(t *testing.T) {
 	okResp.Body.Close()
 	if okResp.StatusCode != http.StatusOK {
 		t.Fatalf("post after timeout status = %d, want 200", okResp.StatusCode)
+	}
+}
+
+func TestGateStalledBodyOnRejectedRequestsDoesNotPinSlots(t *testing.T) {
+	origin := echoOrigin(t)
+	defer origin.Close()
+	host := hostOf(t, origin.URL)
+
+	// Long BodyReadTimeout (10s) so any unintentional body drain on an early
+	// rejection (400/403/413) would hang well past the test's 1s deadline.
+	g := gate.New(gate.Config{
+		Networking:            domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{host}},
+		MaxBodyBytes:          64,
+		MaxTotalBodyBytes:     128,
+		MaxConcurrentRequests: 2,
+		BodyReadTimeout:       10 * time.Second,
+	})
+	gsrv := httptest.NewServer(g)
+	defer gsrv.Close()
+
+	// Send 6 stalled POST requests (more than MaxConcurrentRequests=2) across
+	// every early-rejection path without ever sending the declared body bytes.
+	probes := []struct {
+		raw  string
+		want int
+	}{
+		{fmt.Sprintf("POST http://forbidden.invalid/x HTTP/1.1\r\nHost: forbidden.invalid\r\nContent-Length: 32\r\n\r\n"), http.StatusForbidden},
+		{fmt.Sprintf("POST /not-a-proxy-path HTTP/1.1\r\nHost: %s\r\nContent-Length: 32\r\n\r\n", host), http.StatusBadRequest},
+		{fmt.Sprintf("POST %s/big HTTP/1.1\r\nHost: %s\r\nContent-Length: 100\r\n\r\n", origin.URL, host), http.StatusRequestEntityTooLarge},
+		{fmt.Sprintf("POST http://forbidden.invalid/chunked HTTP/1.1\r\nHost: forbidden.invalid\r\nTransfer-Encoding: chunked\r\n\r\n"), http.StatusForbidden},
+	}
+	for i := range 2 {
+		for _, p := range probes {
+			conn, err := net.DialTimeout("tcp", gsrv.Listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatalf("round %d dial: %v", i, err)
+			}
+			_, _ = io.WriteString(conn, p.raw)
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+			conn.Close()
+			if err != nil {
+				t.Fatalf("round %d stalled rejection (%d) hung: %v", i, p.want, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != p.want {
+				t.Fatalf("round %d status = %d, want %d", i, resp.StatusCode, p.want)
+			}
+		}
+	}
+
+	// All concurrency slots must be free so ordinary traffic completes immediately.
+	client := proxyClient(t, gsrv.URL, nil)
+	okResp, err := client.Get(origin.URL + "/ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatalf("ordinary GET after stalled rejections = %d, want 200", okResp.StatusCode)
 	}
 }

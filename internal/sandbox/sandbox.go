@@ -279,13 +279,15 @@ type GateResources struct {
 }
 
 // Effective returns r with any non-positive field filled from the platform
-// defaults.
+// defaults and CPUMillis capped so NanoCpus conversion cannot overflow int64.
 func (r GateResources) Effective() GateResources {
 	if r.MemoryBytes <= 0 {
 		r.MemoryBytes = DefaultGateMemoryBytes
 	}
 	if r.CPUMillis <= 0 {
 		r.CPUMillis = DefaultGateCPUMillis
+	} else if r.CPUMillis > maxCPUMillis {
+		r.CPUMillis = maxCPUMillis
 	}
 	if r.PidsLimit <= 0 {
 		r.PidsLimit = DefaultGatePidsLimit
@@ -295,6 +297,8 @@ func (r GateResources) Effective() GateResources {
 	}
 	return r
 }
+
+const maxCPUMillis = (1<<63 - 1) / 1_000_000
 
 // GateSpec configures a session's egress-gate sidecar. The provider mints the
 // gate's per-session token via TokenMinter, and only when it creates the pair

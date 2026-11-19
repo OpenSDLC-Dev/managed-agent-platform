@@ -536,19 +536,31 @@ func tunnelWatchdog(idle time.Duration, activity *tunnelActivity, stop <-chan st
 	}
 }
 
+// rejectAndClose answers an error on a plain-HTTP path where the request body
+// may not have been drained. Setting Connection: close prevents net/http's
+// WriteHeader from attempting a keep-alive drain, and expiring the socket read
+// deadline ensures finishRequest's reqBody.Close unwinds immediately even when
+// http.Server.ReadTimeout is zero — preventing stalled bodies on rejected
+// requests from pinning concurrency slots indefinitely (plan 70 slice 2).
+func rejectAndClose(w http.ResponseWriter, body string, code int) {
+	w.Header().Set("Connection", "close")
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+	http.Error(w, body, code)
+}
+
 // handlePlain admits or refuses a plain-HTTP request on its host, substitutes
 // vault placeholders in the request it forwards, and streams the origin's
 // response back.
 func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	releaseReq, ok := g.limiter.acquireRequest()
 	if !ok {
-		http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
+		rejectAndClose(w, "too many concurrent requests", http.StatusServiceUnavailable)
 		return
 	}
 	defer releaseReq()
 
 	if r.URL == nil || !r.URL.IsAbs() {
-		http.Error(w, "not a proxy request", http.StatusBadRequest)
+		rejectAndClose(w, "not a proxy request", http.StatusBadRequest)
 		return
 	}
 	// The port a plain-HTTP request names is its URL's, defaulted from the
@@ -558,7 +570,7 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	host, port := hostOnly(target), portOnly(target)
 	how := g.policy.admit(host, port)
 	if how == admitNone {
-		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 
@@ -572,25 +584,25 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 		_ = rc.SetReadDeadline(time.Now().Add(g.bodyRead))
 	}
 	releaseBody, err := g.substituteBody(host, out, unreachable)
-	if g.bodyRead > 0 {
-		_ = rc.SetReadDeadline(time.Time{})
-	}
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			http.Error(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
+			rejectAndClose(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
 			return
 		}
 		if errors.Is(err, errBodyBudgetExhausted) {
-			http.Error(w, "gate body buffer budget exhausted", http.StatusServiceUnavailable)
+			rejectAndClose(w, "gate body buffer budget exhausted", http.StatusServiceUnavailable)
 			return
 		}
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			http.Error(w, "request body read timed out", http.StatusRequestTimeout)
+			rejectAndClose(w, "request body read timed out", http.StatusRequestTimeout)
 			return
 		}
-		http.Error(w, "cannot read request body", http.StatusBadGateway)
+		rejectAndClose(w, "cannot read request body", http.StatusBadGateway)
 		return
+	}
+	if g.bodyRead > 0 {
+		_ = rc.SetReadDeadline(time.Time{})
 	}
 	defer releaseBody()
 	removeHopByHop(out.Header)
@@ -647,7 +659,9 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 	if r.Body == nil || r.Body == http.NoBody {
 		return noop, nil
 	}
-	defer func() { _ = r.Body.Close() }()
+	// Do not close r.Body on early rejection paths: net/http's (*body).Close
+	// attempts to drain up to 256 KiB before the caller has expired the socket
+	// read deadline via rejectAndClose. Close r.Body only once read to EOF.
 	if r.ContentLength > g.maxBody {
 		return noop, errBodyTooLarge
 	}
@@ -663,6 +677,12 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 			acquired = 0
 		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			releaseAll()
+		}
+	}()
 
 	const chunkSize int64 = 32 << 10
 	buf := make([]byte, min(chunkSize, g.maxBody+1))
@@ -677,33 +697,46 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 		if n > 0 {
 			totalRead += int64(n)
 			if totalRead > g.maxBody {
-				releaseAll()
 				return noop, errBodyTooLarge
 			}
 			if !g.limiter.acquireBodyBytes(int64(n)) {
-				releaseAll()
 				return noop, errBodyBudgetExhausted
 			}
 			acquired += int64(n)
 			raw.Write(readBuf[:n])
 		}
 		if rerr == io.EOF {
+			_ = r.Body.Close()
 			break
 		}
 		if rerr != nil {
-			releaseAll()
 			return noop, rerr
 		}
 	}
 
-	out, unr := g.engine.Substitute(host, egress.LocationBody, raw.String())
+	// Bound the substituted output BEFORE allocating so a body packed with
+	// placeholders expanding to a larger secret cannot blow past MaxBodyBytes
+	// or the remaining aggregate body-buffer budget.
+	free := g.limiter.freeBodyBytes()
+	budgetCap := g.maxBody
+	budgetBound := false
+	if free < g.maxBody-acquired {
+		budgetCap = acquired + free
+		budgetBound = true
+	}
+	out, unr, exceeded := g.engine.SubstituteBounded(host, egress.LocationBody, raw.String(), budgetCap)
+	if exceeded {
+		if budgetBound {
+			return noop, errBodyBudgetExhausted
+		}
+		return noop, errBodyTooLarge
+	}
 	for _, c := range unr {
 		unreachable[c.Placeholder] = struct{}{}
 	}
 	finalBytes := int64(len(out))
 	if delta := finalBytes - acquired; delta > 0 {
 		if !g.limiter.acquireBodyBytes(delta) {
-			releaseAll()
 			return noop, errBodyBudgetExhausted
 		}
 		acquired = finalBytes
@@ -714,6 +747,7 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 	r.Body = io.NopCloser(strings.NewReader(out))
 	r.ContentLength = finalBytes
 	r.Header.Set("Content-Length", strconv.FormatInt(finalBytes, 10))
+	committed = true
 	var once sync.Once
 	return func() { once.Do(releaseAll) }, nil
 }

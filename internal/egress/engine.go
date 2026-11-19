@@ -3,6 +3,7 @@ package egress
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 )
 
@@ -107,6 +108,41 @@ func NewEngine(creds []Credential) *Engine {
 // verdict. Said here rather than in that plan alone, because the absence is
 // the answer to a question this function invites.
 func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
+	out, unreachable, _ = e.substitute(host, loc, s, -1)
+	return out, unreachable
+}
+
+// SubstituteBounded behaves like Substitute but refuses to allocate or return
+// an output longer than maxBytes (when maxBytes >= 0). It streams through
+// strings.Replacer.WriteString so a body packed with placeholders whose secret
+// values are larger than the placeholder stops before allocating unbounded
+// memory (plan 70 slice 2). When exceeded is true, out is empty.
+func (e *Engine) SubstituteBounded(host string, loc Location, s string, maxBytes int64) (out string, unreachable []*Credential, exceeded bool) {
+	return e.substitute(host, loc, s, maxBytes)
+}
+
+var errSubstOutputTooLarge = errors.New("egress: substituted output exceeds byte limit")
+
+type boundedBuilder struct {
+	buf strings.Builder
+	max int64
+}
+
+func (b *boundedBuilder) Write(p []byte) (int, error) {
+	if int64(len(p)) > b.max-int64(b.buf.Len()) {
+		return 0, errSubstOutputTooLarge
+	}
+	return b.buf.Write(p)
+}
+
+func (b *boundedBuilder) WriteString(s string) (int, error) {
+	if int64(len(s)) > b.max-int64(b.buf.Len()) {
+		return 0, errSubstOutputTooLarge
+	}
+	return b.buf.WriteString(s)
+}
+
+func (e *Engine) substitute(host string, loc Location, s string, maxBytes int64) (out string, unreachable []*Credential, exceeded bool) {
 	var pairs []string // placeholder, secret, … for the admitted credentials
 	for i := range e.creds {
 		c := &e.creds[i]
@@ -120,10 +156,21 @@ func (e *Engine) Substitute(host string, loc Location, s string) (out string, un
 		unreachable = append(unreachable, c)
 	}
 	if len(pairs) == 0 {
-		return s, unreachable
+		if maxBytes >= 0 && int64(len(s)) > maxBytes {
+			return "", unreachable, true
+		}
+		return s, unreachable, false
 	}
 	// One left-to-right pass that never re-scans its own output, so a secret
 	// that happens to contain another credential's placeholder is not itself
 	// rewritten — the result is independent of credential order.
-	return strings.NewReplacer(pairs...).Replace(s), unreachable
+	repl := strings.NewReplacer(pairs...)
+	if maxBytes < 0 {
+		return repl.Replace(s), unreachable, false
+	}
+	bw := boundedBuilder{max: maxBytes}
+	if _, err := repl.WriteString(&bw, s); err != nil {
+		return "", unreachable, true
+	}
+	return bw.buf.String(), unreachable, false
 }

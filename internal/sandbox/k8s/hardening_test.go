@@ -262,6 +262,9 @@ func TestGateSidecarAppliesIndependentResourceLimits(t *testing.T) {
 		if got := c.Resources.Limits.Memory().Value(); got != 128<<20 {
 			t.Errorf("memory limit = %d, want %d", got, 128<<20)
 		}
+		if got := c.Resources.Requests.Memory().Value(); got != 128<<20 {
+			t.Errorf("memory request = %d, want %d", got, 128<<20)
+		}
 		if got := c.Resources.Limits.Cpu().MilliValue(); got != 25 {
 			t.Errorf("cpu limit = %dm, want 25m", got)
 		}
@@ -270,6 +273,9 @@ func TestGateSidecarAppliesIndependentResourceLimits(t *testing.T) {
 		}
 		if got := c.Resources.Limits.StorageEphemeral().Value(); got != 32<<20 {
 			t.Errorf("ephemeral-storage limit = %d, want %d", got, 32<<20)
+		}
+		if got := c.Resources.Requests.StorageEphemeral().Value(); got != 32<<20 {
+			t.Errorf("ephemeral-storage request = %d, want %d", got, 32<<20)
 		}
 	})
 }

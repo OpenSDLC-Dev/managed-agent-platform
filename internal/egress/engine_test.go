@@ -250,3 +250,33 @@ func TestACredentialDoesNotFollowAnIDNAliasOfItsHost(t *testing.T) {
 		t.Errorf("Substitute to the ASCII host = %q, want the secret substituted", out)
 	}
 }
+
+func TestEngineSubstituteBounded(t *testing.T) {
+	e := egress.NewEngine([]egress.Credential{{
+		Placeholder: "vltph_a",
+		Secret:      "0123456789", // 10 bytes
+		Hosts:       egress.NewHostSet([]string{"api.example.com"}),
+		Body:        true,
+	}})
+
+	// Exact fit succeeds.
+	out, unr, exceeded := e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 12)
+	if exceeded || len(unr) != 0 || out != "x=0123456789" {
+		t.Fatalf("exact fit = (%q, %v, %v), want (x=0123456789, nil, false)", out, unr, exceeded)
+	}
+	// One byte over aborts before returning the expanded string.
+	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, "x=vltph_a", 11)
+	if !exceeded || out != "" {
+		t.Fatalf("over limit = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	}
+	// Repeated placeholder bomb stops cleanly.
+	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, strings.Repeat("vltph_a", 100), 50)
+	if !exceeded || out != "" {
+		t.Fatalf("placeholder bomb = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	}
+	// No substitutions still honors maxBytes.
+	out, _, exceeded = e.SubstituteBounded("api.example.com", egress.LocationBody, "plain-text", 5)
+	if !exceeded || out != "" {
+		t.Fatalf("unmatched over limit = (%q, exceeded=%v), want (\"\", true)", out, exceeded)
+	}
+}

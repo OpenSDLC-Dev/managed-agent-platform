@@ -100,12 +100,22 @@ func (l *Limiter) acquireTunnel() (release func(), ok bool) {
 	}, true
 }
 
+func (l *Limiter) freeBodyBytes() int64 {
+	l.mu.Lock()
+	free := l.maxTotalBytes - l.bufferedBytes
+	l.mu.Unlock()
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
 func (l *Limiter) hasBodyCapacity(n int64) bool {
 	if n <= 0 {
 		return true
 	}
 	l.mu.Lock()
-	ok := l.bufferedBytes+n <= l.maxTotalBytes
+	ok := n <= l.maxTotalBytes-l.bufferedBytes
 	l.mu.Unlock()
 	return ok
 }
@@ -115,7 +125,7 @@ func (l *Limiter) acquireBodyBytes(n int64) bool {
 		return true
 	}
 	l.mu.Lock()
-	if l.bufferedBytes+n > l.maxTotalBytes {
+	if n > l.maxTotalBytes-l.bufferedBytes {
 		l.mu.Unlock()
 		return false
 	}

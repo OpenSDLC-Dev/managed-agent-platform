@@ -3,8 +3,10 @@ package gaterun_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -111,23 +113,64 @@ func TestRunFetchLoopContextCancelReturnsNil(t *testing.T) {
 }
 
 func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
-	// A limiter on the initial gate must stay shared after RunFetchLoop swaps
-	// in a newly fetched gate, so config refreshes never reset or double the
-	// concurrency budget.
+	// Exercise real HTTP traffic across a RunFetchLoop swap: a request started
+	// before the swap holds the single concurrency slot, and a second request
+	// hitting the newly swapped gate must observe 503 until the first finishes.
+	reqInFlight := make(chan struct{}, 1)
+	releaseOrigin := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			reqInFlight <- struct{}{}
+			<-releaseOrigin
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer origin.Close()
+	originURL, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originHost := originURL.Hostname()
+
 	initial := gate.New(gate.Config{
-		Networking:            domain.Networking{Type: domain.NetUnrestricted},
+		Networking:            domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{originHost}},
 		MaxConcurrentRequests: 1,
 	})
 	h := gaterun.NewSwappableHandler(initial)
+	gsrv := httptest.NewServer(h)
+	defer gsrv.Close()
+	proxyURL, err := url.Parse(gsrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
 
+	// Start request 1 on the initial gate and hold it at the origin.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		resp, err := client.Get(origin.URL + "/hold")
+		if err != nil {
+			t.Errorf("in-flight request: %v", err)
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+	<-reqInFlight
+
+	// Now swap in a newly fetched gate while request 1 still holds the 1 slot.
+	// Fetch 1 runs only after fetch 0's handler.Swap has completed.
 	swapped := make(chan struct{})
 	var once sync.Once
 	f := &fakeFetcher{fn: func(call int) (*gateconfig.Config, error) {
-		if call == 0 {
-			return &gateconfig.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}}, nil
+		if call >= 1 {
+			once.Do(func() { close(swapped) })
 		}
-		once.Do(func() { close(swapped) })
-		return &gateconfig.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}}, nil
+		return &gateconfig.Config{
+			Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{originHost}},
+		}, nil
 	}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -136,13 +179,39 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 	case <-swapped:
 	case <-time.After(2 * time.Second):
 		cancel()
+		close(releaseOrigin)
 		t.Fatal("loop never swapped")
 	}
+
+	// Request 2 hits the swapped gate while request 1 is still active on the old
+	// gate: because they share one Limiter, it must be rejected with 503.
+	overResp, err := client.Get(origin.URL + "/fast")
+	if err != nil {
+		cancel()
+		close(releaseOrigin)
+		t.Fatal(err)
+	}
+	overResp.Body.Close()
+	if overResp.StatusCode != http.StatusServiceUnavailable {
+		cancel()
+		close(releaseOrigin)
+		t.Fatalf("request after swap while 1 slot held: status = %d, want 503", overResp.StatusCode)
+	}
+
+	// Releasing request 1 frees the shared slot so request 3 succeeds on the swapped gate.
+	close(releaseOrigin)
+	wg.Wait()
+	okResp, err := client.Get(origin.URL + "/fast")
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		cancel()
+		t.Fatalf("request after release on swapped gate: status = %d, want 200", okResp.StatusCode)
+	}
+
 	cancel()
 	<-done
-
-	// Verify the handler's Limiter is still the initial gate's Limiter.
-	if h.Limiter() != initial.Limiter() {
-		t.Fatal("SwappableHandler did not retain the initial gate's Limiter")
-	}
 }
