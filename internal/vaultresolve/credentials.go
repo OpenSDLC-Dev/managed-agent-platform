@@ -102,7 +102,7 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		// When the sealed secret carries an approved destination digest (plan 70
 		// slice 1), fail closed if the plaintext auth column no longer matches it.
 		// Credentials written before that binding lack the key and remain readable.
-		if bound := sealed[egress.SealedApprovedNetworkingKey]; bound != "" &&
+		if bound, ok := sealed[egress.SealedApprovedNetworkingKey]; ok &&
 			bound != egress.NetworkingBindingDigest(unrestricted, doc.Networking.AllowedHosts) {
 			return nil, fmt.Errorf("vaultresolve: credential %s networking does not match sealed destination binding", w.id)
 		}

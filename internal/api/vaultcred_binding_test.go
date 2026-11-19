@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
@@ -181,15 +182,23 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 		wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error",
 			"auth.networking: expanding destinations requires supplying secret_value")
 
-		// Narrowed credential still resolves cleanly with the original secret.
+		// Narrowed credential still resolves cleanly with the original secret,
+		// narrowed host list, and updated injection_location.
 		creds, err := vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_test", []string{vaultID})
 		if err != nil {
 			t.Fatalf("resolve narrowed: %v", err)
 		}
+		found := false
 		for _, c := range creds {
-			if c.CredentialID == id && c.Secret != "kept-secret" {
-				t.Fatalf("secret = %q, want kept-secret", c.Secret)
+			if c.CredentialID == id {
+				found = true
+				if c.Secret != "kept-secret" || len(c.AllowedHosts) != 1 || c.AllowedHosts[0] != "api.example.com" || c.Body || !c.Header {
+					t.Fatalf("resolved narrowed credential = %+v, want kept-secret on [api.example.com] with header-only", c)
+				}
 			}
+		}
+		if !found {
+			t.Fatalf("narrowed credential %s missing from resolved set", id)
 		}
 	})
 
@@ -338,7 +347,7 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 			t.Fatalf("resolve error leaked secret: %v", err)
 		}
 
-		// Supplying a new secret_value cleanly rebinds the credential.
+		// Supplying a new secret_value cleanly rebinds the credential, and it resolves again.
 		if status, resp := s.do("POST", "/v1/vaults/"+tamperVault+"/credentials/"+id, map[string]any{
 			"auth": map[string]any{
 				"type":         "environment_variable",
@@ -347,6 +356,64 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 			},
 		}); status != http.StatusOK {
 			t.Fatalf("rebind with new secret_value: status %d (%v)", status, resp)
+		}
+		creds, err := vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_tamper", []string{tamperVault})
+		if err != nil {
+			t.Fatalf("resolve after rebind: %v", err)
+		}
+		if len(creds) != 1 || creds[0].CredentialID != id || creds[0].Secret != "rebound-secret" ||
+			len(creds[0].AllowedHosts) != 1 || creds[0].AllowedHosts[0] != "api.good.test" {
+			t.Fatalf("rebound credentials = %+v, want %s with rebound-secret on [api.good.test]", creds, id)
+		}
+	})
+
+	t.Run("null or empty secret_value cannot satisfy destination expansion", func(t *testing.T) {
+		id := newLimited("NULL_OR_EMPTY_EXPAND", "orig-secret", "api.good.test")
+		for _, badVal := range []any{nil, ""} {
+			status, resp := s.do("POST", "/v1/vaults/"+vaultID+"/credentials/"+id, map[string]any{
+				"auth": map[string]any{
+					"type":         "environment_variable",
+					"secret_value": badVal,
+					"networking":   map[string]any{"type": "unrestricted"},
+				},
+			})
+			wantErrMsg(t, status, resp, http.StatusBadRequest, "invalid_request_error", "secret_value cannot be cleared")
+		}
+	})
+
+	t.Run("concurrent auth-only change triggers CAS conflict without overwriting", func(t *testing.T) {
+		casVault := createVault(t, s, "cas-auth")
+		cred := createCredential(t, s, casVault, map[string]any{
+			"type":         "environment_variable",
+			"secret_name":  "CAS_AUTH_KEY",
+			"secret_value": "cas-secret",
+			"networking":   map[string]any{"type": "limited", "allowed_hosts": []string{"a.example.com", "b.example.com"}},
+		})
+		id := cred["id"].(string)
+
+		// Mutate only auth (not secret_ciphertext) between the unlocked read and
+		// FOR UPDATE lock to prove the auth-document half of the CAS check rejects.
+		restore := api.SetUpdateCredentialResealHookForTest(func() {
+			if _, err := s.pool.Exec(t.Context(),
+				`UPDATE vault_credentials
+				 SET auth = jsonb_set(auth, '{networking}', '{"type":"limited","allowed_hosts":["a.example.com"]}'::jsonb)
+				 WHERE id = $1`, id); err != nil {
+				t.Errorf("concurrent auth update: %v", err)
+			}
+		})
+		defer restore()
+		status, resp := s.do("POST", "/v1/vaults/"+casVault+"/credentials/"+id, map[string]any{
+			"auth": map[string]any{
+				"type":       "environment_variable",
+				"networking": map[string]any{"type": "limited", "allowed_hosts": []string{"b.example.com"}},
+			},
+		})
+		if status != http.StatusConflict {
+			t.Fatalf("concurrent auth change: status %d (%v), want 409", status, resp)
+		}
+		gotAuth, _ := readRow(id)
+		if !strings.Contains(string(gotAuth), `"a.example.com"`) || strings.Contains(string(gotAuth), `"b.example.com"`) {
+			t.Fatalf("conflicted update overwrote concurrent auth change: %s", gotAuth)
 		}
 	})
 }

@@ -491,11 +491,9 @@ func TestCredentialsDestinationBinding(t *testing.T) {
 			true, true, ct, keyID)
 
 		_, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
-		if err == nil {
-			t.Fatal("expected error for tampered destination binding, got nil")
-		}
-		if !strings.Contains(err.Error(), id) {
-			t.Errorf("error %q must name credential id %q", err, id)
+		want := fmt.Sprintf("vaultresolve: credential %s networking does not match sealed destination binding", id)
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want exact %q", err, want)
 		}
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error %q leaked plaintext secret", err)
@@ -508,11 +506,31 @@ func TestCredentialsDestinationBinding(t *testing.T) {
 		id := insertEnvCred(t, pool, v, "TAMPERED_UNREST", `{"type":"unrestricted"}`, true, true, ct, keyID)
 
 		_, err := vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
-		if err == nil {
-			t.Fatal("expected error for limited-to-unrestricted tampering, got nil")
+		want := fmt.Sprintf("vaultresolve: credential %s networking does not match sealed destination binding", id)
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want exact %q", err, want)
 		}
-		if !strings.Contains(err.Error(), id) {
-			t.Errorf("error %q must name credential id %q", err, id)
+	})
+
+	t.Run("explicit empty binding digest fails closed", func(t *testing.T) {
+		v := newVault(t, pool, false)
+		sealed, err := json.Marshal(map[string]string{
+			"secret_value":                     "s3cr3t-empty-digest",
+			egress.SealedApprovedNetworkingKey: "",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ct, keyID, err := cipher.Encrypt(ctx, sealed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := insertEnvCred(t, pool, v, "EMPTY_BINDING", `{"type":"unrestricted"}`, true, true, ct, keyID)
+
+		_, err = vaultresolve.Credentials(ctx, pool, cipher, sess, []string{v})
+		want := fmt.Sprintf("vaultresolve: credential %s networking does not match sealed destination binding", id)
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want exact %q", err, want)
 		}
 	})
 

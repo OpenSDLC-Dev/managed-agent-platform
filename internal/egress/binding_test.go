@@ -72,4 +72,15 @@ func TestNetworkingBindingDigest(t *testing.T) {
 	if a == b {
 		t.Fatal("disjoint prefixes collided between valid and malformed entries")
 	}
+	// Wildcard and exact entries for the same domain must never collide.
+	if NetworkingBindingDigest(false, []string{"*.example.com"}) == NetworkingBindingDigest(false, []string{"example.com"}) {
+		t.Fatal("wildcard and exact entries collided")
+	}
+	// Empty/whitespace entries must change the digest rather than vanish.
+	if limA == NetworkingBindingDigest(false, []string{"api.example.com", "*.sub.example.com", ""}) {
+		t.Fatal("empty entry was silently dropped from binding digest")
+	}
+	if limA == NetworkingBindingDigest(false, []string{"api.example.com", "*.sub.example.com", "   "}) {
+		t.Fatal("whitespace entry was silently dropped from binding digest")
+	}
 }

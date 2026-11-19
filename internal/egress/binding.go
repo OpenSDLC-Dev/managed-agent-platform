@@ -72,7 +72,7 @@ func NetworkingBindingDigest(unrestricted bool, allowedHosts []string) string {
 func canonicalBindingEntry(raw string) string {
 	e := strings.TrimSpace(raw)
 	if rest, ok := strings.CutPrefix(e, "*."); ok {
-		if len(e) <= maxCanonicalHost {
+		if len(rest) <= maxCanonicalHost {
 			if rest = canonicalDeRooted(rest); rest != "" && !hasEmptyLabel(rest) {
 				return "w:" + rest
 			}

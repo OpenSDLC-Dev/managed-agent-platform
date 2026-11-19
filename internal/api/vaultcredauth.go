@@ -699,7 +699,7 @@ func applyEnvVarUpdate(obj map[string]json.RawMessage, existingDoc []byte, secre
 	// edit cannot act as a wider baseline, then require new secret_value for
 	// any destination expansion.
 	if !secretReplaced {
-		if bound := secrets[egress.SealedApprovedNetworkingKey]; bound != "" &&
+		if bound, ok := secrets[egress.SealedApprovedNetworkingKey]; ok &&
 			bound != egress.NetworkingBindingDigest(oldUnrestricted, oldHosts) {
 			return nil, errInvalid("auth.networking: stored destination policy does not match sealed secret; supply secret_value to rebind")
 		}
