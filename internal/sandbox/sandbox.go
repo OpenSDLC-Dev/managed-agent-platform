@@ -256,6 +256,46 @@ type Spec struct {
 	GateTokenRevoker GateTokenRevoker
 }
 
+// Default resource limits applied to every egress-gate sidecar container
+// independently of the sandbox's own Hardening caps (plan 70 slice 2). The
+// gate buffers plain-HTTP bodies outside the sandbox's cgroup, so it always
+// receives explicit bounds on memory, CPU, PIDs (Docker), and ephemeral
+// storage (Kubernetes).
+const (
+	DefaultGateMemoryBytes           int64 = 256 << 20 // 256 MiB
+	DefaultGateCPUMillis             int64 = 500       // 0.5 CPU
+	DefaultGatePidsLimit             int64 = 128
+	DefaultGateEphemeralStorageBytes int64 = 64 << 20 // 64 MiB
+)
+
+// GateResources configures the resource limits for a session's egress-gate
+// container. Non-positive fields select the corresponding DefaultGate* value
+// so a gate container is never provisioned unbounded.
+type GateResources struct {
+	MemoryBytes           int64
+	CPUMillis             int64
+	PidsLimit             int64
+	EphemeralStorageBytes int64
+}
+
+// Effective returns r with any non-positive field filled from the platform
+// defaults.
+func (r GateResources) Effective() GateResources {
+	if r.MemoryBytes <= 0 {
+		r.MemoryBytes = DefaultGateMemoryBytes
+	}
+	if r.CPUMillis <= 0 {
+		r.CPUMillis = DefaultGateCPUMillis
+	}
+	if r.PidsLimit <= 0 {
+		r.PidsLimit = DefaultGatePidsLimit
+	}
+	if r.EphemeralStorageBytes <= 0 {
+		r.EphemeralStorageBytes = DefaultGateEphemeralStorageBytes
+	}
+	return r
+}
+
 // GateSpec configures a session's egress-gate sidecar. The provider mints the
 // gate's per-session token via TokenMinter, and only when it creates the pair
 // (never when it adopts an existing one) — so a re-provision, which is the normal
@@ -279,6 +319,9 @@ type GateSpec struct {
 	// exporter, exactly as the executor does with an empty endpoint.
 	OTelEndpoint string
 	OTelInsecure bool
+	// Resources bounds the gate sidecar container independently of
+	// Spec.Hardening. Zero fields take the DefaultGate* values.
+	Resources GateResources
 }
 
 // GateTokenMinter mints a per-session gate token in two steps so the provider can

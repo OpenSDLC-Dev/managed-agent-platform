@@ -109,3 +109,40 @@ func TestRunFetchLoopContextCancelReturnsNil(t *testing.T) {
 		t.Fatal("loop did not return after cancel")
 	}
 }
+
+func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
+	// A limiter on the initial gate must stay shared after RunFetchLoop swaps
+	// in a newly fetched gate, so config refreshes never reset or double the
+	// concurrency budget.
+	initial := gate.New(gate.Config{
+		Networking:            domain.Networking{Type: domain.NetUnrestricted},
+		MaxConcurrentRequests: 1,
+	})
+	h := gaterun.NewSwappableHandler(initial)
+
+	swapped := make(chan struct{})
+	var once sync.Once
+	f := &fakeFetcher{fn: func(call int) (*gateconfig.Config, error) {
+		if call == 0 {
+			return &gateconfig.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}}, nil
+		}
+		once.Do(func() { close(swapped) })
+		return &gateconfig.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gaterun.RunFetchLoop(ctx, f, h, time.Millisecond) }()
+	select {
+	case <-swapped:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("loop never swapped")
+	}
+	cancel()
+	<-done
+
+	// Verify the handler's Limiter is still the initial gate's Limiter.
+	if h.Limiter() != initial.Limiter() {
+		t.Fatal("SwappableHandler did not retain the initial gate's Limiter")
+	}
+}

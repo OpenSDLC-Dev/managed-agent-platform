@@ -839,6 +839,34 @@ func resourceRequirements(h sandbox.Hardening) corev1.ResourceRequirements {
 	return r
 }
 
+// gateCPURequestFloorMillis keeps the gate sidecar's CPU scheduling request
+// small while its CPU limit enforces the quota, matching resourceRequirements.
+const gateCPURequestFloorMillis = 50
+
+// gateResourceRequirements builds explicit Requests and Limits for the egress
+// gate sidecar independently of the sandbox container's Hardening settings
+// (plan 70 slice 2). Memory and ephemeral-storage requests match limits so the
+// kubelet's eviction accounting is deterministic.
+func gateResourceRequirements(res sandbox.GateResources) corev1.ResourceRequirements {
+	r := res.Effective()
+	cpuLimit := *resource.NewMilliQuantity(r.CPUMillis, resource.DecimalSI)
+	cpuReq := *resource.NewMilliQuantity(min(r.CPUMillis, gateCPURequestFloorMillis), resource.DecimalSI)
+	mem := *resource.NewQuantity(r.MemoryBytes, resource.BinarySI)
+	disk := *resource.NewQuantity(r.EphemeralStorageBytes, resource.BinarySI)
+	return corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              cpuLimit,
+			corev1.ResourceMemory:           mem,
+			corev1.ResourceEphemeralStorage: disk,
+		},
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              cpuReq,
+			corev1.ResourceMemory:           mem,
+			corev1.ResourceEphemeralStorage: disk,
+		},
+	}
+}
+
 // gateSidecar is the egress-gate native sidecar (an init container with
 // restartPolicy Always): CAP_NET_ADMIN to install its owner-match firewall
 // before it drops privileges, the gate binary's env contract (cmd/gate), and
@@ -877,6 +905,7 @@ func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &restartAlways,
 		Env:             env,
+		Resources:       gateResourceRequirements(g.Resources),
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_ADMIN"}},
 		},

@@ -1057,3 +1057,103 @@ func TestProvisionGatePersistErrorRemovesGate(t *testing.T) {
 		t.Errorf("gate not removed after persist failure (removed=%v)", removed)
 	}
 }
+
+// TestGateContainerAppliesIndependentResourceLimits verifies plan 70 slice 2:
+// the Docker gate container receives explicit Memory, CPU, and PidsLimit caps
+// independently of Spec.Hardening (even when sandbox memory is unbounded), and
+// honors custom GateSpec.Resources overrides (clamping CPU > 1 core).
+func TestGateContainerAppliesIndependentResourceLimits(t *testing.T) {
+	t.Run("defaults apply when Spec.Hardening and Gate.Resources are zero", func(t *testing.T) {
+		m := &fakeMinter{token: "gtk_limits"}
+		s := gatedSpec(m)
+		s.Hardening = sandbox.Hardening{} // explicitly unbounded sandbox
+		gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+		var gateBody containerConfig
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/json"):
+				switch inspectRef(r.URL.Path) {
+				case gateName, sbName:
+					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+				case "gate1":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				}
+			case r.URL.Path == "/containers/create":
+				if r.URL.Query().Get("name") == gateName {
+					json.NewDecoder(r.Body).Decode(&gateBody)
+					io.WriteString(w, `{"Id":"gate1"}`)
+				} else {
+					io.WriteString(w, `{"Id":"sb1"}`)
+				}
+			case strings.HasSuffix(r.URL.Path, "/start"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+		})
+
+		if _, err := p.Provision(context.Background(), s); err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		if gateBody.HostConfig.Memory != sandbox.DefaultGateMemoryBytes {
+			t.Errorf("gate Memory = %d, want %d", gateBody.HostConfig.Memory, sandbox.DefaultGateMemoryBytes)
+		}
+		if want := sandbox.DefaultGateCPUMillis * 1_000_000; gateBody.HostConfig.NanoCpus != want {
+			t.Errorf("gate NanoCpus = %d, want %d", gateBody.HostConfig.NanoCpus, want)
+		}
+		if gateBody.HostConfig.PidsLimit != sandbox.DefaultGatePidsLimit {
+			t.Errorf("gate PidsLimit = %d, want %d", gateBody.HostConfig.PidsLimit, sandbox.DefaultGatePidsLimit)
+		}
+	})
+
+	t.Run("custom GateResources apply and CPU > 1000m clamps to host CPUs", func(t *testing.T) {
+		m := &fakeMinter{token: "gtk_custom"}
+		s := gatedSpec(m)
+		s.Gate.Resources = sandbox.GateResources{
+			MemoryBytes: 128 << 20,
+			CPUMillis:   4000, // exceeds fake host's 2 CPUs
+			PidsLimit:   64,
+		}
+		gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+		var gateBody containerConfig
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/info":
+				io.WriteString(w, `{"NCPU":2}`)
+			case strings.HasSuffix(r.URL.Path, "/json"):
+				switch inspectRef(r.URL.Path) {
+				case gateName, sbName:
+					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+				case "gate1":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				}
+			case r.URL.Path == "/containers/create":
+				if r.URL.Query().Get("name") == gateName {
+					json.NewDecoder(r.Body).Decode(&gateBody)
+					io.WriteString(w, `{"Id":"gate1"}`)
+				} else {
+					io.WriteString(w, `{"Id":"sb1"}`)
+				}
+			case strings.HasSuffix(r.URL.Path, "/start"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+		})
+
+		if _, err := p.Provision(context.Background(), s); err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		if gateBody.HostConfig.Memory != 128<<20 {
+			t.Errorf("gate Memory = %d, want %d", gateBody.HostConfig.Memory, 128<<20)
+		}
+		if gateBody.HostConfig.NanoCpus != 2000*1_000_000 {
+			t.Errorf("gate NanoCpus = %d, want clamped 2000m (%d)", gateBody.HostConfig.NanoCpus, 2000*1_000_000)
+		}
+		if gateBody.HostConfig.PidsLimit != 64 {
+			t.Errorf("gate PidsLimit = %d, want 64", gateBody.HostConfig.PidsLimit)
+		}
+	})
+}

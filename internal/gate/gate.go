@@ -19,6 +19,7 @@
 package gate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,9 +59,19 @@ const defaultResponseHeaderTimeout = 60 * time.Second
 // gate owns its dialer outright (see Config).
 const dialTimeout = 10 * time.Second
 
+// defaultBodyReadTimeout bounds how long a plain-HTTP request may spend
+// sending its body into the substitution buffer when Config.BodyReadTimeout is
+// unset, preventing slowloris uploads from pinning concurrency and buffer
+// budgets indefinitely.
+const defaultBodyReadTimeout = 30 * time.Second
+
 // errBodyTooLarge signals a request body over the substitution size limit; the
 // handler maps it to 413 rather than the generic read-failure 502.
 var errBodyTooLarge = errors.New("request body exceeds the gate substitution limit")
+
+// errBodyBudgetExhausted signals that buffering the request body would exceed
+// the aggregate cross-request body buffer budget; the handler maps it to 503.
+var errBodyBudgetExhausted = errors.New("gate aggregate body buffer budget exhausted")
 
 // Config constructs a Gate. Networking is the environment's request-level
 // policy; Credentials are the session's resolved env-var credentials for
@@ -105,6 +117,25 @@ type Config struct {
 	// stop draining for the entire window counts as abandoned). Zero selects
 	// defaultTunnelIdleTimeout.
 	TunnelIdleTimeout time.Duration
+	// BodyReadTimeout bounds how long a plain-HTTP client may take to finish
+	// sending its request body into the substitution buffer. Zero selects
+	// defaultBodyReadTimeout.
+	BodyReadTimeout time.Duration
+	// Limiter shares concurrency and aggregate body-buffer budgets across
+	// swapped Gate instances (gaterun.SwappableHandler). When nil, New builds
+	// a Limiter from MaxConcurrentRequests, MaxConcurrentTunnels, and
+	// MaxTotalBodyBytes.
+	Limiter *Limiter
+	// MaxConcurrentRequests bounds concurrent plain-HTTP requests when Limiter
+	// is nil. Zero selects defaultMaxConcurrentRequests.
+	MaxConcurrentRequests int
+	// MaxConcurrentTunnels bounds concurrent CONNECT tunnels when Limiter is
+	// nil. Zero selects defaultMaxConcurrentTunnels.
+	MaxConcurrentTunnels int
+	// MaxTotalBodyBytes bounds aggregate plain-HTTP body buffering across
+	// concurrent requests when Limiter is nil. Zero selects
+	// defaultMaxTotalBodyBytes.
+	MaxTotalBodyBytes int64
 }
 
 // Gate is one session's forward proxy. It implements http.Handler: an
@@ -118,6 +149,8 @@ type Gate struct {
 	transport     http.RoundTripper
 	maxBody       int64
 	tunnelIdle    time.Duration
+	bodyRead      time.Duration
+	limiter       *Limiter
 }
 
 // admissionKey carries how the policy admitted a request down to the dialer. It
@@ -269,6 +302,18 @@ func New(cfg Config) *Gate {
 	if tunnelIdle <= 0 {
 		tunnelIdle = defaultTunnelIdleTimeout
 	}
+	bodyRead := cfg.BodyReadTimeout
+	if bodyRead <= 0 {
+		bodyRead = defaultBodyReadTimeout
+	}
+	limiter := cfg.Limiter
+	if limiter == nil {
+		limiter = NewLimiter(LimitConfig{
+			MaxConcurrentRequests: cfg.MaxConcurrentRequests,
+			MaxConcurrentTunnels:  cfg.MaxConcurrentTunnels,
+			MaxTotalBodyBytes:     cfg.MaxTotalBodyBytes,
+		})
+	}
 	return &Gate{
 		policy:        newPolicy(cfg.Networking, cfg.MCPServerEndpoints),
 		engine:        egress.NewEngine(cfg.Credentials),
@@ -277,8 +322,14 @@ func New(cfg Config) *Gate {
 		transport:     transport,
 		maxBody:       maxBody,
 		tunnelIdle:    tunnelIdle,
+		bodyRead:      bodyRead,
+		limiter:       limiter,
 	}
 }
+
+// Limiter returns the Gate's concurrency and buffer limiter so a wrapper that
+// swaps Gate instances on policy refresh can pass the same Limiter forward.
+func (g *Gate) Limiter() *Limiter { return g.limiter }
 
 // ServeHTTP dispatches a forward-proxy request: CONNECT is an opaque tunnel,
 // everything else is a plain-HTTP request to substitute and forward.
@@ -321,6 +372,13 @@ const refusedBody = "Destination IP is in a private/reserved range"
 // copies bytes opaquely — no substitution, so a placeholder in a TLS body
 // reaches the origin literally (the documented #166 gap).
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
+	releaseTunnel, ok := g.limiter.acquireTunnel()
+	if !ok {
+		http.Error(w, "too many concurrent tunnels", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseTunnel()
+
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
 	how := g.policy.admit(host, port)
@@ -482,6 +540,13 @@ func tunnelWatchdog(idle time.Duration, activity *tunnelActivity, stop <-chan st
 // vault placeholders in the request it forwards, and streams the origin's
 // response back.
 func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
+	releaseReq, ok := g.limiter.acquireRequest()
+	if !ok {
+		http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseReq()
+
 	if r.URL == nil || !r.URL.IsAbs() {
 		http.Error(w, "not a proxy request", http.StatusBadRequest)
 		return
@@ -502,18 +567,40 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	out.RequestURI = "" // must be empty on a client request
 	unreachable := map[string]struct{}{}
 	g.substituteHeaders(host, out.Header, unreachable)
-	if err := g.substituteBody(host, out, unreachable); err != nil {
+	rc := http.NewResponseController(w)
+	if g.bodyRead > 0 {
+		_ = rc.SetReadDeadline(time.Now().Add(g.bodyRead))
+	}
+	releaseBody, err := g.substituteBody(host, out, unreachable)
+	if g.bodyRead > 0 {
+		_ = rc.SetReadDeadline(time.Time{})
+	}
+	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			http.Error(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if errors.Is(err, errBodyBudgetExhausted) {
+			http.Error(w, "gate body buffer budget exhausted", http.StatusServiceUnavailable)
+			return
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			http.Error(w, "request body read timed out", http.StatusRequestTimeout)
 			return
 		}
 		http.Error(w, "cannot read request body", http.StatusBadGateway)
 		return
 	}
+	defer releaseBody()
 	removeHopByHop(out.Header)
 	g.report(host, unreachable)
 
 	resp, err := g.transport.RoundTrip(out)
+	// Release the request-body buffer budget as soon as RoundTrip completes so
+	// slow-streaming responses never keep pinning request buffer capacity.
+	out.Body = nil
+	releaseBody()
 	if err != nil {
 		refusedOrUnreachable(w, err)
 		return
@@ -551,29 +638,84 @@ func (g *Gate) substituteHeaders(host string, h http.Header, unreachable map[str
 
 // substituteBody rewrites the request body in the body location. Phase 1 buffers
 // the whole body: the placeholder is a small token and the body must be a single
-// string for substitution; a streaming pass is a later refinement. The read is
-// bounded by maxBody — the sandbox controls the size, so an oversized body is
-// refused (errBodyTooLarge) rather than buffered without limit.
-func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[string]struct{}) error {
-	if r.Body == nil {
-		return nil
+// string for substitution; a streaming pass is a later refinement. Buffering is
+// bounded both per request (maxBody → 413) and in aggregate across concurrent
+// requests (g.limiter → 503), acquiring bytes incrementally as they arrive and
+// releasing them when the returned cleanup runs (plan 70 slice 2).
+func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[string]struct{}) (release func(), err error) {
+	noop := func() {}
+	if r.Body == nil || r.Body == http.NoBody {
+		return noop, nil
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, g.maxBody+1))
-	_ = r.Body.Close()
-	if err != nil {
-		return err
+	defer func() { _ = r.Body.Close() }()
+	if r.ContentLength > g.maxBody {
+		return noop, errBodyTooLarge
 	}
-	if int64(len(body)) > g.maxBody {
-		return errBodyTooLarge
+	if r.ContentLength > 0 && !g.limiter.hasBodyCapacity(r.ContentLength) {
+		return noop, errBodyBudgetExhausted
 	}
-	out, unr := g.engine.Substitute(host, egress.LocationBody, string(body))
+
+	var raw bytes.Buffer
+	var acquired int64
+	releaseAll := func() {
+		if acquired > 0 {
+			g.limiter.releaseBodyBytes(acquired)
+			acquired = 0
+		}
+	}
+
+	const chunkSize int64 = 32 << 10
+	buf := make([]byte, min(chunkSize, g.maxBody+1))
+	var totalRead int64
+	for {
+		rem := g.maxBody + 1 - totalRead
+		readBuf := buf
+		if int64(len(readBuf)) > rem {
+			readBuf = readBuf[:rem]
+		}
+		n, rerr := r.Body.Read(readBuf)
+		if n > 0 {
+			totalRead += int64(n)
+			if totalRead > g.maxBody {
+				releaseAll()
+				return noop, errBodyTooLarge
+			}
+			if !g.limiter.acquireBodyBytes(int64(n)) {
+				releaseAll()
+				return noop, errBodyBudgetExhausted
+			}
+			acquired += int64(n)
+			raw.Write(readBuf[:n])
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			releaseAll()
+			return noop, rerr
+		}
+	}
+
+	out, unr := g.engine.Substitute(host, egress.LocationBody, raw.String())
 	for _, c := range unr {
 		unreachable[c.Placeholder] = struct{}{}
 	}
+	finalBytes := int64(len(out))
+	if delta := finalBytes - acquired; delta > 0 {
+		if !g.limiter.acquireBodyBytes(delta) {
+			releaseAll()
+			return noop, errBodyBudgetExhausted
+		}
+		acquired = finalBytes
+	} else if delta < 0 {
+		g.limiter.releaseBodyBytes(-delta)
+		acquired = finalBytes
+	}
 	r.Body = io.NopCloser(strings.NewReader(out))
-	r.ContentLength = int64(len(out))
-	r.Header.Set("Content-Length", strconv.Itoa(len(out)))
-	return nil
+	r.ContentLength = finalBytes
+	r.Header.Set("Content-Length", strconv.FormatInt(finalBytes, 10))
+	var once sync.Once
+	return func() { once.Do(releaseAll) }, nil
 }
 
 func (g *Gate) report(host string, unreachable map[string]struct{}) {

@@ -72,7 +72,12 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string
 	// it only after winning the create — so a lost create race (another executor
 	// created the gate first, adopted below) never revokes the winner's token.
 	token := spec.Gate.TokenMinter.Generate()
-	cfg := gateConfig(spec, token, p.gateNetwork)
+	res := spec.Gate.Resources.Effective()
+	cpuMillis := res.CPUMillis
+	if cpuMillis > 1000 {
+		cpuMillis = p.clampCPU(ctx, cpuMillis)
+	}
+	cfg := gateConfigWithCPU(spec, token, p.gateNetwork, cpuMillis)
 	id, err = p.api.createContainer(ctx, name, cfg)
 	if statusIs(err, 404) { // the gate image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Gate.Image); perr != nil {
@@ -161,6 +166,11 @@ func (p *Provider) removeDetached(ctx context.Context, id string) {
 // control-plane URL, and the OTLP collector config (so the gate's egress_request
 // spans reach the same collector as the rest of the platform) travel as env.
 func gateConfig(spec sandbox.Spec, token, network string) containerConfig {
+	return gateConfigWithCPU(spec, token, network, spec.Gate.Resources.Effective().CPUMillis)
+}
+
+func gateConfigWithCPU(spec sandbox.Spec, token, network string, cpuMillis int64) containerConfig {
+	res := spec.Gate.Resources.Effective()
 	env := map[string]string{
 		"CONTROLPLANE_URL": spec.Gate.ControlplaneURL,
 		"GATE_TOKEN":       token,
@@ -188,6 +198,9 @@ func gateConfig(spec sandbox.Spec, token, network string) containerConfig {
 			NetworkMode: network,
 			Init:        true,
 			CapAdd:      []string{"NET_ADMIN"},
+			Memory:      res.MemoryBytes,
+			NanoCpus:    cpuMillis * 1_000_000,
+			PidsLimit:   res.PidsLimit,
 		},
 	}
 }
