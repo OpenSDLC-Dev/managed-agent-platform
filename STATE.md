@@ -4,8 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.**
+**Plan 70** ([docs/plan/70_security-hardening-vault-egress.md](./docs/plan/70_security-hardening-vault-egress.md), [#1052](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/1052)) — Vault credential destination binding and egress gate hardening.
 
 ## Tasks
 
-None in flight.
+- [x] Slice 1 — Vault credential destination binding (PR 1: API expansion check, sealed destination digest, resolver check, tests, docs)
+- [ ] Slice 2 — Egress gate resource limits (PR 2: concurrency and aggregate body buffer budgets, Docker/Kubernetes gate container limits)
+- [ ] Slice 3 — Egress policy withdrawal (PR 3: current-policy outbound admission, active tunnel and request withdrawal contract)

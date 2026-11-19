@@ -359,9 +359,10 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 		return nil, archivedCredentialRefusal(ctx, tx, vaultID, credID)
 	}
 	if reseal != nil {
-		// The unlocked read fed the re-seal; if the secret rotated between then
-		// and the lock, our sealed value is stale — refuse rather than clobber.
-		if !bytes.Equal(row.ciphertext, reseal.baseCiphertext) {
+		// The unlocked read fed the re-seal; if the secret or auth document
+		// changed between then and the lock, our sealed value or destination
+		// comparison is stale — refuse rather than clobber.
+		if !bytes.Equal(row.ciphertext, reseal.baseCiphertext) || !bytes.Equal(row.authDoc, reseal.baseAuthDoc) {
 			return nil, errConflict("credential %s was modified concurrently; retry", credID)
 		}
 		row.authDoc, row.ciphertext, row.keyID = reseal.doc, reseal.ciphertext, &reseal.keyID
@@ -407,6 +408,7 @@ type credAuthReseal struct {
 	ciphertext     []byte
 	keyID          string
 	baseCiphertext []byte
+	baseAuthDoc    []byte
 }
 
 // resealCredAuth unseals the base secret, applies the auth update, and re-seals
@@ -432,7 +434,13 @@ func (s *server) resealCredAuth(ctx context.Context, raw json.RawMessage, base *
 	if err != nil {
 		return nil, sealFailed(err)
 	}
-	return &credAuthReseal{doc: newDoc, ciphertext: ciphertext, keyID: keyID, baseCiphertext: base.ciphertext}, nil
+	return &credAuthReseal{
+		doc:            newDoc,
+		ciphertext:     ciphertext,
+		keyID:          keyID,
+		baseCiphertext: base.ciphertext,
+		baseAuthDoc:    base.authDoc,
+	}, nil
 }
 
 func deref(s *string) string {

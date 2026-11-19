@@ -576,7 +576,11 @@ and holds the two OS-touching adapters `gaterun/` declares.
 - **Credentials never enter the sandbox.** Tool credentials (vaults) reach the wire only
   at egress time: the sandbox sees opaque `vltph_` placeholders, and the per-session gate
   substitutes the real value on admitted plain-HTTP egress alone (both backends when the
-  executor opts in; in-sandbox HTTPS keeps its placeholders until #166). Model
+  executor opts in; in-sandbox HTTPS keeps its placeholders until #166). An
+  `environment_variable` credential's sealed secret is bound to its approved `networking`
+  destinations: updates that expand destinations without supplying a new `secret_value`
+  are refused, and `vaultresolve.Credentials` checks the sealed destination digest against
+  the stored `auth.networking` column before handing a secret to the gate (plan 70 slice 1). Model
   keys live sealed in the model gateway's catalogue, or in the brain's provider config
   where it routes past the gateway; the sandbox sees none of them. Provider adapters redact the credentials they were configured with
   — the api key, a `base_url` userinfo password, an auth header — out of the errors that

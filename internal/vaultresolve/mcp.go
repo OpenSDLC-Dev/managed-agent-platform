@@ -179,29 +179,11 @@ func unusable(err error) error {
 	return fmt.Errorf("%w: %w", err, ErrCredentialUnusable)
 }
 
-// sealedField opens a credential's sealed secret and reads one non-empty field
-// from it — the sequence both resolvers need, spelled once.
-//
-// The three errors name the credential and the failure and nothing else: never
-// the cipher's own error, never anything derived from the plaintext. That is
-// what makes leak-safety a property of this package rather than of whichever
-// backend the deployment configured.
-func sealedField(ctx context.Context, cipher secrets.Cipher, id string,
-	ciphertext []byte, keyID *string, field string) (string, error) {
-	sealed, err := openSealed(ctx, cipher, id, ciphertext, keyID)
-	if err != nil {
-		return "", err
-	}
-	v := sealed[field]
-	if v == "" {
-		return "", fmt.Errorf("vaultresolve: credential %s has no %s", id, field)
-	}
-	return v, nil
-}
-
 // openSealed decrypts a credential's sealed document. Its two errors name the
-// credential and the failure and nothing else — see [sealedField], which is this
-// plus one field read, and which is why the guarantee lives here.
+// credential and the failure and nothing else: never the cipher's own error,
+// never anything derived from the plaintext. That is what makes leak-safety a
+// property of this package rather than of whichever backend the deployment
+// configured.
 func openSealed(ctx context.Context, cipher secrets.Cipher, id string,
 	ciphertext []byte, keyID *string) (map[string]string, error) {
 	plain, err := cipher.Decrypt(ctx, ciphertext, deref(keyID))

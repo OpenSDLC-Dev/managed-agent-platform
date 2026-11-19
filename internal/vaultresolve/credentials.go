@@ -82,10 +82,14 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		// The cipher error and the decrypted plaintext must NOT flow into a
 		// resolution error a caller may log: name the credential and the failure,
 		// never wrap the cipher error (%w) or the plaintext-derived parse error.
-		// Leak-safety is then a property of sealedField, not of the cipher.
-		secret, err := sealedField(ctx, cipher, w.id, w.ciphertext, w.keyID, "secret_value")
+		// Leak-safety is then a property of openSealed, not of the cipher.
+		sealed, err := openSealed(ctx, cipher, w.id, w.ciphertext, w.keyID)
 		if err != nil {
 			return nil, err
+		}
+		secret := sealed["secret_value"]
+		if secret == "" {
+			return nil, fmt.Errorf("vaultresolve: credential %s has no secret_value", w.id)
 		}
 		// Reject an unknown networking arm rather than coercing it to limited: a
 		// corrupt or future type carried alongside allowed_hosts would otherwise be
@@ -94,6 +98,13 @@ func Credentials(ctx context.Context, q Querier, cipher secrets.Cipher, sessionI
 		unrestricted := doc.Networking.Type == string(domain.NetUnrestricted)
 		if !unrestricted && doc.Networking.Type != string(domain.NetLimited) {
 			return nil, fmt.Errorf("vaultresolve: credential %s has an unknown networking type", w.id)
+		}
+		// When the sealed secret carries an approved destination digest (plan 70
+		// slice 1), fail closed if the plaintext auth column no longer matches it.
+		// Credentials written before that binding lack the key and remain readable.
+		if bound, ok := sealed[egress.SealedApprovedNetworkingKey]; ok &&
+			bound != egress.NetworkingBindingDigest(unrestricted, doc.Networking.AllowedHosts) {
+			return nil, fmt.Errorf("vaultresolve: credential %s networking does not match sealed destination binding", w.id)
 		}
 		out = append(out, Credential{
 			CredentialID: w.id,
