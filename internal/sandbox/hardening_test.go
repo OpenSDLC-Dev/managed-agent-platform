@@ -339,3 +339,20 @@ func TestRunAsUserAcceptsTheLargestSafeUID(t *testing.T) {
 		}
 	}
 }
+
+func TestGateResourcesEffective(t *testing.T) {
+	def := (sandbox.GateResources{}).Effective()
+	if def.MemoryBytes != sandbox.DefaultGateMemoryBytes ||
+		def.CPUMillis != sandbox.DefaultGateCPUMillis ||
+		def.PidsLimit != sandbox.DefaultGatePidsLimit ||
+		def.EphemeralStorageBytes != 0 {
+		t.Fatalf("default Effective() = %+v", def)
+	}
+	clamped := (sandbox.GateResources{CPUMillis: 1 << 58, EphemeralStorageBytes: -1}).Effective()
+	if clamped.CPUMillis*1_000_000 <= 0 {
+		t.Fatalf("clamped CPUMillis %d overflows NanoCpus", clamped.CPUMillis)
+	}
+	if clamped.EphemeralStorageBytes != 0 {
+		t.Fatalf("negative EphemeralStorageBytes = %d, want 0", clamped.EphemeralStorageBytes)
+	}
+}

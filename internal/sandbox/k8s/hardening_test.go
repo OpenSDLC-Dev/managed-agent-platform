@@ -222,3 +222,60 @@ func TestGateSidecarIsGivenThePlatformsGateUID(t *testing.T) {
 	}
 	t.Errorf("gate sidecar env = %v, want a GATE_UID entry", c.Env)
 }
+
+// TestGateSidecarAppliesIndependentResourceLimits verifies plan 70 slice 2:
+// the Kubernetes gate sidecar always declares explicit CPU, memory, and
+// ephemeral-storage Requests and Limits independently of Spec.Hardening.
+func TestGateSidecarAppliesIndependentResourceLimits(t *testing.T) {
+	t.Run("defaults apply when Gate.Resources is zero", func(t *testing.T) {
+		c := gateSidecar(&sandbox.GateSpec{Image: "gate:1", ControlplaneURL: "http://cp"}, "tok")
+		if got := c.Resources.Limits.Memory().Value(); got != sandbox.DefaultGateMemoryBytes {
+			t.Errorf("memory limit = %d, want %d", got, sandbox.DefaultGateMemoryBytes)
+		}
+		if got := c.Resources.Requests.Memory().Value(); got != sandbox.DefaultGateMemoryBytes {
+			t.Errorf("memory request = %d, want %d", got, sandbox.DefaultGateMemoryBytes)
+		}
+		if got := c.Resources.Limits.Cpu().MilliValue(); got != sandbox.DefaultGateCPUMillis {
+			t.Errorf("cpu limit = %dm, want %dm", got, sandbox.DefaultGateCPUMillis)
+		}
+		if got := c.Resources.Requests.Cpu().MilliValue(); got != gateCPURequestFloorMillis {
+			t.Errorf("cpu request = %dm, want %dm", got, gateCPURequestFloorMillis)
+		}
+		if _, set := c.Resources.Limits[corev1.ResourceEphemeralStorage]; set {
+			t.Errorf("ephemeral-storage limit unexpectedly set by default: %v", c.Resources.Limits[corev1.ResourceEphemeralStorage])
+		}
+		if _, set := c.Resources.Requests[corev1.ResourceEphemeralStorage]; set {
+			t.Errorf("ephemeral-storage request unexpectedly set by default: %v", c.Resources.Requests[corev1.ResourceEphemeralStorage])
+		}
+	})
+
+	t.Run("custom GateResources apply and low CPU caps the request floor", func(t *testing.T) {
+		c := gateSidecar(&sandbox.GateSpec{
+			Image:           "gate:1",
+			ControlplaneURL: "http://cp",
+			Resources: sandbox.GateResources{
+				MemoryBytes:           128 << 20,
+				CPUMillis:             25,
+				EphemeralStorageBytes: 32 << 20,
+			},
+		}, "tok")
+		if got := c.Resources.Limits.Memory().Value(); got != 128<<20 {
+			t.Errorf("memory limit = %d, want %d", got, 128<<20)
+		}
+		if got := c.Resources.Requests.Memory().Value(); got != 128<<20 {
+			t.Errorf("memory request = %d, want %d", got, 128<<20)
+		}
+		if got := c.Resources.Limits.Cpu().MilliValue(); got != 25 {
+			t.Errorf("cpu limit = %dm, want 25m", got)
+		}
+		if got := c.Resources.Requests.Cpu().MilliValue(); got != 25 {
+			t.Errorf("cpu request = %dm, want 25m (not above limit)", got)
+		}
+		if got := c.Resources.Limits.StorageEphemeral().Value(); got != 32<<20 {
+			t.Errorf("ephemeral-storage limit = %d, want %d", got, 32<<20)
+		}
+		if got := c.Resources.Requests.StorageEphemeral().Value(); got != 32<<20 {
+			t.Errorf("ephemeral-storage request = %d, want %d", got, 32<<20)
+		}
+	})
+}

@@ -3,6 +3,7 @@ package egress
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strings"
 )
 
@@ -107,6 +108,66 @@ func NewEngine(creds []Credential) *Engine {
 // verdict. Said here rather than in that plan alone, because the absence is
 // the answer to a question this function invites.
 func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
+	out, unreachable, _ = e.substitute(host, loc, s, -1, 0, nil)
+	return out, unreachable
+}
+
+// ErrOutputTooLarge and ErrOutputBudgetDenied distinguish per-request output
+// size refusal from shared aggregate buffer-budget exhaustion in
+// SubstituteBounded.
+var (
+	ErrOutputTooLarge     = errors.New("egress: substituted output exceeds byte limit")
+	ErrOutputBudgetDenied = errors.New("egress: substituted output exceeds shared buffer budget")
+)
+
+// SubstituteBounded behaves like Substitute while enforcing both a per-request
+// cap maxBytes (when >= 0) and an optional incremental shared-budget reservation
+// callback reserve. prepaid is the byte count already reserved by the caller;
+// before allocating output past prepaid, boundedBuilder asks reserve(extra) for
+// the incremental growth and aborts with ErrOutputBudgetDenied if denied
+// (plan 70 slice 2). When err != nil, out is empty.
+func (e *Engine) SubstituteBounded(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, unreachable []*Credential, err error) {
+	return e.substitute(host, loc, s, maxBytes, prepaid, reserve)
+}
+
+type boundedBuilder struct {
+	buf      strings.Builder
+	max      int64
+	reserved int64
+	reserve  func(extra int64) bool
+}
+
+func (b *boundedBuilder) checkAndReserve(n int64) error {
+	cur := int64(b.buf.Len())
+	if b.max >= 0 && n > b.max-cur {
+		return ErrOutputTooLarge
+	}
+	next := cur + n
+	if next > b.reserved && b.reserve != nil {
+		extra := next - b.reserved
+		if !b.reserve(extra) {
+			return ErrOutputBudgetDenied
+		}
+		b.reserved = next
+	}
+	return nil
+}
+
+func (b *boundedBuilder) Write(p []byte) (int, error) {
+	if err := b.checkAndReserve(int64(len(p))); err != nil {
+		return 0, err
+	}
+	return b.buf.Write(p)
+}
+
+func (b *boundedBuilder) WriteString(s string) (int, error) {
+	if err := b.checkAndReserve(int64(len(s))); err != nil {
+		return 0, err
+	}
+	return b.buf.WriteString(s)
+}
+
+func (e *Engine) substitute(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, unreachable []*Credential, err error) {
 	var pairs []string // placeholder, secret, … for the admitted credentials
 	for i := range e.creds {
 		c := &e.creds[i]
@@ -120,10 +181,21 @@ func (e *Engine) Substitute(host string, loc Location, s string) (out string, un
 		unreachable = append(unreachable, c)
 	}
 	if len(pairs) == 0 {
-		return s, unreachable
+		if maxBytes >= 0 && int64(len(s)) > maxBytes {
+			return "", unreachable, ErrOutputTooLarge
+		}
+		return s, unreachable, nil
 	}
 	// One left-to-right pass that never re-scans its own output, so a secret
 	// that happens to contain another credential's placeholder is not itself
 	// rewritten — the result is independent of credential order.
-	return strings.NewReplacer(pairs...).Replace(s), unreachable
+	repl := strings.NewReplacer(pairs...)
+	if maxBytes < 0 && reserve == nil {
+		return repl.Replace(s), unreachable, nil
+	}
+	bw := boundedBuilder{max: maxBytes, reserved: prepaid, reserve: reserve}
+	if _, werr := repl.WriteString(&bw, s); werr != nil {
+		return "", unreachable, werr
+	}
+	return bw.buf.String(), unreachable, nil
 }

@@ -37,11 +37,13 @@ func RunFetchLoop(ctx context.Context, f Fetcher, handler *SwappableHandler, int
 		cfg, err := f.Fetch(ctx)
 		switch {
 		case err == nil:
-			handler.Swap(gate.New(Convert(cfg)))
+			gc := Convert(cfg)
+			gc.Limiter = handler.Limiter()
+			handler.Swap(gate.New(gc))
 		case ctx.Err() != nil:
 			return nil
 		case errors.Is(err, gateconfig.ErrUnauthorized):
-			handler.Swap(gate.New(gate.Config{})) // deny-all until the server stops
+			handler.Swap(gate.New(gate.Config{Limiter: handler.Limiter()})) // deny-all until the server stops
 			return err
 		default:
 			slog.WarnContext(ctx, "gate config fetch failed; keeping last-known-good", "err", err)

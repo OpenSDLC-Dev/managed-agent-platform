@@ -65,15 +65,21 @@ func Convert(cfg *gateconfig.Config) gate.Config {
 // denies rather than leaks.
 type SwappableHandler struct {
 	current atomic.Pointer[gate.Gate]
+	limiter *gate.Limiter
 }
 
 // NewSwappableHandler returns a handler that serves initial until Swap replaces
-// it. initial must be non-nil.
+// it. initial must be non-nil. The initial gate's Limiter is retained on the
+// handler so RunFetchLoop shares one concurrency and body-buffer budget across
+// every policy swap.
 func NewSwappableHandler(initial *gate.Gate) *SwappableHandler {
-	h := &SwappableHandler{}
+	h := &SwappableHandler{limiter: initial.Limiter()}
 	h.current.Store(initial)
 	return h
 }
+
+// Limiter returns the shared resource limiter carried across policy swaps.
+func (h *SwappableHandler) Limiter() *gate.Limiter { return h.limiter }
 
 // Swap installs g as the gate every subsequent request uses.
 func (h *SwappableHandler) Swap(g *gate.Gate) { h.current.Store(g) }
