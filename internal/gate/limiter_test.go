@@ -412,21 +412,26 @@ func TestGateStalledBodyOnRejectedRequestsDoesNotPinSlots(t *testing.T) {
 		MaxBodyBytes:          64,
 		MaxTotalBodyBytes:     128,
 		MaxConcurrentRequests: 2,
+		MaxConcurrentTunnels:  2,
 		BodyReadTimeout:       10 * time.Second,
 	})
 	gsrv := httptest.NewServer(g)
 	defer gsrv.Close()
 
-	// Send 6 stalled POST requests (more than MaxConcurrentRequests=2) across
-	// every early-rejection path without ever sending the declared body bytes.
+	// Send stalled requests (more than MaxConcurrentRequests=2 and
+	// MaxConcurrentTunnels=2) across every early-rejection path without ever
+	// sending the declared body bytes.
 	probes := []struct {
-		raw  string
-		want int
+		method string
+		raw    string
+		want   int
 	}{
-		{fmt.Sprintf("POST http://forbidden.invalid/x HTTP/1.1\r\nHost: forbidden.invalid\r\nContent-Length: 32\r\n\r\n"), http.StatusForbidden},
-		{fmt.Sprintf("POST /not-a-proxy-path HTTP/1.1\r\nHost: %s\r\nContent-Length: 32\r\n\r\n", host), http.StatusBadRequest},
-		{fmt.Sprintf("POST %s/big HTTP/1.1\r\nHost: %s\r\nContent-Length: 100\r\n\r\n", origin.URL, host), http.StatusRequestEntityTooLarge},
-		{fmt.Sprintf("POST http://forbidden.invalid/chunked HTTP/1.1\r\nHost: forbidden.invalid\r\nTransfer-Encoding: chunked\r\n\r\n"), http.StatusForbidden},
+		{http.MethodPost, "POST http://forbidden.invalid/x HTTP/1.1\r\nHost: forbidden.invalid\r\nContent-Length: 32\r\n\r\n", http.StatusForbidden},
+		{http.MethodPost, fmt.Sprintf("POST /not-a-proxy-path HTTP/1.1\r\nHost: %s\r\nContent-Length: 32\r\n\r\n", host), http.StatusBadRequest},
+		{http.MethodPost, fmt.Sprintf("POST %s/big HTTP/1.1\r\nHost: %s\r\nContent-Length: 100\r\n\r\n", origin.URL, host), http.StatusRequestEntityTooLarge},
+		{http.MethodPost, "POST http://forbidden.invalid/chunked HTTP/1.1\r\nHost: forbidden.invalid\r\nTransfer-Encoding: chunked\r\n\r\n", http.StatusForbidden},
+		{http.MethodConnect, "CONNECT forbidden.invalid:443 HTTP/1.1\r\nHost: forbidden.invalid:443\r\nContent-Length: 32\r\n\r\n", http.StatusForbidden},
+		{http.MethodConnect, "CONNECT forbidden.invalid:443 HTTP/1.1\r\nHost: forbidden.invalid:443\r\nTransfer-Encoding: chunked\r\n\r\n", http.StatusForbidden},
 	}
 	for i := range 2 {
 		for _, p := range probes {
@@ -436,19 +441,19 @@ func TestGateStalledBodyOnRejectedRequestsDoesNotPinSlots(t *testing.T) {
 			}
 			_, _ = io.WriteString(conn, p.raw)
 			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-			resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+			resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: p.method})
 			conn.Close()
 			if err != nil {
-				t.Fatalf("round %d stalled rejection (%d) hung: %v", i, p.want, err)
+				t.Fatalf("round %d stalled %s rejection (%d) hung: %v", i, p.method, p.want, err)
 			}
 			resp.Body.Close()
 			if resp.StatusCode != p.want {
-				t.Fatalf("round %d status = %d, want %d", i, resp.StatusCode, p.want)
+				t.Fatalf("round %d %s status = %d, want %d", i, p.method, resp.StatusCode, p.want)
 			}
 		}
 	}
 
-	// All concurrency slots must be free so ordinary traffic completes immediately.
+	// All plain-HTTP and tunnel slots must be free so ordinary traffic completes immediately.
 	client := proxyClient(t, gsrv.URL, nil)
 	okResp, err := client.Get(origin.URL + "/ok")
 	if err != nil {
@@ -457,5 +462,22 @@ func TestGateStalledBodyOnRejectedRequestsDoesNotPinSlots(t *testing.T) {
 	okResp.Body.Close()
 	if okResp.StatusCode != http.StatusOK {
 		t.Fatalf("ordinary GET after stalled rejections = %d, want 200", okResp.StatusCode)
+	}
+	// Verify CONNECT tunnel slots were also released (ordinary allowed CONNECT succeeds).
+	originAddr := strings.TrimPrefix(origin.URL, "http://")
+	conn, err := net.DialTimeout("tcp", gsrv.Listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", originAddr, originAddr)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	cResp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("allowed CONNECT after stalled CONNECT rejections: %v", err)
+	}
+	cResp.Body.Close()
+	if cResp.StatusCode != http.StatusOK {
+		t.Fatalf("allowed CONNECT after stalled rejections = %d, want 200", cResp.StatusCode)
 	}
 }

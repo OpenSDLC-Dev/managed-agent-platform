@@ -364,6 +364,14 @@ func refusedOrUnreachable(w http.ResponseWriter, err error) {
 	http.Error(w, "cannot reach host", http.StatusBadGateway)
 }
 
+func refusedOrUnreachableAndClose(w http.ResponseWriter, err error) {
+	if errors.Is(err, errFloorRefused) {
+		rejectAndClose(w, refusedBody, http.StatusForbidden)
+		return
+	}
+	rejectAndClose(w, "cannot reach host", http.StatusBadGateway)
+}
+
 // refusedBody is the reference's own wording for an address its floor refused,
 // recorded 2026-09-03 on an `unrestricted` environment (#570).
 const refusedBody = "Destination IP is in a private/reserved range"
@@ -374,7 +382,7 @@ const refusedBody = "Destination IP is in a private/reserved range"
 func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	releaseTunnel, ok := g.limiter.acquireTunnel()
 	if !ok {
-		http.Error(w, "too many concurrent tunnels", http.StatusServiceUnavailable)
+		rejectAndClose(w, "too many concurrent tunnels", http.StatusServiceUnavailable)
 		return
 	}
 	defer releaseTunnel()
@@ -383,7 +391,7 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	host, port := hostOnly(target), portOnly(target)
 	how := g.policy.admit(host, port)
 	if how == admitNone {
-		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 	ctx := withAdmission(r.Context(), how)
@@ -426,14 +434,14 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	upstream, err := g.dial(ctx, "tcp", dialAddr)
 	if err != nil {
-		refusedOrUnreachable(w, err)
+		refusedOrUnreachableAndClose(w, err)
 		return
 	}
 	defer upstream.Close()
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "proxy does not support hijacking", http.StatusInternalServerError)
+		rejectAndClose(w, "proxy does not support hijacking", http.StatusInternalServerError)
 		return
 	}
 	client, clientBuf, err := hj.Hijack()
