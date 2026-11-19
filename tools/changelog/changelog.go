@@ -114,10 +114,16 @@ func loadFragments(dir string) ([]fragment, error) {
 		if !strings.HasPrefix(body, "- ") {
 			return nil, fmt.Errorf("changelog.d/%s: a fragment is the final CHANGELOG entry verbatim and must start with %q", name, "- ")
 		}
-		for _, line := range strings.Split(body, "\n") {
+		lines := strings.Split(body, "\n")
+		for _, line := range lines {
 			if headingRe.MatchString(line) {
 				return nil, fmt.Errorf("changelog.d/%s: headings belong to the assembler, not a fragment", name)
 			}
+		}
+		// Use the release-notes rules with placeholder metadata. Keep the
+		// original body for assembly, which copies fragments verbatim.
+		if _, err := absolutizeLinks(lines, fenceStates(lines), "https://example.invalid/repo", "0.0.0"); err != nil {
+			return nil, fmt.Errorf("changelog.d/%s: %w", name, err)
 		}
 		frags = append(frags, fragment{
 			name:    name,

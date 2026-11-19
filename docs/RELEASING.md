@@ -137,11 +137,8 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    resolve a repo-root-relative target against the repository at the tag,
    so the page itself reads correctly, but the raw body the REST API and
    mirrors serve carries no such base and its `body_html` is root-relative,
-   so the link survives only on github.com. A link form the rewrite cannot
-   map fails **this step**, after the tag is pushed and therefore after it
-   is immutable, and nothing earlier checks link forms — which is why
-   changelog.d/README.md asks for a glance at them while the fragment is
-   still in review.
+   so the link survives only on github.com. Fragment loading applies the same
+   link check. CI runs it against `changelog.d/` before fragments reach a tag.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
    emulating the Go toolchain, after `go run ./tools/ripgrepfetch` — what

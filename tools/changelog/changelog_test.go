@@ -493,6 +493,29 @@ func TestFragmentHeadingGuard(t *testing.T) {
 	}
 }
 
+func TestAssembleRejectsInvalidFragmentLink(t *testing.T) {
+	const name = "link.fixed.md"
+	const target = "deploy/gcp/README.md"
+	const body = "- See the [deployment guide](" + target + ").\n"
+	clPath, dir := writeFixture(t, steadyChangelog, map[string]string{name: body})
+
+	err := runAssemble(clPath, dir, "0.3.0", "2026-09-01")
+	if err == nil {
+		t.Fatal("assemble accepted a fragment whose link would fail release-notes rendering")
+	}
+	for _, want := range []string{"changelog.d/" + name, target} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if got := readFile(t, clPath); got != steadyChangelog {
+		t.Error("CHANGELOG modified on refused assemble")
+	}
+	if got := readFile(t, filepath.Join(dir, name)); got != body {
+		t.Error("fragment modified on refused assemble")
+	}
+}
+
 // Interior bytes and trailing spaces (markdown hard breaks) survive; only
 // surrounding newlines are trimmed — the hard break sits on the fragment's
 // FINAL line precisely so a whole-file TrimSpace would strip it and fail.
@@ -596,10 +619,11 @@ func TestFragmentSizeCap(t *testing.T) {
 // changelog.d/ — the only fragments that will ever be released.
 //
 // Every other test here builds a fixture, so the loader's rules (naming, the
-// "- " prefix, no headings, the byte cap) were checked only against fragments
-// written to be checked. Nothing in `make verify` or CI touched the real
-// directory, so a fragment breaking one of them merged green and failed at the
-// release PR — the point where the cost is highest and the author is elsewhere.
+// "- " prefix, no headings, the byte cap, link forms) were checked only
+// against fragments written to be checked. Nothing in `make verify` or CI
+// touched the real directory, so a fragment breaking one of them merged green
+// and failed at the release PR — the point where the cost is highest and the
+// author is elsewhere.
 // This puts the failure in the PR that causes it.
 //
 // loadFragments only reads. Never reach for assemble here: it DELETES every
