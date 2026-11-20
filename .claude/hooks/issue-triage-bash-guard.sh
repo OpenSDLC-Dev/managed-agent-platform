@@ -8,8 +8,10 @@
 # Stdin is the PreToolUse JSON payload; tool_input.command is the Bash command.
 set -eu
 set -f
+LC_ALL=C
+export LC_ALL
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 reader="$script_dir/issue-triage-read.sh"
 
 # The parse step must not depend on a working python3 on PATH: the Microsoft
@@ -33,7 +35,11 @@ if not isinstance(ti, dict):
 cmd = ti.get("command", "")
 if not isinstance(cmd, str):
     sys.exit(1)
-sys.stdout.write(cmd)'
+# Reject NUL and line breaks inside Python before command substitution can
+# truncate at NUL (ksh), drop NUL (bash/dash), or strip trailing newlines.
+if "\x00" in cmd or "\n" in cmd or "\r" in cmd:
+    sys.exit(3)
+sys.stdout.write(cmd + "x")'
 py=''
 for p in python3 python; do
   if printf '{}' | "$p" -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
@@ -42,10 +48,16 @@ for p in python3 python; do
   fi
 done
 if [ -n "$py" ]; then
-  cmd=$(printf '%s' "$payload" | "$py" -c "$json" 2>/dev/null) || {
+  rc=0
+  cmd_marked=$(printf '%s' "$payload" | "$py" -c "$json" 2>/dev/null) || rc=$?
+  if [ "$rc" = 3 ]; then
+    echo "issue-triage guard: command contains disallowed NUL or newline characters" >&2
+    exit 2
+  elif [ "$rc" != 0 ]; then
     echo "issue-triage guard: the PreToolUse payload is not valid JSON" >&2
     exit 2
-  }
+  fi
+  cmd=${cmd_marked%x}
 else
   # The extraction must be unambiguous as well as faithful: sed's greedy
   # match selects the LAST "command" key, and the harness executes
@@ -67,13 +79,10 @@ else
   esac
 fi
 
-# Reject empty commands and ANY character outside a narrow metacharacter-free
-# allowlist (ASCII letters, digits, space, and . _ / : @ ~ ^ + -). This denies
-# quotes, backslashes, globs, variable/command substitutions, redirects, pipes,
-# operators, assignments (=), comments (#), tabs, and newlines so shell parsing
-# cannot diverge from the tokens checked below.
+# Reject empty commands and ANY character outside a narrow ASCII
+# metacharacter-free allowlist (LC_ALL=C pins character classes to ASCII).
 case "$cmd" in
-  ''|*[!A-Za-z0-9._/:@~^+' '-]*)
+  ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:@~^+' '-]*)
     echo "issue-triage guard: command is empty or contains disallowed characters or shell metacharacters" >&2
     exit 2;;
 esac

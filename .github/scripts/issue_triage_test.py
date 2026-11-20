@@ -64,7 +64,8 @@ class IssueTriageGuardTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             no_py_env = self._no_python_env(tmpdir)
-            for label, env in [("python", None), ("posix-fallback", no_py_env)]:
+            utf8_env = {**os.environ, "LC_ALL": "en_US.UTF-8"}
+            for label, env in [("python", utf8_env), ("posix-fallback", no_py_env)]:
                 for cmd in allowed:
                     with self.subTest(mode=label, cmd=cmd):
                         res = run_guard(payload_for(cmd), env=env)
@@ -107,20 +108,30 @@ class IssueTriageGuardTests(unittest.TestCase):
             ".claude/hooks/issue-triage-read.sh issue-view `id`",
             ".claude/hooks/issue-triage-read.sh issue-view 1052 > /tmp/pwn",
             ".claude/hooks/issue-triage-read.sh git-log\ntouch /tmp/pwn",
+            ".claude/hooks/issue-triage-read.sh git-log\n",
+            ".claude/hooks/issue-triage-read.sh git-log\x00; touch /tmp/pwn",
+            ".claude/hooks/issue-triage-read.sh\x00 git-log",
             ".claude/hooks/issue-triage-read.sh git-log\rtouch /tmp/pwn",
             ".claude/hooks/issue-triage-read.sh git-log\t--oneline",
             ".claude/hooks/issue-triage-read.sh git-log *",
             ".claude/hooks/issue-triage-read.sh git-log ~root",
+            ".claude/hooks/issue-triage-read.sh git-log ^HEAD",
+            ".claude/hooks/issue-triage-read.sh git-log café",
             "FOO=bar .claude/hooks/issue-triage-read.sh git-log",
             # Argument validation edge cases
             ".claude/hooks/issue-triage-read.sh issue-view abc",
             ".claude/hooks/issue-triage-read.sh issue-view 0",
+            ".claude/hooks/issue-triage-read.sh issue-view 000010",
+            ".claude/hooks/issue-triage-read.sh issue-view 99999999999999999999999999999999",
             ".claude/hooks/issue-triage-read.sh issue-list --state invalid",
             ".claude/hooks/issue-triage-read.sh issue-list --limit 0",
+            ".claude/hooks/issue-triage-read.sh issue-list --limit 010",
             ".claude/hooks/issue-triage-read.sh issue-list --limit 101",
             ".claude/hooks/issue-triage-read.sh issue-list --label -bad",
             ".claude/hooks/issue-triage-read.sh git-log -n 0",
+            ".claude/hooks/issue-triage-read.sh git-log -n 001",
             ".claude/hooks/issue-triage-read.sh git-log -n 201",
+            ".claude/hooks/issue-triage-read.sh git-log -n 99999999999999999999999999999999",
             ".claude/hooks/issue-triage-read.sh git-log -- ../outside",
             ".claude/hooks/issue-triage-read.sh git-log -- /etc/passwd",
             ".claude/hooks/issue-triage-read.sh git-log -- -rf",
@@ -131,7 +142,8 @@ class IssueTriageGuardTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             no_py_env = self._no_python_env(tmpdir)
-            for label, env in [("python", None), ("posix-fallback", no_py_env)]:
+            utf8_env = {**os.environ, "LC_ALL": "en_US.UTF-8"}
+            for label, env in [("python", utf8_env), ("posix-fallback", no_py_env)]:
                 for cmd in rejected:
                     with self.subTest(mode=label, cmd=cmd):
                         res = run_guard(payload_for(cmd), env=env)
@@ -225,22 +237,58 @@ class IssueTriageReaderExecutionTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "line1\nline2\n")
 
-    def test_git_disables_malicious_external_diff_and_textconv(self):
+    def test_git_disables_malicious_external_diff_textconv_and_gpg(self):
         marker = self.root / "pwned"
         evil = self.root / "evil.sh"
         evil.write_text(f'#!/bin/sh\ntouch "{marker}"\n')
         evil.chmod(0o755)
         self._git("config", "diff.external", str(evil))
+        self._git("config", "diff.txt.command", str(evil))
         self._git("config", "diff.txt.textconv", str(evil))
+        self._git("config", "log.showSignature", "true")
+        self._git("config", "gpg.program", str(evil))
         (self.repo / ".gitattributes").write_text("*.txt diff=txt\n")
 
-        r = self._read("git-show", "HEAD")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(marker.exists(), "git diff.external/textconv executed despite read-only wrapper")
+        # Create a commit carrying a gpgsig header so log.showSignature=true
+        # would invoke gpg.program unless explicitly suppressed.
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        parent = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        signed_obj = (
+            f"tree {tree}\n"
+            f"parent {parent}\n"
+            "author Test User <test@example.com> 1700000000 +0000\n"
+            "committer Test User <test@example.com> 1700000000 +0000\n"
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n"
+            " \n"
+            " fake\n"
+            " -----END PGP SIGNATURE-----\n"
+            "\n"
+            "signed commit\n"
+        )
+        signed_sha = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=self.repo, input=signed_obj, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self._git("reset", "--hard", "-q", signed_sha)
 
-        r = self._read("git-log", "-n", "1", "--stat")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(marker.exists(), "git log triggered external diff/textconv")
+        env_with_ext = {**self.env, "GIT_EXTERNAL_DIFF": str(evil)}
+        for args in [
+            ("git-show", "HEAD"),
+            ("git-show", "HEAD:hello.txt"),
+            ("git-log", "-n", "2", "--stat"),
+        ]:
+            r = subprocess.run(
+                [str(READER), *args],
+                cwd=self.repo, env=env_with_ext, capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(marker.exists(), f"{args} triggered external diff, textconv, or gpg.program")
 
     def test_gh_queries_pass_exact_args_with_no_pager(self):
         for args, expected in [

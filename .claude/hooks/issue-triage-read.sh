@@ -1,8 +1,9 @@
 #!/bin/sh
 # Structured read-only inspection interface for the issue-triage subagent
 # (.claude/agents/issue-triage.md). Enforces a narrow subcommand and argument
-# allowlist and executes git/gh directly via exec with external diff/textconv
-# and pagers disabled — never eval, never shell re-parsing (#1052).
+# allowlist and executes git/gh directly via exec with external diff/textconv,
+# signature verification, fsmonitor, and pagers disabled — never eval, never
+# shell re-parsing (#1052).
 #
 # Usage:
 #   .claude/hooks/issue-triage-read.sh [--check] <subcommand> [args...]
@@ -26,18 +27,18 @@ is_uint_in_range() {
   min_v=$2
   max_v=$3
   case "$val" in
-    ''|*[!0-9]*) return 1 ;;
+    ''|0*|*[!0123456789]*) return 1 ;;
   esac
-  # Strip leading zeros safely before arithmetic comparison (avoid octal).
-  trimmed=$(printf '%s' "$val" | sed 's/^0*//')
-  [ -n "$trimmed" ] || trimmed=0
-  [ "$trimmed" -ge "$min_v" ] && [ "$trimmed" -le "$max_v" ]
+  [ "${#val}" -le 9 ] || return 1
+  [ "$val" -ge "$min_v" ] && [ "$val" -le "$max_v" ]
 }
 
 check_rev() {
   rev=$1
   case "$rev" in
-    ''|-*|*[!A-Za-z0-9._/^~:@-]*)
+    ''|-*|^*)
+      die "invalid git revision: $rev" ;;
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/^~:@-]*)
       die "invalid git revision: $rev" ;;
   esac
 }
@@ -45,7 +46,9 @@ check_rev() {
 check_rel_path() {
   p=$1
   case "$p" in
-    ''|-*|/*|..|../*|*/..|*/../*|*[!A-Za-z0-9._/@+-]*)
+    ''|-*|/*|..|../*|*/..|*/../*)
+      die "invalid repository-relative path: $p" ;;
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@+-]*)
       die "invalid repository-relative path: $p" ;;
   esac
 }
@@ -53,7 +56,9 @@ check_rel_path() {
 check_label() {
   lbl=$1
   case "$lbl" in
-    ''|-*|*[!A-Za-z0-9._:/+-]*)
+    ''|-*)
+      die "invalid label: $lbl" ;;
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/+-]*)
       die "invalid label: $lbl" ;;
   esac
 }
@@ -143,6 +148,7 @@ case "$subcmd" in
       set -- "$@" --limit "$limit"
     fi
     if [ -n "$labels" ]; then
+      IFS=' '
       for lbl in $labels; do
         set -- "$@" --label "$lbl"
       done
@@ -213,7 +219,7 @@ case "$subcmd" in
       -c core.fsmonitor=false \
       -c core.pager=cat \
       -c diff.external= \
-      -c diff.textconv= \
+      -c log.showSignature=false \
       log --no-ext-diff --no-textconv "$@"
     ;;
 
@@ -270,7 +276,7 @@ case "$subcmd" in
       -c core.fsmonitor=false \
       -c core.pager=cat \
       -c diff.external= \
-      -c diff.textconv= \
+      -c log.showSignature=false \
       show --no-ext-diff --no-textconv "$@"
     ;;
 
