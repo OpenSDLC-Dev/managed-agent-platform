@@ -25,13 +25,14 @@ const (
 )
 
 // Config carries native browser-login settings. Only the control plane needs
-// OIDCClientSecret; a gateway reads SessionConfigFromEnv instead.
+// OIDCClientSecret and EdgeClientIPToken; a gateway reads SessionConfigFromEnv instead.
 type Config struct {
-	Mode             Mode
-	PublicOrigin     string
-	Development      bool
-	OIDCClientID     string
-	OIDCClientSecret string `json:"-" yaml:"-" xml:"-"`
+	Mode              Mode
+	PublicOrigin      string
+	Development       bool
+	OIDCClientID      string
+	OIDCClientSecret  string `json:"-" yaml:"-" xml:"-"`
+	EdgeClientIPToken string `json:"-" yaml:"-" xml:"-"`
 }
 
 // String, GoString and LogValue exclude the client secret. Format also covers
@@ -64,7 +65,25 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		}
 		cfg.OIDCClientSecret = getenv("IDENTITY_OIDC_CLIENT_SECRET")
 	}
+	if cfg.Mode == ModePassword {
+		token := getenv("APP_EDGE_CLIENT_IP_TOKEN")
+		if token != "" {
+			if !validEdgeToken(token) {
+				return Config{}, errors.New("login: APP_EDGE_CLIENT_IP_TOKEN must contain only visible ASCII characters without spaces")
+			}
+			cfg.EdgeClientIPToken = token
+		}
+	}
 	return cfg, nil
+}
+
+func validEdgeToken(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return len(v) > 0
 }
 
 // SessionConfigFromEnv reads only settings needed to accept browser sessions.

@@ -31,10 +31,11 @@ var (
 // Manager shares credentials through PostgreSQL, not replica-local memory. It
 // deliberately retains no OIDC client secret, even when constructed with one.
 type Manager struct {
-	pool   *pgxpool.Pool
-	mode   Mode
-	origin string
-	secure bool
+	pool              *pgxpool.Pool
+	mode              Mode
+	origin            string
+	secure            bool
+	edgeClientIPToken string
 }
 
 func New(pool *pgxpool.Pool, cfg Config) *Manager {
@@ -45,6 +46,9 @@ func New(pool *pgxpool.Pool, cfg Config) *Manager {
 	if u, err := parseOrigin(cfg.PublicOrigin, cfg.Development); err == nil && (cfg.Mode != ModePassword || cfg.Development) {
 		m.origin = cfg.PublicOrigin
 		m.secure = !loopbackHTTP(u)
+	}
+	if validEdgeToken(cfg.EdgeClientIPToken) {
+		m.edgeClientIPToken = cfg.EdgeClientIPToken
 	}
 	return m
 }

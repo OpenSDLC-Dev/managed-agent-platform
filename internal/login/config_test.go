@@ -27,6 +27,9 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 		{"password needs development", map[string]string{"IDENTITY_MODE": "password", "CONSOLE_PUBLIC_ORIGIN": "https://console.example"}, "", true},
 		{"password needs origin", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true"}, "", true},
 		{"development password", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000"}, ModePassword, false},
+		{"development password with edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "edge-secret-1"}, ModePassword, false},
+		{"development password rejects whitespace edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "bad token"}, "", true},
+		{"development password rejects newline edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "bad\ntoken"}, "", true},
 		{"native oidc", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_CLIENT_ID": "console", "IDENTITY_OIDC_AUDIENCE": "console"}, ModeOIDC, false},
 		{"native oidc needs client", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_AUDIENCE": "console"}, "", true},
 		{"native oidc audience mismatch", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_CLIENT_ID": "console", "IDENTITY_OIDC_AUDIENCE": "other"}, "", true},
@@ -150,7 +153,8 @@ func TestCanonicalPublicOrigins(t *testing.T) {
 
 func TestBrowserLoginConfigurationDiagnosticFormatting(t *testing.T) {
 	const secret = "FIX1-SYNTHETIC-CONFIG-CLIENT-SECRET"
-	cfg := Config{Mode: ModeOIDC, PublicOrigin: "https://console.example", OIDCClientID: "console", OIDCClientSecret: secret}
+	const edgeToken = "FIX1-SYNTHETIC-EDGE-TOKEN"
+	cfg := Config{Mode: ModeOIDC, PublicOrigin: "https://console.example", OIDCClientID: "console", OIDCClientSecret: secret, EdgeClientIPToken: edgeToken}
 	for _, form := range []struct {
 		name  string
 		value any
@@ -168,9 +172,9 @@ func TestBrowserLoginConfigurationDiagnosticFormatting(t *testing.T) {
 			}
 			for _, format := range formats {
 				output := fmt.Sprintf(format, form.value)
-				for _, canary := range []string{secret, fmt.Sprintf("%x", secret), fmt.Sprintf("%X", secret)} {
+				for _, canary := range []string{secret, fmt.Sprintf("%x", secret), fmt.Sprintf("%X", secret), edgeToken, fmt.Sprintf("%x", edgeToken), fmt.Sprintf("%X", edgeToken)} {
 					if strings.Contains(output, canary) {
-						t.Errorf("%s of %s disclosed the synthetic client secret", format, form.name)
+						t.Errorf("%s of %s disclosed a synthetic config secret", format, form.name)
 					}
 				}
 			}

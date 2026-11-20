@@ -167,4 +167,110 @@ func TestThrottleIsSharedAndAtomic(t *testing.T) {
 			t.Fatal("invalid peer fell back to forwarded header")
 		}
 	})
+
+	t.Run("trusted edge separates unrelated clients and ignores caller forwarding headers", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `DELETE FROM login_throttle`); err != nil {
+			t.Fatal(err)
+		}
+		const edgeToken = "edge-throttle-secret"
+		edgeMgr := New(pool, Config{EdgeClientIPToken: edgeToken})
+		const caddyPeer = "172.18.0.5:43210"
+
+		// Client A exhausts its 20-attempt peer quota through Caddy while sending
+		// forged X-Forwarded-For / Forwarded / X-Real-IP headers on every request.
+		for i := 0; i < 21; i++ {
+			r := throttleRequest(caddyPeer)
+			r.Header.Set(EdgeClientIPTokenHeader, edgeToken)
+			r.Header.Set(EdgeClientIPHeader, "203.0.113.10")
+			r.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+			r.Header.Set("Forwarded", fmt.Sprintf("for=198.51.100.%d", i))
+			r.Header.Set("X-Real-IP", fmt.Sprintf("198.51.100.%d", i))
+			retry, err := edgeMgr.Throttle(ctx, r, fmt.Sprintf("client-a-%d", i))
+			if err != nil {
+				t.Fatalf("client A attempt %d: %v", i+1, err)
+			}
+			if (retry == 0) != (i < 20) {
+				t.Fatalf("client A attempt %d: retry=%s, want allowed=%v", i+1, retry, i < 20)
+			}
+		}
+
+		// IPv4-mapped IPv6 for Client A maps to the same bucket and remains throttled.
+		mapped := throttleRequest(caddyPeer)
+		mapped.Header.Set(EdgeClientIPTokenHeader, edgeToken)
+		mapped.Header.Set(EdgeClientIPHeader, "::ffff:203.0.113.10")
+		if retry, err := edgeMgr.Throttle(ctx, mapped, "client-a-mapped"); err != nil || retry <= 0 {
+			t.Fatalf("mapped IPv4-in-IPv6 escaped client A bucket: retry=%s err=%v", retry, err)
+		}
+
+		// Client B behind the exact same Caddy peer gets an independent 20-attempt quota.
+		for i := 0; i < 20; i++ {
+			r := throttleRequest(caddyPeer)
+			r.Header.Set(EdgeClientIPTokenHeader, edgeToken)
+			r.Header.Set(EdgeClientIPHeader, "203.0.113.20")
+			retry, err := edgeMgr.Throttle(ctx, r, fmt.Sprintf("client-b-%d", i))
+			if err != nil || retry != 0 {
+				t.Fatalf("client B attempt %d blocked by client A: retry=%s err=%v", i+1, retry, err)
+			}
+		}
+		// 21st attempt from Client B is throttled on its own bucket.
+		rB21 := throttleRequest(caddyPeer)
+		rB21.Header.Set(EdgeClientIPTokenHeader, edgeToken)
+		rB21.Header.Set(EdgeClientIPHeader, "203.0.113.20")
+		if retry, err := edgeMgr.Throttle(ctx, rB21, "client-b-21"); err != nil || retry <= 0 {
+			t.Fatalf("client B 21st attempt not throttled: retry=%s err=%v", retry, err)
+		}
+	})
+
+	t.Run("direct requests cannot forge trusted edge headers", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `DELETE FROM login_throttle`); err != nil {
+			t.Fatal(err)
+		}
+		const edgeToken = "edge-throttle-secret"
+		edgeMgr := New(pool, Config{EdgeClientIPToken: edgeToken})
+		const directPeer = "192.0.2.77:5555"
+
+		for i := 0; i < 21; i++ {
+			r := throttleRequest(directPeer)
+			r.Header.Set(EdgeClientIPHeader, fmt.Sprintf("198.51.100.%d", i))
+			switch i % 3 {
+			case 0:
+				// No edge token.
+			case 1:
+				r.Header.Set(EdgeClientIPTokenHeader, "wrong-token")
+			case 2:
+				// Repeated edge token header must never be trusted.
+				r.Header.Add(EdgeClientIPTokenHeader, edgeToken)
+				r.Header.Add(EdgeClientIPTokenHeader, edgeToken)
+			}
+			retry, err := edgeMgr.Throttle(ctx, r, fmt.Sprintf("direct-%d", i))
+			if err != nil {
+				t.Fatalf("direct attempt %d: %v", i+1, err)
+			}
+			if (retry == 0) != (i < 20) {
+				t.Fatalf("forged edge headers split direct peer quota at attempt %d: retry=%s", i+1, retry)
+			}
+		}
+	})
+
+	t.Run("malformed or ambiguous trusted edge client IP fails closed", func(t *testing.T) {
+		const edgeToken = "edge-throttle-secret"
+		edgeMgr := New(pool, Config{EdgeClientIPToken: edgeToken})
+		badIPs := [][]string{
+			nil,
+			{""},
+			{"not-an-ip"},
+			{"203.0.113.10", "203.0.113.11"},
+			{"fe80::1%eth0"},
+		}
+		for _, vals := range badIPs {
+			r := throttleRequest("172.18.0.5:43210")
+			r.Header.Set(EdgeClientIPTokenHeader, edgeToken)
+			for _, v := range vals {
+				r.Header.Add(EdgeClientIPHeader, v)
+			}
+			if _, err := edgeMgr.Throttle(ctx, r, "edge-bad"); err == nil {
+				t.Fatalf("accepted invalid trusted edge client IP %v", vals)
+			}
+		}
+	})
 }
