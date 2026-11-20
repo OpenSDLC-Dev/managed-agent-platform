@@ -1446,6 +1446,8 @@ jobs:
       # 65,536 bytes, so the same step had passed on every runner (#763).
       - name: no workflow pipeline stops reading before its input ends
         run: make pipes-test
+      - name: issue-triage read-only wrapper and Bash guard hold their boundary
+        run: make issue-triage-guard-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
       # SILENTLY: the trigger stops matching, or every deploy classifies as
       # `parked` so no successful run ever closes a CD issue again. Nor can any
