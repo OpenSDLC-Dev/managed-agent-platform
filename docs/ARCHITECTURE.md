@@ -420,6 +420,13 @@ deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
 
+Interactive CLI OAuth (plan 72) uses a same-origin browser consent page and
+a control-plane token endpoint. A PostgreSQL grant identifies the human
+principal and consents to specific scopes. The control plane and model
+gateway check the grant and current role on access. The token endpoint stores
+credential hashes and serializes rotation on the grant. A replay or removal
+of the principal revokes the grant.
+
 List page tokens encode their list family and keyset position. A different
 list rejects the token before passing its position to the database. Event
 cursors also name the session or child thread being listed. Other nested
@@ -428,7 +435,7 @@ to the requested parent. The new format rejects tokens issued before plan 71.
 
 An application Caddy edge serves the published Console at the same origin
 as private CP routes and gateway administration. The edge sends login,
-management, OAuth and resource-proxy paths to CP. Pages, assets and shallow health
+management, OAuth authorization and resource-proxy paths to CP. Console pages, assets and shallow health
 remain Console-owned. Console holds no credentials. Raw `/v1` goes to CP; gateway
 inference stays on its separate listener. The edge rejects internal paths before
 proxying and preserves SSE cancellation. Compose loopback ports and release-qualified

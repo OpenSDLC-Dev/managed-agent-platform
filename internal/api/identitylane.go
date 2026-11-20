@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 )
 
@@ -27,6 +28,9 @@ func identityFrom(ctx context.Context) (identityPrincipal, bool) {
 // can miss dispatch's machine predicate but still match ServeMux's route.
 // That route's RoleNone must refuse before its handler checks work scope.
 func requireRole(ctx context.Context, min identity.Role) error {
+	if a, ok := ctx.Value(cliOAuthContextKey{}).(clioauth.Authority); ok && min == identity.RoleAdmin && !a.Has(clioauth.OrgAdmin) {
+		return errForbidden("Authentication method not allowed for this endpoint.")
+	}
 	var role identity.Role
 	refusal := "this route is not available to SSO-authenticated callers"
 	if key, ok := ownedKeyFrom(ctx); ok {

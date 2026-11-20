@@ -59,6 +59,9 @@ func New(pool *pgxpool.Pool, cfg Config) *Manager {
 // Mode reports only the nonsecret deployment mode, not provider configuration.
 func (m *Manager) Mode() Mode { return m.mode }
 
+// PublicOrigin is the validated browser origin used for native login.
+func (m *Manager) PublicOrigin() string { return m.origin }
+
 // String, GoString, LogValue, and Format use value receivers so both Manager
 // values and pointers redact edgeClientIPToken on diagnostic output, matching
 // Config's redaction discipline (Go's fmt formats a nil *Manager as "<nil>").

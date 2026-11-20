@@ -1,0 +1,1 @@
+- **Browser sign-in for the CLI** — `ant auth login` can authorize a local profile through the platform's Console. CLI profiles can call management and Anthropic inference APIs within the scopes granted by the signed-in user. The control plane rotates refresh tokens and revokes a grant on replay or principal removal (#993).
