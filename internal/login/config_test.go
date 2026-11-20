@@ -260,9 +260,20 @@ func TestBrowserLoginConfigurationSecretBoundaries(t *testing.T) {
 		x, _ := xml.Marshal(pwCfg)
 		y, _ := yaml.Marshal(pwCfg)
 		m := New(nil, pwCfg)
+		var nilMgr *Manager
+		if got := fmt.Sprint(nilMgr); got != "<nil>" {
+			t.Fatalf("nil *Manager formatted as %q, want <nil>", got)
+		}
 		var mgrLogs bytes.Buffer
-		slog.New(slog.NewJSONHandler(&mgrLogs, nil)).Info("manager", "manager", m, "config", pwCfg)
-		for _, rendered := range []string{string(j), string(x), string(y), fmt.Sprint(m), fmt.Sprintf("%+v", m), fmt.Sprintf("%#v", m), mgrLogs.String()} {
+		slog.New(slog.NewJSONHandler(&mgrLogs, nil)).Info("manager", "ptr", m, "val", *m, "config", pwCfg)
+		nested := struct{ M Manager }{*m}
+		for _, rendered := range []string{
+			string(j), string(x), string(y),
+			fmt.Sprint(m), fmt.Sprintf("%+v", m), fmt.Sprintf("%#v", m),
+			fmt.Sprint(*m), fmt.Sprintf("%+v", *m), fmt.Sprintf("%#v", *m),
+			fmt.Sprintf("%+v", nested), fmt.Sprintf("%#v", nested),
+			mgrLogs.String(),
+		} {
 			if strings.Contains(rendered, tok) {
 				t.Fatalf("edge token disclosed: %s", rendered)
 			}
