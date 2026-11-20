@@ -282,5 +282,10 @@ func TestRunFetchLoopRevocationClosesActiveTunnel(t *testing.T) {
 	one := make([]byte, 1)
 	if _, err := br.Read(one); err == nil {
 		t.Fatal("active CONNECT tunnel stayed open after ErrUnauthorized revocation")
+	} else {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			t.Fatalf("active CONNECT tunnel stayed open until read deadline expired: %v", err)
+		}
 	}
 }

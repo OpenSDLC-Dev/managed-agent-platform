@@ -294,12 +294,20 @@ func TestEngineSubstituteBounded(t *testing.T) {
 }
 
 func TestEngineStillPermitted(t *testing.T) {
-	e := egress.NewEngine([]egress.Credential{{
-		Placeholder: "vltph_a",
-		Secret:      "sec1",
-		Hosts:       egress.NewHostSet([]string{"api.example.com"}),
-		Header:      true,
-	}})
+	e := egress.NewEngine([]egress.Credential{
+		{
+			Placeholder: "vltph_a",
+			Secret:      "sec1",
+			Hosts:       egress.NewHostSet([]string{"api.example.com"}),
+			Header:      true,
+		},
+		{
+			Placeholder:  "vltph_any",
+			Secret:       "sec-any",
+			Unrestricted: true,
+			Body:         true,
+		},
+	})
 	used := egress.UsedCredential{Placeholder: "vltph_a", Secret: "sec1", Location: egress.LocationHeader}
 	if !e.StillPermitted("api.example.com", used) {
 		t.Fatal("expected identical credential on allowed host/location to be permitted")
@@ -312,5 +320,11 @@ func TestEngineStillPermitted(t *testing.T) {
 	}
 	if e.StillPermitted("api.example.com", egress.UsedCredential{Placeholder: "vltph_a", Secret: "sec1", Location: egress.LocationBody}) {
 		t.Fatal("disabled location must not be permitted")
+	}
+	if e.StillPermitted("api.example.com", egress.UsedCredential{Placeholder: "vltph_missing", Secret: "sec1", Location: egress.LocationHeader}) {
+		t.Fatal("withdrawn/absent placeholder must not be permitted")
+	}
+	if !e.StillPermitted("anywhere.example.test", egress.UsedCredential{Placeholder: "vltph_any", Secret: "sec-any", Location: egress.LocationBody}) {
+		t.Fatal("unrestricted credential must be permitted for any host at enabled location")
 	}
 }

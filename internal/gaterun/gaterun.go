@@ -13,6 +13,7 @@ package gaterun
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -66,6 +67,7 @@ func Convert(cfg *gateconfig.Config) gate.Config {
 // the caller passes a fail-closed gate (admits nothing, no credentials) so an
 // unconfigured gate denies rather than leaks.
 type SwappableHandler struct {
+	mu      sync.Mutex // serializes Update and Swap; ServeHTTP stays lock-free
 	current atomic.Pointer[gate.Gate]
 	limiter *gate.Limiter
 }
@@ -87,6 +89,8 @@ func (h *SwappableHandler) Limiter() *gate.Limiter { return h.limiter }
 // credentials to the current gate in place, withdrawing superseded active work
 // while keeping unaffected tunnels and requests alive (plan 70 slice 3).
 func (h *SwappableHandler) Update(cfg gate.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.current.Load().Update(cfg)
 }
 
@@ -94,6 +98,8 @@ func (h *SwappableHandler) Update(cfg gate.Config) {
 // superseded gate to deny-all so handlers on the old gate cannot begin new
 // outbound activity or keep stale tunnels open.
 func (h *SwappableHandler) Swap(g *gate.Gate) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	old := h.current.Swap(g)
 	if old != nil && old != g {
 		old.Update(gate.Config{})

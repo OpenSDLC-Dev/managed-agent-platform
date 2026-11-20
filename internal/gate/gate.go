@@ -158,16 +158,18 @@ type Config struct {
 // HTTP(S)_PROXY is the running gate. Policy and credentials may be updated
 // live via Update (plan 70 slice 3).
 type Gate struct {
-	snap          atomic.Pointer[snapshot]
-	ipAllowed     func(net.IP) error
-	onUnreachable func(host string, placeholders []string)
-	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
-	transport     http.RoundTripper
-	maxBody       int64
-	tunnelIdle    time.Duration
-	bodyRead      time.Duration
-	uploadTimeout time.Duration
-	limiter       *Limiter
+	snap             atomic.Pointer[snapshot]
+	ipAllowed        func(net.IP) error
+	onUnreachable    func(host string, placeholders []string)
+	dial             func(ctx context.Context, network, addr string) (net.Conn, error)
+	transport        http.RoundTripper // initial snapshot's *http.Transport (overridable by internal tests)
+	initialTransport http.RoundTripper
+	headerTimeout    time.Duration
+	maxBody          int64
+	tunnelIdle       time.Duration
+	bodyRead         time.Duration
+	uploadTimeout    time.Duration
+	limiter          *Limiter
 
 	activeMu sync.Mutex
 	tunnels  map[*activeTunnel]struct{}
@@ -329,6 +331,7 @@ func New(cfg Config) *Gate {
 	g := &Gate{
 		ipAllowed:     ipAllowed,
 		onUnreachable: cfg.OnUnreachable,
+		headerTimeout: headerTimeout,
 		maxBody:       maxBody,
 		tunnelIdle:    tunnelIdle,
 		bodyRead:      bodyRead,
@@ -337,39 +340,39 @@ func New(cfg Config) *Gate {
 		tunnels:       make(map[*activeTunnel]struct{}),
 		requests:      make(map[*activeRequest]struct{}),
 	}
-	g.snap.Store(newSnapshot(cfg))
-	// Re-check the current policy snapshot immediately before opening any TCP
-	// socket so work admitted under a superseded policy cannot begin new
-	// outbound activity once Update takes effect (plan 70 slice 3).
+	// Re-check the current policy snapshot immediately before and after opening
+	// any TCP socket so work admitted under a superseded policy cannot begin
+	// new outbound activity or hand a disallowed socket back to http.Transport
+	// once Update takes effect (plan 70 slice 3).
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if dt, ok := dialTargetFrom(ctx); ok {
-			curHow := g.snap.Load().policy.admit(dt.host, dt.port)
+			cur := g.snap.Load()
+			curHow := cur.policy.admit(dt.host, dt.port)
 			if curHow == admitNone {
+				return nil, errPolicyWithdrawn
+			}
+			if dt.ar != nil && (dt.ar.withdrawn.Load() || !cur.allowsUsed(dt.host, dt.ar.used)) {
+				dt.ar.withdrawn.Store(true)
 				return nil, errPolicyWithdrawn
 			}
 			ctx = withAdmission(ctx, curHow)
 			conn, err := baseDial(ctx, network, addr)
-			if err == nil && dt.recordIP != nil {
-				dt.recordIP(remoteIPOf(conn))
+			if err != nil {
+				return nil, err
 			}
-			return conn, err
+			if dt.ar != nil && !g.recordRequestIP(dt.ar, remoteIPOf(conn)) {
+				_ = conn.Close()
+				return nil, errPolicyWithdrawn
+			}
+			return conn, nil
 		}
 		return baseDial(ctx, network, addr)
 	}
 	g.dial = dial
-	g.transport = &http.Transport{
-		DialContext:       dial,
-		ForceAttemptHTTP2: false,
-		MaxIdleConns:      32,
-		IdleConnTimeout:   90 * time.Second,
-		// A transparent proxy must not inject Accept-Encoding or auto-decompress:
-		// the sandbox controls its own content negotiation, and the origin's
-		// Content-Encoding/Content-Length must reach it unaltered.
-		DisableCompression:    true,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: headerTimeout,
-		ExpectContinueTimeout: time.Second,
-	}
+	initialSnap := g.newSnapshot(cfg)
+	g.snap.Store(initialSnap)
+	g.transport = initialSnap.transport
+	g.initialTransport = initialSnap.transport
 	return g
 }
 
@@ -720,8 +723,9 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically verify against the live snapshot and register as active before
 	// any outbound socket activity so a concurrent Gate.Update either refuses
-	// here or cancels reqCtx immediately.
-	ar, curHow, admitted := g.registerRequest(host, port, used, cancelReq)
+	// here or cancels reqCtx immediately. Use the snapshot's own transport so
+	// idle sockets from an earlier policy generation can never be reused.
+	ar, curSnap, curHow, admitted := g.registerRequest(host, port, used, cancelReq)
 	if !admitted {
 		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
@@ -732,9 +736,9 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	g.report(host, unreachable)
 
 	outCtx := withDialTarget(withAdmission(reqCtx, curHow), dialTarget{
-		host:     host,
-		port:     port,
-		recordIP: func(ip net.IP) { g.recordRequestIP(ar, ip) },
+		host: host,
+		port: port,
+		ar:   ar,
 	})
 	outCtx = httptrace.WithClientTrace(outCtx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
@@ -750,7 +754,11 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	if g.uploadTimeout > 0 {
 		uploadTimer = time.AfterFunc(g.uploadTimeout, cancelReq)
 	}
-	resp, err := g.transport.RoundTrip(out)
+	rt := http.RoundTripper(curSnap.transport)
+	if g.transport != g.initialTransport {
+		rt = g.transport
+	}
+	resp, err := rt.RoundTrip(out)
 	if uploadTimer != nil {
 		uploadTimer.Stop()
 	}
@@ -775,17 +783,23 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	copyFlushing(w, resp.Body)
+	if err := copyFlushing(w, resp.Body); err != nil {
+		// Abort the client connection cleanly without writing a chunked
+		// 0\r\n\r\n terminator when the upstream read failed or was cancelled
+		// mid-stream (for example by Gate.Update withdrawal).
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // copyFlushing forwards a response body chunk by chunk, flushing when the
 // ResponseWriter supports it so streaming origins deliver bytes without
-// waiting to fill net/http's write buffer.
-func copyFlushing(w http.ResponseWriter, r io.Reader) {
+// waiting to fill net/http's write buffer. Returns any non-EOF read error so
+// the caller can abort the downstream response instead of forging a clean EOF.
+func copyFlushing(w http.ResponseWriter, r io.Reader) error {
 	flusher, canFlush := w.(http.Flusher)
 	if !canFlush {
-		_, _ = io.Copy(w, r)
-		return
+		_, err := io.Copy(w, r)
+		return err
 	}
 	flusher.Flush()
 	buf := make([]byte, 32<<10)
@@ -793,12 +807,15 @@ func copyFlushing(w http.ResponseWriter, r io.Reader) {
 		n, err := r.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+				return nil
 			}
 			flusher.Flush()
 		}
 		if err != nil {
-			return
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
 }

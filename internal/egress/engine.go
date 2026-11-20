@@ -107,6 +107,11 @@ func NewEngine(creds []Credential) *Engine {
 // egress_request span, which carries the method and server address and no
 // verdict. Said here rather than in that plan alone, because the absence is
 // the answer to a question this function invites.
+func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
+	out, _, unreachable, _ = e.substitute(host, loc, s, -1, 0, nil)
+	return out, unreachable
+}
+
 // UsedCredential identifies one credential that was actually substituted into
 // an outbound request so the gate can cancel that in-flight request if a live
 // policy update withdraws, rotates, or narrows the credential (plan 70 slice 3).
@@ -126,11 +131,6 @@ func (e *Engine) StillPermitted(host string, u UsedCredential) bool {
 		}
 	}
 	return false
-}
-
-func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
-	out, _, unreachable, _ = e.substitute(host, loc, s, -1, 0, nil)
-	return out, unreachable
 }
 
 // ErrOutputTooLarge and ErrOutputBudgetDenied distinguish per-request output

@@ -3,6 +3,7 @@ package gate_test
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,20 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gate"
 )
+
+func assertConnClosed(t *testing.T, c net.Conn, br *bufio.Reader, label string) {
+	t.Helper()
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	one := make([]byte, 1)
+	n, err := br.Read(one)
+	if err == nil {
+		t.Fatalf("%s stayed open and delivered %d byte(s)", label, n)
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("%s stayed open until read deadline expired (not closed by server): %v", label, err)
+	}
+}
 
 func TestGatePlainHTTPWithdrawnBeforeOutboundCannotDial(t *testing.T) {
 	var hits atomic.Int32
@@ -172,7 +187,6 @@ func TestGatePlainHTTPCredentialWithdrawnBeforeOutboundNotSubstituted(t *testing
 }
 
 func TestGateActivePlainHTTPStreamCancelledOnWithdrawalAndUnaffectedSurvives(t *testing.T) {
-	streamReadyA := make(chan struct{}, 2)
 	releaseA := make(chan struct{})
 	var relAOnce sync.Once
 	endA := func() { relAOnce.Do(func() { close(releaseA) }) }
@@ -183,7 +197,6 @@ func TestGateActivePlainHTTPStreamCancelledOnWithdrawalAndUnaffectedSurvives(t *
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		streamReadyA <- struct{}{}
 		select {
 		case <-releaseA:
 			_, _ = io.WriteString(w, "end\n")
@@ -260,13 +273,17 @@ func TestGateActivePlainHTTPStreamCancelledOnWithdrawalAndUnaffectedSurvives(t *
 	}
 
 	// Now withdraw the credential used by credDone while keeping hostA allowed:
-	// credDone must abort promptly while plainDone stays alive.
+	// credDone must abort with a non-nil stream error (not a clean EOF) while
+	// plainDone stays alive.
 	g.Update(gate.Config{
 		Networking:  domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{hostA}},
 		Credentials: nil,
 	})
 	select {
-	case <-credDone:
+	case err := <-credDone:
+		if err == nil {
+			t.Fatal("withdrawn credential stream ended with clean EOF instead of abort error")
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("active stream using withdrawn credential was not cancelled")
 	}
@@ -276,12 +293,16 @@ func TestGateActivePlainHTTPStreamCancelledOnWithdrawalAndUnaffectedSurvives(t *
 	case <-time.After(80 * time.Millisecond):
 	}
 
-	// Now withdraw hostA itself: plainDone must abort promptly too.
-	g.Update(gate.Config{Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"other.invalid"}}})
+	// Tightening from operator-vouched hostA (unfloored) to unrestricted
+	// (floored over loopback 127.0.0.1) must abort plainDone with a stream error too.
+	g.Update(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
 	select {
-	case <-plainDone:
+	case err := <-plainDone:
+		if err == nil {
+			t.Fatal("floor-withdrawn stream ended with clean EOF instead of abort error")
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("active stream to withdrawn host was not cancelled")
+		t.Fatal("active stream over loopback was not cancelled on floor tightening")
 	}
 	endA()
 }
@@ -376,16 +397,12 @@ func TestGateConnectTunnelWithdrawnImmediatelyAndUnaffectedSurvives(t *testing.T
 	}
 
 	// Withdraw 127.0.0.1 while keeping localhost permitted: c1 must close
-	// immediately and c2 must continue echoing uninterrupted.
+	// immediately (non-timeout EOF/close) and c2 must continue echoing uninterrupted.
 	g.Update(gate.Config{
 		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"localhost"}},
 	})
 
-	_ = c1.SetReadDeadline(time.Now().Add(2 * time.Second))
-	one := make([]byte, 1)
-	if _, err := br1.Read(one); err == nil {
-		t.Fatal("withdrawn CONNECT tunnel c1 stayed open after host removal")
-	}
+	assertConnClosed(t, c1, br1, "withdrawn CONNECT tunnel c1")
 	if err := echo(c2, br2, "still-alive"); err != nil {
 		t.Fatalf("unaffected CONNECT tunnel c2 failed after unrelated host withdrawal: %v", err)
 	}
@@ -396,18 +413,25 @@ func TestGateConnectTunnelWithdrawnImmediatelyAndUnaffectedSurvives(t *testing.T
 	g.Update(gate.Config{
 		Networking: domain.Networking{Type: domain.NetUnrestricted},
 	})
-	_ = c2.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := br2.Read(one); err == nil {
-		t.Fatal("CONNECT tunnel c2 stayed open after floor tightened over loopback IP")
-	}
+	assertConnClosed(t, c2, br2, "floor-tightened CONNECT tunnel c2")
 }
 
 func TestGateIdleConnectionsClosedOnPolicyWithdrawal(t *testing.T) {
 	var hits atomic.Int32
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	connClosed := make(chan struct{}, 4)
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
+	origin.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case connClosed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	origin.Start()
 	defer origin.Close()
 	host := hostOf(t, origin.URL)
 
@@ -418,7 +442,8 @@ func TestGateIdleConnectionsClosedOnPolicyWithdrawal(t *testing.T) {
 	defer gsrv.Close()
 	client := proxyClient(t, gsrv.URL, nil)
 
-	// Warm a pooled keep-alive connection to origin.
+	// Warm a pooled keep-alive connection to loopback origin under operator-vouched
+	// (unfloored) allowed_hosts.
 	resp, err := client.Get(origin.URL + "/warm")
 	if err != nil {
 		t.Fatal(err)
@@ -429,17 +454,27 @@ func TestGateIdleConnectionsClosedOnPolicyWithdrawal(t *testing.T) {
 		t.Fatalf("warm request = %d (hits=%d), want 200 (1)", resp.StatusCode, hits.Load())
 	}
 
-	// Withdraw origin; next request must get 403 and never reuse the pooled socket.
-	g.Update(gate.Config{})
+	// Switch to unrestricted (which still passes host admission into RoundTrip
+	// but enforces the loopback address floor). The warm idle socket MUST close
+	// and never be reused by RoundTrip — forcing a fresh dial that hits the
+	// floor and returns 403 with zero additional origin hits.
+	g.Update(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
+	select {
+	case <-connClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("warm idle upstream connection was not closed on Gate.Update")
+	}
+
 	resp2, err := client.Get(origin.URL + "/after")
 	if err != nil {
 		t.Fatal(err)
 	}
+	body2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusForbidden {
-		t.Fatalf("post-withdrawal status = %d, want 403", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusForbidden || !strings.Contains(string(body2), "private/reserved") {
+		t.Fatalf("post-update status = %d (%q), want 403 floor refusal (not reused pooled socket)", resp2.StatusCode, body2)
 	}
 	if hits.Load() != 1 {
-		t.Fatalf("origin hits = %d, want 1", hits.Load())
+		t.Fatalf("origin hits = %d, want 1 (reused warm socket)", hits.Load())
 	}
 }
