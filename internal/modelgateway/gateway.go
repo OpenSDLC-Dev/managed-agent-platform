@@ -227,7 +227,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), openAIKey{}, openAI))
 	// Authenticate before routing, so an unauthenticated caller learns
 	// nothing about which paths exist.
-	c, err := h.authenticate(r)
+	c, err := h.authenticate(r, path, openAI)
 	if err != nil {
 		writeError(w, r, err)
 		return

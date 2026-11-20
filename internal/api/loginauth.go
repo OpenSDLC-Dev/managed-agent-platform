@@ -134,6 +134,11 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			w.Header().Set("Pragma", "no-cache")
 		}
 		p := r.URL.EscapedPath()
+		if p == cliAuthorizePath && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
+			p == cliTokenPath && r.Method == http.MethodPost {
+			next.ServeHTTP(w, r)
+			return
+		}
 		public := r.Method == http.MethodGet && p == "/api/auth/config"
 		if s.nativeLogin() {
 			switch s.login.Mode() {

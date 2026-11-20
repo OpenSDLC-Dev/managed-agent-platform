@@ -116,7 +116,7 @@ class EdgeRouting(unittest.TestCase):
                 else:
                     raise AssertionError(docker("logs", cid).stdout + docker("logs", cid).stderr)
                 routes = {"/login": "console", "/setup": "console", "/_next/static/test.js": "console", "/api/health": "console", "/v1/agents": "controlplane"}
-                for path in ["/api/auth/config", "/api/auth/callback?code=test", "/api/console/organizations/default/members", "/api/oauth/test", "/api/organizations/default/proxy/v1/agents"]:
+                for path in ["/oauth/authorize", "/v1/oauth/token", "/api/auth/config", "/api/auth/callback?code=test", "/api/console/organizations/default/members", "/api/oauth/test", "/api/organizations/default/proxy/v1/agents"]:
                     routes[path] = "controlplane"
                 for path in ["/api/login", "/api/platform/agents", "/api/gateway/providers"]:
                     routes[path] = "console"

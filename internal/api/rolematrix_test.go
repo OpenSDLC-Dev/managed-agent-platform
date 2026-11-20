@@ -78,6 +78,17 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 			if reg.role != "RoleUser" {
 				t.Errorf("server.go:%d: %s must allow an authenticated user, got %q", reg.line, reg.pattern, reg.role)
 			}
+		case laneCLIOAuth:
+			// Consent and grant exchange verify protocol credentials inside
+			// their handlers. The resource route requires an OAuth admin.
+			want := ""
+			if reg.pattern == "GET /v1/organizations/workspaces" {
+				want = "RoleAdmin"
+			}
+			if reg.isFunc || reg.role != want {
+				t.Errorf("server.go:%d: %s declares %q, want %q on the CLI OAuth lane",
+					reg.line, reg.pattern, reg.role, want)
+			}
 		case laneManagement, laneConsole:
 			switch reg.role {
 			case "":
@@ -233,6 +244,7 @@ type lane string
 
 const (
 	laneAuth       lane = "browser auth"
+	laneCLIOAuth   lane = "CLI OAuth"
 	laneManagement lane = "management"
 	laneConsole    lane = "console"
 	laneWork       lane = "work"
@@ -247,6 +259,10 @@ const (
 func laneOf(pattern string) lane {
 	if nativeAuthPatterns[pattern] {
 		return laneAuth
+	}
+	switch pattern {
+	case "GET +cliAuthorizePath", "POST +cliAuthorizePath", "POST +cliTokenPath", "GET /v1/organizations/workspaces":
+		return laneCLIOAuth
 	}
 	if strings.Contains(pattern, "gateconfig.Path") {
 		return laneGate

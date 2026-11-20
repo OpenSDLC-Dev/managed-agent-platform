@@ -115,6 +115,11 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	}
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("GET "+cliAuthorizePath, s.cliAuthorize)
+	mux.HandleFunc("POST "+cliAuthorizePath, s.cliAuthorize)
+	mux.HandleFunc("POST "+cliTokenPath, s.cliToken)
+	mux.HandleFunc("GET /v1/organizations/workspaces", s.handle(identity.RoleAdmin, s.cliWorkspaces))
+
 	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleDeveloper, s.createAgent))
 	mux.HandleFunc("GET /v1/agents", s.handle(identity.RoleDeveloper, s.listAgents))
 	mux.HandleFunc("GET /v1/agents/{id}", s.handle(identity.RoleDeveloper, s.getAgent))
@@ -472,6 +477,7 @@ func dispatchAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 // IdP credentials are used only at sign-in, never on this resource lane.
 func dispatchManagementAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 	mgmt := requireAPIKey(pool, next)
+	oauth := requireCLIOAuth(pool, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the private proxy can bring verified cookie context back into
 		// this dispatcher. Its credentials were stripped before rewriting; this
@@ -484,6 +490,10 @@ func dispatchManagementAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handle
 		requestedPublic, routedPublic := publicAPIPaths(r)
 		if apiKeyOffered(r) || issuedAPIKeyBearer(r) && (requestedPublic || routedPublic) {
 			mgmt.ServeHTTP(w, r)
+			return
+		}
+		if requestedPublic && routedPublic && cliBearer(r) {
+			oauth.ServeHTTP(w, r)
 			return
 		}
 		if answerEnvironmentKey(w, r, pool, next) {
@@ -501,7 +511,7 @@ func dispatchManagementAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handle
 // A single empty x-api-key stays absent; repeated fields select key refusal.
 func dualAuth(env, mgmt http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := bearerToken(r); ok && !apiKeyOffered(r) && !issuedAPIKeyBearer(r) {
+		if _, ok := bearerToken(r); ok && !apiKeyOffered(r) && !issuedAPIKeyBearer(r) && !cliBearer(r) {
 			env.ServeHTTP(w, r)
 			return
 		}

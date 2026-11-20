@@ -26,9 +26,15 @@ docker compose --profile console up --build
 ```
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
-- Console: `http://localhost:3000/setup`. Retrieve the first-admin code from the local file named in control-plane logs, create your admin and issue an API key.
-- Drive it with the real CLI: `ANTHROPIC_API_KEY=<issued-key> ant --base-url http://localhost:8080 beta:agents list` (management commands ignore `ANTHROPIC_BASE_URL`; only the worker/auth subcommands honor it).
+- Console: `http://localhost:3000/setup`. Retrieve the first-admin code from the local file named in the control-plane logs to create your admin.
+- For interactive CLI access, sign in and approve the profile. An owned API key remains available for automation.
 - Model gateway: `http://localhost:8090`, on the same loopback bind. The brain sends its current claim token. Configure vendors, deployments and aliases through the signed-in Console before starting model turns.
+
+```sh
+ant auth login --profile platform --console-url http://localhost:3000 --base-url http://localhost:3000
+ant --profile platform beta:agents list
+ant --profile platform --base-url http://localhost:8090 models list
+```
 
 The stack comes up out of the box and idles: the brain's one route, the committed
 `model-providers.gateway.json`, is the gateway, so model *turns* fail until its

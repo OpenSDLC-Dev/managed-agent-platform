@@ -1352,7 +1352,7 @@ Use [the Compose guide](../deploy/compose/README.md#one-origin-console-optional)
 [the chart guide](../deploy/helm/managed-agent-platform/README.md#one-origin-console-consoleenabled)
 for RP secrets, CA trust and the CP-owned `/api/auth/callback` registration.
 
-With IAP, protect human pages, `/api/auth/*`, private `/api/console/*`,
+With IAP, protect human pages, `/oauth/authorize`, `/api/auth/*`, private `/api/console/*`,
 `/api/organizations/*`, `/api/oauth/*` and gateway `/admin/v1/*` before the edge.
 Only required infrastructure health may be anonymous. Give SDK `/v1/*` a separate
 IAP-bypass route or listener; it still requires platform API authentication.
@@ -1370,7 +1370,7 @@ Query-parse and duplicate-parameter failures clear the pending cookie, but retai
 the server attempt. A client that restores its original binding can retry it.
 Discovery, JWKS and token requests propagate the current W3C trace context.
 Trusted-proxy login verifies the signed assertion. Password login takes JSON
-`{login_name,password}` with exact Origin. There is no OAuth authorization server.
+`{login_name,password}` with exact Origin.
 
 The host-only `map_session` cookie is HttpOnly, SameSite=Lax and Secure, except
 on declared loopback HTTP. PostgreSQL stores only its SHA-256 hash and imposes
@@ -1422,6 +1422,26 @@ unrelated clients through the same edge receive independent peer buckets while
 direct requests stay keyed on transport `RemoteAddr`. Without that token,
 requests through a proxy share its peer bucket. Origin checks never trust
 forwarded host or protocol headers.
+
+#### CLI OAuth
+
+Use `ant auth login` with the public management API and the Console origin.
+The browser uses the current native session. Approval requires a same-origin
+form submission with a session-bound CSRF token. The CLI uses a loopback
+callback or, with `--no-browser`, accepts the displayed code and state.
+Keep `/v1/oauth/token` reachable by the CLI without IAP.
+
+The authorization code binds the client, callback, state and S256 challenge.
+It expires in five minutes and can be redeemed once. The database stores SHA-256
+hashes of the code and tokens. An access token lasts at most eight hours. The
+grant expires 30 days after redemption. Refresh replaces both tokens. Replay of
+a spent refresh token revokes the grant. Removing a principal revokes that
+principal's grants, and restoring the principal does not restore its grants.
+
+Send the access token as `Authorization: Bearer`. Management and Anthropic
+inference both check the granted scopes and the current stored role. Inference
+uses the gateway base URL. Signing out of the browser ends the browser session.
+The CLI grant has its own lifecycle. Private routes retain their cookie rule.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 

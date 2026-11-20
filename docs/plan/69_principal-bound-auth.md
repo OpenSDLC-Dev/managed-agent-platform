@@ -718,7 +718,7 @@ The plan's shape keeps room for four pieces of work. Each GitHub issue holds
 its own scope:
 
 - workload identity federation (#992);
-- `ant auth login` (#993);
+- `ant auth login` (#993), implemented in [plan 72](./72_ant-oauth.md);
 - the monthly spend limit (#994);
 - the console playground (#995).
 

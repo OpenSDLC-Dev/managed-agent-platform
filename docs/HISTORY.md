@@ -8603,3 +8603,15 @@ control plane with a fresh Dockerized PostgreSQL passed five original-list
 continuations, the three original cross-list failures, both cross-session
 event refusals and an old-token refusal. The fixture contained no brain or
 model provider.
+
+**Plan 72 acceptance (archived).** [Plan 72](./plan/72_ant-oauth.md) (#993)
+passed with the published `ant` 2.4.0 Windows binary, Chrome, the Compose
+Caddy edge, Linux control-plane and model-gateway binaries, and fresh
+PostgreSQL. Separate CLI profiles completed loopback and manual approval.
+Each listed Agents and gateway Models before refresh and made another
+authenticated call after refresh. The previous access tokens returned 401.
+`TestCLIOAuthScopeMatrix` checked the four recorded scope sets across nine
+API probes, with a test upstream for Messages and Count Tokens.
+After review, the real loopback CLI also reported a role refusal and received
+the original state. Both inference probes sent a local workspace selector.
+The test upstream received neither selector.

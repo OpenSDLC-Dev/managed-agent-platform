@@ -138,6 +138,12 @@ func TestARevokedEnvironmentKeyIsAnsweredAsRevokedOnEveryPublicRoute(t *testing.
 					}
 				case request == "POST /api/auth/login":
 					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "login requires the configured login credential")
+				case path == "/oauth/authorize":
+					wantErrMsg(t, status, body, http.StatusUnauthorized, "authentication_error", "a browser session cookie is required")
+				case request == "POST /v1/oauth/token":
+					if status != http.StatusBadRequest || body["error"] != "invalid_request" {
+						t.Fatalf("missing OAuth grant = %d %v; want invalid_request", status, body)
+					}
 				case request == "POST "+setupPath:
 					wantErrMsg(t, status, body, http.StatusForbidden, "permission_error", "invalid browser origin")
 				case strings.HasPrefix(path, "/api/"):
