@@ -25,13 +25,14 @@ const (
 )
 
 // Config carries native browser-login settings. Only the control plane needs
-// OIDCClientSecret; a gateway reads SessionConfigFromEnv instead.
+// OIDCClientSecret and EdgeClientIPToken; a gateway reads SessionConfigFromEnv instead.
 type Config struct {
-	Mode             Mode
-	PublicOrigin     string
-	Development      bool
-	OIDCClientID     string
-	OIDCClientSecret string `json:"-" yaml:"-" xml:"-"`
+	Mode              Mode
+	PublicOrigin      string
+	Development       bool
+	OIDCClientID      string
+	OIDCClientSecret  string `json:"-" yaml:"-" xml:"-"`
+	EdgeClientIPToken string `json:"-" yaml:"-" xml:"-"`
 }
 
 // String, GoString and LogValue exclude the client secret. Format also covers
@@ -64,7 +65,34 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		}
 		cfg.OIDCClientSecret = getenv("IDENTITY_OIDC_CLIENT_SECRET")
 	}
+	if cfg.Mode == ModePassword {
+		token := getenv("APP_EDGE_CLIENT_IP_TOKEN")
+		if token != "" {
+			if !validEdgeToken(token) {
+				return Config{}, errors.New("login: APP_EDGE_CLIENT_IP_TOKEN must use only ASCII letters, digits, or . _ ~ + -")
+			}
+			cfg.EdgeClientIPToken = token
+		}
+	}
 	return cfg, nil
+}
+
+// validEdgeToken restricts APP_EDGE_CLIENT_IP_TOKEN to a URL/base64url/hex-safe
+// ASCII subset so Caddyfile never interprets placeholders ({...}), quotes, or
+// comments differently from the control plane.
+func validEdgeToken(v string) bool {
+	if len(v) == 0 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '~' || c == '+' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // SessionConfigFromEnv reads only settings needed to accept browser sessions.

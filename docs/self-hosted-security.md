@@ -1413,8 +1413,15 @@ Local login names are immutable lowercase subjects in
 Passwords must contain 12–1024 UTF-8 bytes and no NUL. Fixed Argon2id parameters
 allow at most eight concurrent derivations per process. PostgreSQL limits login
 and password setup to 20 attempts per peer and 5 per normalized name per five
-minutes. Forwarded address headers cannot split the peer bucket. A proxy shares
-that peer bucket. Origin checks never trust forwarded host or protocol headers.
+minutes. Caller-supplied forwarded address headers (`X-Forwarded-For`,
+`Forwarded`, `X-Real-IP`) cannot split the peer bucket. When deployed behind
+the supported `app-edge` proxy with `APP_EDGE_CLIENT_IP_TOKEN` configured on
+both `app-edge` and `controlplane`, `app-edge` overwrites `X-Platform-Client-IP`
+with its observed transport client IP and attaches `X-Platform-Edge-Token`, so
+unrelated clients through the same edge receive independent peer buckets while
+direct requests stay keyed on transport `RemoteAddr`. Without that token,
+requests through a proxy share its peer bucket. Origin checks never trust
+forwarded host or protocol headers.
 
 #### The CERT/CC VU#780781 posture, stated plainly
 

@@ -3,6 +3,11 @@ reverse_proxy @platform {$CONTROLPLANE_UPSTREAM:controlplane:8080} {
 	# Zero flush delay preserves the upstream's SSE frames. Caddy's default
 	# transport has no response/read timeout and cancels on client disconnect.
 	flush_interval 0
+	# Overwrite any caller-supplied edge client-IP headers with the transport
+	# peer observed by Caddy so password login throttling separates clients
+	# behind app-edge without trusting caller-supplied forwarding headers.
+	header_up X-Platform-Client-IP {http.request.remote.host}
+	header_up X-Platform-Edge-Token {$APP_EDGE_CLIENT_IP_TOKEN:}
 }
 import /etc/caddy/admin-{$APP_EDGE_ADMIN}.caddy
 reverse_proxy {$CONSOLE_UPSTREAM:console:3000}

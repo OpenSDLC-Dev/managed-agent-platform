@@ -2,6 +2,7 @@ package login
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"net"
 	"net/http"
@@ -13,18 +14,27 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Throttle atomically counts both the transport peer (20/5 min) and normalized
+const (
+	// EdgeClientIPHeader carries the client IP observed by the trusted app-edge
+	// reverse proxy (Caddy {http.request.remote.host}).
+	EdgeClientIPHeader = "X-Platform-Client-IP"
+	// EdgeClientIPTokenHeader authenticates EdgeClientIPHeader as coming from
+	// the configured app-edge proxy rather than a direct caller.
+	EdgeClientIPTokenHeader = "X-Platform-Edge-Token"
+)
+
+// Throttle atomically counts both the client peer (20/5 min) and normalized
 // login name (5/5 min) in PostgreSQL. A positive retryAfter means refusal; callers
 // return 429 and round it up to whole seconds for Retry-After before hashing.
-// Forwarded headers are never a source of transport-peer identity.
+//
+// Generic forwarded headers (X-Forwarded-For, Forwarded, X-Real-IP) are never
+// read. EdgeClientIPHeader is trusted only when EdgeClientIPToken is configured
+// and the request carries a single matching EdgeClientIPTokenHeader; direct
+// requests continue to key on r.RemoteAddr.
 func (m *Manager) Throttle(ctx context.Context, r *http.Request, loginName string) (retryAfter time.Duration, err error) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	addr, err := m.throttlePeer(r)
 	if err != nil {
-		return 0, errors.New("login: invalid transport peer address")
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return 0, errors.New("login: invalid transport peer address")
+		return 0, err
 	}
 	buckets := []struct {
 		hash  string
@@ -71,4 +81,31 @@ func (m *Manager) Throttle(ctx context.Context, r *http.Request, loginName strin
 		return 0, err
 	}
 	return retryAfter, nil
+}
+
+func (m *Manager) throttlePeer(r *http.Request) (netip.Addr, error) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}, errors.New("login: invalid transport peer address")
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, errors.New("login: invalid transport peer address")
+	}
+	if m.edgeClientIPToken == "" {
+		return peer.Unmap(), nil
+	}
+	tokens := r.Header.Values(EdgeClientIPTokenHeader)
+	if len(tokens) != 1 || subtle.ConstantTimeCompare([]byte(tokens[0]), []byte(m.edgeClientIPToken)) != 1 {
+		return peer.Unmap(), nil
+	}
+	ips := r.Header.Values(EdgeClientIPHeader)
+	if len(ips) != 1 {
+		return netip.Addr{}, errors.New("login: invalid trusted edge client address")
+	}
+	clientAddr, err := netip.ParseAddr(strings.TrimSpace(ips[0]))
+	if err != nil || clientAddr.Zone() != "" {
+		return netip.Addr{}, errors.New("login: invalid trusted edge client address")
+	}
+	return clientAddr.Unmap(), nil
 }

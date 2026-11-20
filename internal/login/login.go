@@ -10,6 +10,9 @@ package login
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,10 +34,11 @@ var (
 // Manager shares credentials through PostgreSQL, not replica-local memory. It
 // deliberately retains no OIDC client secret, even when constructed with one.
 type Manager struct {
-	pool   *pgxpool.Pool
-	mode   Mode
-	origin string
-	secure bool
+	pool              *pgxpool.Pool
+	mode              Mode
+	origin            string
+	secure            bool
+	edgeClientIPToken string
 }
 
 func New(pool *pgxpool.Pool, cfg Config) *Manager {
@@ -46,11 +50,24 @@ func New(pool *pgxpool.Pool, cfg Config) *Manager {
 		m.origin = cfg.PublicOrigin
 		m.secure = !loopbackHTTP(u)
 	}
+	if validEdgeToken(cfg.EdgeClientIPToken) {
+		m.edgeClientIPToken = cfg.EdgeClientIPToken
+	}
 	return m
 }
 
 // Mode reports only the nonsecret deployment mode, not provider configuration.
 func (m *Manager) Mode() Mode { return m.mode }
+
+// String, GoString, LogValue, and Format use value receivers so both Manager
+// values and pointers redact edgeClientIPToken on diagnostic output, matching
+// Config's redaction discipline (Go's fmt formats a nil *Manager as "<nil>").
+func (m Manager) String() string {
+	return fmt.Sprintf("login.Manager{mode:%q, origin:%q, secure:%t}", m.mode, m.origin, m.secure)
+}
+func (m Manager) GoString() string           { return m.String() }
+func (m Manager) LogValue() slog.Value       { return slog.StringValue(m.String()) }
+func (m Manager) Format(s fmt.State, _ rune) { _, _ = io.WriteString(s, m.String()) }
 
 // NativeEnabled reports whether the manager has a public origin and a supported login mode.
 func (m *Manager) NativeEnabled() bool {

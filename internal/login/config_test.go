@@ -27,6 +27,11 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 		{"password needs development", map[string]string{"IDENTITY_MODE": "password", "CONSOLE_PUBLIC_ORIGIN": "https://console.example"}, "", true},
 		{"password needs origin", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true"}, "", true},
 		{"development password", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000"}, ModePassword, false},
+		{"development password with edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "edge-secret_1.~+"}, ModePassword, false},
+		{"development password rejects whitespace edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "bad token"}, "", true},
+		{"development password rejects newline edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "bad\ntoken"}, "", true},
+		{"development password rejects Caddy placeholder braces in edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": "bad{token}"}, "", true},
+		{"development password rejects quotes in edge token", map[string]string{"IDENTITY_MODE": "password", "DEVELOPMENT_MODE": "true", "CONSOLE_PUBLIC_ORIGIN": "http://localhost:3000", "APP_EDGE_CLIENT_IP_TOKEN": `bad"token`}, "", true},
 		{"native oidc", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_CLIENT_ID": "console", "IDENTITY_OIDC_AUDIENCE": "console"}, ModeOIDC, false},
 		{"native oidc needs client", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_AUDIENCE": "console"}, "", true},
 		{"native oidc audience mismatch", map[string]string{"IDENTITY_MODE": "oidc", "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "IDENTITY_OIDC_CLIENT_ID": "console", "IDENTITY_OIDC_AUDIENCE": "other"}, "", true},
@@ -41,6 +46,9 @@ func TestBrowserLoginConfiguration(t *testing.T) {
 			}
 			if err == nil && cfg.Mode != tc.wantMode {
 				t.Errorf("mode = %q, want %q", cfg.Mode, tc.wantMode)
+			}
+			if err == nil && tc.env["APP_EDGE_CLIENT_IP_TOKEN"] != "" && cfg.EdgeClientIPToken != tc.env["APP_EDGE_CLIENT_IP_TOKEN"] {
+				t.Errorf("EdgeClientIPToken = %q, want %q", cfg.EdgeClientIPToken, tc.env["APP_EDGE_CLIENT_IP_TOKEN"])
 			}
 		})
 	}
@@ -150,7 +158,8 @@ func TestCanonicalPublicOrigins(t *testing.T) {
 
 func TestBrowserLoginConfigurationDiagnosticFormatting(t *testing.T) {
 	const secret = "FIX1-SYNTHETIC-CONFIG-CLIENT-SECRET"
-	cfg := Config{Mode: ModeOIDC, PublicOrigin: "https://console.example", OIDCClientID: "console", OIDCClientSecret: secret}
+	const edgeToken = "FIX1-SYNTHETIC-EDGE-TOKEN"
+	cfg := Config{Mode: ModeOIDC, PublicOrigin: "https://console.example", OIDCClientID: "console", OIDCClientSecret: secret, EdgeClientIPToken: edgeToken}
 	for _, form := range []struct {
 		name  string
 		value any
@@ -168,9 +177,9 @@ func TestBrowserLoginConfigurationDiagnosticFormatting(t *testing.T) {
 			}
 			for _, format := range formats {
 				output := fmt.Sprintf(format, form.value)
-				for _, canary := range []string{secret, fmt.Sprintf("%x", secret), fmt.Sprintf("%X", secret)} {
+				for _, canary := range []string{secret, fmt.Sprintf("%x", secret), fmt.Sprintf("%X", secret), edgeToken, fmt.Sprintf("%x", edgeToken), fmt.Sprintf("%X", edgeToken)} {
 					if strings.Contains(output, canary) {
-						t.Errorf("%s of %s disclosed the synthetic client secret", format, form.name)
+						t.Errorf("%s of %s disclosed a synthetic config secret", format, form.name)
 					}
 				}
 			}
@@ -219,17 +228,77 @@ func TestBrowserLoginConfigurationSecretBoundaries(t *testing.T) {
 	for _, mode := range []string{"oidc", "trusted_proxy", "password"} {
 		t.Run("session-only "+mode, func(t *testing.T) {
 			cfg, err := SessionConfigFromEnv(func(k string) string {
-				if strings.HasPrefix(k, "IDENTITY_OIDC_") {
-					t.Fatalf("session-only configuration read RP variable %s", k)
+				if strings.HasPrefix(k, "IDENTITY_OIDC_") || k == "APP_EDGE_CLIENT_IP_TOKEN" {
+					t.Fatalf("session-only configuration read controlplane-only variable %s", k)
 				}
 				return map[string]string{"IDENTITY_MODE": mode, "CONSOLE_PUBLIC_ORIGIN": "https://console.example", "DEVELOPMENT_MODE": "true"}[k]
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.OIDCClientSecret != "" {
+			if cfg.OIDCClientSecret != "" || cfg.EdgeClientIPToken != "" {
 				t.Fatal("session-only config carries a secret")
 			}
 		})
 	}
+	t.Run("edge token secret boundaries", func(t *testing.T) {
+		const tok = "fixture-edge-token-never-render"
+		pwEnv := map[string]string{
+			"IDENTITY_MODE":            "password",
+			"DEVELOPMENT_MODE":         "true",
+			"CONSOLE_PUBLIC_ORIGIN":    "http://localhost:3000",
+			"APP_EDGE_CLIENT_IP_TOKEN": tok,
+		}
+		pwCfg, err := ConfigFromEnv(func(k string) string { return pwEnv[k] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pwCfg.EdgeClientIPToken != tok {
+			t.Fatalf("EdgeClientIPToken = %q, want %q", pwCfg.EdgeClientIPToken, tok)
+		}
+		j, _ := json.Marshal(pwCfg)
+		x, _ := xml.Marshal(pwCfg)
+		y, _ := yaml.Marshal(pwCfg)
+		m := New(nil, pwCfg)
+		var nilMgr *Manager
+		if got := fmt.Sprint(nilMgr); got != "<nil>" {
+			t.Fatalf("nil *Manager formatted as %q, want <nil>", got)
+		}
+		var mgrLogs bytes.Buffer
+		slog.New(slog.NewJSONHandler(&mgrLogs, nil)).Info("manager", "ptr", m, "val", *m, "config", pwCfg)
+		nested := struct{ M Manager }{*m}
+		for _, rendered := range []string{
+			string(j), string(x), string(y),
+			fmt.Sprint(m), fmt.Sprintf("%+v", m), fmt.Sprintf("%#v", m),
+			fmt.Sprint(*m), fmt.Sprintf("%+v", *m), fmt.Sprintf("%#v", *m),
+			fmt.Sprintf("%+v", nested), fmt.Sprintf("%#v", nested),
+			mgrLogs.String(),
+		} {
+			if strings.Contains(rendered, tok) {
+				t.Fatalf("edge token disclosed: %s", rendered)
+			}
+		}
+		_, err = ConfigFromEnv(func(k string) string {
+			if k == "APP_EDGE_CLIENT_IP_TOKEN" {
+				return "bad{" + tok + "}"
+			}
+			return pwEnv[k]
+		})
+		if err == nil || strings.Contains(err.Error(), tok) {
+			t.Fatalf("unsafe invalid-edge-token error: %v", err)
+		}
+		// Non-password modes never read APP_EDGE_CLIENT_IP_TOKEN.
+		oidcCfg, err := ConfigFromEnv(func(k string) string {
+			if k == "APP_EDGE_CLIENT_IP_TOKEN" {
+				return tok
+			}
+			return env[k]
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if oidcCfg.EdgeClientIPToken != "" {
+			t.Fatal("OIDC mode retained APP_EDGE_CLIENT_IP_TOKEN")
+		}
+	})
 }
