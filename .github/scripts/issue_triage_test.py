@@ -13,13 +13,14 @@ GUARD = ROOT / ".claude/hooks/issue-triage-bash-guard.sh"
 READER = ROOT / ".claude/hooks/issue-triage-read.sh"
 
 
-def run_guard(payload, *, env=None):
+def run_guard(payload, *, env=None, cwd=ROOT):
     return subprocess.run(
         ["/bin/sh", str(GUARD)],
         input=payload,
         text=True,
         capture_output=True,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -169,6 +170,15 @@ class IssueTriageGuardTests(unittest.TestCase):
             self.assertEqual(res.returncode, 2)
             self.assertIn("issue-triage guard:", res.stderr)
 
+    def test_subdirectory_cwd_cannot_shadow_reader(self):
+        # Running from a subdirectory (even one containing a decoy
+        # .claude/hooks/issue-triage-read.sh) must be rejected so the relative
+        # command path always resolves to the validated repo-root reader.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res = run_guard(payload_for(".claude/hooks/issue-triage-read.sh git-log"), cwd=tmpdir)
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("repository root", res.stderr)
+
 
 class IssueTriageReaderExecutionTests(unittest.TestCase):
     def setUp(self):
@@ -245,12 +255,13 @@ class IssueTriageReaderExecutionTests(unittest.TestCase):
         self._git("config", "diff.external", str(evil))
         self._git("config", "diff.txt.command", str(evil))
         self._git("config", "diff.txt.textconv", str(evil))
+        self._git("config", "format.pretty", "format:%G?")
         self._git("config", "log.showSignature", "true")
         self._git("config", "gpg.program", str(evil))
         (self.repo / ".gitattributes").write_text("*.txt diff=txt\n")
 
-        # Create a commit carrying a gpgsig header so log.showSignature=true
-        # would invoke gpg.program unless explicitly suppressed.
+        # Create a commit carrying a gpgsig header so log.showSignature=true or
+        # format.pretty=format:%G? would invoke gpg.program unless suppressed.
         tree = subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=self.repo, check=True, capture_output=True, text=True,
@@ -278,9 +289,14 @@ class IssueTriageReaderExecutionTests(unittest.TestCase):
         self._git("reset", "--hard", "-q", signed_sha)
 
         env_with_ext = {**self.env, "GIT_EXTERNAL_DIFF": str(evil)}
+        # Include HEAD~1 (which renders a changed-file patch on hello.txt) and
+        # signed HEAD so external diff, textconv, and gpg.program paths are all
+        # actively exercised and proven suppressed.
         for args in [
             ("git-show", "HEAD"),
+            ("git-show", "HEAD~1"),
             ("git-show", "HEAD:hello.txt"),
+            ("git-log", "-n", "3"),
             ("git-log", "-n", "2", "--stat"),
         ]:
             r = subprocess.run(
@@ -289,6 +305,11 @@ class IssueTriageReaderExecutionTests(unittest.TestCase):
             )
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(marker.exists(), f"{args} triggered external diff, textconv, or gpg.program")
+
+        # Positive control: unsuppressed raw git show HEAD~1 triggers the hook,
+        # proving the test fails if wrapper suppression is removed.
+        subprocess.run(["git", "--no-pager", "show", "HEAD~1"], cwd=self.repo, env=env_with_ext, capture_output=True, text=True)
+        self.assertTrue(marker.exists(), "positive control failed: raw git show did not trigger configured hook")
 
     def test_gh_queries_pass_exact_args_with_no_pager(self):
         for args, expected in [

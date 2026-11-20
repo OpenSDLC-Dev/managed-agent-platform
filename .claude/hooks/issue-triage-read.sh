@@ -219,6 +219,7 @@ case "$subcmd" in
       -c core.fsmonitor=false \
       -c core.pager=cat \
       -c diff.external= \
+      -c format.pretty=medium \
       -c log.showSignature=false \
       log --no-ext-diff --no-textconv "$@"
     ;;
@@ -276,6 +277,7 @@ case "$subcmd" in
       -c core.fsmonitor=false \
       -c core.pager=cat \
       -c diff.external= \
+      -c format.pretty=medium \
       -c log.showSignature=false \
       show --no-ext-diff --no-textconv "$@"
     ;;

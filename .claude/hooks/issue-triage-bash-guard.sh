@@ -11,7 +11,8 @@ set -f
 LC_ALL=C
 export LC_ALL
 
-script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
 reader="$script_dir/issue-triage-read.sh"
 
 # The parse step must not depend on a working python3 on PATH: the Microsoft
@@ -101,9 +102,16 @@ IFS=' '
 # shellcheck disable=SC2086
 set -- $cmd
 
-# Require direct invocation of the structured read-only wrapper.
+# Require direct invocation of the structured read-only wrapper from the
+# repository root so the relative path executed by Bash is guaranteed to be
+# the exact validated reader beside this hook (not a shadowed copy in a
+# subdirectory).
 if [ $# -lt 2 ] || [ "$1" != ".claude/hooks/issue-triage-read.sh" ]; then
   echo "issue-triage guard: only '.claude/hooks/issue-triage-read.sh <subcommand> ...' is allowed (read-only triage)" >&2
+  exit 2
+fi
+if [ "$(pwd -P)" != "$repo_root" ]; then
+  echo "issue-triage guard: read-only helper must be invoked from the repository root" >&2
   exit 2
 fi
 shift
