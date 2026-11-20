@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -154,18 +155,25 @@ type Config struct {
 
 // Gate is one session's forward proxy. It implements http.Handler: an
 // http.Server{Handler: gate} serving on the address injected as the sandbox's
-// HTTP(S)_PROXY is the running gate.
+// HTTP(S)_PROXY is the running gate. Policy and credentials may be updated
+// live via Update (plan 70 slice 3).
 type Gate struct {
-	policy        *policy
-	engine        *egress.Engine
-	onUnreachable func(host string, placeholders []string)
-	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
-	transport     http.RoundTripper
-	maxBody       int64
-	tunnelIdle    time.Duration
-	bodyRead      time.Duration
-	uploadTimeout time.Duration
-	limiter       *Limiter
+	snap             atomic.Pointer[snapshot]
+	ipAllowed        func(net.IP) error
+	onUnreachable    func(host string, placeholders []string)
+	dial             func(ctx context.Context, network, addr string) (net.Conn, error)
+	transport        http.RoundTripper // initial snapshot's *http.Transport (overridable by internal tests)
+	initialTransport http.RoundTripper
+	headerTimeout    time.Duration
+	maxBody          int64
+	tunnelIdle       time.Duration
+	bodyRead         time.Duration
+	uploadTimeout    time.Duration
+	limiter          *Limiter
+
+	activeMu sync.Mutex
+	tunnels  map[*activeTunnel]struct{}
+	requests map[*activeRequest]struct{}
 }
 
 // admissionKey carries how the policy admitted a request down to the dialer. It
@@ -291,23 +299,10 @@ func New(cfg Config) *Gate {
 	if ipAllowed == nil {
 		ipAllowed = dialguard.IPAllowed
 	}
-	dial := rootedDial(newDialer(ipAllowed).DialContext)
+	baseDial := rootedDial(newDialer(ipAllowed).DialContext)
 	headerTimeout := cfg.ResponseHeaderTimeout
 	if headerTimeout <= 0 {
 		headerTimeout = defaultResponseHeaderTimeout
-	}
-	transport := &http.Transport{
-		DialContext:       dial,
-		ForceAttemptHTTP2: false,
-		MaxIdleConns:      32,
-		IdleConnTimeout:   90 * time.Second,
-		// A transparent proxy must not inject Accept-Encoding or auto-decompress:
-		// the sandbox controls its own content negotiation, and the origin's
-		// Content-Encoding/Content-Length must reach it unaltered.
-		DisableCompression:    true,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: headerTimeout,
-		ExpectContinueTimeout: time.Second,
 	}
 	maxBody := cfg.MaxBodyBytes
 	if maxBody <= 0 {
@@ -333,18 +328,52 @@ func New(cfg Config) *Gate {
 			MaxTotalBodyBytes:     cfg.MaxTotalBodyBytes,
 		})
 	}
-	return &Gate{
-		policy:        newPolicy(cfg.Networking, cfg.MCPServerEndpoints),
-		engine:        egress.NewEngine(cfg.Credentials),
+	g := &Gate{
+		ipAllowed:     ipAllowed,
 		onUnreachable: cfg.OnUnreachable,
-		dial:          dial,
-		transport:     transport,
+		headerTimeout: headerTimeout,
 		maxBody:       maxBody,
 		tunnelIdle:    tunnelIdle,
 		bodyRead:      bodyRead,
 		uploadTimeout: uploadTimeout,
 		limiter:       limiter,
+		tunnels:       make(map[*activeTunnel]struct{}),
+		requests:      make(map[*activeRequest]struct{}),
 	}
+	// Re-check the current policy snapshot immediately before and after opening
+	// any TCP socket so work admitted under a superseded policy cannot begin
+	// new outbound activity or hand a disallowed socket back to http.Transport
+	// once Update takes effect (plan 70 slice 3).
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dt, ok := dialTargetFrom(ctx); ok {
+			cur := g.snap.Load()
+			curHow := cur.policy.admit(dt.host, dt.port)
+			if curHow == admitNone {
+				return nil, errPolicyWithdrawn
+			}
+			if dt.ar != nil && (dt.ar.withdrawn.Load() || !cur.allowsUsed(dt.host, dt.ar.used)) {
+				dt.ar.withdrawn.Store(true)
+				return nil, errPolicyWithdrawn
+			}
+			ctx = withAdmission(ctx, curHow)
+			conn, err := baseDial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if dt.ar != nil && !g.recordRequestIP(dt.ar, remoteIPOf(conn)) {
+				_ = conn.Close()
+				return nil, errPolicyWithdrawn
+			}
+			return conn, nil
+		}
+		return baseDial(ctx, network, addr)
+	}
+	g.dial = dial
+	initialSnap := g.newSnapshot(cfg)
+	g.snap.Store(initialSnap)
+	g.transport = initialSnap.transport
+	g.initialTransport = initialSnap.transport
+	return g
 }
 
 // Limiter returns the Gate's concurrency and buffer limiter so a wrapper that
@@ -372,6 +401,10 @@ func (g *Gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // so this is errors.Is rather than a comparison — and a test drives that path
 // through a real RoundTrip rather than assuming the wrapping is transparent.
 func refusedOrUnreachable(w http.ResponseWriter, err error) {
+	if errors.Is(err, errPolicyWithdrawn) {
+		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
 	if errors.Is(err, errFloorRefused) {
 		// The recording gives the wording, not the bytes: what a curl transcript
 		// shows cannot settle whether the reference terminates the line. So this
@@ -385,6 +418,10 @@ func refusedOrUnreachable(w http.ResponseWriter, err error) {
 }
 
 func refusedOrUnreachableAndClose(w http.ResponseWriter, err error) {
+	if errors.Is(err, errPolicyWithdrawn) {
+		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
 	if errors.Is(err, errFloorRefused) {
 		rejectAndClose(w, refusedBody, http.StatusForbidden)
 		return
@@ -409,12 +446,12 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	target := addrWithPort(r.Host, "443")
 	host, port := hostOnly(target), portOnly(target)
-	how := g.policy.admit(host, port)
+	how := g.snap.Load().policy.admit(host, port)
 	if how == admitNone {
 		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
-	ctx := withAdmission(r.Context(), how)
+	ctx := withDialTarget(withAdmission(r.Context(), how), dialTarget{host: host, port: port})
 	// Dial the name that was admitted, not the one the sandbox typed. Admission
 	// compares canonical names, so the two can differ by a whole name rather
 	// than by case alone: the Kelvin sign U+212A before ".example" (not the
@@ -459,6 +496,16 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstream.Close()
 
+	// Re-check current policy under activeMu and register the tunnel BEFORE
+	// hijacking or answering 200 Connection Established, so a concurrent Update
+	// either rejects admission here or immediately tears down the tunnel.
+	at, ok := g.registerTunnel(host, port, remoteIPOf(upstream), upstream)
+	if !ok {
+		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
+	defer g.unregisterTunnel(at)
+
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		rejectAndClose(w, "proxy does not support hijacking", http.StatusInternalServerError)
@@ -469,6 +516,10 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer client.Close()
+
+	if !g.attachTunnelClient(at, client) {
+		return
+	}
 
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
@@ -483,11 +534,9 @@ func (g *Gate) handleConnect(w http.ResponseWriter, r *http.Request) {
 	//
 	// An activity-based idle deadline bounds an abandoned tunnel: when no bytes
 	// move in EITHER direction for tunnelIdle, the watchdog closes both conns
-	// and the pumps unwind. The deadline is shared across directions — a
-	// per-direction cut would sever a long download that is silent
-	// upstream-ward — and is owned by this handler invocation, not the Gate:
-	// the deployment swaps in a fresh Gate per config fetch while old tunnels
-	// keep running on the gate they started with.
+	// and the pumps unwind. Live policy updates (Gate.Update) also close both
+	// conns immediately if the tunnel's host is withdrawn or its remote IP
+	// fails a newly required address floor (plan 70 slice 3).
 	activity := newTunnelActivity()
 	stop := make(chan struct{})
 	defer close(stop)
@@ -578,7 +627,10 @@ func rejectAndClose(w http.ResponseWriter, body string, code int) {
 
 // handlePlain admits or refuses a plain-HTTP request on its host, substitutes
 // vault placeholders in the request it forwards, and streams the origin's
-// response back.
+// response back. Policy and credentials are re-evaluated against the current
+// snapshot immediately before outbound admission so a request that began under
+// a superseded policy cannot start new outbound work or inject withdrawn
+// secrets once Gate.Update takes effect (plan 70 slice 3).
 func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	releaseReq, ok := g.limiter.acquireRequest()
 	if !ok {
@@ -596,23 +648,24 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	// carries the same two halves and is normalized the same way.
 	target := addrWithPort(r.URL.Host, defaultPort(r.URL.Scheme))
 	host, port := hostOnly(target), portOnly(target)
-	how := g.policy.admit(host, port)
-	if how == admitNone {
+	if g.snap.Load().policy.admit(host, port) == admitNone {
 		rejectAndClose(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
 		return
 	}
 
-	reqCtx, cancelReq := context.WithCancel(withAdmission(r.Context(), how))
+	reqCtx, cancelReq := context.WithCancel(r.Context())
 	defer cancelReq()
 	out := r.Clone(reqCtx)
 	out.RequestURI = "" // must be empty on a client request
-	unreachable := map[string]struct{}{}
-	g.substituteHeaders(host, out.Header, unreachable)
+
+	// Buffer the raw request body BEFORE loading the outbound policy/credential
+	// snapshot so any policy or credential withdrawal that arrives while the
+	// body is being uploaded takes effect before substitution and RoundTrip.
 	rc := http.NewResponseController(w)
 	if g.bodyRead > 0 {
 		_ = rc.SetReadDeadline(time.Now().Add(g.bodyRead))
 	}
-	releaseBody, err := g.substituteBody(host, out, unreachable)
+	rawBody, acquired, hasBody, err := g.readRawBody(out)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
 			rejectAndClose(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
@@ -633,6 +686,30 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 	if g.bodyRead > 0 {
 		_ = rc.SetReadDeadline(time.Time{})
 	}
+
+	// Outbound admission against the current snapshot.
+	snap := g.snap.Load()
+	if snap.policy.admit(host, port) == admitNone {
+		g.limiter.releaseBodyBytes(acquired)
+		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
+	unreachable := map[string]struct{}{}
+	used := substituteHeaders(snap.engine, host, out.Header, unreachable)
+	releaseBody := func() {}
+	if hasBody {
+		var usedBody []egress.UsedCredential
+		usedBody, releaseBody, err = g.substituteRawBody(snap.engine, host, out, rawBody, acquired, unreachable)
+		if err != nil {
+			if errors.Is(err, errBodyTooLarge) {
+				http.Error(w, "request body too large to substitute", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "gate body buffer budget exhausted", http.StatusServiceUnavailable)
+			return
+		}
+		used = append(used, usedBody...)
+	}
 	// Once out.Body is handed to RoundTrip, budgetBody.Close owns dropping the
 	// backing string and releasing the Limiter bytes when the transport finishes
 	// consuming/closing the upload. Only release directly if we unwind before
@@ -643,19 +720,53 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 			releaseBody()
 		}
 	}()
+
+	// Atomically verify against the live snapshot and register as active before
+	// any outbound socket activity so a concurrent Gate.Update either refuses
+	// here or cancels reqCtx immediately. Use the snapshot's own transport so
+	// idle sockets from an earlier policy generation can never be reused.
+	ar, curSnap, curHow, admitted := g.registerRequest(host, port, used, cancelReq)
+	if !admitted {
+		http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+		return
+	}
+	defer g.unregisterRequest(ar)
+
 	removeHopByHop(out.Header)
 	g.report(host, unreachable)
+
+	outCtx := withDialTarget(withAdmission(reqCtx, curHow), dialTarget{
+		host: host,
+		port: port,
+		ar:   ar,
+	})
+	outCtx = httptrace.WithClientTrace(outCtx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil {
+				g.recordRequestIP(ar, remoteIPOf(info.Conn))
+			}
+		},
+	})
+	out = out.WithContext(outCtx)
 
 	dispatched = true
 	var uploadTimer *time.Timer
 	if g.uploadTimeout > 0 {
 		uploadTimer = time.AfterFunc(g.uploadTimeout, cancelReq)
 	}
-	resp, err := g.transport.RoundTrip(out)
+	rt := http.RoundTripper(curSnap.transport)
+	if g.transport != g.initialTransport {
+		rt = g.transport
+	}
+	resp, err := rt.RoundTrip(out)
 	if uploadTimer != nil {
 		uploadTimer.Stop()
 	}
 	if err != nil {
+		if ar.withdrawn.Load() {
+			http.Error(w, "host not permitted by the environment's networking policy", http.StatusForbidden)
+			return
+		}
 		refusedOrUnreachable(w, err)
 		return
 	}
@@ -672,22 +783,60 @@ func (g *Gate) handlePlain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	if err := copyFlushing(w, resp.Body); err != nil {
+		// Abort the client connection cleanly without writing a chunked
+		// 0\r\n\r\n terminator when the upstream read failed or was cancelled
+		// mid-stream (for example by Gate.Update withdrawal).
+		panic(http.ErrAbortHandler)
+	}
 }
 
-// substituteHeaders rewrites every header value in the header location,
-// collecting any host-unreachable credential's placeholder.
-func (g *Gate) substituteHeaders(host string, h http.Header, unreachable map[string]struct{}) {
+// copyFlushing forwards a response body chunk by chunk, flushing when the
+// ResponseWriter supports it so streaming origins deliver bytes without
+// waiting to fill net/http's write buffer. Returns any non-EOF read error so
+// the caller can abort the downstream response instead of forging a clean EOF.
+func copyFlushing(w http.ResponseWriter, r io.Reader) error {
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
+		_, err := io.Copy(w, r)
+		return err
+	}
+	flusher.Flush()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return nil
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+// substituteHeaders rewrites every header value in the header location using
+// engine, returning the credentials substituted and collecting any
+// host-unreachable credential's placeholder.
+func substituteHeaders(engine *egress.Engine, host string, h http.Header, unreachable map[string]struct{}) []egress.UsedCredential {
+	var used []egress.UsedCredential
 	for k, vs := range h {
 		for i, v := range vs {
-			out, unr := g.engine.Substitute(host, egress.LocationHeader, v)
+			out, u, unr, _ := engine.SubstituteDetailed(host, egress.LocationHeader, v, -1, 0, nil)
 			vs[i] = out
+			used = append(used, u...)
 			for _, c := range unr {
 				unreachable[c.Placeholder] = struct{}{}
 			}
 		}
 		h[k] = vs
 	}
+	return used
 }
 
 // budgetBody wraps a substituted plain-HTTP request body so the backing string
@@ -723,41 +872,33 @@ func (b *budgetBody) Close() error {
 	return nil
 }
 
-// substituteBody rewrites the request body in the body location. Phase 1 buffers
-// the whole body: the placeholder is a small token and the body must be a single
-// string for substitution; a streaming pass is a later refinement. Buffering is
-// bounded both per request (maxBody → 413) and in aggregate across concurrent
-// requests (g.limiter → 503), acquiring bytes incrementally as they arrive (and
-// incrementally as substitution expands) and releasing them when the outbound
-// budgetBody closes (plan 70 slice 2). For chunked bodies without a declared
-// Content-Length, the first limit hit as bytes arrive wins.
-func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[string]struct{}) (release func(), err error) {
-	noop := func() {}
+// readRawBody buffers the inbound request body without substituting so the
+// current policy/credential snapshot can be applied immediately before
+// outbound admission. Buffering is bounded both per request (maxBody → 413)
+// and in aggregate across concurrent requests (g.limiter → 503). For chunked
+// bodies without a declared Content-Length, the first limit hit as bytes arrive
+// wins. On error, all acquired bytes are released.
+func (g *Gate) readRawBody(r *http.Request) (string, int64, bool, error) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return noop, nil
+		return "", 0, false, nil
 	}
 	// Do not close r.Body on early rejection paths: net/http's (*body).Close
 	// attempts to drain up to 256 KiB before the caller has expired the socket
 	// read deadline via rejectAndClose. Close r.Body only once read to EOF.
 	if r.ContentLength > g.maxBody {
-		return noop, errBodyTooLarge
+		return "", 0, false, errBodyTooLarge
 	}
 	if r.ContentLength > 0 && !g.limiter.hasBodyCapacity(r.ContentLength) {
-		return noop, errBodyBudgetExhausted
+		return "", 0, false, errBodyBudgetExhausted
 	}
 
 	var raw bytes.Buffer
 	var acquired int64
-	releaseAll := func() {
-		if acquired > 0 {
-			g.limiter.releaseBodyBytes(acquired)
-			acquired = 0
-		}
-	}
 	committed := false
 	defer func() {
-		if !committed {
-			releaseAll()
+		if !committed && acquired > 0 {
+			g.limiter.releaseBodyBytes(acquired)
+			acquired = 0
 		}
 	}()
 
@@ -775,11 +916,11 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 		n, rerr := r.Body.Read(readBuf)
 		if n > 0 {
 			if int64(n) > rem {
-				return noop, errBodyTooLarge
+				return "", 0, false, errBodyTooLarge
 			}
 			totalRead += int64(n)
 			if !g.limiter.acquireBodyBytes(int64(n)) {
-				return noop, errBodyBudgetExhausted
+				return "", 0, false, errBodyBudgetExhausted
 			}
 			acquired += int64(n)
 			raw.Write(readBuf[:n])
@@ -789,14 +930,33 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 			break
 		}
 		if rerr != nil {
-			return noop, rerr
+			return "", 0, false, rerr
 		}
 	}
+	committed = true
+	return raw.String(), acquired, true, nil
+}
 
-	// Reserve any substitution growth atomically inside the bounded writer
-	// BEFORE strings.Builder allocates, so concurrent expanding substitutions
-	// cannot race past the aggregate memory budget.
-	out, unr, serr := g.engine.SubstituteBounded(host, egress.LocationBody, raw.String(), g.maxBody, acquired, func(extra int64) bool {
+// substituteRawBody rewrites raw in the body location using engine, reserving
+// any incremental growth atomically inside the bounded writer BEFORE
+// strings.Builder allocates, and attaches a budgetBody to r. Takes ownership
+// of acquired bytes and releases all reserved bytes on error.
+func (g *Gate) substituteRawBody(engine *egress.Engine, host string, r *http.Request, raw string, acquired int64, unreachable map[string]struct{}) (used []egress.UsedCredential, release func(), err error) {
+	noop := func() {}
+	releaseAll := func() {
+		if acquired > 0 {
+			g.limiter.releaseBodyBytes(acquired)
+			acquired = 0
+		}
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			releaseAll()
+		}
+	}()
+
+	out, used, unr, serr := engine.SubstituteDetailed(host, egress.LocationBody, raw, g.maxBody, acquired, func(extra int64) bool {
 		if !g.limiter.acquireBodyBytes(extra) {
 			return false
 		}
@@ -805,9 +965,9 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 	})
 	if serr != nil {
 		if errors.Is(serr, egress.ErrOutputBudgetDenied) {
-			return noop, errBodyBudgetExhausted
+			return nil, noop, errBodyBudgetExhausted
 		}
-		return noop, errBodyTooLarge
+		return nil, noop, errBodyTooLarge
 	}
 	for _, c := range unr {
 		unreachable[c.Placeholder] = struct{}{}
@@ -823,7 +983,7 @@ func (g *Gate) substituteBody(host string, r *http.Request, unreachable map[stri
 	r.ContentLength = finalBytes
 	r.Header.Set("Content-Length", strconv.FormatInt(finalBytes, 10))
 	committed = true
-	return rel, nil
+	return used, rel, nil
 }
 
 func (g *Gate) report(host string, unreachable map[string]struct{}) {

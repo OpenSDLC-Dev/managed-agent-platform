@@ -8592,3 +8592,5 @@ credentials — Zhipu, Moonshot and two Gitee models — are #903; and DeepSeek'
 tool loop whose thinking the brain dropped is #883. Turning the gateway on in GCP staging — an
 operator's `foundation/` and `environment/` apply and three CD changes — is #906, and a
 first release must make the `modelgateway` image package public (docs/RELEASING.md).
+
+**Plan 70 progress summary (archived).** [Plan 70](./plan/70_security-hardening-vault-egress.md) (#1052) landed in three slices: Slice 1 — Vault `environment_variable` credential destination binding and sealed digest verification (#1054); Slice 2 — egress gate concurrency, aggregate body-buffering, stalled-body/upload bounds, and Docker/Kubernetes sidecar container resource limits (#1056); Slice 3 — live in-place egress policy updates with current-policy outbound admission and immediate teardown/cancellation of withdrawn active CONNECT tunnels and plain-HTTP requests. The remaining two items in #1052 (password login throttling and issue-triage read-only access) stay outside this plan in their own focused PRs.

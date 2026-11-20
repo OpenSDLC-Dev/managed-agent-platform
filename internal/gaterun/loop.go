@@ -17,16 +17,18 @@ type Fetcher interface {
 }
 
 // RunFetchLoop keeps handler's gate current for the session's life: it fetches
-// once immediately, then every interval, converting each config into a fresh
-// gate and swapping it in atomically.
+// once immediately, then every interval, applying each config in place through
+// handler.Update so superseded active tunnels and requests are withdrawn while
+// unaffected traffic stays alive (plan 70 slice 3).
 //
 // The two error postures are the revocation contract (docs/plan/12 slice 4c-2b):
 //   - gateconfig.ErrUnauthorized — the token was revoked or the session archived
-//     — is terminal. The loop swaps in a deny-all gate and returns the error, so
-//     the caller shuts the server down: an unauthorized gate stops serving
+//     — is terminal. The loop updates the gate to deny-all (closing active
+//     tunnels and cancelling active requests) and returns the error, so the
+//     caller shuts the server down: an unauthorized gate stops serving
 //     (fail-closed), and a 401 is the one unambiguous "revoked" signal.
 //   - any other error is transient (a control-plane blip or network hiccup): the
-//     loop keeps the last-known-good gate and retries next tick, so a momentary
+//     loop keeps the last-known-good policy and retries next tick, so a momentary
 //     outage — even one longer than any TTL — never cuts a live session's egress.
 //
 // It returns nil when ctx is cancelled.
@@ -37,13 +39,11 @@ func RunFetchLoop(ctx context.Context, f Fetcher, handler *SwappableHandler, int
 		cfg, err := f.Fetch(ctx)
 		switch {
 		case err == nil:
-			gc := Convert(cfg)
-			gc.Limiter = handler.Limiter()
-			handler.Swap(gate.New(gc))
+			handler.Update(Convert(cfg))
 		case ctx.Err() != nil:
 			return nil
 		case errors.Is(err, gateconfig.ErrUnauthorized):
-			handler.Swap(gate.New(gate.Config{Limiter: handler.Limiter()})) // deny-all until the server stops
+			handler.Update(gate.Config{}) // deny-all and withdraw active tunnels/requests until the server stops
 			return err
 		default:
 			slog.WarnContext(ctx, "gate config fetch failed; keeping last-known-good", "err", err)
