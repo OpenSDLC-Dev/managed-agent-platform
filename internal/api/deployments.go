@@ -416,7 +416,7 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
 	if page.cur != nil {
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+		if page.cur.foreignToTime(cursorDeployments) || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -466,7 +466,7 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		out.Data = append(out.Data, *d)
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorDeployments, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

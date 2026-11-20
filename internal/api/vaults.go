@@ -212,8 +212,8 @@ func (s *server) listVaults(r *http.Request) (any, error) {
 		query += ` AND archived_at IS NULL`
 	}
 	if page.cur != nil {
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+		if page.cur.foreignToTime(cursorVaults) || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorVaults, page.cur, "invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -258,7 +258,7 @@ func (s *server) listVaults(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorVaults, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

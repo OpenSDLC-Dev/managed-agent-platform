@@ -539,7 +539,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND s.source = $%d`, len(args))
 	}
 	if page.cur != nil {
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+		if page.cur.foreignToTime(cursorSkills) || page.cur.dir != dirNext {
 			return nil, errSkillsPageToken
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -581,7 +581,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorSkills, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -829,8 +829,8 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	query := `SELECT id, name, description, created_at FROM skill_versions WHERE skill_id = $1`
 	args := []any{id}
 	if page.cur != nil {
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+		if page.cur.foreignToTime(cursorSkillVersions) || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorSkillVersions, page.cur, "invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -871,7 +871,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorSkillVersions, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

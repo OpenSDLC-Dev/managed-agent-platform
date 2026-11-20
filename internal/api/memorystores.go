@@ -371,8 +371,8 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		// Unidirectional list: only forward time cursors are valid here. Any
 		// other is another list's, which the reference words as the memories
 		// list words its other depth's (2026-10-24 tool-name-page-tokens idx 42).
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid(memoryCursorMismatch)
+		if page.cur.foreignToTime(cursorMemoryStores) || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorMemoryStores, page.cur, memoryCursorMismatch)
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -417,7 +417,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorMemoryStores, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

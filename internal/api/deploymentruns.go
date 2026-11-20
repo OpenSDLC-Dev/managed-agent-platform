@@ -360,7 +360,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		}
 	}
 	if page.cur != nil {
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+		if page.cur.foreignToTime(cursorDeploymentRuns) || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
@@ -395,7 +395,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorDeploymentRuns, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

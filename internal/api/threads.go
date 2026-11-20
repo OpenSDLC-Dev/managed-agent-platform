@@ -146,7 +146,7 @@ func (s *server) listThreads(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if page.cur != nil && (page.cur.foreignToTime() || page.cur.dir != dirNext) {
+	if page.cur != nil && (page.cur.foreignToTime(cursorThreads) || page.cur.dir != dirNext) {
 		return nil, errInvalid("invalid page cursor")
 	}
 	if err := s.sessionExists(ctx, id); err != nil {
@@ -190,7 +190,7 @@ func (s *server) listThreads(r *http.Request) (any, error) {
 	}
 	var next *string
 	if more {
-		c := encodeTimeCursor(dirNext, last.createdAt, last.id)
+		c := encodeTimeCursor(cursorThreads, dirNext, last.createdAt, last.id)
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil

@@ -547,11 +547,9 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		query += fmt.Sprintf(` AND created_at <= $%d`, len(args))
 	}
 	if page.cur != nil {
-		// Unidirectional list: only forward time cursors are valid here. Any
-		// other is another list's, in the reference's words for one (2026-10-24
-		// tool-name-page-tokens idx 54).
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid(pageTokenEmptyCursor)
+		// Unidirectional list: only its own forward time cursors are valid.
+		if page.cur.foreignToTime(cursorAgents) || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorAgents, page.cur, pageTokenEmptyCursor)
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -599,7 +597,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorAgents, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -639,8 +637,8 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	args := []any{id}
 	if page.cur != nil {
 		// Version lists paginate on the version number itself.
-		if !page.cur.versioned || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+		if page.cur.list != cursorAgentVersions || !page.cur.versioned || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorAgentVersions, page.cur, "invalid page cursor")
 		}
 		args = append(args, page.cur.version)
 		query += fmt.Sprintf(` AND version < $%d`, len(args))

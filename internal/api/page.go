@@ -16,9 +16,9 @@ import (
 // carries {"data":[…],"next_page":<cursor>} (sessions additionally carry
 // "prev_page"; a last page omits next_page or sends it null, by route — see
 // pageJSON), and clients pass the cursor back as ?page=…. Cursors are
-// keyset positions — (created_at, id) for resource lists, the version number
-// for agent-version lists — so concurrent inserts and deletes never duplicate
-// or skip rows the way row offsets would.
+// keyset positions bound to the list that issued them. Resource lists use
+// (created_at, id), agent versions use a version number, event lists use
+// sequence, and memories at depth=1 use a path.
 
 const (
 	defaultLimit = 20
@@ -47,13 +47,9 @@ const (
 // it from parsePage's limit refusal (errors.Is) and answer in its own words.
 var errPageCursor = errInvalid("invalid page cursor")
 
-// The reference words a page token a list cannot use list by list, and the
-// words follow no rule (2026-10-24 tool-name-page-tokens setup.json; #983). A
-// list recorded with its words for a token it decodes but cannot use gives them
-// to every cursor of a kind or direction it does not mint itself, but for a
-// backwards sequence cursor: no list mints one, so the events lists take it as
-// a token that does not decode. The skills list's words are errSkillsPageToken;
-// a list not recorded keeps `invalid page cursor`.
+// The 2026-10-24 tool-name-page-tokens recording supplied the refusal words
+// used by #983. The 2026-10-31 cursor-parent-binding recording also varied
+// the source list. Those source/target overrides are in foreignCursorWords.
 const (
 	// The memory stores and memories lists, for a token that does not decode.
 	pageTokenInvalid = "invalid page token"
@@ -73,8 +69,46 @@ const (
 	dirPrev = "p"
 )
 
+type cursorList string
+
+const (
+	cursorAgents           cursorList = "agents"
+	cursorAgentVersions    cursorList = "agent_versions"
+	cursorDeployments      cursorList = "deployments"
+	cursorDeploymentRuns   cursorList = "deployment_runs"
+	cursorDreams           cursorList = "dreams"
+	cursorEnvironments     cursorList = "environments"
+	cursorFiles            cursorList = "files"
+	cursorMemories         cursorList = "memories"
+	cursorMemoryStores     cursorList = "memory_stores"
+	cursorMemoryVersions   cursorList = "memory_versions"
+	cursorServiceAccounts  cursorList = "service_accounts"
+	cursorSessions         cursorList = "sessions"
+	cursorSessionEvents    cursorList = "session_events"
+	cursorSkills           cursorList = "skills"
+	cursorSkillVersions    cursorList = "skill_versions"
+	cursorThreads          cursorList = "threads"
+	cursorThreadEvents     cursorList = "thread_events"
+	cursorVaults           cursorList = "vaults"
+	cursorVaultCredentials cursorList = "vault_credentials"
+	cursorWork             cursorList = "work"
+)
+
+func (list cursorList) valid() bool {
+	switch list {
+	case cursorAgents, cursorAgentVersions, cursorDeployments, cursorDeploymentRuns, cursorDreams,
+		cursorEnvironments, cursorFiles, cursorMemories, cursorMemoryStores, cursorMemoryVersions,
+		cursorServiceAccounts, cursorSessions, cursorSessionEvents, cursorSkills, cursorSkillVersions,
+		cursorThreads, cursorThreadEvents, cursorVaults, cursorVaultCredentials, cursorWork:
+		return true
+	default:
+		return false
+	}
+}
+
 type cursor struct {
-	dir string
+	list cursorList
+	dir  string
 	// time-keyed position (agents, environments, sessions)
 	t  time.Time
 	id string
@@ -86,6 +120,10 @@ type cursor struct {
 	seqKeyed bool
 	seqDesc  bool
 	seq      int64
+	// Event sequences restart in every session. Carry the target thread of
+	// the original request and the event named in a foreign-thread refusal.
+	threadID domain.ID
+	eventID  domain.ID
 	// path-keyed position (memories at depth=1); used when pathKeyed is true.
 	// The memories list at depth=1 is the one list ordered by something other
 	// than time or a counter, and its key is not always a memory path: the
@@ -94,26 +132,10 @@ type cursor struct {
 	path      string
 }
 
-// foreignToTime reports whether c positions a walk this list does not run: a
-// version, sequence or path key — the three key kinds the lists ordered by
-// something other than (created_at, id) issue. A nil cursor is not a foreign
-// one: a request that sent no ?page= has nothing to refuse, and answering that
-// here means a caller cannot turn a missing nil check into a panic.
-//
-// A time-keyed list has to refuse those rather than bind them. They decode with
-// a zero time and an empty id, which is a perfectly legal position for the
-// keyset comparison, so the request answers 200 with something plausible where
-// the reference publishes 400. Which plausible answer depends on which way the
-// comparison points: a DESC walk finds nothing before the zero time and reports
-// end-of-history, while an ASC one finds everything after it and serves the rows
-// a cursorless request would have returned. Neither is stable enough to be
-// recognised from outside as the same bug.
-//
-// It lives beside the kinds it names so a list added later reads the rule
-// instead of reassembling it from three booleans, which is how eleven of the
-// fourteen came to disagree (#534).
-func (c *cursor) foreignToTime() bool {
-	return c != nil && (c.versioned || c.seqKeyed || c.pathKeyed)
+// foreignToTime rejects positions from another list or a non-time key before
+// a handler can bind them into its keyset query (#534, #1004).
+func (c *cursor) foreignToTime(list cursorList) bool {
+	return c != nil && (c.list != list || c.versioned || c.seqKeyed || c.pathKeyed)
 }
 
 type pageParams struct {
@@ -162,13 +184,13 @@ func parsePageWith(q url.Values, def, max int) (pageParams, error) {
 	return p, nil
 }
 
-func encodeTimeCursor(dir string, t time.Time, id string) string {
-	raw := fmt.Sprintf("k1|%s|t|%d|%s", dir, t.UnixNano(), id)
+func encodeTimeCursor(list cursorList, dir string, t time.Time, id string) string {
+	raw := fmt.Sprintf("k2|%s|%s|t|%d|%s", list, dir, t.UnixNano(), id)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 func encodeVersionCursor(version int64) string {
-	raw := fmt.Sprintf("k1|%s|v|%d", dirNext, version)
+	raw := fmt.Sprintf("k2|%s|%s|v|%d", cursorAgentVersions, dirNext, version)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -176,16 +198,16 @@ func encodeVersionCursor(version int64) string {
 // rolled-up prefix. The key is base64url'd INSIDE the token because a path may
 // hold any byte but NUL — "|" among them — and the grammar splits on "|".
 func encodePathCursor(path string) string {
-	raw := fmt.Sprintf("k1|%s|m|%s", dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))
+	raw := fmt.Sprintf("k2|%s|%s|m|%s", cursorMemories, dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-func encodeSeqCursor(desc bool, seq int64) string {
+func encodeSeqCursor(list cursorList, threadID domain.ID, desc bool, ev domain.Event) string {
 	order := "a"
 	if desc {
 		order = "d"
 	}
-	raw := fmt.Sprintf("k1|%s|s|%s|%d", dirNext, order, seq)
+	raw := fmt.Sprintf("k2|%s|%s|s|%s|%d|%s|%s", list, dirNext, order, ev.Seq, threadID, ev.ID)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -195,52 +217,61 @@ func decodeCursor(s string) (*cursor, error) {
 		return nil, errPageCursor
 	}
 	parts := strings.Split(string(raw), "|")
-	if len(parts) < 4 || parts[0] != "k1" || (parts[1] != dirNext && parts[1] != dirPrev) {
+	if len(parts) < 5 || parts[0] != "k2" || (parts[2] != dirNext && parts[2] != dirPrev) {
 		return nil, errPageCursor
 	}
-	switch parts[2] {
+	list := cursorList(parts[1])
+	if !list.valid() {
+		return nil, errPageCursor
+	}
+	c := &cursor{list: list, dir: parts[2]}
+	key := parts[4:]
+	switch parts[3] {
 	case "t":
-		if len(parts) != 5 {
+		if len(key) != 2 {
 			return nil, errPageCursor
 		}
-		nanos, err := strconv.ParseInt(parts[3], 10, 64)
-		if err != nil || parts[4] == "" {
+		nanos, err := strconv.ParseInt(key[0], 10, 64)
+		if err != nil || key[1] == "" {
 			return nil, errPageCursor
 		}
-		return &cursor{dir: parts[1], t: time.Unix(0, nanos).UTC(), id: parts[4]}, nil
+		c.t, c.id = time.Unix(0, nanos).UTC(), key[1]
 	case "v":
-		if len(parts) != 4 {
+		if len(key) != 1 {
 			return nil, errPageCursor
 		}
-		version, err := strconv.ParseInt(parts[3], 10, 64)
+		version, err := strconv.ParseInt(key[0], 10, 64)
 		if err != nil || version < 1 {
 			return nil, errPageCursor
 		}
-		return &cursor{dir: parts[1], versioned: true, version: version}, nil
+		c.versioned, c.version = true, version
 	case "m":
-		if len(parts) != 4 {
+		if len(key) != 1 {
 			return nil, errPageCursor
 		}
-		path, err := base64.RawURLEncoding.DecodeString(parts[3])
+		path, err := base64.RawURLEncoding.DecodeString(key[0])
 		// storableText here rather than in parsePageWith, which guards the id
 		// field: a crafted cursor carrying an unstorable byte would otherwise
 		// bind into the keyset comparison as a 500 (#135).
 		if err != nil || len(path) == 0 || !storableText(string(path)) {
 			return nil, errPageCursor
 		}
-		return &cursor{dir: parts[1], pathKeyed: true, path: string(path)}, nil
+		c.pathKeyed, c.path = true, string(path)
 	case "s":
-		if len(parts) != 5 || (parts[3] != "a" && parts[3] != "d") {
+		if len(key) != 4 || (key[0] != "a" && key[0] != "d") {
 			return nil, errPageCursor
 		}
-		seq, err := strconv.ParseInt(parts[4], 10, 64)
-		if err != nil || seq < 1 {
+		seq, err := strconv.ParseInt(key[1], 10, 64)
+		if err != nil || seq < 1 || !domain.WellFormedID(key[2], domain.PrefixSessionThread) ||
+			!domain.WellFormedID(key[3], domain.PrefixEvent) {
 			return nil, errPageCursor
 		}
-		return &cursor{dir: parts[1], seqKeyed: true, seqDesc: parts[3] == "d", seq: seq}, nil
+		c.seqKeyed, c.seqDesc, c.seq = true, key[0] == "d", seq
+		c.threadID, c.eventID = domain.ID(key[2]), domain.ID(key[3])
 	default:
 		return nil, errPageCursor
 	}
+	return c, nil
 }
 
 // keysetClause returns the SQL comparison and ORDER BY direction for a
@@ -281,7 +312,7 @@ func keysetClause(sortDir string, cur *cursor, argOffset int) (clause, orderDir 
 //	reversed   — whether this was a prev-page fetch
 //
 // key returns the keyset position of a rendered row.
-func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time, string)) (next, prev *string) {
+func pageEdges(list cursorList, n int, more, hadCursor, reversed bool, key func(i int) (time.Time, string)) (next, prev *string) {
 	if n == 0 {
 		return nil, nil
 	}
@@ -290,20 +321,20 @@ func pageEdges(n int, more, hadCursor, reversed bool, key func(i int) (time.Time
 	if reversed {
 		// Walking backwards: something newer (the page we came from) always
 		// exists after this page; more-before is what the probe row answered.
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(list, dirNext, lastT, lastID)
 		next = &c
 		if more {
-			p := encodeTimeCursor(dirPrev, firstT, firstID)
+			p := encodeTimeCursor(list, dirPrev, firstT, firstID)
 			prev = &p
 		}
 		return next, prev
 	}
 	if more {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(list, dirNext, lastT, lastID)
 		next = &c
 	}
 	if hadCursor {
-		p := encodeTimeCursor(dirPrev, firstT, firstID)
+		p := encodeTimeCursor(list, dirPrev, firstT, firstID)
 		prev = &p
 	}
 	return next, prev

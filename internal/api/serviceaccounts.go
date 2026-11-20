@@ -105,7 +105,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 	if _, err := managementLimit(q, 100); err != nil {
 		return nil, err
 	}
-	if p.cur != nil && (p.cur.foreignToTime() || p.cur.dir != dirNext || !domain.WellFormedID(p.cur.id, domain.PrefixPrincipal)) {
+	if p.cur != nil && (p.cur.foreignToTime(cursorServiceAccounts) || p.cur.dir != dirNext || !domain.WellFormedID(p.cur.id, domain.PrefixPrincipal)) {
 		return nil, errInvalid("invalid page cursor")
 	}
 	includeArchived := false
@@ -146,7 +146,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 		page.Data = page.Data[:p.limit]
 		last := page.Data[len(page.Data)-1]
 		internalID, _, _ := principal.ParsePublicID(last.ID)
-		next := encodeTimeCursor(dirNext, last.CreatedAt, internalID)
+		next := encodeTimeCursor(cursorServiceAccounts, dirNext, last.CreatedAt, internalID)
 		page.NextPage = &next
 	}
 	return page, nil

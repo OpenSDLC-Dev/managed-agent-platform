@@ -196,8 +196,8 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	}
 	if page.cur != nil {
 		// Unidirectional list: only forward time cursors are valid here.
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
-			return nil, errInvalid("invalid page cursor")
+		if page.cur.foreignToTime(cursorMemoryVersions) || page.cur.dir != dirNext {
+			return nil, foreignCursorError(cursorMemoryVersions, page.cur, "invalid page cursor")
 		}
 		args = append(args, page.cur.t, page.cur.id)
 		query += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
@@ -243,7 +243,7 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(dirNext, lastT, lastID)
+		c := encodeTimeCursor(cursorMemoryVersions, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
