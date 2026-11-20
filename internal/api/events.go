@@ -700,6 +700,17 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	if interruptAll {
 		batch = keepLastSessionIdle(batch)
 	}
+	// Harvest the cloud session's deliverables when the interrupt leaves it
+	// newly idle. A redirect can pass through idle within the batch. Use the
+	// final fold, and let an interrupted outcome discard its own harvest.
+	// Schedule after the cancellations so CancelSession frees the live slot.
+	if interruptAll && !outcomeFlip && opts.SetStatus != nil && *opts.SetStatus == domain.SessionIdle &&
+		envKind == string(domain.EnvCloud) {
+		thens = append(thens, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := s.queue.EnqueueOutputsHarvest(ctx, tx, envID, domain.ID(id), false)
+			return err
+		})
+	}
 	if len(cancels)+len(thens) > 0 {
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			for _, fn := range append(cancels, thens...) {

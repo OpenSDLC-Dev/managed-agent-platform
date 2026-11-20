@@ -186,9 +186,13 @@ park, cut chain or gated ending, and `cutExhaustedRun`'s delegation-bound refusa
 two that end an outcome cycle, `settleVerdict` with budget left and `settleGraderError`,
 fold idle too and deliberately do not: that cycle's own harvest already published the
 tree, and only a tool-less grader call ran since. A verdict on the last cycle folds
-nothing itself; its acknowledgment turn's `end_turn` harvests like any other.) The two idle folds the *API* makes — a `user.interrupt`
-and the archive of a session's last running thread — are out of scope here and tracked by
-#586: a session folded idle by either harvests nothing under this plan. The brain settlements share
+nothing itself; its acknowledgment turn's `end_turn` harvests like any other.)
+A session-wide `user.interrupt` also queues an idle harvest when it leaves a
+cloud session newly idle and interrupts no active outcome (#586). The API
+cancels the old work before queuing the harvest in the same transaction.
+An interrupted grading cycle still discards a harvest that had yet to publish.
+A session archive can fold idle by ending the last rescheduling child when
+no thread is running. #586 tracks that archive case. The brain settlements share
 one gate (`brain.enqueueIdleHarvest`) keyed on each site's own net session-level fold, so
 a thread idling under a busy sibling schedules nothing. The work item's `metadata` carries
 which trigger scheduled it (`queue.Item.ChainGrading`) because the session row cannot say,
