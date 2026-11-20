@@ -428,6 +428,11 @@ func TestGateBodyReadTimeoutContainsStalledUpload(t *testing.T) {
 	if resp.StatusCode != http.StatusRequestTimeout {
 		t.Fatalf("stalled body status = %d, want 408", resp.StatusCode)
 	}
+	// Wait for the server to finish rejecting and close the connection so its
+	// deferred request slot release has completed before the recovery probe.
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Fatalf("expected server-side EOF after 408 timeout, got %v", err)
+	}
 
 	// Once the stalled upload times out, its request slot and body buffer are
 	// released so an ordinary request succeeds.

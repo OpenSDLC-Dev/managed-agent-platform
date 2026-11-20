@@ -107,8 +107,29 @@ func NewEngine(creds []Credential) *Engine {
 // egress_request span, which carries the method and server address and no
 // verdict. Said here rather than in that plan alone, because the absence is
 // the answer to a question this function invites.
+// UsedCredential identifies one credential that was actually substituted into
+// an outbound request so the gate can cancel that in-flight request if a live
+// policy update withdraws, rotates, or narrows the credential (plan 70 slice 3).
+type UsedCredential struct {
+	Placeholder string
+	Secret      string
+	Location    Location
+}
+
+// StillPermitted reports whether the engine still permits substituting u's
+// exact secret for host at u.Location.
+func (e *Engine) StillPermitted(host string, u UsedCredential) bool {
+	for i := range e.creds {
+		c := &e.creds[i]
+		if c.Placeholder == u.Placeholder && c.Secret == u.Secret && c.enabled(u.Location) && (c.Unrestricted || c.Hosts.Match(host)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) Substitute(host string, loc Location, s string) (out string, unreachable []*Credential) {
-	out, unreachable, _ = e.substitute(host, loc, s, -1, 0, nil)
+	out, _, unreachable, _ = e.substitute(host, loc, s, -1, 0, nil)
 	return out, unreachable
 }
 
@@ -127,6 +148,13 @@ var (
 // the incremental growth and aborts with ErrOutputBudgetDenied if denied
 // (plan 70 slice 2). When err != nil, out is empty.
 func (e *Engine) SubstituteBounded(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, unreachable []*Credential, err error) {
+	out, _, unreachable, err = e.substitute(host, loc, s, maxBytes, prepaid, reserve)
+	return out, unreachable, err
+}
+
+// SubstituteDetailed behaves like SubstituteBounded and also returns every
+// credential that was actually substituted into out.
+func (e *Engine) SubstituteDetailed(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, used []UsedCredential, unreachable []*Credential, err error) {
 	return e.substitute(host, loc, s, maxBytes, prepaid, reserve)
 }
 
@@ -167,7 +195,7 @@ func (b *boundedBuilder) WriteString(s string) (int, error) {
 	return b.buf.WriteString(s)
 }
 
-func (e *Engine) substitute(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, unreachable []*Credential, err error) {
+func (e *Engine) substitute(host string, loc Location, s string, maxBytes, prepaid int64, reserve func(extra int64) bool) (out string, used []UsedCredential, unreachable []*Credential, err error) {
 	var pairs []string // placeholder, secret, … for the admitted credentials
 	for i := range e.creds {
 		c := &e.creds[i]
@@ -176,26 +204,27 @@ func (e *Engine) substitute(host string, loc Location, s string, maxBytes, prepa
 		}
 		if c.Unrestricted || c.Hosts.Match(host) {
 			pairs = append(pairs, c.Placeholder, c.Secret)
+			used = append(used, UsedCredential{Placeholder: c.Placeholder, Secret: c.Secret, Location: loc})
 			continue
 		}
 		unreachable = append(unreachable, c)
 	}
 	if len(pairs) == 0 {
 		if maxBytes >= 0 && int64(len(s)) > maxBytes {
-			return "", unreachable, ErrOutputTooLarge
+			return "", nil, unreachable, ErrOutputTooLarge
 		}
-		return s, unreachable, nil
+		return s, nil, unreachable, nil
 	}
 	// One left-to-right pass that never re-scans its own output, so a secret
 	// that happens to contain another credential's placeholder is not itself
 	// rewritten — the result is independent of credential order.
 	repl := strings.NewReplacer(pairs...)
 	if maxBytes < 0 && reserve == nil {
-		return repl.Replace(s), unreachable, nil
+		return repl.Replace(s), used, unreachable, nil
 	}
 	bw := boundedBuilder{max: maxBytes, reserved: prepaid, reserve: reserve}
 	if _, werr := repl.WriteString(&bw, s); werr != nil {
-		return "", unreachable, werr
+		return "", nil, unreachable, werr
 	}
-	return bw.buf.String(), unreachable, nil
+	return bw.buf.String(), used, unreachable, nil
 }

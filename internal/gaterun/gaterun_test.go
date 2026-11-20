@@ -93,11 +93,16 @@ func TestSwappableHandler(t *testing.T) {
 		t.Errorf("deny-all gate: status = %d, want 403", got)
 	}
 
-	// Swap in an unrestricted gate: the host is now admitted, so the gate dials
-	// the (unresolvable) origin and returns 502 — the 403->502 flip proves the
-	// swap is what the next request uses.
-	h.Swap(gate.New(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}}))
+	// Update installs an unrestricted policy in place: the host is now admitted,
+	// so the gate dials the (unresolvable) origin and returns 502.
+	h.Update(gate.Config{Networking: domain.Networking{Type: domain.NetUnrestricted}})
 	if got := proxyStatus(t, srv.URL, unreachableHost); got != http.StatusBadGateway {
-		t.Errorf("after swap to unrestricted: status = %d, want 502", got)
+		t.Errorf("after Update to unrestricted: status = %d, want 502", got)
+	}
+
+	// Swap still replaces the gate and retires the old one.
+	h.Swap(gate.New(gate.Config{}))
+	if got := proxyStatus(t, srv.URL, unreachableHost); got != http.StatusForbidden {
+		t.Errorf("after Swap to deny-all: status = %d, want 403", got)
 	}
 }

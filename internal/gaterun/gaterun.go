@@ -57,32 +57,48 @@ func Convert(cfg *gateconfig.Config) gate.Config {
 
 // SwappableHandler is the stable http.Handler the gate's single http.Server
 // serves for its whole life: every request is forwarded to the current
-// *gate.Gate, which the fetch loop replaces atomically as the session's config
-// changes. The server never restarts across a swap, and a request already in
-// flight keeps the gate it started on. Before the first successful fetch the
-// handler serves whatever gate it was constructed with — the caller passes a
-// fail-closed gate (admits nothing, no credentials) so an unconfigured gate
-// denies rather than leaks.
+// *gate.Gate, whose live policy and credentials Update replaces in place as the
+// session's config changes (plan 70 slice 3). Updating in place preserves one
+// shared Limiter and lets Gate.Update immediately sever active CONNECT tunnels
+// and cancel active plain-HTTP requests whose destination or credentials were
+// withdrawn while leaving unaffected traffic uninterrupted. Before the first
+// successful fetch the handler serves whatever gate it was constructed with —
+// the caller passes a fail-closed gate (admits nothing, no credentials) so an
+// unconfigured gate denies rather than leaks.
 type SwappableHandler struct {
 	current atomic.Pointer[gate.Gate]
 	limiter *gate.Limiter
 }
 
-// NewSwappableHandler returns a handler that serves initial until Swap replaces
-// it. initial must be non-nil. The initial gate's Limiter is retained on the
-// handler so RunFetchLoop shares one concurrency and body-buffer budget across
-// every policy swap.
+// NewSwappableHandler returns a handler that serves initial until Update or
+// Swap changes it. initial must be non-nil. The initial gate's Limiter is
+// retained on the handler so policy refreshes never reset active resource
+// budgets.
 func NewSwappableHandler(initial *gate.Gate) *SwappableHandler {
 	h := &SwappableHandler{limiter: initial.Limiter()}
 	h.current.Store(initial)
 	return h
 }
 
-// Limiter returns the shared resource limiter carried across policy swaps.
+// Limiter returns the shared resource limiter carried across policy updates.
 func (h *SwappableHandler) Limiter() *gate.Limiter { return h.limiter }
 
-// Swap installs g as the gate every subsequent request uses.
-func (h *SwappableHandler) Swap(g *gate.Gate) { h.current.Store(g) }
+// Update applies cfg's live networking policy, MCP server endpoints, and
+// credentials to the current gate in place, withdrawing superseded active work
+// while keeping unaffected tunnels and requests alive (plan 70 slice 3).
+func (h *SwappableHandler) Update(cfg gate.Config) {
+	h.current.Load().Update(cfg)
+}
+
+// Swap installs g as the gate every subsequent request uses and retires the
+// superseded gate to deny-all so handlers on the old gate cannot begin new
+// outbound activity or keep stale tunnels open.
+func (h *SwappableHandler) Swap(g *gate.Gate) {
+	old := h.current.Swap(g)
+	if old != nil && old != g {
+		old.Update(gate.Config{})
+	}
+}
 
 // ServeHTTP forwards to the current gate under an egress span. The span is made
 // the active span for the forwarded request (so it wraps the whole proxied

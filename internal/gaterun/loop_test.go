@@ -1,9 +1,12 @@
 package gaterun_test
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -221,4 +224,63 @@ func TestRunFetchLoopSharesLimiterAcrossSwaps(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestRunFetchLoopRevocationClosesActiveTunnel(t *testing.T) {
+	// Echo TCP listener representing an upstream HTTPS endpoint.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+
+	h := gaterun.NewSwappableHandler(gate.New(gate.Config{
+		Networking: domain.Networking{Type: domain.NetLimited, AllowedHosts: []string{"127.0.0.1"}},
+	}))
+	gsrv := httptest.NewServer(h)
+	defer gsrv.Close()
+
+	// Establish a live CONNECT tunnel before the session token is revoked.
+	conn, err := net.DialTimeout("tcp", gsrv.Listener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", ln.Addr().String(), ln.Addr().String())
+	br := bufio.NewReader(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT setup = %v / %v, want 200", resp, err)
+	}
+	if _, err := io.WriteString(conn, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(br, buf); err != nil || string(buf) != "hi" {
+		t.Fatalf("tunnel echo = %q / %v, want hi", buf, err)
+	}
+
+	// Revoke via ErrUnauthorized in RunFetchLoop: the live tunnel must close immediately.
+	f := &fakeFetcher{fn: func(int) (*gateconfig.Config, error) { return nil, gateconfig.ErrUnauthorized }}
+	if err := gaterun.RunFetchLoop(context.Background(), f, h, time.Hour); !errors.Is(err, gateconfig.ErrUnauthorized) {
+		t.Fatalf("RunFetchLoop = %v, want ErrUnauthorized", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	one := make([]byte, 1)
+	if _, err := br.Read(one); err == nil {
+		t.Fatal("active CONNECT tunnel stayed open after ErrUnauthorized revocation")
+	}
 }
