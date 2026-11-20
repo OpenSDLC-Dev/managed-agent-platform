@@ -1,9 +1,19 @@
 #!/bin/sh
 # PreToolUse guard for the issue-triage subagent (.claude/agents/issue-triage.md).
 # The agent is judgment-only and read-only; its frontmatter cannot express a Bash
-# command allowlist (the tools field takes bare names only), so this hook enforces
-# one: allow read-only gh/git inspection commands, deny everything else (exit 2).
+# command allowlist (the tools field takes bare names only), so this hook restricts
+# Bash to the structured read-only wrapper (.claude/hooks/issue-triage-read.sh)
+# with zero shell metacharacters, quotes, escapes, globs, or expansions, and
+# validates the exact post-split tokens via `issue-triage-read.sh --check` (#1052).
 # Stdin is the PreToolUse JSON payload; tool_input.command is the Bash command.
+set -eu
+set -f
+LC_ALL=C
+export LC_ALL
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH='' cd -- "$script_dir/../.." && pwd -P)
+reader="$script_dir/issue-triage-read.sh"
 
 # The parse step must not depend on a working python3 on PATH: the Microsoft
 # Store's alias stub exits without reading stdin, which turned this line's
@@ -16,7 +26,21 @@
 # escape it would have to interpret or a truncated match at an escaped
 # quote — so the allowlist itself never judges a mis-parsed command.
 payload=$(cat)
-json='import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))'
+json='import json,sys
+data = json.load(sys.stdin)
+if not isinstance(data, dict):
+    sys.exit(1)
+ti = data.get("tool_input")
+if not isinstance(ti, dict):
+    sys.exit(1)
+cmd = ti.get("command", "")
+if not isinstance(cmd, str):
+    sys.exit(1)
+# Reject NUL and line breaks inside Python before command substitution can
+# truncate at NUL (ksh), drop NUL (bash/dash), or strip trailing newlines.
+if "\x00" in cmd or "\n" in cmd or "\r" in cmd:
+    sys.exit(3)
+sys.stdout.write(cmd + "x")'
 py=''
 for p in python3 python; do
   if printf '{}' | "$p" -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
@@ -25,17 +49,21 @@ for p in python3 python; do
   fi
 done
 if [ -n "$py" ]; then
-  cmd=$(printf '%s' "$payload" | "$py" -c "$json" 2>/dev/null) || {
+  rc=0
+  cmd_marked=$(printf '%s' "$payload" | "$py" -c "$json" 2>/dev/null) || rc=$?
+  if [ "$rc" = 3 ]; then
+    echo "issue-triage guard: command contains disallowed NUL or newline characters" >&2
+    exit 2
+  elif [ "$rc" != 0 ]; then
     echo "issue-triage guard: the PreToolUse payload is not valid JSON" >&2
     exit 2
-  }
+  fi
+  cmd=${cmd_marked%x}
 else
   # The extraction must be unambiguous as well as faithful: sed's greedy
   # match selects the LAST "command" key, and the harness executes
   # tool_input.command — so a payload carrying anything but exactly one
   # bare "command" needle is denied rather than judged by the wrong key.
-  # (Unreachable today — string values escape their quotes, and the Bash
-  # tool_input has a single command key — but payload shapes drift.)
   # The NF pattern guard matters: awk sets NF=0 on a blank record, so an
   # unguarded `c += NF - 1` would subtract one per blank line and let a
   # two-key payload with a blank line count as one.
@@ -52,39 +80,42 @@ else
   esac
 fi
 
-# Newline and carriage return are held in variables, not glob literals: under a
-# POSIX /bin/sh (dash) the bashism $'\n' is the four literal characters $ ' \ n,
-# so it would never match a real newline and an embedded second command would
-# ride an allowed prefix. A literal-newline variable matches portably.
-nl='
-'
-cr=$(printf '\r')
+# Reject empty commands and ANY character outside a narrow ASCII
+# metacharacter-free allowlist (LC_ALL=C pins character classes to ASCII).
 case "$cmd" in
-  ''|*';'*|*'|'*|*'&'*|*'>'*|*'<'*|*'`'*|*'$('*|*"$nl"*|*"$cr"*)
-    echo "issue-triage guard: empty command or shell metacharacters are not allowed" >&2
+  ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/:@~^+' '-]*)
+    echo "issue-triage guard: command is empty or contains disallowed characters or shell metacharacters" >&2
     exit 2;;
 esac
 
-# Write-capable or out-of-sandbox flags riding an allowed prefix: git's
-# --output(-*) writes a file; gh's --web/-w opens a browser (-w is only denied
-# for gh — for git log it is the whitespace flag and harmless).
+# Deny leading whitespace and tilde-expansion at the start of any token
+# (mid-token ~ such as HEAD~1 never expands in POSIX sh/bash).
 case "$cmd" in
-  'git '*)
-    case " $cmd" in *' --output'*)
-      echo "issue-triage guard: git --output writes a file and is not allowed" >&2
-      exit 2;;
-    esac;;
-  'gh '*)
-    case " $cmd" in *' --web'*|*' -w '*|*' -w')
-      echo "issue-triage guard: gh --web/-w opens a browser and is not allowed" >&2
-      exit 2;;
-    esac;;
-esac
-
-case "$cmd" in
-  'gh issue view '*|'gh issue list'|'gh issue list '*|'gh pr view '*|'git log'|'git log '*|'git show '*)
-    exit 0;;
-  *)
-    echo "issue-triage guard: only 'gh issue view/list', 'gh pr view', 'git log', and 'git show' are allowed (read-only triage)" >&2
+  ' '*|~*|*' ~'*)
+    echo "issue-triage guard: leading whitespace or tilde expansion is not allowed" >&2
     exit 2;;
 esac
+
+# Split strictly on ASCII space (set -f disabled globbing above, and no quotes,
+# escapes, tabs, or newlines survived the character allowlist).
+IFS=' '
+# shellcheck disable=SC2086
+set -- $cmd
+
+# Require direct invocation of the structured read-only wrapper from the
+# repository root so the relative path executed by Bash is guaranteed to be
+# the exact validated reader beside this hook (not a shadowed copy in a
+# subdirectory).
+if [ $# -lt 2 ] || [ "$1" != ".claude/hooks/issue-triage-read.sh" ]; then
+  echo "issue-triage guard: only '.claude/hooks/issue-triage-read.sh <subcommand> ...' is allowed (read-only triage)" >&2
+  exit 2
+fi
+if [ "$(pwd -P)" != "$repo_root" ]; then
+  echo "issue-triage guard: read-only helper must be invoked from the repository root" >&2
+  exit 2
+fi
+shift
+
+# Validate the exact subcommand and argument allowlist using the wrapper itself
+# so hook and wrapper enforce the identical boundary.
+"$reader" --check "$@"
