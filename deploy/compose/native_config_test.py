@@ -38,6 +38,7 @@ class ComposeConfig(unittest.TestCase):
                 self.assertNotIn("build", service)
             self.assertFalse(console.get("environment"))
             self.assertEqual(set(edge["environment"]), {"CONSOLE_PUBLIC_ORIGIN", "IDENTITY_MODE", "MODELGATEWAY_UPSTREAM", "APP_EDGE_CLIENT_IP_TOKEN"})
+            self.assertTrue(edge["environment"]["APP_EDGE_CLIENT_IP_TOKEN"])
             self.assertEqual(edge["environment"]["APP_EDGE_CLIENT_IP_TOKEN"], cp["environment"]["APP_EDGE_CLIENT_IP_TOKEN"])
             self.assertNotIn("APP_EDGE_CLIENT_IP_TOKEN", gw["environment"])
             self.assertFalse(any(key.startswith("IDENTITY_") and key != "IDENTITY_MODE" for key in gw["environment"]))

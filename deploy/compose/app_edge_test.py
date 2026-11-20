@@ -2,6 +2,7 @@
 """Exercise the deployed Caddy routing with owned, distinguishable upstreams."""
 import http.client
 import http.server
+import ipaddress
 import json
 import os
 import signal
@@ -126,13 +127,16 @@ class EdgeRouting(unittest.TestCase):
                         self.assertIn(b"0123456789abcdef0123456789abcdef", body)
                 self.assertEqual(request("/admin/v1/providers")[:2], (200, "gateway") if gateway else (503, None))
                 # Verify Caddy overwrites caller-supplied forwarding and edge
-                # identity headers with its observed transport peer and token.
+                # identity headers (including repeated and mixed-case headers)
+                # with its observed transport peer IP and configured token.
                 spoof = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
                 spoof.putrequest("GET", "/api/auth/config")
                 spoof.putheader("X-Platform-Client-IP", "198.51.100.99")
-                spoof.putheader("X-Platform-Client-IP", "198.51.100.98")
-                spoof.putheader("X-Platform-Edge-Token", "forged-token")
+                spoof.putheader("x-platform-client-ip", "198.51.100.98")
+                spoof.putheader("X-Platform-Edge-Token", "forged-token-1")
+                spoof.putheader("x-platform-edge-token", "forged-token-2")
                 spoof.putheader("X-Forwarded-For", "198.51.100.77")
+                spoof.putheader("Forwarded", "for=198.51.100.66")
                 spoof.putheader("X-Real-IP", "198.51.100.88")
                 spoof.endheaders()
                 spoof_resp = spoof.getresponse()
@@ -140,8 +144,14 @@ class EdgeRouting(unittest.TestCase):
                 spoof.close()
                 self.assertEqual(spoof_resp.status, 200)
                 self.assertEqual(len(spoof_body["client_ips"]), 1, spoof_body)
-                self.assertNotIn(spoof_body["client_ips"][0], {"198.51.100.99", "198.51.100.98", "198.51.100.77", "198.51.100.88"})
+                observed_ip = str(ipaddress.ip_address(spoof_body["client_ips"][0]))
+                self.assertNotIn(observed_ip, {"198.51.100.99", "198.51.100.98", "198.51.100.77", "198.51.100.66", "198.51.100.88"})
                 self.assertEqual(spoof_body["edge_tokens"], ["edge-test-token"] if gateway else [""], spoof_body)
+                # Console and gateway upstreams must never receive the controlplane edge token.
+                for isolated_path in ["/api/health"] + (["/admin/v1/providers"] if gateway else []):
+                    _, _, isolated_raw = request(isolated_path)
+                    isolated = json.loads(isolated_raw)
+                    self.assertEqual(isolated["edge_tokens"], [], (isolated_path, isolated))
                 for path in ["/internal/v1/gate/config", "/%69nternal/v1/gate/config", "//internal/v1/gate/config", "/x/../internal/v1/gate/config", "/%2e%2e/internal/v1/gate/config", "/internal%2fv1/gate/config", "/%2569nternal/v1/gate/config", "/internal\\v1/gate/config"]:
                     before = len(seen)
                     with self.subTest(path=path):

@@ -69,7 +69,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		token := getenv("APP_EDGE_CLIENT_IP_TOKEN")
 		if token != "" {
 			if !validEdgeToken(token) {
-				return Config{}, errors.New("login: APP_EDGE_CLIENT_IP_TOKEN must contain only visible ASCII characters without spaces")
+				return Config{}, errors.New("login: APP_EDGE_CLIENT_IP_TOKEN must use only ASCII letters, digits, or . _ ~ + -")
 			}
 			cfg.EdgeClientIPToken = token
 		}
@@ -77,13 +77,22 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
+// validEdgeToken restricts APP_EDGE_CLIENT_IP_TOKEN to a URL/base64url/hex-safe
+// ASCII subset so Caddyfile never interprets placeholders ({...}), quotes, or
+// comments differently from the control plane.
 func validEdgeToken(v string) bool {
+	if len(v) == 0 {
+		return false
+	}
 	for i := 0; i < len(v); i++ {
-		if v[i] < 0x21 || v[i] > 0x7e {
+		c := v[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '~' || c == '+' || c == '-'
+		if !ok {
 			return false
 		}
 	}
-	return len(v) > 0
+	return true
 }
 
 // SessionConfigFromEnv reads only settings needed to accept browser sessions.

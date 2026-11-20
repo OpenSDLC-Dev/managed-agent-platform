@@ -166,6 +166,35 @@ func TestThrottleIsSharedAndAtomic(t *testing.T) {
 		if _, err := managers[0].Throttle(ctx, r, "alice"); err == nil {
 			t.Fatal("invalid peer fell back to forwarded header")
 		}
+		// Even with a valid edge token and valid X-Platform-Client-IP, an
+		// unparseable transport RemoteAddr must still fail closed.
+		edgeMgr := New(pool, Config{EdgeClientIPToken: "edge-throttle-secret"})
+		rEdge := throttleRequest("not-an-ip:1234")
+		rEdge.Header.Set(EdgeClientIPTokenHeader, "edge-throttle-secret")
+		rEdge.Header.Set(EdgeClientIPHeader, "203.0.113.10")
+		if _, err := edgeMgr.Throttle(ctx, rEdge, "alice"); err == nil {
+			t.Fatal("invalid peer bypassed fail-closed check via edge headers")
+		}
+	})
+
+	t.Run("unconfigured edge token ignores empty X-Platform-Edge-Token header", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `DELETE FROM login_throttle`); err != nil {
+			t.Fatal(err)
+		}
+		// Caddy sends X-Platform-Edge-Token: "" when APP_EDGE_CLIENT_IP_TOKEN
+		// is unset; an unconfigured Manager must NOT treat "" == "" as trusted.
+		for i := 0; i < 21; i++ {
+			r := throttleRequest("192.0.2.88:4444")
+			r.Header.Set(EdgeClientIPTokenHeader, "")
+			r.Header.Set(EdgeClientIPHeader, fmt.Sprintf("198.51.100.%d", i+1))
+			retry, err := managers[0].Throttle(ctx, r, fmt.Sprintf("empty-tok-%d", i))
+			if err != nil {
+				t.Fatalf("attempt %d: %v", i+1, err)
+			}
+			if (retry == 0) != (i < 20) {
+				t.Fatalf("empty edge token split peer quota on unconfigured manager at attempt %d: retry=%s", i+1, retry)
+			}
+		}
 	})
 
 	t.Run("trusted edge separates unrelated clients and ignores caller forwarding headers", func(t *testing.T) {

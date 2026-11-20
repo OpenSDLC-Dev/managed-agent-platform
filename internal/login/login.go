@@ -10,6 +10,9 @@ package login
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +58,18 @@ func New(pool *pgxpool.Pool, cfg Config) *Manager {
 
 // Mode reports only the nonsecret deployment mode, not provider configuration.
 func (m *Manager) Mode() Mode { return m.mode }
+
+// String, GoString, LogValue, and Format redact edgeClientIPToken on diagnostic
+// output, matching Config's redaction discipline.
+func (m *Manager) String() string {
+	if m == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("login.Manager{mode:%q, origin:%q, secure:%t}", m.mode, m.origin, m.secure)
+}
+func (m *Manager) GoString() string           { return m.String() }
+func (m *Manager) LogValue() slog.Value       { return slog.StringValue(m.String()) }
+func (m *Manager) Format(s fmt.State, _ rune) { _, _ = io.WriteString(s, m.String()) }
 
 // NativeEnabled reports whether the manager has a public origin and a supported login mode.
 func (m *Manager) NativeEnabled() bool {
