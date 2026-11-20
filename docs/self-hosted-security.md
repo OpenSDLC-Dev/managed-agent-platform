@@ -1214,9 +1214,9 @@ of the verifier's warming key fetch, never as a permissions message.
 
 Roles are `user`, `developer` and `admin`. There is no read-only role: someone
 who only needs to read must get `developer`, which can also write. A first
-sign-in with no matching mapping gets `user`. No playground is built yet, so
-that role reaches authentication/session routes and setup redemption, not
-resources. The mapping rules are below. Native browser login is available
+sign-in with no matching mapping gets `user`. The role reaches session routes
+and setup redemption. An admin can also enable Playground access for the member.
+The mapping rules are below. Native browser login is available
 when `CONSOLE_PUBLIC_ORIGIN` is set. Member and service-account management
 requires a human admin cookie. Public owned-key admission enforces the owner's
 current stored role. Human developers issue and manage their own owned keys;
@@ -1400,13 +1400,14 @@ The proxy retains each resource's role floor, audit actor and trace context.
 Private resource responses and native gateway administration use `Cache-Control: no-store, private`.
 The proxy enforces this after downstream headers, including binary downloads and SSE.
 This forbids shared-cache storage; the shipped Caddy edge does not itself cache responses.
-It cannot forward to worker, gate, internal or inference routes.
+The CP resource proxy serves no worker, gate, internal or inference route.
+The edge routes the two exact Playground paths to the gateway.
 Streams recheck the session every 5 seconds, with a 5-second lookup timeout.
 Revocation, expiry, deactivation, loss of developer authority or a store error
 cancels the stream within 15 seconds, without creating resource events.
 Cancellation can truncate the HTTP response; the next request determines sign-out status.
 Request completion cancels pending lookups and stops the watcher.
-Public `/v1`, worker, gate and gateway inference routes never accept cookies.
+Public `/v1`, worker, gate and public gateway inference routes never accept cookies.
 
 Local login names are immutable lowercase subjects in
 `urn:managed-agent-platform:local`, never selected or linked by email.
@@ -1422,6 +1423,21 @@ unrelated clients through the same edge receive independent peer buckets while
 direct requests stay keyed on transport `RemoteAddr`. Without that token,
 requests through a proxy share its peer bucket. Origin checks never trust
 forwarded host or protocol headers.
+
+#### Playground
+
+In Members, an admin can enable or withdraw Playground access for a `user`.
+An IdP mapping to `user` leaves this setting unchanged. The setting defaults
+to off. Developers and admins can already use models and get Playground access.
+The gateway checks the stored authority on each request. Active prompts recheck
+the session every five seconds. Withdrawal or a browser Stop cancels upstream inference.
+
+Playground Models and Messages use the private `/api/organizations/default/proxy/v1/`
+prefix. They require the native session cookie. Messages also requires same-origin
+CSRF validation. Prompts use named chat aliases from the model list. The gateway records usage against the principal and applies its
+configured organization and model limits. Vendor credentials stay in the gateway.
+When the gateway is disabled, the application edge marks the session response and
+Console omits its Playground entry and approval controls.
 
 #### CLI OAuth
 

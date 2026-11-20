@@ -22,16 +22,17 @@ import (
 // Session is the private session DTO plus the internal audit actor. It contains
 // current authority, not the role or profile at the time the cookie was issued.
 type Session struct {
-	PrincipalID string        `json:"-"`
-	SignedIn    bool          `json:"signed_in"`
-	ID          string        `json:"id"`
-	Role        identity.Role `json:"role"`
-	RoleSource  string        `json:"role_source"`
-	Email       string        `json:"email"`
-	Name        string        `json:"name"`
-	LoginName   string        `json:"login_name,omitempty"`
-	ExpiresAt   time.Time     `json:"expires_at"`
-	CSRFToken   string        `json:"csrf_token"`
+	PrincipalID      string        `json:"-"`
+	SignedIn         bool          `json:"signed_in"`
+	ID               string        `json:"id"`
+	Role             identity.Role `json:"role"`
+	RoleSource       string        `json:"role_source"`
+	PlaygroundAccess bool          `json:"playground_access"`
+	Email            string        `json:"email"`
+	Name             string        `json:"name"`
+	LoginName        string        `json:"login_name,omitempty"`
+	ExpiresAt        time.Time     `json:"expires_at"`
+	CSRFToken        string        `json:"csrf_token"`
 }
 
 // IssuedSession carries the bearer only as far as SetCookie. Serializers and
@@ -94,7 +95,7 @@ func (m *Manager) issue(ctx context.Context, principalID string, passwordLogin b
 			WHERE p.id=$2 AND p.kind='user' AND p.status='active'
 			RETURNING principal_id,expires_at
 		)
-		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,
+		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,p.playground_access,
 		       CASE WHEN p.issuer=$3 THEN p.subject ELSE '' END,issued.expires_at
 		FROM issued JOIN principals p ON p.id=issued.principal_id`, hashCredential(token), principalID, LocalIssuer))
 	if err != nil {
@@ -140,7 +141,7 @@ func authenticate(ctx context.Context, db principal.Querier, r *http.Request, lo
 		return Session{}, err
 	}
 	session, err := scanSession(db.QueryRow(ctx, `
-		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,
+		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,p.playground_access,
 		       CASE WHEN p.issuer=$2 THEN p.subject ELSE '' END,s.expires_at
 		FROM browser_sessions s JOIN principals p ON p.id=s.principal_id
 		WHERE s.token_hash=$1 AND s.expires_at>clock_timestamp()`+lock, hashCredential(token), LocalIssuer))
@@ -165,7 +166,7 @@ func (m *Manager) Revoke(ctx context.Context, r *http.Request) error {
 func scanSession(row pgx.Row) (Session, error) {
 	var s Session
 	var kind, status string
-	err := row.Scan(&s.PrincipalID, &kind, &status, &s.Role, &s.RoleSource, &s.Email, &s.Name, &s.LoginName, &s.ExpiresAt)
+	err := row.Scan(&s.PrincipalID, &kind, &status, &s.Role, &s.RoleSource, &s.Email, &s.Name, &s.PlaygroundAccess, &s.LoginName, &s.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrUnauthenticated
 	}
@@ -183,6 +184,7 @@ func scanSession(row pgx.Row) (Session, error) {
 		return Session{}, ErrUnauthenticated
 	}
 	s.SignedIn = true
+	s.PlaygroundAccess = s.PlaygroundAccess || s.Role.AtLeast(identity.RoleDeveloper)
 	return s, nil
 }
 

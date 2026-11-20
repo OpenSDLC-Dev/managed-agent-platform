@@ -28,15 +28,16 @@ const (
 // Native user fields plus our private role provenance and tombstone status.
 // Internal principal IDs, issuer/subject and credentials never enter this DTO.
 type memberJSON struct {
-	ID         string    `json:"id"`
-	Type       string    `json:"type"`
-	AddedAt    time.Time `json:"added_at"`
-	Email      string    `json:"email"`
-	Name       string    `json:"name"`
-	Role       string    `json:"role"`
-	RoleSource string    `json:"role_source"`
-	Status     string    `json:"status"`
-	LoginName  string    `json:"login_name,omitempty"`
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	AddedAt          time.Time `json:"added_at"`
+	Email            string    `json:"email"`
+	Name             string    `json:"name"`
+	Role             string    `json:"role"`
+	RoleSource       string    `json:"role_source"`
+	PlaygroundAccess bool      `json:"playground_access"`
+	Status           string    `json:"status"`
+	LoginName        string    `json:"login_name,omitempty"`
 }
 
 type membersPageJSON struct {
@@ -153,12 +154,12 @@ func privatePrincipalID(value, wantKind string) (string, error) {
 	return id, nil
 }
 
-const memberColumns = `id,created_at,email,display_name,role,role_source,status,
+const memberColumns = `id,created_at,email,display_name,role,role_source,status,playground_access,
 	CASE WHEN issuer='urn:managed-agent-platform:local' THEN subject ELSE '' END`
 
 func scanMember(row pgx.Row) (memberJSON, error) {
 	var m memberJSON
-	err := row.Scan(&m.ID, &m.AddedAt, &m.Email, &m.Name, &m.Role, &m.RoleSource, &m.Status, &m.LoginName)
+	err := row.Scan(&m.ID, &m.AddedAt, &m.Email, &m.Name, &m.Role, &m.RoleSource, &m.Status, &m.PlaygroundAccess, &m.LoginName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, errNotFound("Not found")
 	}
@@ -352,16 +353,25 @@ func (s *server) updateMember(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	obj, err := managementBody(r, "role")
+	obj, err := managementBody(r, "role", "playground_access")
 	if err != nil {
 		return nil, err
 	}
-	role, err := requiredString(obj, "role")
-	if err != nil {
-		return nil, err
+	var role string
+	if _, present := obj["role"]; present || obj["playground_access"] == nil {
+		role, err = requiredString(obj, "role")
+		if err != nil {
+			return nil, err
+		}
+		if !managementRole(role, true) {
+			return nil, errInvalid("unsupported role")
+		}
 	}
-	if !managementRole(role, true) {
-		return nil, errInvalid("unsupported role")
+	var access *bool
+	if value, present := obj["playground_access"]; present {
+		if err := json.Unmarshal(value, &access); err != nil || access == nil {
+			return nil, errInvalid("playground_access must be a boolean")
+		}
 	}
 	tx, actor, err := s.beginPrincipalMutation(r)
 	if err != nil {
@@ -376,15 +386,17 @@ func (s *server) updateMember(r *http.Request) (any, error) {
 	if m.Status != "active" {
 		return nil, errInvalid("removed members cannot be updated")
 	}
-	if m.RoleSource == "idp" {
+	if role != "" && m.RoleSource == "idp" {
 		return nil, errConflict("this role comes from the identity provider's mapping")
 	}
-	if role != "admin" {
+	if role != "" && role != "admin" {
 		if err := protectLastHumanAdmin(r, tx, m); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := tx.Exec(r.Context(), `UPDATE principals SET role=$2,role_source='console',updated_at=clock_timestamp(),updated_by=$3 WHERE id=$1`, id, role, actor.PrincipalID); err != nil {
+	if _, err := tx.Exec(r.Context(), `UPDATE principals SET role=coalesce(nullif($2,''),role),
+		role_source=CASE WHEN $2='' THEN role_source ELSE 'console' END,
+		playground_access=coalesce($3,playground_access),updated_at=clock_timestamp(),updated_by=$4 WHERE id=$1`, id, role, access, actor.PrincipalID); err != nil {
 		return nil, err
 	}
 	m, err = readMember(r, tx, id)

@@ -1,4 +1,4 @@
-@admin path /admin/v1 /admin/v1/*
+@admin path /admin/v1 /admin/v1/* /api/organizations/default/proxy/v1/models /api/organizations/default/proxy/v1/messages
 reverse_proxy @admin {$MODELGATEWAY_UPSTREAM} {
 	flush_interval 0
 }

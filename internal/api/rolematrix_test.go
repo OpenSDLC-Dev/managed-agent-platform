@@ -113,8 +113,8 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 }
 
 // TestNoRouteAdmitsUserExceptRedemption holds the line the plan draws under the
-// user role: it signs in and does nothing else, because there is no read-only
-// role and the playground it is meant for does not exist yet. A route
+// user role: this control plane admits it only for browser login and setup.
+// The gateway owns the separate Playground admission check. A resource route
 // registered at RoleUser would hand every first sign-in whatever that route
 // serves. Setup redemption and the six named browser-auth routes are the only
 // exceptions. They expose no resource operations.

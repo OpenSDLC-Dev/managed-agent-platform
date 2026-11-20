@@ -18,6 +18,7 @@ type caller struct {
 	principalID string
 	sessionID   string // delegated calls use the claim's session, never a caller header
 	delegated   bool
+	playground  bool
 }
 
 // authenticate checks a delegated claim, CLI grant or owned key.

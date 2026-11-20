@@ -126,6 +126,17 @@ class EdgeRouting(unittest.TestCase):
                         self.assertEqual((status, owner), (200, expected))
                         self.assertIn(b"0123456789abcdef0123456789abcdef", body)
                 self.assertEqual(request("/admin/v1/providers")[:2], (200, "gateway") if gateway else (503, None))
+                for path in ["/api/organizations/default/proxy/v1/models", "/api/organizations/default/proxy/v1/messages?beta=true"]:
+                    self.assertEqual(request(path)[:2], (200, "gateway") if gateway else (503, None))
+                session_conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                try:
+                    session_conn.request("GET", "/api/auth/session")
+                    session = session_conn.getresponse()
+                    self.assertEqual(session.getheader("X-Upstream"), "controlplane")
+                    self.assertEqual(session.getheader("X-Platform-Playground-Disabled"), None if gateway else "1")
+                    session.read()
+                finally:
+                    session_conn.close()
                 # Verify Caddy overwrites caller-supplied forwarding and edge
                 # identity headers (including repeated and mixed-case headers)
                 # with its observed transport peer IP and configured token.

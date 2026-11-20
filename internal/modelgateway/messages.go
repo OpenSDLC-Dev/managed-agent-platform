@@ -273,7 +273,7 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	snap := h.cfg.Catalog.Snapshot()
 	a, ok := snap.Alias(model)
 	switch {
-	case !ok, a.Name == "*" && a.Kind != rt.kind: // the wildcard catches names for its own kind's routes alone
+	case !ok, a.Name == "*" && (a.Kind != rt.kind || c.playground):
 		writeError(w, r, notFound("model: %s", model))
 		return
 	case a.Kind != rt.kind:
@@ -381,20 +381,24 @@ func (h *handler) serve(w http.ResponseWriter, r *http.Request, c caller, path, 
 	// Only a request the key's limits admit counts, and is recorded: the
 	// refusals above are the gateway's own, made before any upstream was
 	// asked.
+	if c.playground && r.Context().Err() != nil {
+		return
+	}
 	if !h.admit(w, r, c, a.Name) {
 		return
 	}
 	out := &outcome{}
 	defer h.record(w, r, c, a.Name, model, surface, routes[surface].proto, start, out)
 	call := call{
-		proto:  proto,
-		top:    top,
-		alias:  model,
-		path:   path,
-		stream: path != "/v1/messages/count_tokens" && streams,
-		resp:   resp,
-		start:  start,
-		out:    out,
+		proto:             proto,
+		top:               top,
+		alias:             model,
+		path:              path,
+		stream:            path != "/v1/messages/count_tokens" && streams,
+		resp:              resp,
+		start:             start,
+		out:               out,
+		cancelWithRequest: c.playground,
 	}
 	// Thinking provenance and the caller's headers are the Messages API's:
 	// a Chat Completions caller's reasoning_content carries no signature to
@@ -481,18 +485,19 @@ var protocolNames = map[profile.Protocol]string{profile.Anthropic: "Anthropic", 
 
 // call is what every attempt of one request sends.
 type call struct {
-	proto  profile.Protocol
-	top    map[string]json.RawMessage
-	hist   *history // its messages' thinking, nil when there is none
-	alias  string   // the model name the caller sent, which the answer carries back
-	path   string
-	stream bool
-	usage  bool                  // a Chat Completions stream's caller asked for its usage chunk
-	header http.Header           // the caller's headers that go upstream
-	resp   *convert.ResponseMeta // the Response a Responses request is answered with, nil for any other
-	start  time.Time             // when the request arrived
-	out    *outcome              // what the ledger is told of it
-	within time.Duration         // a deployment test's bound on its whole attempt (probes.go); zero on a caller's call, which a stall alone bounds (provider.StallGuard)
+	proto             profile.Protocol
+	top               map[string]json.RawMessage
+	hist              *history // its messages' thinking, nil when there is none
+	alias             string   // the model name the caller sent, which the answer carries back
+	path              string
+	stream            bool
+	usage             bool                  // a Chat Completions stream's caller asked for its usage chunk
+	header            http.Header           // the caller's headers that go upstream
+	resp              *convert.ResponseMeta // the Response a Responses request is answered with, nil for any other
+	start             time.Time             // when the request arrived
+	out               *outcome              // what the ledger is told of it
+	within            time.Duration         // a deployment test's bound on its whole attempt (probes.go); zero on a caller's call, which a stall alone bounds (provider.StallGuard)
+	cancelWithRequest bool                  // the Playground's Stop and authority watcher stop upstream work
 }
 
 // fail answers the caller with f: an upstream's error body, which is in
@@ -672,13 +677,14 @@ func streamError(ctx context.Context, at catalog.Attempt, data []byte, header ht
 // or a stream's first event that is not an error — so every failure it
 // returns leaves the caller's response untouched.
 //
-// The call runs under a context the caller's cancellation does not reach,
-// bounded by the provider's stall guard instead: a caller that disconnects
-// does not end an upstream answer it has started paying for, which is read to
-// its end.
+// Public callers' responses are read for usage even after a disconnect. A
+// Playground request stops its upstream when the browser leaves or loses authority.
 func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at catalog.Attempt, strip bool) (*failure, bool) {
 	c.out.at, c.out.upstream = &at, 0
-	ctx := context.WithoutCancel(r.Context())
+	ctx := r.Context()
+	if !c.cancelWithRequest {
+		ctx = context.WithoutCancel(ctx)
+	}
 	if c.within > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.within)
@@ -727,6 +733,9 @@ func (h *handler) attempt(w http.ResponseWriter, r *http.Request, c call, at cat
 	vendorHeaders(ctx, req.Header, at.Provider, prof, up, key)
 	req.Header.Set("Content-Type", "application/json")
 
+	if c.cancelWithRequest && ctx.Err() != nil {
+		return noAnswer(guard, red, ctx.Err())
+	}
 	resp, err := h.clientFor(prof).Do(req)
 	if err != nil {
 		return noAnswer(guard, red, err)
@@ -1077,7 +1086,9 @@ func answerJSON(b []byte, alias string, wrap *wrapping) ([]byte, json.RawMessage
 func relayStream(w http.ResponseWriter, events *upstream.Reader, held []byte, first upstream.Event, c call, p streamProto, guard *provider.StallGuard, red provider.Redactor) {
 	c.out.status = http.StatusOK
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	w.WriteHeader(http.StatusOK)
 	cw := newCallerWriter(w, guard, true)
 	send := cw.write

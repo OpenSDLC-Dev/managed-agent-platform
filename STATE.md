@@ -4,8 +4,10 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**None.**
+[Plan 73](./docs/plan/73_console-playground.md) implements Console Playground (#995).
 
 ## Tasks
 
-None in flight.
+- [x] Authorize and route private browser inference.
+- [x] Expose access approval and integrate the Console Playground.
+- [ ] Verify the paired stack, review and merge.
