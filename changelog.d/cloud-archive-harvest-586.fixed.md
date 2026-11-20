@@ -1,0 +1,1 @@
+- **Deliverables after archiving a cloud session** — When archiving ends the last rescheduling child and the session folds to idle outside an active outcome, the executor collects deliverables from the existing sandbox for the Files API before the sandbox is reaped (#586).

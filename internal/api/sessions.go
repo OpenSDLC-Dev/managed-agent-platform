@@ -1639,7 +1639,7 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	}); err != nil {
 		return nil, err
 	}
-	row, moves, err := s.archiveSessionInTx(ctx, tx, id)
+	row, moves, err := s.archiveSessionInTx(ctx, tx, id, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1664,12 +1664,8 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 // requireNotDreamOwned would refuse the runner itself and the not-running
 // check is the arm's own decision rather than a rejected request. Both count
 // the session status moves it returns — ending a child can move the status —
-// after their commit (#731).
-func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (sessionRow, []domain.SessionStatus, error) {
-	moves, err := terminateLiveChildren(ctx, tx, s.log, id)
-	if err != nil {
-		return sessionRow{}, nil, err
-	}
+// after their commit (#731). Only the public archive collects outputs.
+func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string, collectOutputs bool) (sessionRow, []domain.SessionStatus, error) {
 	// Read ahead of the COALESCE rather than after it, because afterwards the
 	// two cases are indistinguishable: the stamp is set either way, and an
 	// archive that changed nothing must not claim a session just ended. One
@@ -1678,11 +1674,21 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	// same lock and re-reads the status under it before calling in (#716).
 	// Both callers hold this row, and a third would have to as well.
 	var alreadyArchived bool
+	var priorStatus string
 	if err := tx.QueryRow(ctx,
-		`SELECT archived_at IS NOT NULL FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived); err != nil {
+		`SELECT archived_at IS NOT NULL, status FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived, &priorStatus); err != nil {
 		return sessionRow{}, nil, err
 	}
+	moves, err := terminateLiveChildren(ctx, tx, s.log, id)
+	if err != nil {
+		return sessionRow{}, nil, err
+	}
+	// Capture the child's fold before appending any moves from settling the
+	// primary. An archive that was already idle has no new snapshot to take.
+	childFoldedIdle := priorStatus == string(domain.SessionRescheduling) &&
+		len(moves) > 0 && moves[len(moves)-1] == domain.SessionIdle
 
+	var flip bool
 	if !alreadyArchived {
 		flow, err := events.ThreadToolFlow(ctx, tx, domain.ID(id), "", platformExecuted)
 		if err != nil {
@@ -1696,7 +1702,6 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 		// archive has just ended, or nothing at all (retries_exhausted).
 		var batch []events.NewEvent
 		var opts events.AppendOptions
-		var flip bool
 		if flow.Unsettled {
 			out, err := s.interruptThreadInTx(ctx, tx, interruptThreadIn{sessionID: domain.ID(id), status: string(domain.SessionIdle), all: true, primaryInterrupted: true})
 			if err != nil {
@@ -1741,11 +1746,35 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string) (
 	// reports an ending would have every executor sweep for a request that
 	// changed no row.
 	if !alreadyArchived {
+		if collectOutputs && childFoldedIdle && row.status == string(domain.SessionIdle) && !flip {
+			if err := s.queueArchiveHarvest(ctx, tx, id); err != nil {
+				return sessionRow{}, nil, err
+			}
+		}
 		if err := events.NotifyReapKick(ctx, tx); err != nil {
 			return sessionRow{}, nil, err
 		}
 	}
 	return row, moves, nil
+}
+
+// queueArchiveHarvest replaces any stale work while the session row is still
+// locked. A queued harvest would occupy the dedup slot, and a claimed one
+// must lose its lease before the final harvest can publish the snapshot.
+func (s *server) queueArchiveHarvest(ctx context.Context, tx pgx.Tx, id string) error {
+	var envID domain.ID
+	var kind domain.EnvironmentKind
+	if err := tx.QueryRow(ctx, `SELECT e.id, e.kind FROM sessions s
+		JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`, id).Scan(&envID, &kind); err != nil {
+		return err
+	}
+	if kind != domain.EnvCloud {
+		return nil
+	}
+	if err := s.queue.CancelSession(ctx, tx, domain.ID(id)); err != nil {
+		return err
+	}
+	return s.queue.EnqueueArchiveHarvest(ctx, tx, envID, domain.ID(id))
 }
 
 // sessionDeleteBroadcastBudget bounds the terminal broadcasts, which run

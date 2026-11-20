@@ -191,12 +191,17 @@ A session-wide `user.interrupt` also queues an idle harvest when it leaves a
 cloud session newly idle and interrupts no active outcome (#586). The API
 cancels the old work before queuing the harvest in the same transaction.
 An interrupted grading cycle still discards a harvest that had yet to publish.
-A session archive can fold idle by ending the last rescheduling child when
-no thread is running. #586 tracks that archive case. The brain settlements share
+A public cloud session archive that folds idle by ending the last rescheduling
+child also queues a final harvest when it ends no active outcome (#586). The
+archive replaces any old work with a marked harvest in the same transaction
+that freezes the session. The executor attaches to the live sandbox, if any,
+and settles the snapshot without grading. The archived reaper tier waits for
+the marked item while it is live, and settlement wakes the reaper again.
+The brain settlements share
 one gate (`brain.enqueueIdleHarvest`) keyed on each site's own net session-level fold, so
-a thread idling under a busy sibling schedules nothing. The work item's `metadata` carries
-which trigger scheduled it (`queue.Item.ChainGrading`) because the session row cannot say,
-and the executor branches on it: a grading harvest provisions a sandbox — the grader needs
+a thread idling under a busy sibling schedules nothing. For open sessions, the work item's
+`metadata` distinguishes a grading harvest from an idle one (`queue.Item.ChainGrading`)
+because the session row cannot say. A grading harvest provisions a sandbox — the grader needs
 a current snapshot — while an idle one only attaches to a live one and no-ops when none is
 up, so a tool-less session that never ran a container is left untouched (never provisioned
 just to walk an empty tree). That settlement reads the live outcome state first: a cycle

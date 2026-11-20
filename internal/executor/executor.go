@@ -1059,11 +1059,15 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	// the exception because a session's idle is now a reason to schedule one
 	// (docs/plan/38, #263): that item is claimed precisely because the session
 	// just stopped working, so requiring running would drain every one of them
-	// unread. The carve-out is exactly idle — a terminated, archived or deleted
-	// session still drains — and no other kind gains a state.
-	live := status == string(domain.SessionRunning) ||
-		(item.Kind == queue.OutputsHarvest && status == string(domain.SessionIdle))
-	if !live || archivedAt != nil {
+	// unread. An archive-triggered harvest is admitted after the archive
+	// freezes the idle session. All other work on an archived session drains.
+	harvest := item.Kind == queue.OutputsHarvest
+	idle := status == string(domain.SessionIdle)
+	live := archivedAt == nil && (status == string(domain.SessionRunning) || (harvest && idle))
+	if item.ArchiveHarvest {
+		live = harvest && archivedAt != nil && idle
+	}
+	if !live {
 		if err := e.queue.Complete(ctx, tx, item); err != nil {
 			return sessionRun{}, false, err
 		}
@@ -1072,8 +1076,9 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 
 	// Serialize harvesting against actual tool execution under the session row
 	// lock. Queue claims can race, but neither driver begins sandbox work before
-	// this check. Queued tools win over an obsolete idle snapshot.
-	if item.Kind == queue.OutputsHarvest && !item.ChainGrading {
+	// this check. Queued tools win over an obsolete idle snapshot. The archive
+	// closes the event log and cancels the old work when scheduling its harvest.
+	if harvest && !item.ChainGrading && !item.ArchiveHarvest {
 		class, err := events.RunnableExecClass(ctx, tx, item.SessionID, nil, nil, toolset.IsWebTool, toolset.IsDelegationTool)
 		if err != nil {
 			return sessionRun{}, false, err
@@ -1088,7 +1093,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 			}
 			return sessionRun{}, false, tx.Commit(ctx)
 		}
-	} else if item.Kind != queue.OutputsHarvest {
+	} else if !harvest {
 		var harvesting bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_items WHERE session_id=$1 AND kind='outputs_harvest' AND state IN ('starting','active'))`, item.SessionID.String()).Scan(&harvesting); err != nil {
 			return sessionRun{}, false, err
@@ -1112,7 +1117,7 @@ func (e *Executor) sessionForRun(ctx context.Context, item *queue.Item) (session
 	// (#263 review), the same wedge the settleHarvest outcome-decode tolerance
 	// closes. A grading harvest still decodes: it provisions a fresh sandbox and
 	// needs the full run state.
-	if item.Kind == queue.OutputsHarvest && !item.ChainGrading {
+	if harvest && !item.ChainGrading {
 		return sessionRun{}, true, tx.Commit(ctx)
 	}
 

@@ -6,6 +6,7 @@ package executor
 // (in place of the grading turn, which this file chains once the snapshot is
 // in, so the grader never reads a stale one), or the session simply folding
 // idle with no outcome at all (nothing to chain — the snapshot is the point).
+// The API can also schedule the latter on a session interrupt or archive.
 // Either way this file walks /mnt/session/outputs/ in the session's sandbox and
 // publishes the tree into the files registry as a per-path snapshot, so the
 // caller sees the deliverables through GET /v1/files. The work is identical
@@ -353,7 +354,9 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		return err
 	}
 	var evals []domain.OutcomeEvaluation
-	if len(evalsJSON) > 0 {
+	// An archive has already settled outcomes and frozen the session. Its
+	// harvest cannot hand the one live slot over to a grading cycle.
+	if !item.ArchiveHarvest && len(evalsJSON) > 0 {
 		if err := json.Unmarshal(evalsJSON, &evals); err != nil {
 			// A grading harvest cannot settle without the outcome it grades, so
 			// a decode failure there is a genuine fault. An idle harvest never
@@ -458,6 +461,11 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 	}
 	if err := e.queue.Complete(ctx, tx, item); err != nil {
 		return err
+	}
+	if item.ArchiveHarvest {
+		if err := events.NotifyReapKick(ctx, tx); err != nil {
+			return err
+		}
 	}
 	// The replaced snapshot's bytes go unreferenced the moment these deletes
 	// commit, and the rows are the objects' only names, bar a copy another
