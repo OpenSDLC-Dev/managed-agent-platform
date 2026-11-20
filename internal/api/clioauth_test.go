@@ -164,6 +164,40 @@ func TestCLIOAuthConsentBoundaries(t *testing.T) {
 	if status := post(); status != http.StatusForbidden {
 		t.Fatalf("other origin: HTTP %d", status)
 	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET role='user' WHERE role='admin'`); err != nil {
+		t.Fatal(err)
+	}
+	q.Set("scope", "user:developer")
+	if status := post(); status != http.StatusForbidden {
+		t.Fatalf("other origin with insufficient role: HTTP %d", status)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		target, body := s.url+uri, ""
+		if method == http.MethodGet {
+			target += "?" + q.Encode()
+		} else {
+			body = q.Encode()
+		}
+		req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", s.cookie)
+		req.Header.Set("Origin", nativeOrigin)
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		want := q.Get("redirect_uri") + "?" + (url.Values{
+			"error": {"access_denied"}, "error_description": {"the current role cannot grant the requested scopes"}, "state": {q.Get("state")},
+		}).Encode()
+		if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != want {
+			t.Errorf("%s role refusal: HTTP %d, Location %q, want redirect to %s", method, res.StatusCode, res.Header.Get("Location"), want)
+		}
+	}
 }
 
 func TestCLIOAuthUsesCurrentRoleAndRevokesOnRemoval(t *testing.T) {
@@ -297,6 +331,7 @@ func cliGatewayCall(t *testing.T, base, method, path, body, token string) (int, 
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("anthropic-version", "2026-10-21")
+	req.Header.Set("anthropic-workspace-id", "wrkspc_00000000000000000000000001")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +348,11 @@ func cliGatewayFixture(t *testing.T, s *tserver) string {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("anthropic-workspace-id") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"unexpected upstream workspace header"}}`)
+			return
+		}
 		if r.URL.Path == "/v1/messages/count_tokens" {
 			_, _ = io.WriteString(w, `{"input_tokens":1}`)
 			return

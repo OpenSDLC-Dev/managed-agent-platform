@@ -28,6 +28,8 @@ const (
 	maxOAuthInput     = 8 << 10
 )
 
+var errCLIRole = errForbidden("the current role cannot grant the requested scopes")
+
 var cliConsentPage = template.Must(template.New("cli-consent").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorize CLI</title></head>
 <body><main><h1>Authorize CLI</h1>
@@ -101,8 +103,13 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	markVerified(r.Context())
+	if r.Method == http.MethodPost && (s.login.CheckOrigin(r) != nil ||
+		subtle.ConstantTimeCompare([]byte(params.Get("csrf_token")), []byte(session.CSRFToken)) != 1) {
+		writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
+		return
+	}
 	if !clioauth.CanConsent(session.Role, in.Scopes) {
-		writeError(w, r, errForbidden("the current role cannot grant the requested scopes"))
+		writeCLIRoleDenial(w, r, in, s.login.PublicOrigin())
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -122,11 +129,11 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 		renderCLIConsent(w, cliConsentView{Account: account, CSRF: session.CSRFToken, Scopes: in.Scopes, Fields: fields})
 		return
 	}
-	if s.login.CheckOrigin(r) != nil || subtle.ConstantTimeCompare([]byte(params.Get("csrf_token")), []byte(session.CSRFToken)) != 1 {
-		writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
+	code, err := s.issueCLIConsent(r, session, in)
+	if errors.Is(err, errCLIRole) {
+		writeCLIRoleDenial(w, r, in, s.login.PublicOrigin())
 		return
 	}
-	code, err := s.issueCLIConsent(r, session, in)
 	if err != nil {
 		writeCLIConsentError(w, r, err)
 		return
@@ -140,6 +147,15 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 
 func setCLIPagePolicy(w http.ResponseWriter, loopback string) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'"+loopback+"; frame-ancestors 'none'; base-uri 'none'")
+}
+
+func writeCLIRoleDenial(w http.ResponseWriter, r *http.Request, in clioauth.CodeRequest, origin string) {
+	if in.RedirectURI == manualCLIRedirect(origin) {
+		writeError(w, r, errCLIRole)
+		return
+	}
+	params := url.Values{"error": {"access_denied"}, "error_description": {errCLIRole.Error()}, "state": {in.State}}
+	http.Redirect(w, r, in.RedirectURI+"?"+params.Encode(), http.StatusSeeOther)
 }
 
 func writeCLIConsentError(w http.ResponseWriter, r *http.Request, err error) {
@@ -178,7 +194,7 @@ func (s *server) issueCLIConsent(r *http.Request, session login.Session, in clio
 		return "", err
 	}
 	if current.PrincipalID != id || !clioauth.CanConsent(current.Role, in.Scopes) {
-		return "", errForbidden("the current role cannot grant the requested scopes")
+		return "", errCLIRole
 	}
 	code, err := clioauth.IssueCode(ctx, tx, id, in)
 	if err != nil {

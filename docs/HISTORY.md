@@ -8612,3 +8612,6 @@ Each listed Agents and gateway Models before refresh and made another
 authenticated call after refresh. The previous access tokens returned 401.
 `TestCLIOAuthScopeMatrix` checked the four recorded scope sets across nine
 API probes, with a test upstream for Messages and Count Tokens.
+After review, the real loopback CLI also reported a role refusal and received
+the original state. Both inference probes sent a local workspace selector.
+The test upstream received neither selector.

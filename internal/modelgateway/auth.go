@@ -100,5 +100,7 @@ func (h *handler) authenticateCLI(r *http.Request, token, path string, openAI bo
 	if !a.Role.AtLeast(identity.RoleDeveloper) {
 		return caller{}, forbidden("calling models requires the developer role")
 	}
+	// The caller's workspace selects the local grant. The upstream has its own tenancy.
+	r.Header.Del("anthropic-workspace-id")
 	return caller{principalID: a.PrincipalID}, nil
 }
