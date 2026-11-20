@@ -1,0 +1,1 @@
+- **Deliverables after a cloud session interrupt** — A session-wide `user.interrupt` that leaves the cloud session newly idle outside an active outcome now collects deliverables for the session-scoped Files API. Interrupted grading cycles continue to discard unfinished harvests (#586).
