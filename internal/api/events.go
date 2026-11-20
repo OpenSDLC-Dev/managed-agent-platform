@@ -1608,6 +1608,14 @@ func (s *server) listSessionEvents(r *http.Request) (any, error) {
 // and the view this surface renders under.
 func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, filters bool, resolve func(context.Context) (eventsView, error)) (any, error) {
 	ctx := r.Context()
+	list := cursorSessionEvents
+	if !filters {
+		list = cursorThreadEvents
+	}
+	threadID := query.ThreadID
+	if threadID == "" {
+		threadID = domain.PrimaryThreadID(domain.ID(id))
+	}
 	q, err := queryValues(r)
 	if err != nil {
 		return nil, err
@@ -1633,12 +1641,9 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		return nil, errInvalid(`order must be "asc" or "desc"`)
 	}
 	if page.cur != nil {
-		// A thread list mints only ascending cursors; a descending one came
-		// from the session list and would walk the thread backwards past
-		// the order refusal above. The session list answers another list's
-		// cursor in the reference's words for one (2026-10-24
-		// tool-name-page-tokens idx 55); the thread lists were not recorded.
-		if !page.cur.seqKeyed || (!filters && page.cur.seqDesc) {
+		// Only the session endpoint accepts descending cursors. Its
+		// cross-list error was recorded, unlike the thread endpoint's.
+		if page.cur.list != list || !page.cur.seqKeyed || (!filters && page.cur.seqDesc) {
 			if filters {
 				return nil, errInvalid(pageTokenOtherEndpoint)
 			}
@@ -1648,6 +1653,10 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		// issued: it takes the words for a token that does not decode.
 		if page.cur.dir != dirNext {
 			return nil, errPageCursor
+		}
+		if page.cur.threadID != threadID {
+			return nil, errInvalid("sessionstore GetEvents for thread %s: invalid_argument: cursor event %s does not belong to this thread",
+				threadID, page.cur.eventID)
 		}
 		// The cursor binds the direction it was minted under, so a
 		// follow-up that omits ?order= keeps walking the same way — and
@@ -1706,7 +1715,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 	}
 	var next *string
 	if more {
-		c := encodeSeqCursor(query.Desc, evs[len(evs)-1].Seq)
+		c := encodeSeqCursor(list, threadID, query.Desc, evs[len(evs)-1])
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil

@@ -1530,8 +1530,8 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	if page.cur != nil {
 		// Another list's cursor, in the reference's words for one (2026-10-24
 		// tool-name-page-tokens idx 41).
-		if page.cur.foreignToTime() {
-			return nil, errInvalid(pageTokenOtherEndpoint)
+		if page.cur.foreignToTime(cursorSessions) {
+			return nil, foreignCursorError(cursorSessions, page.cur, pageTokenOtherEndpoint)
 		}
 		var clause string
 		clause, orderDir, reversed = keysetClause(sortDir, page.cur, len(args))
@@ -1583,7 +1583,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	if out.Data == nil {
 		out.Data = []any{}
 	}
-	out.NextPage, out.PrevPage = pageEdges(len(data), fetched > page.limit, page.cur != nil, reversed,
+	out.NextPage, out.PrevPage = pageEdges(cursorSessions, len(data), fetched > page.limit, page.cur != nil, reversed,
 		func(i int) (time.Time, string) { return keys[i].t, keys[i].id })
 	return out, nil
 }

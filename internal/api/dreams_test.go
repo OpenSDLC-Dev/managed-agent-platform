@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -593,13 +594,13 @@ func TestDreamListPaging(t *testing.T) {
 	}
 }
 
-// The other lists' own cursor encodings — base64url of the k1| grammar page.go's
-// decodeCursor reads — which the dreams list must refuse.
+// Positions in other list families, encoded in the grammar decodeCursor
+// reads. The end-to-end tests use actual API-issued tokens.
 var foreignCursors = map[string]string{
-	"version":   "azF8bnx2fDE",                                        // k1|n|v|1
-	"seq":       "azF8bnxzfGR8NQ",                                     // k1|n|s|d|5
-	"path":      "azF8bnxtfFlTOWk",                                    // k1|n|m|base64url("a/b")
-	"prev time": "azF8cHx0fDF8ZHJtXzAxMjM0NTY3ODlhYmNkZWZnaGprbW5wcQ", // k1|p|t|1|drm_0123456789abcdefghjkmnpq
+	"version":   base64.RawURLEncoding.EncodeToString([]byte("k2|agent_versions|n|v|1")),
+	"seq":       base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|n|s|d|5|sthr_abc|sevt_abc")),
+	"path":      base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|YS9i")), // path = a/b
+	"prev time": base64.RawURLEncoding.EncodeToString([]byte("k2|sessions|p|t|1|sesn_0123456789abcdefghjkmnpq")),
 }
 
 func TestDreamListFilters(t *testing.T) {

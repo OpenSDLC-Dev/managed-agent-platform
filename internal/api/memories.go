@@ -817,7 +817,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		  FROM memories
 		 WHERE memory_store_id = $1 AND left(path, length($2::text)) = $2::text`
 		if page.cur != nil {
-			if page.cur.foreignToTime() || page.cur.dir != dirNext {
+			if page.cur.foreignToTime(cursorMemories) || page.cur.dir != dirNext {
 				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.t, page.cur.id)
@@ -839,7 +839,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 		  ) matched
 		 WHERE true`
 		if page.cur != nil {
-			if !page.cur.pathKeyed || page.cur.dir != dirNext {
+			if page.cur.list != cursorMemories || !page.cur.pathKeyed || page.cur.dir != dirNext {
 				return nil, errInvalid(memoryCursorMismatch)
 			}
 			args = append(args, page.cur.path)
@@ -894,7 +894,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if fetched > page.limit || depth == 1 && fetched == page.limit && lastIsPrefix {
 		var c string
 		if depth == 0 {
-			c = encodeTimeCursor(dirNext, last.createdAt, last.id)
+			c = encodeTimeCursor(cursorMemories, dirNext, last.createdAt, last.id)
 		} else {
 			c = encodePathCursor(lastKey)
 		}

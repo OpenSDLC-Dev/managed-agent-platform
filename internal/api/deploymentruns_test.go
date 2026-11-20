@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"context"
-	"encoding/base64"
 	"net/http"
 	"net/url"
 	"slices"
@@ -752,9 +751,9 @@ func TestDeploymentRunsListFiltersAndPages(t *testing.T) {
 	// path cursor, an agent-versions version cursor, or plain garbage — is
 	// the published 400, never an empty 200 page (#534).
 	for _, cur := range []string{
-		base64.RawURLEncoding.EncodeToString([]byte("k1|n|s|a|5")),
-		base64.RawURLEncoding.EncodeToString([]byte("k1|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("p")))),
-		base64.RawURLEncoding.EncodeToString([]byte("k1|n|v|3")),
+		foreignCursors["seq"],
+		foreignCursors["path"],
+		foreignCursors["version"],
 		"not-a-cursor",
 	} {
 		status, res = s.do(http.MethodGet, "/v1/deployment_runs?page="+url.QueryEscape(cur), nil)

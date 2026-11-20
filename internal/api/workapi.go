@@ -323,7 +323,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	var afterID string
 	if page.cur != nil {
 		// Unidirectional list: only a forward time cursor is valid here.
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+		if page.cur.foreignToTime(cursorWork) || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 		after, afterT, afterID = true, page.cur.t, page.cur.id
@@ -342,7 +342,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	}
 	if len(items) > page.limit {
 		last := items[page.limit-1]
-		c := encodeTimeCursor(dirNext, last.CreatedAt, last.ID.String())
+		c := encodeTimeCursor(cursorWork, dirNext, last.CreatedAt, last.ID.String())
 		out.NextPage = &c
 	}
 	return out, nil

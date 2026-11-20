@@ -8594,3 +8594,12 @@ operator's `foundation/` and `environment/` apply and three CD changes — is #9
 first release must make the `modelgateway` image package public (docs/RELEASING.md).
 
 **Plan 70 progress summary (archived).** [Plan 70](./plan/70_security-hardening-vault-egress.md) (#1052) landed in three slices: Slice 1 — Vault `environment_variable` credential destination binding and sealed digest verification (#1054); Slice 2 — egress gate concurrency, aggregate body-buffering, stalled-body/upload bounds, and Docker/Kubernetes sidecar container resource limits (#1056); Slice 3 — live in-place egress policy updates with current-policy outbound admission and immediate teardown/cancellation of withdrawn active CONNECT tunnels and plain-HTTP requests. The remaining two items in #1052 (password login throttling and issue-triage read-only access) stay outside this plan in their own focused PRs.
+
+**Plan 71 acceptance (archived).** [Plan 71](./plan/71_list-cursor-binding.md)
+(#1004) passed `TestPageTokensBindToTheirList` over HTTP and PostgreSQL.
+The test exercises 18 original-list continuations, all 42 cross-list error
+messages, and both directions of six cross-parent pairs. A separately built
+control plane with a fresh Dockerized PostgreSQL passed five original-list
+continuations, the three original cross-list failures, both cross-session
+event refusals and an old-token refusal. The fixture contained no brain or
+model provider.

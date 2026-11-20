@@ -342,7 +342,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 			return nil, errInvalid("page and after_id/before_id are mutually exclusive")
 		}
 		// Unidirectional list: only forward time cursors are valid here (#534).
-		if page.cur.foreignToTime() || page.cur.dir != dirNext {
+		if page.cur.foreignToTime(cursorFiles) || page.cur.dir != dirNext {
 			return nil, errInvalid("invalid page cursor")
 		}
 	}
@@ -507,7 +507,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// combination — so the cursor is emitted here rather than withheld on
 		// the arms a legacy client seeds.
 		if hasMore || beforeID != "" {
-			c := encodeTimeCursor(dirNext, files[len(files)-1].CreatedAt, last)
+			c := encodeTimeCursor(cursorFiles, dirNext, files[len(files)-1].CreatedAt, last)
 			out.NextPage = &c
 		}
 	}

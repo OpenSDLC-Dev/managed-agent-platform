@@ -1,7 +1,6 @@
 package api_test
 
 import (
-	"encoding/base64"
 	"net/http"
 	"testing"
 
@@ -92,7 +91,7 @@ func TestSkillListsRejectSeqCursor(t *testing.T) {
 	s := newTestServer(t)
 	created := s.createSkill(t)
 	id, _ := created["id"].(string)
-	seqCursor := base64.RawURLEncoding.EncodeToString([]byte("k1|n|s|a|5"))
+	seqCursor := foreignCursors["seq"]
 
 	status, body := s.do("GET", "/v1/skills?page="+seqCursor, nil)
 	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")

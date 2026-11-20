@@ -120,10 +120,8 @@ func TestTimeKeyedListsRejectForeignCursors(t *testing.T) {
 // TestPageTokenRefusalWords pins the words the reference was recorded giving,
 // list by list, for a page token the list cannot use (2026-10-24
 // tool-name-page-tokens setup.json; #983). It words two cases apart: a token
-// that does not decode, and a token another list minted. This platform can
-// tell the second only when the other list's cursor is of another kind, so
-// those cases send the kinds a list never mints. A same-kind token from another
-// list still answers 200 here (#1004).
+// that does not decode, and a token another list minted. Real cross-list
+// tokens and their recorded messages are covered by TestPageTokensBindToTheirList.
 func TestPageTokenRefusalWords(t *testing.T) {
 	s := newTestServer(t)
 	agentID, envID := fixture(t, s)
@@ -164,14 +162,14 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	}
 	// A time cursor whose id no row could hold is refused while the page is
 	// parsed too, so it takes the same words (#135).
-	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|1|a\x00b")))
+	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k2|memory_stores|n|t|1|a\x00b")))
 	for _, list := range []string{"/v1/memory_stores", memories} {
 		status, res := s.do(http.MethodGet, list+"?page="+unstorable, nil)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tokenWords)
 	}
 	// No list mints a backwards sequence cursor, so the events lists take one
 	// as a token that does not decode.
-	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k1|p|s|a|1")))
+	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|p|s|a|1|sthr_abc|sevt_abc")))
 	for _, list := range []string{events, threadEvents} {
 		status, res := s.do(http.MethodGet, list+"?page="+backwardsSeq, nil)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
@@ -192,15 +190,21 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	status, res = s.do(http.MethodGet, threadEvents+"?page="+url.QueryEscape(agentsToken), nil)
 	wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)
 
-	// Idx 41, 42 and 54 sent a time token between two time-keyed lists, which
-	// is #1004. Each of those lists gives its recorded words to every kind it
-	// does not mint. A backwards time cursor is the sessions list's own, so
-	// only the unidirectional lists refuse it.
+	// Keep the foreign-kind checks too. Recorded source/target pairs override
+	// the existing fallback for a kind the target cannot use.
 	for _, c := range []struct {
 		name, list, want string
 		curs             map[string]string
 	}{
-		{"agents", "/v1/agents?", emptyCursor, foreignCursors},            // idx 54
+		{"agents", "/v1/agents?", emptyCursor, map[string]string{
+			"prev time": foreignCursors["prev time"],
+		}}, // idx 54
+		{"agents_events_and_versions", "/v1/agents?", otherEndpoint, map[string]string{
+			"seq": foreignCursors["seq"], "version": foreignCursors["version"],
+		}},
+		{"agents_memories", "/v1/agents?", "unsupported page token version 10", map[string]string{
+			"path": foreignCursors["path"],
+		}},
 		{"memory_stores", "/v1/memory_stores?", mismatch, foreignCursors}, // idx 42
 		{"sessions", "/v1/sessions?", otherEndpoint, foreignKindCursors},  // idx 41
 		{"sessions_asc", "/v1/sessions?order=asc&", otherEndpoint, foreignKindCursors},
