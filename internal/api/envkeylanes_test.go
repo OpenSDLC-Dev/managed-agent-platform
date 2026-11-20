@@ -110,6 +110,8 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	want := map[string]envKeyRoute{
 		// Anonymous platform configuration, not authority granted to the key.
 		"GET /api/auth/config": served,
+		// The OAuth token endpoint validates the grant body independently of a Bearer.
+		"POST /v1/oauth/token": {status: http.StatusBadRequest},
 		// Password setup is anonymous but requires browser origin. Login
 		// explicitly refuses an environment Bearer before its origin check.
 		"POST /api/console/organizations/default/setup_code/redeem": {status: http.StatusForbidden, errType: "permission_error"},
@@ -321,11 +323,11 @@ func envelopeMessage(body map[string]any) string {
 	return msg
 }
 
-// consoleRoutePaths spells out the path constants server.go registers the
-// console namespaces and the gate config under, so the enumeration above
-// requests them too. An unknown name fails the test rather than going
-// unrequested.
+// consoleRoutePaths maps the path constants used by server.go registrations.
+// An unknown name fails the test rather than leaving a route unrequested.
 var consoleRoutePaths = map[string]string{
+	"cliAuthorizePath":                 "/oauth/authorize",
+	"cliTokenPath":                     "/v1/oauth/token",
 	"consoleTokensPath":                "/api/oauth/organizations/default/environments/{id}/tokens",
 	"consoleRevokePath":                "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
 	"consoleWorkspacePath":             "/api/console/organizations/default/workspaces/default",
