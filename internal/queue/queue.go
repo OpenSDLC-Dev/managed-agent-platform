@@ -129,6 +129,10 @@ type Item struct {
 	// internal/executor/harvest.go's, and it reads the live outcome state
 	// first — see settleHarvest.
 	ChainGrading bool
+	// ArchiveHarvest marks the final snapshot scheduled by the archive
+	// transaction. It may attach to an archived session's sandbox and never
+	// chains grading.
+	ArchiveHarvest bool
 	// TraceContext is the W3C trace context captured at enqueue, so the
 	// claimant can parent its work on the turn that produced it — the same
 	// context a BYOC worker gets from its poll response (see Work). Nil when
@@ -260,12 +264,23 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 // the settlement must reconcile a stale flag against live outcome state rather
 // than trust it (internal/executor/harvest.go's settleHarvest).
 func (q *Queue) EnqueueOutputsHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading bool) (bool, error) {
+	return q.enqueueHarvest(ctx, db, envID, sessionID, chainGrading, false)
+}
+
+// EnqueueArchiveHarvest schedules the final, attach-only snapshot after the
+// archive has stopped the old work in the same transaction.
+func (q *Queue) EnqueueArchiveHarvest(ctx context.Context, db DB, envID, sessionID domain.ID) error {
+	_, err := q.enqueueHarvest(ctx, db, envID, sessionID, false, true)
+	return err
+}
+
+func (q *Queue) enqueueHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading, archiveHarvest bool) (bool, error) {
 	tag, err := db.Exec(ctx,
 		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool))
+		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool, 'archive_harvest', $7::bool))
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
-		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading)
+		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading, archiveHarvest)
 	if err != nil {
 		return false, fmt.Errorf("queue: enqueue %s for %s: %w", OutputsHarvest, sessionID, err)
 	}
@@ -345,9 +360,10 @@ func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) 
 		           w.lease_expires_at, p.state, w.trace_context,
 		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
 		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END,
-		           COALESCE((w.metadata->>'chain_grading')::bool, false), w.inference_generation`,
+		           COALESCE((w.metadata->>'chain_grading')::bool, false),
+		           COALESCE(w.metadata @> '{"archive_harvest":true}', false), w.inference_generation`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
-		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading, &generation)
+		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading, &it.ArchiveHarvest, &generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

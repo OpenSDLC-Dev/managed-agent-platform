@@ -693,7 +693,7 @@ func (s *server) dreamClosingArm(ctx context.Context, tx store.ObjectDeleteTx, d
 		if d.sessionArchived == nil {
 			// Every other status the set requireNotRunning admits — idle,
 			// terminated and rescheduling alike — is archivable.
-			_, moves, err := s.archiveSessionInTx(ctx, tx, *d.sessionID)
+			_, moves, err := s.archiveSessionInTx(ctx, tx, *d.sessionID, false)
 			if err != nil {
 				return dreamStepResult{}, err
 			}

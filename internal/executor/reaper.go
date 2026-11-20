@@ -260,8 +260,8 @@ func (e *Executor) idleTTL() time.Duration {
 // row: a missing row also describes a holding that was never this
 // deployment's (a second deployment sharing the Docker daemon or K8s
 // namespace labels sandboxes with ids this database never saw), and those are
-// skipped. Archived beats terminated (the stricter lifecycle answer). The
-// idle tier (plan 24 slice 5) takes what remains only when armed
+// skipped. Archived beats terminated and waits for a pending archive harvest.
+// The idle tier (plan 24 slice 5) takes what remains only when armed
 // (idleTTL() > 0) and every predicate holds in the same snapshot: status
 // idle, last activity older than the TTL, no queued/starting/active work
 // item (a pending harvest or tool_exec must find the tree it was enqueued
@@ -293,7 +293,7 @@ func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid do
 	}
 
 	var status, kind string
-	var archived, idlePastTTL, liveWork bool
+	var archived, idlePastTTL, liveWork, archiveHarvest bool
 	err := q.QueryRow(ctx,
 		`SELECT s.status, s.archived_at IS NOT NULL, e.kind,
 		        s.updated_at < now() - make_interval(secs => $2),
@@ -301,10 +301,14 @@ func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid do
 		                WHERE w.session_id = s.id
 		                  AND (w.state IN ('queued', 'starting', 'active')
 		                       OR (w.state = 'stopped'
-		                           AND w.stopped_at > now() - make_interval(secs => $3))))
+		                           AND w.stopped_at > now() - make_interval(secs => $3)))),
+		        s.archived_at IS NOT NULL AND EXISTS (
+		            SELECT 1 FROM work_items w WHERE w.session_id = s.id
+		              AND w.kind = 'outputs_harvest' AND w.state IN ('queued', 'starting', 'active')
+		              AND w.metadata @> '{"archive_harvest":true}')
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
 		 WHERE s.id = $1`, sid.String(), e.idleTTL().Seconds(), e.cfg.LeaseTTL.Seconds()).
-		Scan(&status, &archived, &kind, &idlePastTTL, &liveWork)
+		Scan(&status, &archived, &kind, &idlePastTTL, &liveWork, &archiveHarvest)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var deadKind string
 		err := q.QueryRow(ctx,
@@ -327,6 +331,9 @@ func (e *Executor) classifyForReap(ctx context.Context, q events.Querier, sid do
 		return tierNone, nil
 	}
 	if archived {
+		if archiveHarvest {
+			return tierNone, nil
+		}
 		return tierArchived, nil
 	}
 	if status == string(domain.SessionTerminated) {
