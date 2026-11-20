@@ -1,13 +1,12 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
 
 const (
@@ -43,7 +42,10 @@ func (s *server) serveConsoleProxy(next http.Handler) http.HandlerFunc {
 			writeError(w, r, errNotFound("Not found"))
 			return
 		}
-		ctx, cancel := context.WithCancel(r.Context())
+		ctx, stop := s.login.WatchAuthority(w, r, func(session login.Session) bool {
+			return session.Role.AtLeast(identity.RoleDeveloper)
+		})
+		defer stop()
 		forwarded := r.Clone(ctx)
 		forwarded.URL.Path, _ = url.PathUnescape(target)
 		forwarded.URL.RawPath = target
@@ -54,35 +56,6 @@ func (s *server) serveConsoleProxy(next http.Handler) http.HandlerFunc {
 			forwarded.Header.Del(s.verifier.AssertionHeader())
 		}
 
-		// A tick plus a bounded lookup takes at most 10s of the 15s withdrawal
-		// budget. Cancellation also aborts an in-flight lookup on request end.
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			tick := time.NewTicker(5 * time.Second)
-			defer tick.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-tick.C:
-					checkCtx, stop := context.WithTimeout(ctx, 5*time.Second)
-					session, err := s.login.Authenticate(checkCtx, forwarded)
-					stop()
-					if ctx.Err() != nil {
-						return // request completion, not authority withdrawal
-					}
-					if err != nil || !session.Role.AtLeast(identity.RoleDeveloper) {
-						cancel()
-						// Context cancellation alone cannot interrupt a slow client's
-						// blocked Write/Flush. Expire this response's write deadline too.
-						_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
-						return
-					}
-				}
-			}
-		}()
-		defer func() { cancel(); <-done }()
 		next.ServeHTTP(&consoleProxyWriter{ResponseWriter: w, prefix: "/" + strings.Join(parts[1:5], "/"), host: r.Host}, forwarded)
 	}
 }

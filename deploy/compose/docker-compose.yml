@@ -256,7 +256,7 @@ services:
   # Opt-in browser receiver. It never inherits x-app or database credentials.
   console:
     profiles: ["console"]
-    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:3395af7496c827f4607cc2a5b35246241a5d8f63a3026b7e966ba7da4179cfae
+    image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:bb4c9eb683e98cdc268e5539039d6f3a0d7c41ae6c94f1caddf93d7e251797ee
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s

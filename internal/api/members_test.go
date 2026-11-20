@@ -22,6 +22,31 @@ import (
 const membersPath = "/api/console/organizations/default/members"
 const serviceAccountsPath = "/api/console/organizations/default/service_accounts"
 
+func TestPlaygroundApprovalIsSeparateFromTheMemberRole(t *testing.T) {
+	s := newNativeServer(t, login.ModeOIDC)
+	adminCookie, admin := s.issue(seedMember(t, s, "admin", "admin", "console"))
+	userID := seedMember(t, s, "playground-user", "user", "idp")
+	userCookie, user := s.issue(userID)
+	path := membersPath + "/" + principal.PublicID(userID, "user")
+	adminHeaders := nativeHeaders(adminCookie, admin.CSRFToken)
+	userHeaders := nativeHeaders(userCookie, user.CSRFToken)
+	assertAccess := func(raw []byte, want bool) {
+		t.Helper()
+		var value map[string]any
+		if err := json.Unmarshal(raw, &value); err != nil || value["playground_access"] != want || value["role"] != "user" || value["role_source"] != "idp" {
+			t.Fatalf("member or session did not preserve the mapped user role and report playground access %v", want)
+		}
+	}
+	assertAccess(expectManagement(t, s, "GET", "/api/auth/session", "", userHeaders, 200), false)
+	expectManagement(t, s, "POST", path, `{"playground_access":true}`, userHeaders, 403)
+	expectManagement(t, s, "POST", path, `{"playground_access":null}`, adminHeaders, 400)
+	for _, access := range []bool{true, false} {
+		assertAccess(expectManagement(t, s, "POST", path, fmt.Sprintf(`{"playground_access":%t}`, access), adminHeaders, 200), access)
+		assertAccess(expectManagement(t, s, "GET", "/api/auth/session", "", userHeaders, 200), access)
+		expectManagement(t, s, "GET", "/api/organizations/default/proxy/v1/agents", "", userHeaders, 403)
+	}
+}
+
 func seedMember(t *testing.T, s *nativeServer, subject, role, source string) string {
 	t.Helper()
 	id := domain.NewID(domain.PrefixPrincipal).String()

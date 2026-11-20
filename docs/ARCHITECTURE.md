@@ -434,10 +434,13 @@ lists can reuse a position across parents, and their queries constrain results
 to the requested parent. The new format rejects tokens issued before plan 71.
 
 An application Caddy edge serves the published Console at the same origin
-as private CP routes and gateway administration. The edge sends login,
-management, OAuth authorization and resource-proxy paths to CP. Console pages, assets and shallow health
-remain Console-owned. Console holds no credentials. Raw `/v1` goes to CP; gateway
-inference stays on its separate listener. The edge rejects internal paths before
+as private CP and gateway routes. The edge sends login, management, OAuth
+authorization and private resource paths to CP. It sends the two Playground
+paths and gateway administration to the gateway. The gateway checks current
+browser authority for Playground, using the same budgets and usage ledger as
+public inference. Console serves pages, assets and shallow health without
+holding credentials. Raw `/v1` on the edge goes to CP. Public gateway inference
+uses its separate listener. The edge rejects internal paths before
 proxying and preserves SSE cancellation. Compose loopback ports and release-qualified
 Helm resources do not adopt the separately deployed staging Console or IAP.
 

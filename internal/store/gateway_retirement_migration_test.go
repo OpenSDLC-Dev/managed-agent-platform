@@ -52,7 +52,8 @@ func TestGatewayPolicyRetirementPreservesHistoryAndModelBudgets(t *testing.T) {
 		snapshots[table] = keySnapshot(t, pool, fmt.Sprintf(`SELECT coalesce(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)),'[]')::text FROM %s r`, table))
 	}
 	for pass := range 2 {
-		if err := store.Migrate(ctx, pool); err != nil {
+		// Compare the rows at the retirement migration's schema boundary.
+		if err := store.MigrateThrough(ctx, pool, "0066_retire_gateway_key_policies.sql"); err != nil {
 			t.Fatal(err)
 		}
 		var retired bool

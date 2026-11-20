@@ -1,2 +1,4 @@
-@admin path /admin/v1 /admin/v1/*
+@admin path /admin/v1 /admin/v1/* /api/organizations/default/proxy/v1/models /api/organizations/default/proxy/v1/messages
 respond @admin "gateway unavailable" 503
+@browser_session path /api/auth/session
+header @browser_session X-Platform-Playground-Disabled 1

@@ -22,6 +22,8 @@
 // Bearer. An owned key uses its active owner's current developer or admin
 // role. Delegated inference tokens use the current work claim and require
 // the initiator to remain an active organization member.
+// The private Playground routes use the authenticated browser principal and
+// its current access permission.
 //
 // Each inference path is a passthrough to an upstream speaking its protocol:
 // the body is read only as far as its top-level keys, model becomes the
@@ -51,6 +53,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/catalog"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/profile"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -65,6 +68,7 @@ type Config struct {
 	Keys    apikey.Querier // the platform database, whose api_keys a caller's key is checked against
 	Cipher  secrets.Cipher // opens the credentials the catalog holds sealed
 	Admin   http.Handler   // served under /admin/v1/; nil serves none
+	Login   *login.Manager // authenticates the private Playground routes
 
 	// Client calls upstreams; nil takes upstream.NewClient.
 	Client *http.Client
@@ -189,6 +193,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rid := newRequestID()
 	w.Header().Set("request-id", rid)
 	r = r.WithContext(context.WithValue(ctx, requestIDKey{}, rid))
+	switch r.URL.EscapedPath() {
+	case playgroundModelsPath, playgroundMessagesPath:
+		h.servePlayground(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/admin/") {
 		if token := inferencetoken.Credential(r); token != "" {
 			p, err := inferencetoken.Authenticate(r.Context(), h.cfg.Keys, token)

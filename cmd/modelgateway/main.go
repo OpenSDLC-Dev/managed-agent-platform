@@ -121,13 +121,13 @@ func run(ctx context.Context) error {
 		return errors.New("SECRETS_BACKEND is required: the gateway seals and opens vendor credentials")
 	}
 	manager := login.New(pool, loginCfg)
-	slog.Info("browser sessions configured for the admin API", "mode", manager.Mode())
+	slog.Info("browser sessions configured for private gateway routes", "mode", manager.Mode())
 	cat, err := catalog.New(ctx, pool, reload)
 	if err != nil {
 		return err
 	}
 	st := mgstore.New(pool)
-	cfg := modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, MaxAttempts: attempts}
+	cfg := modelgateway.Config{Catalog: cat, Store: st, Keys: pool, Cipher: cipher, Login: manager, MaxAttempts: attempts}
 	prober, err := modelgateway.NewProber(cfg)
 	if err != nil {
 		return err

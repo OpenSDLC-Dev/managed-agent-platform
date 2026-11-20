@@ -8615,3 +8615,17 @@ API probes, with a test upstream for Messages and Count Tokens.
 After review, the real loopback CLI also reported a role refusal and received
 the original state. Both inference probes sent a local workspace selector.
 The test upstream received neither selector.
+
+**Plan 73 acceptance (archived).** [Plan 73](./plan/73_console-playground.md)
+(#995) passed all 23 native Chrome contracts with PostgreSQL, the control
+plane, the gateway and a synthetic model. The browser exercised unmatched
+OIDC sign-in, grant, model selection, Messages streaming, Stop, withdrawal
+and the management boundary. The gateway's stalled upstream test confirmed
+withdrawal cancels the request. The Playground was checked in light and
+dark themes.
+
+The native CI source is Console revision
+`f98c1e538e9f1b4330ffca8c059d8fe4a45ee71f` from
+[Console #270](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/270).
+The Compose and Helm defaults use
+`sha256:bb4c9eb683e98cdc268e5539039d6f3a0d7c41ae6c94f1caddf93d7e251797ee`. Both scanned Linux image architectures advertise that revision.

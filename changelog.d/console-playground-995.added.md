@@ -1,0 +1,1 @@
+- **Console Playground** — Administrators can grant a member with the `user` role access to run prompts against configured chat models. The Playground uses the browser session and the model gateway's existing limits and usage attribution. Unmatched sign-ins start without permission to run prompts (#995).
