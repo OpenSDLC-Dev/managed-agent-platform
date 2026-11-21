@@ -57,33 +57,40 @@ go test -count=1 -v -run TestRehearsalDefineOutcomes ./acceptance/...
 
 ### Path B — Multi-container Compose stack (real binaries + Postgres + MinIO + modelgateway)
 
-Use when changing `cmd/`, `deploy/compose/`, auth/login, skills/files, or gateway wiring. Set `COMPOSE_PROJECT_NAME=verify-smoke` so both `./compose` (which injects `PLATFORM_BUILD_VERSION` via `tools/build-version.sh`) and `smoke_login.py`'s internal `docker compose` calls stay isolated from a developer's default stack, and pass an unused path inside a temp directory to `--key-file` (`smoke_login.py` opens it with `O_CREAT|O_EXCL`):
+Use when changing `cmd/`, `deploy/compose/`, auth/login, skills/files, or gateway wiring. Set a unique per-run `COMPOSE_PROJECT_NAME` (`verify-smoke-$$`) so both `./compose` (which injects `PLATFORM_BUILD_VERSION` via `tools/build-version.sh`) and `smoke_login.py`'s internal `docker compose` calls stay isolated from any other session's stack, and pass an unused path inside a temp directory to `--key-file` (`smoke_login.py` opens it with `O_CREAT|O_EXCL`):
 
 ```bash
 (
+  set -euo pipefail
   cd deploy/compose
   [ -f .env ] || cp .env.example .env
-  export COMPOSE_PROJECT_NAME=verify-smoke
+  export COMPOSE_PROJECT_NAME="verify-smoke-$$"
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"; ./compose down -v' EXIT
   ./compose up -d --build postgres minio controlplane brain modelgateway
   python3 -I smoke_login.py --key-file "$TMP_DIR/api-key"
   KEY="$(cat "$TMP_DIR/api-key")"
-  curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/agents | grep -q '"data"'
-  curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/environments | grep -q '"data"'
+  agents="$(curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/agents)"
+  printf '%s' "$agents" | grep '"data"' > /dev/null
+  envs="$(curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/environments)"
+  printf '%s' "$envs" | grep '"data"' > /dev/null
 )
 ```
 
 ### Path C — Wire compatibility check with real `ant` CLI
 
-Use when changing public `/v1/*` wire shapes, headers, SSE streams, or worker endpoints. Build `ant` from the read-only local checkout (see `docs/REFERENCE_PROJECTS.md`):
+Use when changing public `/v1/*` wire shapes, headers, SSE streams, or worker endpoints. Run against a live stack (either inserted before Path B's subshell exits using its `$KEY`, or against an already-running local stack with `KEY` set to a valid API key). Build `ant` from the read-only local checkout (see `docs/REFERENCE_PROJECTS.md`):
 
 ```bash
-SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
-(cd ../../anthropic-cli && go build -o "$SCRATCH/ant" ./cmd/ant)
-ANTHROPIC_API_KEY="$KEY" "$SCRATCH/ant" --base-url http://localhost:8080 beta:agents list
-ANTHROPIC_API_KEY="$KEY" "$SCRATCH/ant" --base-url http://localhost:8080 beta:environments list
+(
+  set -euo pipefail
+  : "${KEY:?export KEY from a running stack (or run inside Path B before teardown)}"
+  SCRATCH="$(mktemp -d)"
+  trap 'rm -rf "$SCRATCH"' EXIT
+  (cd ../../anthropic-cli && go build -o "$SCRATCH/ant" ./cmd/ant)
+  ANTHROPIC_API_KEY="$KEY" "$SCRATCH/ant" --base-url http://localhost:8080 beta:agents list
+  ANTHROPIC_API_KEY="$KEY" "$SCRATCH/ant" --base-url http://localhost:8080 beta:environments list
+)
 ```
 
 ## 4. Full merge gate before PR
