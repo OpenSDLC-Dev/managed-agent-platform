@@ -9,8 +9,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 ## Tasks
 
 - [x] Slice 1: `pgtest` template DB cloning, `dockertest` dead-owner reaping (#499), and `make test-fast` (PR #1075)
-- [ ] Slice 2: `.claude/skills/verify`, 3-round repair cap, and `main` branch protection alignment (in progress)
-- [ ] Slice 3: Property tests, `Fuzz*` targets, and scheduled fuzz workflow
+- [x] Slice 2: `.claude/skills/verify`, 3-round repair cap, and `main` branch protection alignment (PR #1077)
+- [ ] Slice 3: Property tests, `Fuzz*` targets, and scheduled fuzz workflow (in progress)
 - [ ] Slice 4: `make test-race`, CI `race` job, and test-hygiene guard
 - [ ] Slice 5: `REVIEW.md` diff-triggered reliability checklist and base-branch rule isolation
 - [ ] Slice 6: Full-topology offline E2E and wire differential test suite
