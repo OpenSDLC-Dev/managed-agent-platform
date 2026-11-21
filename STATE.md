@@ -4,8 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-Plan 74 checks the effective user of Docker and Kubernetes gated sandboxes ([#196](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/196)).
+**None.**
 
 ## Tasks
 
-- Implement gated identity admission and verify the shared provider contract.
+None in flight.

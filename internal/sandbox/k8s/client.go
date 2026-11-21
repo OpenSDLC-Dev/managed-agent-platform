@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -100,9 +101,21 @@ func restConfig(cfg Config) (*rest.Config, error) {
 // client wraps a clientset plus the rest.Config the SPDY executor needs, scoped
 // to one namespace.
 type client struct {
+	guarded   bool // only on clients bound to an admitted gated sandbox
 	cs        kubernetes.Interface
 	rest      *rest.Config
 	namespace string
+}
+
+// forSandbox shares the connection and clientset. Its exec path also covers
+// liveness probes, file operations and checkpoint exports.
+func (c *client) forSandbox(gated bool) *client {
+	if !gated {
+		return c
+	}
+	bound := *c
+	bound.guarded = true
+	return &bound
 }
 
 func newClient(cfg Config) (*client, error) {
@@ -132,6 +145,9 @@ type streamResult struct {
 // code comes back as a utilexec.CodeExitError, which is a clean finish, not a
 // failure — only a transport or API error is returned as err.
 func (c *client) exec(ctx context.Context, pod, container string, argv []string, stdin io.Reader, stdout, stderr io.Writer) (streamResult, error) {
+	if c.guarded {
+		argv = uidguard.Command(argv)
+	}
 	req := c.cs.CoreV1().RESTClient().Post().
 		Resource("pods").Name(pod).Namespace(c.namespace).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{

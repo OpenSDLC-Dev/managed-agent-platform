@@ -6,6 +6,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -101,6 +102,9 @@ func gateFixture(t *testing.T) sandboxtest.GateFixture {
 	image := sandboxtest.BuildGateImage(t)
 	stub := sandboxtest.StartGateStub(t)
 	return sandboxtest.GateFixture{
+		SandboxImage: func(t *testing.T, dockerfile string) string {
+			return dockertest.ImageFrom(t, "image-identity", dockerfile, "--host", docker.DaemonHost())
+		},
 		Spec: &sandbox.GateSpec{
 			Image:           image,
 			ControlplaneURL: "http://" + stub.Addr,

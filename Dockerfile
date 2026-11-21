@@ -37,7 +37,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=${VERSION}" \
-    -o /out/ ./cmd/gate
+    -o /out/ ./cmd/gate ./cmd/uidguard
 
 # The per-session egress gate is a separate image (built with --target gate): it
 # needs iptables (to install owner-match rules) and a dedicated UID it drops to,
@@ -52,6 +52,7 @@ RUN apt-get update \
     && groupadd -g 65532 gate \
     && useradd -u 65532 -g 65532 -M -s /usr/sbin/nologin gate
 COPY --from=gate-build /out/gate /gate
+COPY --from=gate-build /out/uidguard /usr/local/lib/map/uidguard
 HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=15 \
     CMD ["/gate", "-healthcheck"]
 ENTRYPOINT ["/gate"]

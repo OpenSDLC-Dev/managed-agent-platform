@@ -8629,3 +8629,9 @@ At acceptance, native CI used Console revision
 [Console #270](https://github.com/OpenSDLC-Dev/managed-agent-console/pull/270).
 The Compose and Helm defaults used
 `sha256:bb4c9eb683e98cdc268e5539039d6f3a0d7c41ae6c94f1caddf93d7e251797ee`. Both scanned Linux image architectures advertised that revision.
+
+**Plan 74 acceptance (archived).** [Plan 74](./plan/74_gated-sandbox-identity.md)
+(#196) used the shared provider contract against Docker and a kind cluster.
+Both refused numeric and named image users resolving to 65532. Both admitted
+the same images with a safe numeric override and preserved the effective UID
+of a safe named user across creation, adoption and attachment.

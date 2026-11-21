@@ -217,6 +217,28 @@ func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
 	}
 }
 
+func TestGatedPodWithoutIdentityGuardIsRefused(t *testing.T) {
+	sid := domain.NewID("sesn")
+	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	pod.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+	p := fakeProvider(pod)
+	ctx := t.Context()
+	if _, err := p.Provision(ctx, spec); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("adopt unguarded pod: %v", err)
+	}
+	if _, err := p.Attach(ctx, sid); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("attach unguarded pod: %v", err)
+	}
+	if _, err := p.Export(ctx, sid, "/workspace"); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("export unguarded pod: %v", err)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(ctx, pod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("existing pod after refusal: %v", err)
+	}
+}
+
 // A pod that is both wedged (its gate never turns ready) and spec-mismatched
 // must still be reclaimed: the readiness wait and its #198 reclaim run before
 // the spec check, deliberately — refusing first would strand a dead pod
@@ -316,7 +338,7 @@ func TestExecErrReclassifiesVanishedPod(t *testing.T) {
 
 	// No pod exists: a generic exec error becomes ErrNotFound once the existence
 	// check confirms the pod is gone (remotecommand's upgrade error hides this).
-	gone := fakeProvider().attach(podName(sid), "/workspace")
+	gone := fakeProvider().attach(podName(sid), "/workspace", false)
 	if gone.execErr(ctx, nil) != nil {
 		t.Error("execErr(nil) = non-nil, want nil")
 	}
@@ -330,7 +352,7 @@ func TestExecErrReclassifiesVanishedPod(t *testing.T) {
 
 	// The pod is present: a transient error is surfaced unchanged, not masked as
 	// a vanished sandbox.
-	live := fakeProvider(readyPod(sid)).attach(podName(sid), "/workspace")
+	live := fakeProvider(readyPod(sid)).attach(podName(sid), "/workspace", false)
 	transient := errors.New("transient stream reset")
 	if err := live.execErr(ctx, transient); err != transient {
 		t.Errorf("execErr(present pod, transient) = %v, want the original error", err)

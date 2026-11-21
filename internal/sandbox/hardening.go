@@ -206,8 +206,8 @@ func WritablePaths(workdir string) []string {
 // not run as the gate's own uid, because the gate's owner-match firewall ACCEPTs
 // exactly that uid — every tool process would leave the namespace unfiltered,
 // with allowed_hosts and vault substitution bypassed and nothing logged. The
-// same hazard reached through the sandbox *image* is #196; this closes the half
-// the platform itself now opens.
+// launcher checks the runtime's effective UID too, including an image-selected
+// user (plan 74).
 func (h Hardening) Validate(gated bool) error {
 	if gated && h.RunAsUser != nil && *h.RunAsUser == gaterun.DefaultGateUID {
 		return fmt.Errorf("sandbox: RunAsUser %d is the egress gate's own uid: "+

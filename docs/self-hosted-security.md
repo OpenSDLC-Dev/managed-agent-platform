@@ -578,15 +578,18 @@ outright.
 A **gated** sandbox (plan 12) drops those same three whatever `SANDBOX_CAP_DROP`
 says — they are what keeps a tool from crafting raw packets past the gate's
 owner-match firewall or becoming the gate's UID *at runtime*, so they are not
-configurable away. One caveat the drops cannot cover: a sandbox **image** whose
-`USER` directive is already the gate's dropped-to UID (`GATE_UID`, default 65532
-— notably distroless's `nonroot` user) starts every tool process as the UID the
-owner-match firewall permits, silently bypassing `allowed_hosts` on both
-backends. Do not use sandbox images that run as the configured gate UID;
-enforcement for the *image* is tracked in #196. The half the platform itself
-opens is closed: `SANDBOX_RUN_AS_USER` set to the gate's uid on a gated session
-**fails the provision** on both backends, rather than starting a sandbox whose
-egress policy is silently void. The `NET_ADMIN` holders are the gate
+configurable away. Docker and Kubernetes also check the actual user before
+starting image code and before executing sandbox commands. The gate image
+supplies a static launcher in a read-only sandbox mount at
+`/map-sandbox-guard`. UID 65532 is reserved for the gate. A gated image whose
+numeric or named `USER` resolves to it fails provisioning. Choose a different
+image user or set `SANDBOX_RUN_AS_USER` to a UID that can use the image and
+workdir.
+
+Deploy the matching gate image with the executor and worker. Existing gated
+sandboxes created without the launcher need to be drained and recreated during
+rollout. An executor refuses to adopt them and preserves their files.
+The `NET_ADMIN` holders are the gate
 container/sidecar itself (it installs the firewall, then drops privileges) and,
 on Kubernetes, the short-lived `netsetup` init container that enforces gate-less
 `limited` networking — never the sandbox container.

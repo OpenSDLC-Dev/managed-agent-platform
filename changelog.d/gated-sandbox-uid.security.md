@@ -1,0 +1,1 @@
+- **Gated sandboxes check the image user before running commands.** Docker and Kubernetes refuse provisioning when an image's numeric or named user resolves to the egress gate's reserved UID. An explicit safe sandbox UID can still use that image. The executor and worker require a matching gate image and refuse to adopt gated sandboxes created without the identity check (#196).
