@@ -1,0 +1,150 @@
+[
+  {
+    "id": "incident-1023-placeholder-tool-revert",
+    "pr": 1023,
+    "commit": "e1833f40daec1801f10bd027da48c1588a950042",
+    "subset": "tuning",
+    "kind": "incident",
+    "diff_direction": "forward",
+    "title": "Synthesize placeholder tool on turns with tool history and no tools (later reverted in #1031)",
+    "expected_rules": ["R04"],
+    "expected_severity": "Important",
+    "answer_key": "Defining a synthetic placeholder tool when an agent has tool history but no active tools diverges from the reference wire behavior and broke callers, requiring revert in PR #1031.",
+    "match_groups": [
+      ["placeholder", "synthetic", "dummy", "fabricated"],
+      ["tool history", "no tools", "no active tools", "wire", "diverge", "unrequested", "schema"]
+    ]
+  },
+  {
+    "id": "incident-1037-redacted-at-lock-clock",
+    "pr": 1037,
+    "commit": "33b316894006b3190723792d8dd5087f01f33c3a",
+    "subset": "tuning",
+    "kind": "incident",
+    "diff_direction": "reverse",
+    "title": "Stamp memory version redacted_at with now() instead of clock_timestamp() after lock (#989)",
+    "expected_rules": ["R02"],
+    "expected_severity": "Important",
+    "answer_key": "Using now() instead of clock_timestamp() after acquiring the store lock stamps redacted_at with transaction start time rather than post-lock time, breaking ordering under contention.",
+    "match_groups": [
+      ["clock_timestamp", "now()"],
+      ["redacted_at", "lock", "transaction start", "after acquiring", "contention"]
+    ]
+  },
+  {
+    "id": "incident-1057-docker-single-quote-path",
+    "pr": 1057,
+    "commit": "eb469fac43d8d4c9d1fa72381e61abab590586e0",
+    "subset": "tuning",
+    "kind": "incident",
+    "diff_direction": "reverse",
+    "title": "Docker file write breaks on long paths containing single quotes (#862)",
+    "expected_rules": ["R08"],
+    "expected_severity": "Important",
+    "answer_key": "Expanding quote-heavy paths before checking command or filename length limits breaks or truncates Docker writes on long paths with single quotes.",
+    "match_groups": [
+      ["single quote", "single-quote", "quote-heavy", "quoting"],
+      ["length", "limit", "long path", "truncat", "exceed", "cap", "expand", "maxcommand", "checkcommand"]
+    ]
+  },
+  {
+    "id": "control-1058-shared-write-temp-path",
+    "pr": 1058,
+    "commit": "071dd9c4ff5a593c86db35f4fb86a90feeb11bc0",
+    "subset": "tuning",
+    "kind": "control",
+    "diff_direction": "forward",
+    "title": "Share sandbox write temporary path validation across backends",
+    "expected_rules": [],
+    "expected_severity": "",
+    "answer_key": "",
+    "match_groups": []
+  },
+  {
+    "id": "control-1055-changelog-fragment-links",
+    "pr": 1055,
+    "commit": "93b2fb6871c69f1d5a83cf68afeca53ac0b88f7a",
+    "subset": "tuning",
+    "kind": "control",
+    "diff_direction": "forward",
+    "title": "Validate changelog fragment links before release",
+    "expected_rules": [],
+    "expected_severity": "",
+    "answer_key": "",
+    "match_groups": []
+  },
+  {
+    "id": "incident-1064-cursor-list-binding",
+    "pr": 1064,
+    "commit": "6b2ba764ee36181b3a33d989fbf7c3648b124ea9",
+    "subset": "eval",
+    "kind": "incident",
+    "diff_direction": "reverse",
+    "title": "Pagination cursor not bound to issuing list (#1004)",
+    "expected_rules": ["R05"],
+    "expected_severity": "Important",
+    "answer_key": "Omitting list-scoped cursor binding allows a page token minted by one list route to be replayed against a different list endpoint instead of returning 400 invalid_request_error.",
+    "match_groups": [
+      ["cursor", "page token", "next_page"],
+      ["list", "scope", "cross-list", "foreign", "replay", "bind", "endpoint"]
+    ]
+  },
+  {
+    "id": "incident-1060-egress-policy-withdrawal",
+    "pr": 1060,
+    "commit": "9f4f026053d13e0e89ced431911769d7bfa06f68",
+    "subset": "eval",
+    "kind": "incident",
+    "diff_direction": "reverse",
+    "title": "Egress gate fails to re-check policy at outbound admission or sever withdrawn connections",
+    "expected_rules": ["R07"],
+    "expected_severity": "Important",
+    "answer_key": "Without re-checking the live policy snapshot at outbound admission and severing active tunnels/requests upon withdrawal, a revoked host or credential stays usable after policy update.",
+    "match_groups": [
+      ["withdraw", "revok", "stale", "policy update", "policy snapshot"],
+      ["egress", "tunnel", "sever", "outbound", "admission", "in-flight", "active"]
+    ]
+  },
+  {
+    "id": "incident-1032-unicode-host-refusal",
+    "pr": 1032,
+    "commit": "f5338755d192ef3bd9dee868846c3e67123a2f5b",
+    "subset": "eval",
+    "kind": "incident",
+    "diff_direction": "reverse",
+    "title": "Unicode hostnames folded instead of refused in allowed_hosts and MCP URLs (#614)",
+    "expected_rules": ["R07"],
+    "expected_severity": "Important",
+    "answer_key": "Accepting or punycode-folding non-ASCII Unicode hostnames in allowed_hosts or MCP server URLs diverges from the reference refusal and risks host-matching surprises.",
+    "match_groups": [
+      ["unicode", "non-ascii", "punycode", "idna", "a-label"],
+      ["allowed_hosts", "mcp", "host", "refus", "reject"]
+    ]
+  },
+  {
+    "id": "control-1068-browser-session-version",
+    "pr": 1068,
+    "commit": "fa42406842b4052cb67440b8ddb2ca5bb419d34e",
+    "subset": "eval",
+    "kind": "control",
+    "diff_direction": "forward",
+    "title": "Report release and development versions in browser sessions",
+    "expected_rules": [],
+    "expected_severity": "",
+    "answer_key": "",
+    "match_groups": []
+  },
+  {
+    "id": "control-1067-changelog-link-rewriting",
+    "pr": 1067,
+    "commit": "5026ab9dc0be5b5652e466c0ee1e8878dca0a98a",
+    "subset": "eval",
+    "kind": "control",
+    "diff_direction": "forward",
+    "title": "Fix changelog link rewriting and release boundaries",
+    "expected_rules": [],
+    "expected_severity": "",
+    "answer_key": "",
+    "match_groups": []
+  }
+]

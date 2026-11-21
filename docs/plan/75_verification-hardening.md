@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Verification and testing hardening (plan 75)
