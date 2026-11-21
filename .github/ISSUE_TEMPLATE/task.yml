@@ -1,16 +1,7 @@
-name: Report a bug or request a feature
-description: Describe the issue and select its type, priority and difficulty.
+name: Create a task
+description: Track a specific piece of work.
+type: Task
 body:
-  - type: dropdown
-    id: issue-type
-    attributes:
-      label: Type
-      description: Choose bug for broken behavior or feature for a new capability or improvement.
-      options:
-        - bug
-        - feature
-    validations:
-      required: true
   - type: dropdown
     id: priority
     attributes:
@@ -36,7 +27,7 @@ body:
   - type: textarea
     id: details
     attributes:
-      label: Details
-      description: For a bug, give the steps, expected result and actual result. For a feature, describe the change and who needs it.
+      label: Task details
+      description: Describe the work and how to tell when it is complete.
     validations:
       required: true

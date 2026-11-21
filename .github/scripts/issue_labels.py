@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Keep one type, priority and difficulty on each open GitHub issue."""
+"""Set the native issue type and keep one priority and one difficulty label."""
 import json
 import os
 import re
 import subprocess
+from datetime import datetime, timezone
 
 
+ROLLOUT = datetime(2026, 11, 21, 4, 40, tzinfo=timezone.utc)
 # Each group starts with the provisional choice for issues filed without a form.
-GROUPS = (("feature", "bug"), ("p1", "p0", "p2"), ("hard", "medium", "easy"))
-# GitHub renders the three dropdowns before the free-text Details field.
-FORM = re.compile(r"\A### Type\n\n([^\n]*)\n\n### Priority\n\n([^\n]*)\n\n"
-                  r"### Difficulty\n\n([^\n]*)\n\n### Details(?:\n|$)")
+GROUPS = (("p1", "p0", "p2"), ("hard", "medium", "easy"))
+FORM_TYPES = {"Bug details": "Bug", "Feature request": "Feature", "Task details": "Task"}
+# The two dropdowns precede each template's distinct free-text field.
+FORM = re.compile(r"\A### Priority\n\n([^\n]*)\n\n### Difficulty\n\n([^\n]*)\n\n"
+                  r"### (Bug details|Feature request|Task details)(?:\n|$)")
 
 
 def api(endpoint, *args, payload=None):
@@ -22,38 +25,95 @@ def api(endpoint, *args, payload=None):
     return json.loads(result.stdout)
 
 
-def compliant(labels):
+def labels_compliant(labels):
     return len(labels) == len(GROUPS) and all(labels.intersection(group) for group in GROUPS)
 
 
-def recent_assignments(path):
+def filed_since_rollout(created_at):
+    return datetime.fromisoformat(created_at.replace("Z", "+00:00")) >= ROLLOUT
+
+
+def fill_type(path, issue, labels, form):
+    previous = (issue["type"] or {}).get("name")
+    if previous in FORM_TYPES.values():
+        return
+    legacy = labels & {"bug", "feature"}
+    target = "Feature"
+    if len(legacy) == 1:
+        target = next(iter(legacy)).title()
+    elif form:
+        target = FORM_TYPES[form[3]]
+
+    while True:
+        saved = api(path, "--method", "PATCH", payload={"type": target})
+        if (saved["type"] or {}).get("name") != target:
+            raise RuntimeError(f"GitHub did not apply issue type {target} to {path}")
+        # A maintainer can set a type between the read and PATCH. The change
+        # event records the previous type even if our write overwrote it.
+        receipt = api("graphql", payload={
+            "query": """query($id: ID!) { node(id: $id) { ... on Issue {
+                issueType { name }
+                timelineItems(last: 1, itemTypes: [ISSUE_TYPE_ADDED_EVENT, ISSUE_TYPE_CHANGED_EVENT,
+                                                   ISSUE_TYPE_REMOVED_EVENT]) { nodes {
+                    ... on IssueTypeChangedEvent { actor { __typename login } prevIssueType { name } }
+                } }
+            } } }""",
+            "variables": {"id": issue["node_id"]},
+        })["data"]["node"]
+        events = receipt["timelineItems"]["nodes"]
+        change = events[-1] if events else {}
+        displaced = (change.get("prevIssueType") or {}).get("name")
+        if ((receipt["issueType"] or {}).get("name") != target
+                or change.get("actor") != {"__typename": "Bot", "login": "github-actions"}
+                or displaced not in FORM_TYPES.values() or displaced == previous):
+            return
+        previous, target = target, displaced
+
+
+def label_history(path):
     pages = api(path + "/events?per_page=100", "--paginate", "--slurp")
-    events = (e for page in pages for e in page if e["event"] == "labeled")
-    rank = {}
+    events = (e for page in pages for e in page if e["event"] in ("labeled", "unlabeled"))
+    rank, restore = {}, {}
+    active = set()
     for index, event in enumerate(sorted(events, key=lambda e: (e["created_at"], e["id"])), start=1):
-        # A provisional label may land while a maintainer adds the real one.
-        actor = (event["actor"] or {}).get("login")
-        rank[event["label"]["name"]] = (actor != "github-actions[bot]", index)
-    return rank
+        name = event["label"]["name"]
+        group = next((group for group in GROUPS if name in group), None)
+        if group is None:
+            continue
+        bot = (event["actor"] or {}).get("login") == "github-actions[bot]"
+        restore.pop(group, None)
+        if event["event"] == "labeled":
+            active.add(name)
+            # A provisional label may land while a maintainer adds the real one.
+            rank[name] = (not bot, index)
+        else:
+            active.discard(name)
+            # Conflict cleanup may race with a human removing its intended winner.
+            # Restore only the bot removal that actually emptied this group.
+            if bot and active.isdisjoint(group):
+                restore[group] = name
+    return rank, restore
 
 
-def reconcile(repository, number):
+def reconcile(repository, number, *, confirm_cleanup=True):
     path = f"repos/{repository}/issues/{number}"
     issue = api(path)
-    if (issue["state"] != "open" or "pull_request" in issue or
+    if ("pull_request" in issue or
+            (issue["state"] == "closed" and not filed_since_rollout(issue["created_at"])) or
             not issue["repository_url"].lower().endswith("/repos/" + repository.lower())):
         return
     current = {label["name"]: label["node_id"] for label in issue["labels"]}
     names = set(current)
-    if compliant(names):
+    form = FORM.match((issue["body"] or "").replace("\r\n", "\n"))
+    fill_type(path, issue, names, form)
+    if labels_compliant(names):
         return
 
     matches = [names.intersection(group) for group in GROUPS]
     # A later webhook can run first, or replace one queued for this issue.
     # Resolve conflicting live labels from their assignment history.
-    rank = recent_assignments(path) if any(len(names) > 1 for names in matches) else {}
-    form = FORM.match((issue["body"] or "").replace("\r\n", "\n"))
-    answers = form.groups() if form else (None,) * len(GROUPS)
+    rank, restore = label_history(path) if any(len(group) != 1 for group in matches) else ({}, {})
+    answers = form.groups()[:2] if form else (None,) * len(GROUPS)
     desired = set()
     for group, existing, answer in zip(GROUPS, matches, answers):
         if existing:
@@ -61,7 +121,7 @@ def reconcile(repository, number):
             chosen = max((name for name in group if name in existing),
                          key=lambda name: rank.get(name, (False, 0)))
         else:
-            chosen = answer if answer in group else group[0]
+            chosen = restore.get(group, answer if answer in group else group[0])
         desired.add(chosen)
 
     # Apply only the observed delta. Replacing the entire set would erase a
@@ -78,15 +138,40 @@ def reconcile(repository, number):
             "variables": {"input": {"labelableId": issue["node_id"],
                                     "labelIds": [current[name] for name in extra]}},
         })
+        if confirm_cleanup and any(len(group) > 1 for group in matches):
+            # GITHUB_TOKEN removals do not schedule a follow-up issues run.
+            reconcile(repository, number, confirm_cleanup=False)
 
 
 def sweep(repository):
-    # Issues created by another workflow's GITHUB_TOKEN can miss the issues event.
-    pages = api(f"repos/{repository}/issues?state=open&per_page=100", "--paginate", "--slurp")
-    for page in pages:
-        for issue in page:
-            if "pull_request" not in issue and not compliant({label["name"] for label in issue["labels"]}):
-                reconcile(repository, issue["number"])
+    # repository.issues excludes pull requests. Three names suffice to detect
+    # every bad set, even if an issue carries many more noncanonical labels.
+    query = """query($owner: String!, $name: String!, $state: IssueState!, $cursor: String) {
+        repository(owner: $owner, name: $name) {
+            issues(states: [$state], first: 100, after: $cursor,
+                   orderBy: {field: CREATED_AT, direction: DESC}) {
+                nodes { number createdAt issueType { name } labels(first: 3) { nodes { name } } }
+                pageInfo { hasNextPage endCursor }
+            }
+        }
+    }"""
+    owner, name = repository.split("/")
+    for state in ("OPEN", "CLOSED"):
+        cursor = None
+        while True:
+            result = api("graphql", payload={
+                "query": query, "variables": {"owner": owner, "name": name, "state": state, "cursor": cursor},
+            })
+            page = result["data"]["repository"]["issues"]
+            for issue in page["nodes"]:
+                if state == "CLOSED" and not filed_since_rollout(issue["createdAt"]):
+                    return
+                if ((issue["issueType"] or {}).get("name") not in FORM_TYPES.values()
+                        or not labels_compliant({label["name"] for label in issue["labels"]["nodes"]})):
+                    reconcile(repository, issue["number"])
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            cursor = page["pageInfo"]["endCursor"]
 
 
 if __name__ == "__main__":

@@ -209,22 +209,10 @@ jobs:
               echo "commented on #$num"
               return
             fi
-            # Assigned, not merely filed. An unassigned issue in a repository
-            # whose backlog is already issues is the same silence #479 is about,
-            # one layer up; the assignment is what actually sends someone a
-            # notification. The run's actor is whoever's merge is on the failing
-            # commit.
-            #
-            # Two calls rather than `create --assignee`, and this is not
-            # stylistic: on github.com `gh` passes the assignee as a LOGIN, and
-            # `IssueCreate` applies logins AFTER `createIssue` returns. A login
-            # that cannot be assigned — a bot, or someone without push access —
-            # therefore leaves the issue created, exits non-zero, and prints no
-            # URL. Any `|| gh issue create` fallback behind that files the
-            # outage a second time.
+            # Assign after creation so an unassignable actor still leaves one
+            # correctly classified outage issue for the next run to find.
             local url
-            body="$(notifier_marker "$kind")"$'\n\n'"$body"
-            url="$(gh issue create --repo "$REPO" --title "$title" --label bug,p1,medium --body "$body")"
+            url="$(create_notifier_issue "$kind" "$title" "$body")"
             echo "opened $url"
             gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ACTOR" >/dev/null 2>&1 \
               || echo "::warning::opened $url but could not assign it to $ACTOR"

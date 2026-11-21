@@ -321,8 +321,6 @@ jobs:
               # reaches everyone watching the repository, which is how every
               # other issue in this backlog reaches anyone.
               body="$(printf '%s\n' \
-                "$(notifier_marker staging-parked)" \
-                "" \
                 "The staging cluster \`$GKE_CLUSTER\` carries \`power-saved-*\` labels, so \`make gcp-env-stop\` parked it and nothing has deployed to it since." \
                 "" \
                 "Labels: \`$labels\`" \
@@ -342,7 +340,7 @@ jobs:
                 "" \
                 "It closes automatically: the next run of this workflow that finds the cluster unparked, or gone, closes it, and a completed \`deploy\` is one of its triggers.")"
 
-              url="$(gh issue create --repo "$REPO" --title "$TITLE" --label feature,p2,hard --body "$body")"
+              url="$(create_notifier_issue staging-parked "$TITLE" "$body")"
               echo "opened $url"
               ;;
           esac

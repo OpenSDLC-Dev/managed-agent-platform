@@ -154,8 +154,7 @@ jobs:
               return
             fi
             local url
-            body="$(notifier_marker evals)"$'\n\n'"$body"
-            url="$(gh issue create --repo "$REPO" --title "$TITLE" --label bug,p1,medium --body "$body")"
+            url="$(create_notifier_issue evals "$TITLE" "$body")"
             echo "opened $url"
           }
 

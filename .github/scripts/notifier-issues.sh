@@ -4,6 +4,25 @@ notifier_marker() {
   printf '<!-- platform-notifier:%s -->\n' "$1"
 }
 
+# Issues created with GITHUB_TOKEN do not trigger issue triage. Set the type and
+# labels on the create itself and check the response: GitHub can silently omit
+# fields the token cannot set. Retrying the POST could create a second issue.
+create_notifier_issue() {
+  local kind="$1" title="$2" body="$3" issue_type priority difficulty
+  case "$kind" in
+    deploy-failure|deploy-notifier|evals) issue_type=Bug; priority=p1; difficulty=medium ;;
+    staging-parked) issue_type=Task; priority=p2; difficulty=hard ;;
+    *) echo "unknown notifier: $kind" >&2; return 1 ;;
+  esac
+  body="$(notifier_marker "$kind")"$'\n\n'"$body"
+  gh api --method POST "repos/$REPO/issues" -f "title=$title" -f "body=$body" \
+    -f "type=$issue_type" -f "labels[]=$priority" -f "labels[]=$difficulty" |
+    jq -er --arg type "$issue_type" --arg priority "$priority" --arg difficulty "$difficulty" '
+      if .type.name == $type and ([.labels[].name] | sort) == ([$priority, $difficulty] | sort)
+      then .html_url
+      else error("GitHub created \(.html_url) without the requested issue type and labels") end'
+}
+
 # Print every open tracking issue, newest first. The REST creator filter keeps
 # pagination small. Check the author and exclude pull requests before using a
 # number for a comment or an automatic close.

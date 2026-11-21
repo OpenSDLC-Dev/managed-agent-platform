@@ -1,8 +1,17 @@
-name: Issue labels
+name: Issue triage
 
 on:
   issues:
-    types: [opened, reopened, edited, labeled, unlabeled, transferred]
+    types:
+      - opened
+      - closed
+      - reopened
+      - edited
+      - labeled
+      - unlabeled
+      - typed
+      - untyped
+      - transferred
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -23,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Apply the issue labels
+      - name: Apply the issue type and labels
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.changes.new_issue.number || github.event.issue.number }}

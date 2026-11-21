@@ -167,7 +167,7 @@ whole cluster.
 
 It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only when
 somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten — and
-keeps one `feature`, `p2`, `hard` issue open while the cluster carries those labels.
+keeps one `Task` open with the `p2` and `hard` labels while the cluster is parked.
 A scheduled or manually dispatched run opens it. The issue's age shows how long staging
 has been parked. A completed `deploy` triggers a check, so reviving staging can close the
 issue before the next weekly check. Destroying staging closes it too. The issue offers
@@ -699,8 +699,8 @@ classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) be
 `make cd-outcome-test`, and why CI checks the three names the notifier borrows from
 `deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
 separates parked from deployed. If that name goes missing, the notifier opens a separate
-issue for the step-name mismatch. Both kinds of issue carry `bug`, `p1` and `medium`.
-The notifier identifies each by its author and a marker in the issue body, so changing
+issue for the step-name mismatch. Both alerts use the `Bug` issue type with the `p1` and
+`medium` labels. The notifier identifies each by its author and a marker in the issue body, so changing
 triage labels or renaming an issue still lets the next successful deploy close it.
 
 **Application secrets are supplied separately from infrastructure bootstrap.**
