@@ -1491,6 +1491,8 @@ jobs:
         run: make test-hygiene-test
       - name: REVIEW.md diff-triggered checklist is valid
         run: make review-checklist-test
+      - name: verification commit gate hook and stamping helper hold their contract
+        run: make verify-commit-gate-test
       - name: issue-triage read-only wrapper and Bash guard hold their boundary
         run: make issue-triage-guard-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail
