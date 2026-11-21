@@ -350,8 +350,16 @@ func (c *apiClient) startContainer(ctx context.Context, id string) error {
 }
 
 func (c *apiClient) removeContainer(ctx context.Context, id string) error {
+	return c.deleteContainer(ctx, id, url.Values{"force": {"1"}, "v": {"1"}})
+}
+
+func (c *apiClient) removeStoppedContainer(ctx context.Context, id string) error {
+	return c.deleteContainer(ctx, id, url.Values{"v": {"1"}})
+}
+
+func (c *apiClient) deleteContainer(ctx context.Context, id string, query url.Values) error {
 	resp, err := c.request(ctx, http.MethodDelete, "/containers/"+id,
-		url.Values{"force": {"1"}, "v": {"1"}}, nil, "")
+		query, nil, "")
 	if err != nil {
 		return err
 	}

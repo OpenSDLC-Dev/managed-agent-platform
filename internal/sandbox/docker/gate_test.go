@@ -20,14 +20,16 @@ import (
 
 // fakeMinter is a sandbox.GateTokenMinter (and GateTokenRevoker) that records
 // its calls, so a test can assert the provider mints only on create, persists
-// exactly the token it put in the gate container, and revokes only on the
-// gated→ungated dismantle.
+// exactly the token it put in the gate container and selects the right token
+// for retirement.
 type fakeMinter struct {
-	token      string
-	generated  int
-	persisted  []string
-	persistErr error
-	revoked    []domain.ID
+	token         string
+	generated     int
+	persisted     []string
+	persistErr    error
+	revoked       []domain.ID
+	scopedRevokes []string
+	revokeErr     error
 }
 
 func (m *fakeMinter) Generate() string { m.generated++; return m.token }
@@ -43,6 +45,11 @@ func (m *fakeMinter) Persist(_ context.Context, _ domain.ID, token string) error
 func (m *fakeMinter) Revoke(_ context.Context, sid domain.ID) error {
 	m.revoked = append(m.revoked, sid)
 	return nil
+}
+
+func (m *fakeMinter) RevokeIfCurrent(_ context.Context, _ domain.ID, token string) error {
+	m.scopedRevokes = append(m.scopedRevokes, token)
+	return m.revokeErr
 }
 
 // revokerFunc adapts a func to sandbox.GateTokenRevoker, so a test can observe
@@ -65,7 +72,7 @@ func inspectRef(path string) string {
 
 func healthJSON(id, health string, s sandbox.Spec, running bool) string {
 	return fmt.Sprintf(`{"Id":%q,"State":{"Running":%t,"Health":{"Status":%q}},"Config":{"Labels":{%q:%q},
-		"Env":["GATE_UID=65532","MAP_STAGE_SANDBOX_GUARD=1"]},
+		"Env":["GATE_UID=65532","MAP_STAGE_SANDBOX_GUARD=1","GATE_TOKEN=previous-test-token"]},
 		"Mounts":[{"Type":"volume","Name":"gate-guard","Destination":%q,"RW":true}]}`,
 		id, running, health, sessionLabel, s.SessionID, uidguard.Dir)
 }
@@ -336,6 +343,116 @@ func TestGatedDockerHandlesRequireTheActualSandboxGuard(t *testing.T) {
 	}
 }
 
+func TestAttachHarvestsLocalOutputAfterGateExit(t *testing.T) {
+	s := gatedSpec(&fakeMinter{})
+	archive, err := tarFile("answer.txt", []byte("finished"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name                           string
+		status                         int
+		gateID, gateHealth             string
+		running, legacy, foreignVolume bool
+		want                           error
+	}{
+		{name: "revoked gate stopped", status: 200, gateID: "gate1"},
+		{name: "gate starting", status: 200, gateID: "gate1", gateHealth: "starting", running: true},
+		{name: "missing gate", status: 404},
+		{name: "replaced gate", status: 200, gateID: "new-gate", gateHealth: "healthy", running: true},
+		{name: "unverified workspace", status: 404, legacy: true, want: sandbox.ErrSpecMismatch},
+		{name: "wrong guard owner", status: 404, foreignVolume: true, want: sandbox.ErrSpecMismatch},
+		{name: "daemon unavailable", status: 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/containers/" + containerName(s.SessionID) + "/json":
+					body := sandboxJSON("sb1", s, "container:gate1")
+					if tc.legacy {
+						body = strings.Replace(body, uidguard.Path, "/bin/bash", 1)
+					}
+					io.WriteString(w, body)
+				case "/containers/" + gateName(s.SessionID) + "/json":
+					w.WriteHeader(tc.status)
+					if tc.status == http.StatusOK {
+						io.WriteString(w, healthJSON(tc.gateID, tc.gateHealth, s, tc.running))
+					}
+				case "/volumes/gate-guard":
+					owner := string(s.SessionID)
+					if tc.foreignVolume {
+						owner = "other-session"
+					}
+					fmt.Fprintf(w, `{"Labels":{%q:%q}}`, guardSessionLabel, owner)
+				case "/containers/sb1/exec":
+					var cfg execConfig
+					if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil || len(cfg.Cmd) < 2 || cfg.Cmd[0] != uidguard.Path {
+						t.Errorf("unguarded harvest exec: %v, %v", cfg.Cmd, err)
+					}
+					io.WriteString(w, `{"Id":"exec1"}`)
+				case "/exec/exec1/start":
+					w.Write(frame(1, "answer.txt"))
+				case "/exec/exec1/json":
+					io.WriteString(w, `{"Running":false,"ExitCode":0}`)
+				case "/containers/sb1/archive":
+					if r.URL.Query().Get("path") != "/workspace/answer.txt" {
+						t.Errorf("unexpected harvest path %s", r.URL)
+					}
+					w.Write(archive)
+				case "/containers/sb1", "/containers/gate1":
+					if r.Method != http.MethodDelete || r.URL.Path == "/containers/gate1" && tc.gateID != "gate1" {
+						t.Errorf("destroy touched unrelated container %s", r.URL.Path)
+					}
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			})
+			sb, err := p.Attach(t.Context(), s.SessionID)
+			if tc.want != nil || tc.status == 503 {
+				if sb != nil || tc.want != nil && !errors.Is(err, tc.want) || tc.status == 503 && !statusIs(err, tc.status) {
+					t.Fatalf("attach = %v, %v", sb, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			found, err := sb.Exec(t.Context(), sandbox.ExecRequest{Command: "ls /workspace/answer.txt"})
+			if err != nil || found.Stdout != "answer.txt" || found.ExitCode != 0 {
+				t.Fatalf("harvest listing = %+v, %v", found, err)
+			}
+			reply, err := sb.ReadFile(t.Context(), "/workspace/"+found.Stdout)
+			if err != nil || string(reply) != "finished" {
+				t.Fatalf("harvested output = %q, %v", reply, err)
+			}
+			if err := sb.Destroy(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAttachRetriesAStartingGatedSandbox(t *testing.T) {
+	s := gatedSpec(&fakeMinter{})
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gate := r.URL.Path == "/containers/"+gateName(s.SessionID)+"/json"
+		body := sandboxJSON("sb1", s, "container:gate1")
+		if gate {
+			body = healthJSON("gate1", "healthy", s, true)
+		}
+		if !gate {
+			body = strings.Replace(body, `"Status":"healthy"`, `"Status":"starting"`, 1)
+		}
+		io.WriteString(w, body)
+	})
+	sb, err := p.Attach(t.Context(), s.SessionID)
+	if sb != nil || err == nil || errors.Is(err, sandbox.ErrNotFound) {
+		t.Fatalf("starting sandbox: attach = %v, %v, want retryable readiness error", sb, err)
+	}
+}
+
 func TestGatedDockerStartupRefusalRemovesOnlyTheNewSandbox(t *testing.T) {
 	s := gatedSpec(&fakeMinter{})
 	started := false
@@ -368,11 +485,144 @@ func TestGatedDockerStartupRefusalRemovesOnlyTheNewSandbox(t *testing.T) {
 		}
 	})
 	sb, err := p.Provision(context.Background(), s)
-	if sb != nil || err == nil || !strings.Contains(err.Error(), "reserved gate UID") {
+	if sb != nil || err == nil || !strings.Contains(err.Error(), "possible reserved gate UID") {
 		t.Fatalf("admission = %v, %v", sb, err)
 	}
 	if !slices.Equal(removed, []string{"sb1"}) {
 		t.Fatalf("removed %v, want only the new sandbox", removed)
+	}
+}
+
+func TestInterruptedReadinessPreservesTheAdoptedDockerPair(t *testing.T) {
+	for _, cancelReadiness := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel_%t", cancelReadiness), func(t *testing.T) {
+			s := gatedSpec(&fakeMinter{})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var gateExists, sandboxExists, started bool
+			var p *Provider
+			adopted := make(chan error, 1)
+			p = fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/containers/" + gateName(s.SessionID) + "/json":
+					if !gateExists {
+						http.NotFound(w, r)
+						return
+					}
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				case "/containers/gate1/json":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				case "/containers/" + containerName(s.SessionID) + "/json":
+					if !sandboxExists {
+						http.NotFound(w, r)
+						return
+					}
+					io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
+				case "/containers/create":
+					if r.URL.Query().Get("name") == gateName(s.SessionID) {
+						gateExists = true
+						io.WriteString(w, `{"Id":"gate1"}`)
+					} else {
+						sandboxExists = true
+						io.WriteString(w, `{"Id":"sb1"}`)
+					}
+				case "/containers/gate1/start":
+					w.WriteHeader(http.StatusNoContent)
+				case "/containers/sb1/start":
+					started = true
+					w.WriteHeader(http.StatusNoContent)
+				case "/containers/sb1/json":
+					if !started {
+						io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
+						return
+					}
+					// Another provision observes the already healthy pair before the
+					// creator's inspection result is lost.
+					_, err := p.Provision(t.Context(), s)
+					adopted <- err
+					if cancelReadiness {
+						cancel()
+					}
+					http.Error(w, "inspection unavailable", http.StatusServiceUnavailable)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			})
+			got, err := p.Provision(ctx, s)
+			if got != nil || err == nil {
+				t.Fatalf("creator returned %v, %v", got, err)
+			}
+			select {
+			case err := <-adopted:
+				if err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatal("the other provision did not adopt the pair")
+			}
+		})
+	}
+}
+
+func TestFreshDockerRefusalRevokesOnlyItsStoppedGate(t *testing.T) {
+	for _, revokeFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("revoke_fails_%t", revokeFails), func(t *testing.T) {
+			m := &fakeMinter{token: "fresh-gate-token"}
+			if revokeFails {
+				m.revokeErr = errors.New("token store unavailable")
+			}
+			s := gatedSpec(m)
+			var started bool
+			var removed []string
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/containers/" + gateName(s.SessionID) + "/json", "/containers/" + containerName(s.SessionID) + "/json":
+					http.NotFound(w, r)
+				case "/containers/create":
+					if r.URL.Query().Get("name") == gateName(s.SessionID) {
+						io.WriteString(w, `{"Id":"gate1"}`)
+					} else {
+						io.WriteString(w, `{"Id":"sb1"}`)
+					}
+				case "/containers/gate1/json":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, !started))
+				case "/containers/sb1/json":
+					body := sandboxJSON("sb1", s, "container:gate1")
+					if started {
+						body = strings.Replace(body, `"Running":true`, `"Running":false,"ExitCode":77`, 1)
+					}
+					io.WriteString(w, body)
+				case "/containers/gate1/start":
+					w.WriteHeader(http.StatusNoContent)
+				case "/containers/sb1/start":
+					started = true
+					w.WriteHeader(http.StatusNoContent)
+				case "/containers/gate1", "/containers/sb1":
+					if r.Method != http.MethodDelete || r.URL.Query().Has("force") || !slices.Equal(m.scopedRevokes, []string{m.token}) {
+						t.Errorf("removed a container without a successful scoped revocation and a stopped-state precondition")
+					}
+					removed = append(removed, r.URL.Path)
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+			sb, err := p.Provision(t.Context(), s)
+			if sb != nil || err == nil || !strings.Contains(err.Error(), "possible reserved gate UID") {
+				t.Fatalf("admission = %v, %v", sb, err)
+			}
+			if !slices.Equal(m.scopedRevokes, []string{m.token}) || len(m.revoked) != 0 {
+				t.Error("refusal did not select only the creator's token")
+			}
+			if revokeFails {
+				if !errors.Is(err, m.revokeErr) || len(removed) != 0 {
+					t.Errorf("failed revocation lost its retry trigger: %v, removed %v", err, removed)
+				}
+			} else if !slices.Equal(removed, []string{"/containers/sb1", "/containers/gate1"}) {
+				t.Errorf("removed %v", removed)
+			}
+		})
 	}
 }
 
@@ -396,7 +646,9 @@ func TestGatedDockerExecChecksTheRuntimeSelectedUID(t *testing.T) {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	})
-	res, err := p.attach("sb1", "/workspace", "gate1", false).Exec(context.Background(), sandbox.ExecRequest{Command: "exit 77"})
+	c := p.attach("sb1", "/workspace", "gate1", false)
+	c.guardVolume = "gate-guard"
+	res, err := c.Exec(context.Background(), sandbox.ExecRequest{Command: "exit 77"})
 	if err != nil || res.ExitCode != 77 {
 		t.Fatalf("ordinary command exit status: %v, %v", res, err)
 	}
@@ -514,9 +766,8 @@ func TestProvisionRejectsAdoptedUnhealthyGate(t *testing.T) {
 	}
 }
 
-// TestProvisionGateUnhealthyFailsClosed: a gate that never reports healthy never
-// verified its firewall, so provisioning fails and the orphan gate is removed
-// rather than the sandbox being created against an unproven gate.
+// A running but unhealthy gate cannot admit a sandbox. Its label remains
+// discoverable for a retry or the session reaper.
 func TestProvisionGateUnhealthyFailsClosed(t *testing.T) {
 	m := &fakeMinter{token: "gtk_test"}
 	s := gatedSpec(m)
@@ -552,14 +803,13 @@ func TestProvisionGateUnhealthyFailsClosed(t *testing.T) {
 	if _, err := p.Provision(context.Background(), s); err == nil {
 		t.Fatal("provision succeeded against an unhealthy gate")
 	}
-	if !slices.Contains(removed, "gate1") {
-		t.Errorf("orphan gate not removed (removed=%v)", removed)
+	if len(removed) != 0 {
+		t.Errorf("removed a running gate: %v", removed)
 	}
 }
 
-// TestProvisionRemovesGateWhenSandboxCreateFails: if the sandbox half fails after
-// a fresh gate was created, the gate is not leaked.
-func TestProvisionRemovesGateWhenSandboxCreateFails(t *testing.T) {
+// A healthy gate is visible to another provision before the sandbox exists.
+func TestProvisionKeepsTheHealthyGateWhenSandboxCreateFails(t *testing.T) {
 	m := &fakeMinter{token: "gtk_test"}
 	s := gatedSpec(m)
 	gateName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
@@ -595,8 +845,8 @@ func TestProvisionRemovesGateWhenSandboxCreateFails(t *testing.T) {
 	if _, err := p.Provision(context.Background(), s); err == nil {
 		t.Fatal("provision succeeded despite a failing sandbox create")
 	}
-	if !slices.Contains(removed, "gate1") {
-		t.Errorf("gate leaked after sandbox create failed (removed=%v)", removed)
+	if len(removed) != 0 || len(m.scopedRevokes) != 0 {
+		t.Errorf("a sandbox create failure dismantled a published gate")
 	}
 }
 
@@ -615,6 +865,8 @@ func TestProvisionGateStartErrorRemovesGate(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json") && inspectRef(r.URL.Path) == gateName:
 			http.Error(w, `{"message":"No such container: x"}`, http.StatusNotFound)
+		case r.URL.Path == "/containers/gate1/json":
+			io.WriteString(w, healthJSON("gate1", "", s, false))
 		case r.URL.Path == "/containers/create":
 			io.WriteString(w, `{"Id":"gate1"}`)
 		case strings.HasSuffix(r.URL.Path, "/start"):
@@ -757,7 +1009,15 @@ func TestProvisionRecreatesStoppedGate(t *testing.T) {
 	healthPolls := 0
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes/gate-guard":
+			if r.Method == http.MethodDelete && !slices.Equal(m.scopedRevokes, []string{"previous-test-token"}) {
+				t.Error("removed the retired gate's volume before revoking its own token")
+			}
+			fmt.Fprintf(w, `{"Labels":{%q:%q}}`, guardSessionLabel, s.SessionID)
 		case r.Method == http.MethodDelete:
+			if r.URL.Query().Has("force") || r.URL.Query().Has("v") {
+				t.Error("stopped gate removal must retain its guard volume and require a stopped gate")
+			}
 			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/containers/"))
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/start"):
@@ -804,12 +1064,55 @@ func TestProvisionRecreatesStoppedGate(t *testing.T) {
 	if !slices.Contains(removed, "gateOld") {
 		t.Errorf("stopped gate not removed (removed=%v)", removed)
 	}
+	if !slices.Equal(m.scopedRevokes, []string{"previous-test-token"}) || len(m.revoked) != 0 {
+		t.Error("replacement did not retire just the token inspected on the stopped gate")
+	}
 	if gateCreates != 1 {
 		t.Errorf("gate created %d times, want 1 (a fresh gate replacing the stopped one)", gateCreates)
 	}
 	// A fresh token is minted and persisted; the stopped gate's is not trusted.
 	if !slices.Equal(m.persisted, []string{"gtk_test"}) {
 		t.Errorf("persisted = %v, want [gtk_test]", m.persisted)
+	}
+}
+
+func TestStoppedGateRetirementPreservesRetryOwnership(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gate_restarted_%t", restarted), func(t *testing.T) {
+			m := &fakeMinter{revokeErr: errors.New("token store unavailable")}
+			s := gatedSpec(m)
+			p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/containers/" + gateName(s.SessionID) + "/json":
+					io.WriteString(w, healthJSON("gateOld", "", s, false))
+				case "/volumes/gate-guard":
+					if r.Method != http.MethodGet {
+						t.Error("deleted the only remaining retry trigger")
+					}
+					fmt.Fprintf(w, `{"Labels":{%q:%q}}`, guardSessionLabel, s.SessionID)
+				case "/containers/gateOld":
+					if r.Method != http.MethodDelete || r.URL.Query().Has("force") || r.URL.Query().Has("v") {
+						t.Error("removal failed to protect a started gate or its ownership volume")
+					}
+					if restarted {
+						http.Error(w, "gate started", http.StatusConflict)
+					}
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+			sb, err := p.Provision(t.Context(), s)
+			if sb != nil || err == nil || len(m.revoked) != 0 || m.generated != 0 {
+				t.Fatalf("unexpected replacement: %v, %v", sb, err)
+			}
+			if restarted {
+				if !statusIs(err, http.StatusConflict) || len(m.scopedRevokes) != 0 {
+					t.Error("raced gate lost its token")
+				}
+			} else if !errors.Is(err, m.revokeErr) || !slices.Equal(m.scopedRevokes, []string{"previous-test-token"}) {
+				t.Error("failed retirement did not surface the scoped revocation error")
+			}
+		})
 	}
 }
 
@@ -1028,10 +1331,8 @@ func TestProvisionFailsClosedOnMispairedRaceWinner(t *testing.T) {
 	}
 }
 
-// TestProvisionRemovesSandboxOnStartFailure: if the sandbox is created but fails
-// to start, it is removed (not left as a stopped container whose immutable
-// network mode references a gate about to be torn down, which would poison every
-// later retry) along with the gate this call created.
+// A failed sandbox start releases the stopped creation for a corrected spec.
+// The healthy gate remains available to the retry.
 func TestProvisionRemovesSandboxOnStartFailure(t *testing.T) {
 	m := &fakeMinter{token: "gtk_test"}
 	s := gatedSpec(m)
@@ -1075,9 +1376,8 @@ func TestProvisionRemovesSandboxOnStartFailure(t *testing.T) {
 	if _, err := p.Provision(context.Background(), s); err == nil {
 		t.Fatal("provision succeeded despite a sandbox start failure")
 	}
-	// Both the leaked sandbox and the gate this call created are removed.
-	if !slices.Contains(removed, "sb1") || !slices.Contains(removed, "gate1") {
-		t.Errorf("start failure did not clean up the pair (removed=%v)", removed)
+	if !slices.Equal(removed, []string{"sb1"}) || len(m.scopedRevokes) != 0 {
+		t.Errorf("start failure removed %v, want only the new sandbox", removed)
 	}
 }
 
@@ -1235,6 +1535,10 @@ func TestProvisionGatePersistErrorRemovesGate(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			if inspectRef(r.URL.Path) == gateName {
 				http.Error(w, `{"message":"No such container: x"}`, http.StatusNotFound)
+				return
+			}
+			if inspectRef(r.URL.Path) == "gate1" {
+				io.WriteString(w, healthJSON("gate1", "", s, false))
 				return
 			}
 			t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))

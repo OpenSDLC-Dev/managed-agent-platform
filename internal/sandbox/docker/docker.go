@@ -403,8 +403,8 @@ func containerName(sessionID domain.ID) string { return "map-" + string(sessionI
 // When spec.Gate is set the sandbox is one half of a pair: the gate container is
 // ensured first (it owns the network namespace the sandbox joins and enforces
 // its egress), and only once it is healthy is the sandbox created inside its
-// netns. If a fresh gate was created here and the sandbox half then fails, the
-// gate is torn down rather than leaked.
+// netns. A healthy gate is already visible to concurrent provisions. A retry
+// can reuse it, and the session reaper collects it if no sandbox follows.
 func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox.Sandbox, err error) {
 	if spec.SessionID.IsZero() {
 		return nil, errors.New("docker: provision needs a session id")
@@ -419,36 +419,19 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, err
 	}
 	p.warnUnenforceableEphemeralStorage(ctx, spec.Hardening)
-	workdir := spec.Workdir
-	if workdir == "" {
-		workdir = sandbox.DefaultWorkdir
+	workdir, err := spec.EffectiveWorkdir()
+	if err != nil {
+		return nil, err
 	}
 	name := containerName(spec.SessionID)
 
-	var gateID, volume string
+	var gateID, volume, mintedToken string
 	if spec.Gate != nil {
-		gate, created, gerr := p.ensureGate(ctx, spec)
+		gate, token, gerr := p.ensureGate(ctx, spec)
 		if gerr != nil {
 			return nil, gerr
 		}
-		gateID = gate.ID
-		if created {
-			// The gate is live but the sandbox half is not yet. Any error return
-			// below (a lost adopt, a failed create/start) leaves this gate an
-			// orphan no one adopts, so tear it down. This is scoped to a gate this
-			// call created; a rare concurrent-adopt race (another executor adopts
-			// this gate and pairs a sandbox to it while this call then errors) can
-			// still break that sandbox's netns, but it is fail-closed and
-			// self-healing — the broken sandbox's next tool call faults, reclaims,
-			// and re-provisions, and the NetworkMode-aware adoption below rebuilds
-			// it against a fresh gate. The standalone teardown reaper (a separate
-			// issue) is the race-safe long-term owner of orphan cleanup.
-			defer func() {
-				if err != nil {
-					p.removeDetached(ctx, gateID)
-				}
-			}()
-		}
+		gateID, mintedToken = gate.ID, token
 		volume, err = guardVolume(gate)
 		if err != nil {
 			return nil, err
@@ -468,7 +451,8 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			if aerr := adoptable(info, spec, workdir, gateID); aerr != nil {
 				return nil, aerr
 			}
-			return p.startSandbox(ctx, info, workdir, gateID, volume, !info.State.Running)
+			sb, _, err := p.startSandbox(ctx, info, workdir, gateID, volume, !info.State.Running)
+			return sb, err
 		}
 		// The sandbox's egress path no longer matches the session's shape: gated
 		// but attached to a different (or since-removed) gate — a stale pairing (a
@@ -564,11 +548,6 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, cerr
 	}
 	if createdSandbox {
-		defer func() {
-			if err != nil {
-				p.removeDetached(ctx, id)
-			}
-		}()
 		info = containerInfo{ID: id}
 		info.HostConfig.ReadonlyRootfs = cfg.HostConfig.ReadonlyRootfs
 		if gateID != "" {
@@ -580,26 +559,37 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			}
 		}
 	}
-	return p.startSandbox(ctx, info, workdir, gateID, volume, true)
+	sb, discard, err := p.startSandbox(ctx, info, workdir, gateID, volume, true)
+	if createdSandbox && discard {
+		if mintedToken != "" {
+			return nil, errors.Join(err, p.releaseFailedPair(ctx, spec, gateID, mintedToken, info.ID))
+		}
+		p.removeDetached(ctx, info.ID)
+	}
+	return sb, err
 }
 
-func (p *Provider) startSandbox(ctx context.Context, info containerInfo, workdir, gateID, volume string, start bool) (sandbox.Sandbox, error) {
+// discard permits the creator to remove its stopped container. An inconclusive
+// post-start inspection leaves the workspace to a concurrent adopter or retry.
+func (p *Provider) startSandbox(ctx context.Context, info containerInfo, workdir, gateID, volume string, start bool) (sb sandbox.Sandbox, discard bool, err error) {
 	if gateID != "" {
 		if err := guardedSandbox(info, volume); err != nil {
-			return nil, err
+			return nil, true, err
 		}
 	}
 	if start {
 		if err := p.api.startContainer(ctx, info.ID); err != nil {
-			return nil, err
+			var daemonErr *apiError
+			return nil, errors.As(err, &daemonErr), err
 		}
 	}
 	if gateID != "" && (start || info.State.Health.Status != healthStatusHealthy) {
-		if _, err := p.waitHealthy(ctx, info.ID, "sandbox"); err != nil {
-			return nil, err
+		observed, err := p.waitHealthy(ctx, info.ID, "sandbox")
+		if err != nil {
+			return nil, observed.ID == info.ID && !observed.State.Running, err
 		}
 	}
-	return p.attachInfo(info, workdir, gateID), nil
+	return p.attachInfo(info, workdir, gateID, volume), false, nil
 }
 
 // The immutable startup command and healthcheck must both enter the launcher's
@@ -864,34 +854,52 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 	}
 	gateID, gated := strings.CutPrefix(info.HostConfig.NetworkMode, "container:")
 	if !gated {
-		gateID = ""
-	} else {
-		gate, err := p.api.inspectContainer(ctx, gateName(sessionID))
-		if err != nil {
-			return nil, err
-		}
-		if gate.ID != gateID || ours(gate, sessionID) != nil {
-			return nil, fmt.Errorf("docker: sandbox %s is not paired with its session's gate: %w", info.ID, sandbox.ErrSpecMismatch)
-		}
-		volume, err := guardVolume(gate)
-		if err != nil {
-			return nil, err
-		}
-		if err := guardedSandbox(info, volume); err != nil {
-			return nil, err
-		}
-		if !gate.State.Running || gate.State.Health.Status != healthStatusHealthy || info.State.Health.Status != healthStatusHealthy {
-			return nil, sandbox.ErrNotFound
-		}
+		return p.attachInfo(info, info.Config.WorkingDir, "", ""), nil
 	}
-	return p.attachInfo(info, info.Config.WorkingDir, gateID), nil
+	volume := borrowedGuard(info.Mounts)
+	if err := guardedSandbox(info, volume); err != nil {
+		return nil, err
+	}
+	// An archive revokes the gate token before local output is harvested.
+	// Its former sandbox still runs, and every exec still enters the guard.
+	gate, err := p.api.inspectContainer(ctx, gateName(sessionID))
+	switch {
+	case err != nil && !statusIs(err, 404):
+		return nil, err
+	case err == nil && gate.ID == gateID:
+		if err := ours(gate, sessionID); err != nil {
+			return nil, err
+		}
+		donor, err := guardVolume(gate)
+		if err != nil {
+			return nil, err
+		}
+		if donor != volume {
+			return nil, fmt.Errorf("docker: sandbox %s guard volume differs from its gate's: %w", info.ID, sandbox.ErrSpecMismatch)
+		}
+	default:
+		// The original donor disappeared. Its session label survives on the
+		// borrowed volume. Destroy has no authority over a replacement gate.
+		owned, err := p.api.ownsGuard(ctx, sessionID, volume)
+		if err != nil {
+			return nil, err
+		}
+		if !owned {
+			return nil, fmt.Errorf("docker: sandbox %s guard volume does not belong to its session: %w", info.ID, sandbox.ErrSpecMismatch)
+		}
+		gateID = ""
+	}
+	if info.State.Health.Status != healthStatusHealthy {
+		return nil, fmt.Errorf("docker: gated sandbox %s is waiting for UID admission", info.ID)
+	}
+	return p.attachInfo(info, info.Config.WorkingDir, gateID, volume), nil
 }
 
-func (p *Provider) attachInfo(info containerInfo, workdir, gateID string) *container {
+func (p *Provider) attachInfo(info containerInfo, workdir, gateID, volume string) *container {
 	c := p.attach(info.ID, workdir, gateID, info.HostConfig.ReadonlyRootfs)
-	if gateID != "" {
+	if volume != "" {
 		c.sessionID = domain.ID(info.Config.Labels[sessionLabel])
-		c.guardVolume = borrowedGuard(info.Mounts)
+		c.guardVolume = volume
 	}
 	return c
 }
@@ -938,9 +946,9 @@ type container struct {
 	api         *apiClient
 	id          string
 	workdir     string
-	gateID      string // the session's egress-gate container, or "" when ungated
+	gateID      string // original gate when verified and still present
 	sessionID   domain.ID
-	guardVolume string
+	guardVolume string // the admitted sandbox's guard, including after its gate exits
 	killGrace   time.Duration
 	overrunSlop time.Duration
 	exitBudget  time.Duration
@@ -1116,7 +1124,7 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	state := execState()
 	argv := []string{"/bin/bash", "-c", execWrapper,
 		"map-exec", req.Command, strconv.Itoa(seconds), state}
-	if c.gateID != "" {
+	if c.guardVolume != "" {
 		// The daemon can resolve a named image user again for each exec.
 		argv = uidguard.Command(argv)
 	}
@@ -2185,9 +2193,8 @@ func (c *container) Destroy(ctx context.Context) error {
 	err := removeIgnoring404(ctx, c.api, c.id)
 	if c.gateID != "" {
 		err = errors.Join(err, removeIgnoring404(ctx, c.api, c.gateID))
-		err = errors.Join(err, c.api.releaseGuard(ctx, c.sessionID, c.guardVolume))
 	}
-	return err
+	return errors.Join(err, c.api.releaseGuard(ctx, c.sessionID, c.guardVolume))
 }
 
 // removeIgnoring404 removes a container, treating its absence as success.

@@ -2,12 +2,14 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -33,18 +35,15 @@ const (
 
 func gateName(sessionID domain.ID) string { return "map-gate-" + string(sessionID) }
 
-// ensureGate creates or adopts the session's gate container and returns its inspection,
-// running and healthy. created reports whether this call created it, so the
-// caller can remove the orphan if the sandbox half then fails. The gate owns the
-// network namespace the sandbox joins and enforces its egress, so it must exist
-// and be healthy before the sandbox is created — the admission gate.
-func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (containerInfo, bool, error) {
+// ensureGate returns the running, healthy owner of the sandbox's network
+// namespace, and the minted token only when this call created the gate.
+func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (containerInfo, string, error) {
 	name := gateName(spec.SessionID)
 	info, ierr := p.api.inspectContainer(ctx, name)
 	switch {
 	case ierr == nil: // an existing gate (a re-lease, or a later tool call)
 		if err := ours(info, spec.SessionID); err != nil {
-			return containerInfo{}, false, err
+			return containerInfo{}, "", err
 		}
 		if info.State.Running {
 			// A running gate has already installed its firewall — one that could
@@ -53,23 +52,18 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (container
 			// not yet (or no longer) serving is not handed a sandbox; an
 			// already-healthy gate returns on the first poll.
 			if info.State.Health.Status == healthStatusHealthy {
-				return info, false, nil
+				return info, "", nil
 			}
 			info, err := p.waitHealthy(ctx, info.ID, "gate")
-			return info, false, err
+			return info, "", err
 		}
-		// A stopped gate is not safe to restart: it may have been created but
-		// never had its token persisted (a crash between the create and Persist
-		// below), or it terminated on a revoked token. Remove it and recreate with
-		// a fresh token rather than start a gate the control plane may reject.
-		// Docker force-removes the gate even while a stopped sandbox still shares
-		// its netns (verified), so a dependent sandbox does not block this; that
-		// sandbox is then rebuilt by the NetworkMode-aware adoption in Provision.
-		if err := p.api.removeContainer(ctx, info.ID); err != nil && !statusIs(err, 404) {
-			return containerInfo{}, false, err
+		// Its token may have been revoked or never persisted. Retire the old
+		// gate before minting a replacement for the session.
+		if err := p.retireStoppedGate(ctx, info, spec); err != nil {
+			return containerInfo{}, "", err
 		}
 	case !statusIs(ierr, 404):
-		return containerInfo{}, false, ierr
+		return containerInfo{}, "", ierr
 	}
 
 	// Create. Mint an in-memory token, create the container with it, and persist
@@ -85,40 +79,112 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (container
 	id, err := p.api.createContainer(ctx, name, cfg)
 	if statusIs(err, 404) { // the gate image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Gate.Image); perr != nil {
-			return containerInfo{}, false, perr
+			return containerInfo{}, "", perr
 		}
 		id, err = p.api.createContainer(ctx, name, cfg)
 	}
 	if statusIs(err, 409) { // another executor won the create; adopt its gate
 		won, werr := p.api.inspectContainer(ctx, name)
 		if werr != nil {
-			return containerInfo{}, false, werr
+			return containerInfo{}, "", werr
 		}
 		if werr := ours(won, spec.SessionID); werr != nil {
-			return containerInfo{}, false, werr
+			return containerInfo{}, "", werr
 		}
 		won, werr = p.waitHealthy(ctx, won.ID, "gate")
-		return won, false, werr
+		return won, "", werr
 	}
 	if err != nil {
-		return containerInfo{}, false, err
+		return containerInfo{}, "", err
 	}
-	// Won the create. Persist the token before starting, so the gate authenticates
-	// its first config fetch; on any failure remove the container we just created.
+	// Persist the token before the gate authenticates its first config fetch.
 	if err := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, token); err != nil {
-		p.removeDetached(ctx, id)
-		return containerInfo{}, false, err
+		err = errors.Join(err, p.releaseFailedPair(ctx, spec, id, token, ""))
+		return containerInfo{}, "", err
 	}
 	if err := p.api.startContainer(ctx, id); err != nil {
-		p.removeDetached(ctx, id)
-		return containerInfo{}, false, err
+		err = errors.Join(err, p.releaseFailedPair(ctx, spec, id, token, ""))
+		return containerInfo{}, "", err
 	}
 	info, err = p.waitHealthy(ctx, id, "gate")
 	if err != nil {
-		p.removeDetached(ctx, id)
-		return containerInfo{}, false, err
+		if info.ID == id && !info.State.Running {
+			err = errors.Join(err, p.releaseFailedPair(ctx, spec, id, token, ""))
+		}
+		return containerInfo{}, "", err
 	}
-	return info, true, nil
+	return info, token, nil
+}
+
+// An existing creator may still be starting this gate. Docker's unforced
+// deletion must succeed before its token is revoked. Keep the labeled volume
+// until revocation succeeds so the reaper can still find the session.
+func (p *Provider) retireStoppedGate(ctx context.Context, gate containerInfo, spec sandbox.Spec) error {
+	volume, err := guardVolume(gate)
+	if err != nil {
+		return err
+	}
+	owned, err := p.api.ownsGuard(ctx, spec.SessionID, volume)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("docker: guard volume of gate %s does not belong to its session: %w", gate.ID, sandbox.ErrSpecMismatch)
+	}
+	var token string
+	for _, entry := range gate.Config.Env {
+		if value, found := strings.CutPrefix(entry, "GATE_TOKEN="); found {
+			token = value
+			break
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("docker: gate %s has no token to retire: %w", gate.ID, sandbox.ErrSpecMismatch)
+	}
+	if err := p.api.deleteContainer(ctx, gate.ID, nil); err != nil && !statusIs(err, http.StatusNotFound) {
+		return err
+	}
+	if err := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, token); err != nil {
+		return fmt.Errorf("docker: revoke stopped gate token for session %s: %w", spec.SessionID, err)
+	}
+	return p.api.releaseGuard(ctx, spec.SessionID, volume)
+}
+
+// A published, running gate may already serve another provision. A stopped
+// gate is never restarted by this provider. Revoke its exact token before
+// deleting its last ownership label, so a failed revoke stays discoverable.
+func (p *Provider) releaseFailedPair(ctx context.Context, spec sandbox.Spec, id, token, sandboxID string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	gate, err := p.api.inspectContainer(ctx, id)
+	if err != nil && !statusIs(err, http.StatusNotFound) {
+		return err
+	}
+	if err == nil {
+		if gate.ID != id || ours(gate, spec.SessionID) != nil {
+			return fmt.Errorf("docker: cannot verify ownership of gate %s: %w", id, sandbox.ErrSpecMismatch)
+		}
+	}
+	if !gate.State.Running {
+		if rerr := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, token); rerr != nil {
+			return fmt.Errorf("docker: revoke stopped gate token for session %s: %w", spec.SessionID, rerr)
+		}
+	}
+	// Release the borrower first so Docker can reclaim the gate's anonymous
+	// volume. A failed unforced delete leaves a concurrent adopter alone.
+	if sandboxID != "" {
+		if rerr := p.api.removeStoppedContainer(ctx, sandboxID); rerr != nil && !statusIs(rerr, http.StatusNotFound) {
+			return rerr
+		}
+	}
+	if gate.State.Running || statusIs(err, http.StatusNotFound) {
+		return nil
+	}
+	err = p.api.removeStoppedContainer(ctx, id)
+	if statusIs(err, http.StatusNotFound) {
+		return nil
+	}
+	return err
 }
 
 // waitHealthy reads the daemon's result of either the gate's proxy healthcheck
@@ -133,11 +199,11 @@ func (p *Provider) waitHealthy(ctx context.Context, id, kind string) (containerI
 	for {
 		info, err := p.api.inspectContainer(ctx, id)
 		if err != nil {
-			return info, err
+			return containerInfo{}, err
 		}
 		if kind == "sandbox" && !info.State.Running {
 			if info.State.ExitCode == uidguard.Refused {
-				return info, fmt.Errorf("docker: sandbox %s exited before admission with status %d (reserved gate UID %d refusal)", id, uidguard.Refused, uidguard.GateUID)
+				return info, fmt.Errorf("docker: sandbox %s exited before admission with status %d (possible reserved gate UID %d refusal)", id, uidguard.Refused, uidguard.GateUID)
 			}
 			return info, fmt.Errorf("docker: sandbox %s stopped before UID admission (exit %d)", id, info.State.ExitCode)
 		}
@@ -180,25 +246,29 @@ func borrowedGuard(mounts []mountedVolume) string {
 	return ""
 }
 
+func (api *apiClient) ownsGuard(ctx context.Context, sid domain.ID, name string) (bool, error) {
+	if name == "" || sid.IsZero() {
+		return false, nil
+	}
+	var v volumeInfo
+	if err := api.getJSON(ctx, "/volumes/"+url.PathEscape(name), &v); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return v.Labels[guardSessionLabel] == string(sid), nil
+}
+
 // Removing the gate with v=1 normally removes its anonymous volume. When
 // the gate goes first, Docker retains the volume while a borrower holds it.
 // The borrower's mount references it by name, so its own v=1 will leave it.
 func (api *apiClient) releaseGuard(ctx context.Context, sid domain.ID, name string) error {
-	if name == "" {
-		return nil
-	}
-	path := "/volumes/" + url.PathEscape(name)
-	var v volumeInfo
-	if err := api.getJSON(ctx, path, &v); err != nil {
-		if statusIs(err, http.StatusNotFound) {
-			return nil
-		}
+	owned, err := api.ownsGuard(ctx, sid, name)
+	if err != nil || !owned {
 		return err
 	}
-	if v.Labels[guardSessionLabel] != string(sid) || sid.IsZero() {
-		return nil
-	}
-	resp, err := api.request(ctx, http.MethodDelete, path, nil, nil, "")
+	resp, err := api.request(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(name), nil, nil, "")
 	if err != nil {
 		// A surviving owner or borrower still needs it. Docker checks this
 		// at deletion, so a racing provision never loses a mounted volume.
@@ -210,16 +280,13 @@ func (api *apiClient) releaseGuard(ctx context.Context, sid domain.ID, name stri
 	return resp.Body.Close()
 }
 
-// removeDetached best-effort removes a container on a cleanup path (an orphaned
-// gate or a sandbox that failed to start). It runs under context.WithoutCancel so
-// an already-cancelled provision still tears down what it created, while keeping
-// the caller's trace context so the removal correlates to the provision it
-// unwinds. A failure is logged, not returned — the caller is already unwinding a
-// prior error, and the standalone reaper is the race-safe long-term orphan owner.
+// removeDetached removes a failed creation only while stopped. Docker rejects
+// an unforced delete if a concurrent provision has already started it. The
+// session reaper owns running orphans.
 func (p *Provider) removeDetached(ctx context.Context, id string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := p.api.removeContainer(ctx, id); err != nil && !statusIs(err, 404) {
+	if err := p.api.removeStoppedContainer(ctx, id); err != nil && !statusIs(err, 404) && !statusIs(err, 409) {
 		slog.WarnContext(ctx, "docker: best-effort container removal failed; leaving orphan for the reaper",
 			"container", id, "error", err)
 	}
