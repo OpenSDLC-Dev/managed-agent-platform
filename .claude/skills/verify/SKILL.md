@@ -57,17 +57,18 @@ go test -count=1 -v -run TestRehearsalDefineOutcomes ./acceptance/...
 
 ### Path B — Multi-container Compose stack (real binaries + Postgres + MinIO + modelgateway)
 
-Use when changing `cmd/`, `deploy/compose/`, auth/login, skills/files, or gateway wiring. Run under an isolated project name (`-p verify-smoke`) so a developer's default stack is untouched:
+Use when changing `cmd/`, `deploy/compose/`, auth/login, skills/files, or gateway wiring. Set `COMPOSE_PROJECT_NAME=verify-smoke` so both `./compose` (which injects `PLATFORM_BUILD_VERSION` via `tools/build-version.sh`) and `smoke_login.py`'s internal `docker compose` calls stay isolated from a developer's default stack, and pass an unused path inside a temp directory to `--key-file` (`smoke_login.py` opens it with `O_CREAT|O_EXCL`):
 
 ```bash
 (
   cd deploy/compose
   [ -f .env ] || cp .env.example .env
-  docker compose -p verify-smoke up -d --build postgres minio controlplane brain modelgateway
-  KEY_FILE="$(mktemp)"
-  trap 'rm -f "$KEY_FILE"; docker compose -p verify-smoke down -v' EXIT
-  python3 -I smoke_login.py --key-file "$KEY_FILE"
-  KEY="$(cat "$KEY_FILE")"
+  export COMPOSE_PROJECT_NAME=verify-smoke
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_DIR"; ./compose down -v' EXIT
+  ./compose up -d --build postgres minio controlplane brain modelgateway
+  python3 -I smoke_login.py --key-file "$TMP_DIR/api-key"
+  KEY="$(cat "$TMP_DIR/api-key")"
   curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/agents | grep -q '"data"'
   curl -sf -H "x-api-key: $KEY" http://localhost:8080/v1/environments | grep -q '"data"'
 )
