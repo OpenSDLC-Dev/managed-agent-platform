@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build build-worker crossbuild vet fmt-check test test-fast test-race fuzz cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test review-checklist-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -459,6 +459,12 @@ pipes-test:
 # require synchronization or an explicit `// hygiene:allow <reason>` comment.
 test-hygiene-test:
 	python3 .github/scripts/test_hygiene_test.py
+
+# Validates REVIEW.md's diff-triggered reliability checklist grammar and matcher
+# (plan 75 slice 5). Pass `--diff origin/main` directly to list items triggered
+# by the current branch.
+review-checklist-test:
+	python3 .github/scripts/review_checklist_test.py
 
 # The issue-triage subagent's structured read-only wrapper and PreToolUse Bash
 # guard (.claude/hooks/issue-triage-{read,bash-guard}.sh, #1052).

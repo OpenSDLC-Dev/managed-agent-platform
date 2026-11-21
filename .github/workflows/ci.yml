@@ -30,6 +30,28 @@ jobs:
       - run: make vet
       - name: gofmt
         run: make fmt-check
+      - name: gate-modification audit
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          gate_hits="$(printf '%s\n' "$changed" | grep -E '^(\.claude/|REVIEW\.md$|Makefile$|\.github/workflows/ci\.yml$|\.github/scripts/test_hygiene_baseline\.json$)' || true)"
+          if [ -n "$gate_hits" ]; then
+            {
+              echo "### Gate-modification audit"
+              echo ""
+              echo "This PR modifies verification or review gate files. Confirm no gate, coverage exclusion, or review rule was weakened:"
+              echo ""
+              printf '%s\n' "$gate_hits" | sed 's/^/- `/' | sed 's/$/`/'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Gate-modification audit: PR touches verification/review gate files:"
+            printf '%s\n' "$gate_hits"
+          else
+            echo "ok: PR does not modify verification/review gate files"
+          fi
 
   # Race detector over high-concurrency core packages (plan 75 slice 4).
   race:
@@ -1467,6 +1489,8 @@ jobs:
         run: make pipes-test
       - name: Go tests do not add unannotated time.Sleep or t.Skip calls above baseline
         run: make test-hygiene-test
+      - name: REVIEW.md diff-triggered checklist is valid
+        run: make review-checklist-test
       - name: issue-triage read-only wrapper and Bash guard hold their boundary
         run: make issue-triage-guard-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail

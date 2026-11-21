@@ -14,6 +14,12 @@ Two ground rules for every pass:
 
 - Branch scope reviews the **committed** diff against `main` — commit before launching, or
   uncommitted fixes escape the review.
+- **Load review rules from `origin/main` and carry context forward.** Read `REVIEW.md` from
+  `origin/main` (`git show origin/main:REVIEW.md`) rather than the PR branch so a change
+  cannot modify its own checks, and run `python3 .github/scripts/review_checklist_test.py --diff origin/main`
+  to focus reviewers on the diff-triggered reliability checklist. Tag findings as `Important`,
+  `Nit`, or `Pre-existing`, and pass prior verifier/review findings into follow-up rounds so
+  each pass builds on earlier context instead of restarting blind.
 - **Verify every finding against the source before acting on it.** Both reviewers have
   produced confidently-argued findings that were false (see the `dec.More()` note in
   `internal/provider/config.go`); refute with evidence rather than "fixing" working code.
