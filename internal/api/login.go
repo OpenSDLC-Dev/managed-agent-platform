@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 func (s *server) authConfig(*http.Request) (any, error) {
@@ -24,7 +25,16 @@ func (s *server) authConfig(*http.Request) (any, error) {
 	}{s.authMode, s.nativeLogin()}, nil
 }
 
-func (s *server) authSession(r *http.Request) (any, error) { return requireCookieSession(r) }
+func (s *server) authSession(r *http.Request) (any, error) {
+	session, err := requireCookieSession(r)
+	if err != nil {
+		return nil, err
+	}
+	return struct {
+		login.Session
+		PlatformVersion string `json:"platform_version"`
+	}{session, version.Version}, nil
+}
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if _, err := requireCookieSession(r); err != nil {

@@ -3,10 +3,8 @@
 //
 //	-ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=X.Y.Z"
 //
-// and an uninjected build reports "dev". A bare variable on purpose: no
-// statements means nothing for the coverage gate to count, and there is no
-// version API endpoint — that would be net-new wire surface (plan 27
-// decision 3).
+// and an uninjected build reports "dev". The control plane includes the stamp
+// in its authenticated browser session response.
 package version
 
 // Version is the platform release version, or "dev" when not injected.

@@ -1,0 +1,1 @@
+- **Platform version in the Console** — The signed-in session reports the running control plane build. The Console can use this value to show the new Platform version after an upgrade.

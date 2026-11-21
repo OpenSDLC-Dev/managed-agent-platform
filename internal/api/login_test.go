@@ -22,6 +22,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
 
 const nativeOrigin = "https://console.example"
@@ -293,8 +294,16 @@ func TestNativePasswordLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, raw = s.request("GET", "/api/auth/session", "", nativeHeaders(cookie, ""))
-	var current login.Session
-	json.Unmarshal(raw, &current)
+	var current struct {
+		login.Session
+		PlatformVersion string `json:"platform_version"`
+	}
+	if err := json.Unmarshal(raw, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.PlatformVersion != version.Version || res.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("session build=%q want=%q cache=%q", current.PlatformVersion, version.Version, res.Header.Get("Cache-Control"))
+	}
 	if res.StatusCode != 200 || current.Role != identity.RoleAdmin || len(res.Cookies()) != 0 {
 		t.Fatalf("same-cookie promotion=%d %s", res.StatusCode, raw)
 	}
