@@ -430,7 +430,9 @@ func dispatchAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
 	workToken := requireWorkToken(pool, next)
 	mgmt := dispatchManagementAuth(pool, next)
 	gate := requireGateToken(pool, next)
-	sessionEvents := dispatchSessionEventsAuth(pool, next)
+	// Worker session reads and events have a scoped credential. Owned keys
+	// and other management credentials use the shared management handler.
+	sessionEvents := dualAuth(requireEnvironmentKeyForSession(pool, next), mgmt)
 	skillReads := dualAuth(requireEnvironmentKey(pool, next), mgmt)
 	fileReads := dualAuth(requireSelfHostedEnvironmentKey(pool, next), mgmt)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -519,14 +521,6 @@ func dualAuth(env, mgmt http.Handler) http.Handler {
 	})
 }
 
-// dispatchSessionEventsAuth serves worker-facing session reads/events without
-// widening mutating session CRUD to an environment key. The selected issued
-// Bearer must resolve to an owned key.
-func dispatchSessionEventsAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handler {
-	return dualAuth(requireEnvironmentKeyForSession(pool, next),
-		dispatchManagementAuth(pool, next))
-}
-
 // apiKeyOffered reports whether the request carries a usable management key —
 // the question every lane decision turns on, asked in one place so the two
 // dispatchers cannot answer it differently.
@@ -544,9 +538,8 @@ func dispatchSessionEventsAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Han
 // fixes. One rule — a duplicate is an ambiguous credential, and an ambiguous
 // credential is a 401.
 //
-// A single empty value still counts as absent, which is the documented
-// pre-existing rule dispatchSessionEventsAuth relies on: it is not a usable
-// credential, and treating it as one would knock a Bearer worker off its lane.
+// A single empty value counts as absent so a worker Bearer credential can
+// still reach the session-events handler.
 //
 // The selected issued-key Bearer branch also refuses repeated Authorization.
 // Other machine branches retain their existing bearerToken behavior.

@@ -1,0 +1,1 @@
+- **Identity startup diagnostics** — The control plane relies on the identity verifier to log its configuration at startup. The missing `jwks_uri` diagnostic uses the same URL redaction as the other discovery diagnostics (#376).
