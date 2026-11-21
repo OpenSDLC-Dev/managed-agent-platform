@@ -15,6 +15,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "sandbox: reserved gate UID %d\n", uidguard.GateUID)
 		os.Exit(uidguard.Refused)
 	}
+	if err := checkMount(uidguard.Dir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(126)
+	}
 	if len(os.Args) == 1 {
 		return
 	}
@@ -25,4 +29,16 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr, err)
 	os.Exit(126)
+}
+
+// The launcher path must stay anchored at its read-only volume for later execs.
+func checkMount(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("sandbox: guard mount %s must be a directory", dir)
+	}
+	return nil
 }
