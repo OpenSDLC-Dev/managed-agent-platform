@@ -114,6 +114,13 @@ and `modelgateway.rate_windows`. It keeps historical key rows, usage, initiator
 attribution and organization model budgets. The staging chart changes the control-plane
 Service to `ClusterIP`; browser, SDK and CD traffic use the HTTPS application edge.
 
+On a later upgrade, migration 0069 removes the old system `bootstrap` keys
+in the default tenant, including rotated records. It identifies the system
+keys by their name and missing issuer and owner. Same-name keys with a recorded
+issuer or owner survive. The old seeder could adopt an unowned key and clear
+its issuer. The migration removes that record as a system preset. Usage and
+initiator history keep their recorded IDs.
+
 If your deployment uses an externally managed Kubernetes Secret, remove
 `controlplane-api-key`, `brain-api-key` and any
 `kubectl.kubernetes.io/last-applied-configuration` annotation that retained their

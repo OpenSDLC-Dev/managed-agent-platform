@@ -63,18 +63,23 @@ type apiKeyOwnerJSON struct {
 	ServiceAccountID string `json:"service_account_id,omitempty"`
 }
 
-// Workspace remains a null tenancy seam; this surface has no scope field.
+// Both key APIs use null workspace_id for the default workspace.
+type apiKeyMetadataJSON struct {
+	ID          string           `json:"id"`
+	Type        string           `json:"type"`
+	Name        string           `json:"name"`
+	WorkspaceID *string          `json:"workspace_id"`
+	CreatedAt   time.Time        `json:"created_at"`
+	Status      string           `json:"status"`
+	ExpiresAt   *time.Time       `json:"expires_at"`
+	Principal   *apiKeyOwnerJSON `json:"principal"`
+}
+
+// The private API keeps the recorded legacy issuer and an empty hint when absent.
 type apiKeyJSON struct {
-	ID             string           `json:"id"`
-	Type           string           `json:"type"`
-	Name           string           `json:"name"`
-	WorkspaceID    *string          `json:"workspace_id"`
-	CreatedAt      time.Time        `json:"created_at"`
-	CreatedBy      *actorJSON       `json:"created_by"`
-	PartialKeyHint string           `json:"partial_key_hint"`
-	Status         string           `json:"status"`
-	ExpiresAt      *time.Time       `json:"expires_at"`
-	Principal      *apiKeyOwnerJSON `json:"principal"`
+	apiKeyMetadataJSON
+	CreatedBy      *actorJSON `json:"created_by"`
+	PartialKeyHint string     `json:"partial_key_hint"`
 }
 
 // can_manage is a list-only permission hint, independent of lifecycle guards.
@@ -121,8 +126,7 @@ func actorFor(id *string) *actorJSON {
 	return &actorJSON{ID: *id, Type: kind}
 }
 
-func renderAPIKey(k ManagementKey) apiKeyJSON {
-	creator := actorFor(k.CreatedBy)
+func apiKeyMetadata(k ManagementKey) apiKeyMetadataJSON {
 	var owner *apiKeyOwnerJSON
 	if k.OwnerPrincipalID != nil {
 		alias := principal.PublicID(*k.OwnerPrincipalID, k.OwnerKind)
@@ -131,22 +135,25 @@ func renderAPIKey(k ManagementKey) apiKeyJSON {
 		} else {
 			owner = &apiKeyOwnerJSON{Type: "user_actor", UserID: alias}
 		}
-		if k.CreatedBy != nil {
-			creator = &actorJSON{ID: principal.PublicID(*k.CreatedBy, "user"), Type: "user"}
-		}
 	}
-	return apiKeyJSON{
-		ID:             k.ID,
-		Type:           apiKeyResourceType,
-		Name:           k.Name,
-		WorkspaceID:    nil,
-		CreatedAt:      k.CreatedAt.UTC(),
-		CreatedBy:      creator,
-		PartialKeyHint: k.PartialKeyHint,
-		Status:         k.Status,
-		ExpiresAt:      utcPtr(k.ExpiresAt),
-		Principal:      owner,
+	return apiKeyMetadataJSON{
+		ID:          k.ID,
+		Type:        apiKeyResourceType,
+		Name:        k.Name,
+		WorkspaceID: nil,
+		CreatedAt:   k.CreatedAt.UTC(),
+		Status:      k.Status,
+		ExpiresAt:   utcPtr(k.ExpiresAt),
+		Principal:   owner,
 	}
+}
+
+func renderAPIKey(k ManagementKey) apiKeyJSON {
+	creator := actorFor(k.CreatedBy)
+	if k.OwnerPrincipalID != nil && k.CreatedBy != nil {
+		creator = &actorJSON{ID: principal.PublicID(*k.CreatedBy, "user"), Type: "user"}
+	}
+	return apiKeyJSON{apiKeyMetadataJSON: apiKeyMetadata(k), CreatedBy: creator, PartialKeyHint: k.PartialKeyHint}
 }
 
 // consoleWorkspace resolves the {org}/{workspace} pair the workspace-scoped
@@ -236,7 +243,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 // no paging, which is what the reference's console list returns. The wire
 // surface's `{data, next_page}` envelope stays on the wire surface, and the
 // public Admin API's `{data, first_id, has_more, last_id}` is a third shape for
-// the same resource that we do not serve at all.
+// the same resource, served separately by listAdminAPIKeys.
 func (s *server) listAPIKeys(r *http.Request) (any, error) {
 	if err := consoleWorkspace(r); err != nil {
 		return nil, err

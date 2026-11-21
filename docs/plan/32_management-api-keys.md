@@ -8,6 +8,7 @@ issue: "#378"
 > [docs/HISTORY.md](../HISTORY.md); the five inferences this plan registered are
 > tracked for confirmation by
 > [#389](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/389).
+> For current public list and retrieve support, see the [administrator audit procedure](../self-hosted-security.md#audit-archived-api-keys).
 
 # Management API keys: named, expiring, console-issued (plan 32)
 

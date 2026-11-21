@@ -72,7 +72,7 @@ type ManagementKey struct {
 // outlast the key's expiry before INSERT RETURNING projects it.
 const managementKeyColumns = `id, name,
 	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= clock_timestamp()
-	     THEN 'expired' ELSE status END,
+	     THEN 'expired' ELSE status END AS status,
 	partial_key_hint, created_at, created_by, expires_at, owner_principal_id,
 	coalesce((SELECT kind FROM principals WHERE principals.id = api_keys.owner_principal_id), '')`
 

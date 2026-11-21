@@ -52,7 +52,7 @@ func cliResourceScope(r *http.Request, a clioauth.Authority) error {
 	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != clioauth.WorkspaceID {
 		return errForbidden("workspace is not served by this platform")
 	}
-	if r.URL.Path == cliWorkspacesPath {
+	if r.URL.Path == cliWorkspacesPath || r.URL.Path == adminAPIKeysPath || strings.HasPrefix(r.URL.Path, adminAPIKeysPath+"/") {
 		if !a.Has(clioauth.OrgAdmin) || a.Role != identity.RoleAdmin {
 			return errForbidden("Authentication method not allowed for this endpoint.")
 		}
@@ -71,10 +71,19 @@ func cliResourceScope(r *http.Request, a clioauth.Authority) error {
 	}
 }
 
-func (s *server) cliWorkspaces(r *http.Request) (any, error) {
-	if _, ok := r.Context().Value(cliOAuthContextKey{}).(clioauth.Authority); !ok {
-		return nil, errForbidden("Authentication method not allowed for this endpoint.")
+// The public role gate also admits owned admin keys. Organization audits require
+// a consented CLI grant, including when the router matches an escaped path.
+func cliAdminRead(fn func(*http.Request) (any, error)) func(*http.Request) (any, error) {
+	return func(r *http.Request) (any, error) {
+		a, _ := r.Context().Value(cliOAuthContextKey{}).(clioauth.Authority)
+		if !a.Has(clioauth.OrgAdmin) {
+			return nil, errForbidden("Authentication method not allowed for this endpoint.")
+		}
+		return fn(r)
 	}
+}
+
+func (s *server) cliWorkspaces(r *http.Request) (any, error) {
 	// The default tenancy is reserved, not an administrable workspace row.
 	return struct {
 		Data    []any   `json:"data"`

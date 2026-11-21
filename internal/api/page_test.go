@@ -244,12 +244,14 @@ const (
 	nullNext                         // "next_page": null
 	filesNext                        // filePageJSON's four keys, next_page null among them
 	memoriesNext                     // omitsNext plus the recorded "prefixes": []
+	adminKeyIDs                      // first_id, last_id and has_more
 )
 
 // listRoutes classifies every list route server.go registers, keyed by the
 // pattern it registers. TestListRoutesAreClassified holds the two to each
 // other, so a list added later fails until it is classified here.
 var listRoutes = map[string]listEnvelope{
+	auditKeysPath:                            adminKeyIDs,
 	"/v1/agents":                             omitsNext,
 	"/v1/agents/{id}/versions":               omitsNext,
 	"/v1/environments":                       nullNext,
@@ -348,6 +350,8 @@ func registeredLists(t *testing.T, file string) map[string]bool {
 // happens to be full.
 func TestListTerminalPageEnvelope(t *testing.T) {
 	s := newTestServer(t)
+	auditHeaders := asBearer(issueCLITokens(t, s, "org:admin")["access_token"].(string))
+	issueAPIKey(t, s, map[string]any{"name": "pagination fixture"})
 	agentID, envID := fixture(t, s)
 	if status, res := s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{"version": 1, "name": "v2"}); status != http.StatusOK {
 		t.Fatalf("second agent version: %d %v", status, res)
@@ -386,6 +390,7 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 	enqueueToolExec(t, s, agentID, workEnvID)
 
 	paths := map[string]string{
+		auditKeysPath:                            auditKeysPath,
 		"/v1/agents":                             "/v1/agents",
 		"/v1/agents/{id}/versions":               "/v1/agents/" + agentID + "/versions",
 		"/v1/environments":                       "/v1/environments",
@@ -409,6 +414,13 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 	}
 	get := func(t *testing.T, pattern, path string) map[string]any {
 		t.Helper()
+		if pattern == auditKeysPath {
+			status, body := s.decode(s.doRaw(http.MethodGet, path, nil, auditHeaders))
+			if status != http.StatusOK {
+				t.Fatalf("GET %s: HTTP %d", path, status)
+			}
+			return body
+		}
 		if pattern == "/v1/environments/{id}/work" {
 			res, body, raw := s.workReq(t, http.MethodGet, path, key, nil)
 			if res.StatusCode != http.StatusOK {
@@ -442,6 +454,11 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 			wantExactKeys(t, body, "data", "next_page")
 		case filesNext:
 			wantExactKeys(t, body, "data", "next_page", "has_more", "first_id", "last_id")
+		case adminKeyIDs:
+			wantExactKeys(t, body, "data", "has_more", "first_id", "last_id")
+			if body["has_more"] != false {
+				t.Error("terminal Admin API key page has more results")
+			}
 		}
 		if env == nullNext || env == filesNext {
 			if c := nextPageOrNull(t, body); c != "" {
@@ -476,7 +493,15 @@ func TestListTerminalPageEnvelope(t *testing.T) {
 					wantExactKeys(t, body, "data", "next_page", "prefixes")
 					wantEmptyPrefixes(t, body)
 				}
-				query = path + "?limit=1&page=" + url.QueryEscape(wantCursor(t, body))
+				if env == adminKeyIDs {
+					lastID, _ := body["last_id"].(string)
+					if body["has_more"] != true || lastID == "" {
+						t.Fatal("missing Admin API key cursor before the terminal page")
+					}
+					query = path + "?limit=1&after_id=" + url.QueryEscape(lastID)
+				} else {
+					query = path + "?limit=1&page=" + url.QueryEscape(wantCursor(t, body))
+				}
 			}
 		})
 	}

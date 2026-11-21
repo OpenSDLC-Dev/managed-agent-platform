@@ -80,9 +80,9 @@ func TestEveryIdentityReachableRouteDeclaresARole(t *testing.T) {
 			}
 		case laneCLIOAuth:
 			// Consent and grant exchange verify protocol credentials inside
-			// their handlers. The resource route requires an OAuth admin.
+			// their handlers. The organization reads require an OAuth admin.
 			want := ""
-			if reg.pattern == "GET /v1/organizations/workspaces" {
+			if strings.HasPrefix(reg.pattern, "GET /v1/organizations/") {
 				want = "RoleAdmin"
 			}
 			if reg.isFunc || reg.role != want {
@@ -261,7 +261,8 @@ func laneOf(pattern string) lane {
 		return laneAuth
 	}
 	switch pattern {
-	case "GET +cliAuthorizePath", "POST +cliAuthorizePath", "POST +cliTokenPath", "GET /v1/organizations/workspaces":
+	case "GET +cliAuthorizePath", "POST +cliAuthorizePath", "POST +cliTokenPath",
+		"GET /v1/organizations/workspaces", "GET /v1/organizations/api_keys", "GET /v1/organizations/api_keys/{id}":
 		return laneCLIOAuth
 	}
 	if strings.Contains(pattern, "gateconfig.Path") {
