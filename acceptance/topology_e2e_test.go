@@ -320,6 +320,55 @@ func waitUsageRows(ctx context.Context, t *testing.T, st *mgstore.Store, session
 	}
 }
 
+// extractToolResultText decodes a replayed Anthropic Messages request body and
+// returns the concatenated text of the first tool_result block, asserting that
+// is_error is false. Searching only the tool_result prevents false passes from
+// markers that also appear verbatim inside the assistant's bash command string.
+func extractToolResultText(t *testing.T, body string) string {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type    string `json:"type"`
+				IsError bool   `json:"is_error"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal upstream request body: %v\nbody: %s", err, body)
+	}
+	var out strings.Builder
+	found := false
+	for _, msg := range req.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		for _, blk := range msg.Content {
+			if blk.Type != "tool_result" {
+				continue
+			}
+			found = true
+			if blk.IsError {
+				t.Errorf("tool_result returned is_error=true: %+v", blk.Content)
+			}
+			for _, inner := range blk.Content {
+				if inner.Type == "text" {
+					out.WriteString(inner.Text)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no tool_result block found in upstream request body:\n%s", body)
+	}
+	return out.String()
+}
+
 func reapSessionContainers(sessionID string, withGate bool) {
 	_ = exec.Command("docker", "rm", "--force", "--volumes", "map-"+sessionID).Run()
 	if withGate {
@@ -542,13 +591,17 @@ fi`, originAddr, originAddr, hostAddr, originPort)
 			t.Errorf("upstream call %d x-api-key = %q, want sealed vendor secret (not delegated token)", i+1, c.APIKey)
 		}
 	}
+	toolOut := extractToolResultText(t, calls[1].Body)
 	for _, want := range []string{"HTTP/1.1 200", "topology-origin-ok", "HTTP/1.1 403", "DIRECT=BLOCKED"} {
-		if !strings.Contains(calls[1].Body, want) {
+		if !strings.Contains(toolOut, want) {
 			hits := 0
 			gateConfigHits.Range(func(_, _ any) bool { hits++; return true })
 			logs, _ := exec.Command("docker", "logs", "map-gate-"+sess.ID).CombinedOutput()
-			t.Errorf("turn 2 replayed tool_result missing %q (gate config fetches=%d, cpGateURL=%s);\ngate logs:\n%s\nbody:\n%s", want, hits, cpGateURL, logs, calls[1].Body)
+			t.Errorf("turn 2 tool_result missing %q (gate config fetches=%d, cpGateURL=%s);\ngate logs:\n%s\ntool_result:\n%s", want, hits, cpGateURL, logs, toolOut)
 		}
+	}
+	if strings.Contains(toolOut, "DIRECT=OPEN") {
+		t.Errorf("direct egress bypassing the gate succeeded:\n%s", toolOut)
 	}
 
 	rows := waitUsageRows(ctx, t, mgSt, sess.ID, 2)
@@ -722,8 +775,9 @@ func TestFullTopologyBYOCWorkerWithModelGateway(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("upstream calls = %d, want 2", len(calls))
 	}
-	if !strings.Contains(calls[1].Body, "byoc-worker-proof-ok") {
-		t.Errorf("turn 2 replayed tool_result missing BYOC worker output; body:\n%s", calls[1].Body)
+	toolOut := extractToolResultText(t, calls[1].Body)
+	if !strings.Contains(toolOut, "byoc-worker-proof-ok") {
+		t.Errorf("turn 2 tool_result missing BYOC worker output; got:\n%s", toolOut)
 	}
 
 	rows := waitUsageRows(ctx, t, mgSt, sess.ID, 2)

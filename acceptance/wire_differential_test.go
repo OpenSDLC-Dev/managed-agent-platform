@@ -32,11 +32,25 @@ var approvedWireExtras = map[string]map[string]string{
 	// in docs/DIVERGENCES.md.
 }
 
+// approvedNullableRequired enumerates the specific `api:"required"` SDK fields
+// whose reference JSON schema permits null (the Go SDK code generator omits a
+// `nullable` struct tag on response fields, so listing them explicitly keeps
+// non-nullable required fields such as id, type, name, and created_at strictly
+// rejecting JSON null).
+var approvedNullableRequired = map[string]map[string]bool{
+	"agent":       {"archived_at": true, "multiagent": true},
+	"environment": {"archived_at": true},
+	"session":     {"archived_at": true, "budget": true},
+	"vault":       {"archived_at": true},
+	"credential":  {"archived_at": true},
+}
+
 // approvedOmittedRequired records the narrow set of SDK `api:"required"` keys
 // intentionally omitted on the wire, each naming its docs/DIVERGENCES.md entry.
 var approvedOmittedRequired = map[string]map[string]string{
 	// Deliberately empty: every `api:"required"` field on the exercised surfaces
-	// is emitted on the wire (or explicit JSON null when tagged `nullable`).
+	// is emitted on the wire (or explicit JSON null when listed in
+	// approvedNullableRequired).
 }
 
 func surfaceFamily(surface string) string {
@@ -51,44 +65,45 @@ func jsonFieldName(tag string) string {
 	return name
 }
 
-// assertWireShape verifies both halves of SDK wire compatibility on a decoded
-// anthropic-sdk-go response struct:
-//  1. No unknown extra wire fields outside approvedWireExtras[surface].
-//  2. Every field tagged `api:"required"` whose companion `JSON.<Field>`
-//     respjson.Field exists is present on the wire (Valid() == true, or
-//     explicit JSON null for nullable required fields), unless explicitly
-//     justified in approvedOmittedRequired with a docs/DIVERGENCES.md citation.
-//     This closes the inverse check noted on assertNoExtras in dcf_test.go.
-func assertWireShape(t *testing.T, surface string, val any) {
-	t.Helper()
+// checkWireShape returns all wire-conformance violations for a decoded SDK
+// response struct:
+//  1. Unknown extra wire fields outside approvedWireExtras[surface].
+//  2. Missing or invalid `api:"required"` fields (accepting explicit JSON null
+//     only when the field carries a nullable tag or is explicitly listed in
+//     approvedNullableRequired, and omission only when justified in
+//     approvedOmittedRequired with a docs/DIVERGENCES.md citation).
+func checkWireShape(surface string, val any) []string {
 	rv := reflect.ValueOf(val)
 	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
-			t.Fatalf("%s: nil response value", surface)
+			return []string{surface + ": nil response value"}
 		}
 		rv = rv.Elem()
 	}
 	if rv.Kind() != reflect.Struct {
-		t.Fatalf("%s: expected struct, got %s", surface, rv.Kind())
+		return []string{surface + ": expected struct, got " + rv.Kind().String()}
 	}
 
 	jsonField := rv.FieldByName("JSON")
 	if !jsonField.IsValid() || jsonField.Kind() != reflect.Struct {
-		t.Fatalf("%s: struct %s has no respjson metadata struct JSON", surface, rv.Type())
+		return []string{surface + ": struct " + rv.Type().String() + " has no respjson metadata struct JSON"}
 	}
 
+	var errs []string
 	allowed := approvedWireExtras[surface]
 	if extrasVal := jsonField.FieldByName("ExtraFields"); extrasVal.IsValid() {
 		if extras, ok := extrasVal.Interface().(map[string]respjson.Field); ok {
 			for k := range extras {
 				if _, ok := allowed[k]; !ok {
-					t.Errorf("%s: undocumented extra wire field %q (record in docs/DIVERGENCES.md and approvedWireExtras if intentional)", surface, k)
+					errs = append(errs, surface+": undocumented extra wire field "+k+" (record in docs/DIVERGENCES.md and approvedWireExtras if intentional)")
 				}
 			}
 		}
 	}
 
-	omittedOK := approvedOmittedRequired[surfaceFamily(surface)]
+	family := surfaceFamily(surface)
+	nullableOK := approvedNullableRequired[family]
+	omittedOK := approvedOmittedRequired[family]
 	rt := rv.Type()
 	for i := 0; i < rt.NumField(); i++ {
 		sf := rt.Field(i)
@@ -107,16 +122,69 @@ func assertWireShape(t *testing.T, surface string, val any) {
 		if !ok {
 			continue
 		}
-		if rf.Valid() || rf.Raw() == "null" {
+		if rf.Valid() {
 			continue
 		}
 		wireKey := jsonFieldName(sf.Tag.Get("json"))
+		isNullable := hasTagToken(apiTag, "nullable") || hasTagToken(sf.Tag.Get("json"), "nullable") || nullableOK[wireKey]
+		if isNullable && rf.Raw() == "null" {
+			continue
+		}
 		if rf.Raw() == "" {
 			if _, ok := omittedOK[wireKey]; ok {
 				continue
 			}
 		}
-		t.Errorf("%s: required SDK field %s (%s) was missing or invalid on the wire (raw=%q)", surface, sf.Name, wireKey, rf.Raw())
+		errs = append(errs, surface+": required SDK field "+sf.Name+" ("+wireKey+") was missing or invalid on the wire (raw="+rf.Raw()+")")
+	}
+	return errs
+}
+
+// assertWireShape verifies both halves of SDK wire compatibility on a decoded
+// anthropic-sdk-go response struct, closing the inverse check noted on
+// assertNoExtras in dcf_test.go.
+func assertWireShape(t *testing.T, surface string, val any) {
+	t.Helper()
+	for _, msg := range checkWireShape(surface, val) {
+		t.Error(msg)
+	}
+}
+
+// TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras proves the wire
+// shape helper catches all three defect classes: null on a non-nullable
+// required field, omitted required field, and undocumented extra keys.
+func TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras(t *testing.T) {
+	var a anthropic.BetaManagedAgentsAgent
+	if err := json.Unmarshal([]byte(`{
+		"id": null,
+		"type": "agent",
+		"name": "x",
+		"version": 1,
+		"model": {"id": "claude-sonnet-4-6"},
+		"system": "",
+		"description": "",
+		"tools": [],
+		"mcp_servers": [],
+		"skills": [],
+		"metadata": {},
+		"created_at": "2026-01-01T00:00:00Z",
+		"updated_at": "2026-01-01T00:00:00Z",
+		"archived_at": null,
+		"multiagent": null,
+		"undocumented_field": true
+	}`), &a); err != nil {
+		t.Fatalf("unmarshal synthetic agent: %v", err)
+	}
+	errs := checkWireShape("agent.synthetic", &a)
+	joined := strings.Join(errs, "\n")
+	if !strings.Contains(joined, "required SDK field ID (id)") {
+		t.Errorf("expected rejection of null non-nullable required field id; got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "undocumented extra wire field undocumented_field") {
+		t.Errorf("expected rejection of undocumented extra field; got:\n%s", joined)
+	}
+	if strings.Contains(joined, "ArchivedAt") || strings.Contains(joined, "Multiagent") {
+		t.Errorf("nullable required fields archived_at/multiagent should be accepted as null; got:\n%s", joined)
 	}
 }
 
