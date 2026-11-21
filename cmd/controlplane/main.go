@@ -255,8 +255,6 @@ func run(ctx context.Context) error {
 	}
 	if loginCfg.Mode == login.ModePassword {
 		slog.Info("native password login configured for development")
-	} else {
-		slog.Info("identity configured", "mode", string(verifier.Mode()))
 	}
 
 	// The dream runner's three knobs (plan 41 §4.7), the controlplane's first

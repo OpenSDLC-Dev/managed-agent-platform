@@ -432,12 +432,9 @@ func (v *Verifier) verify(ctx context.Context, token, expectedNonce string) (Ide
 		// canonical value: the operator's.
 		Issuer:  v.issuer,
 		Subject: std.Subject,
-		// Bounded, because these two are the only fields whose length the token
-		// alone decides, and principal.Resolve persists them. Under maxTokenBytes a
-		// claim can reach roughly 12 KiB, which is a valid login turning into an
-		// insert failure against a bounded column. Truncating keeps the login
-		// working and the descriptive value intact; neither field carries any
-		// authority, so nothing is decided on the bytes dropped.
+		// Bound the size of the profile values principal.Resolve stores. A token
+		// can supply a claim of roughly 12 KiB under maxTokenBytes. Truncation
+		// keeps a displayable value and has no effect on authority.
 		//
 		// Email is NOT verified here. Requiring email_verified would deny every
 		// human on the many providers that never emit it, and this package has
@@ -446,8 +443,7 @@ func (v *Verifier) verify(ctx context.Context, token, expectedNonce string) (Ide
 		// self-service profile attributes, Casdoor included, the user chooses
 		// this string. principal.Resolve (internal/principal) is written to
 		// that rule: it conflicts on (issuer, subject) — never on email — and
-		// treats these two as the provider's to restate, refreshing them
-		// alongside last_seen_at on every request rather than writing them once.
+		// lets the provider refresh both fields alongside last_seen_at at sign-in.
 		// Descriptive fields confer no authority. Remove PostgreSQL's forbidden
 		// NUL before bounding, so discarded bytes do not consume the profile cap.
 		Email:       truncate(strings.ReplaceAll(stringClaim(all, v.emailClaim), "\x00", ""), maxProfileBytes),

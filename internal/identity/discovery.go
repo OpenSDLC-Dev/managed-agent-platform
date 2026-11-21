@@ -57,7 +57,7 @@ func validateDiscovery(doc discoveryDoc, issuer string) error {
 			redactURL(target), redactURL(issuer))
 	}
 	if doc.JWKSURI == "" {
-		return fmt.Errorf("discovery: %s publishes no jwks_uri", target)
+		return fmt.Errorf("discovery: %s publishes no jwks_uri", redactURL(target))
 	}
 	if err := requireHTTPS(doc.JWKSURI); err != nil {
 		return fmt.Errorf("discovery: jwks_uri %w", err)
