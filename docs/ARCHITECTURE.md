@@ -890,7 +890,7 @@ new backend inherits the whole battery. The queue still has one production imple
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
 statement coverage** over the logic packages of `./internal/...`). `make test-fast`
-runs the container-free packages for fast local iteration; `make fuzz` (and `.github/workflows/fuzz.yml` weekly) exercises the repository's zero-dependency Go `Fuzz*` and property tests across model conversion, shell quoting, egress host policies, domain IDs, and pagination cursors; `internal/pgtest` clones a
+runs the container-free packages for fast local iteration; `make test-race` (and CI's `race` job) runs the Go race detector over the high-concurrency core packages alongside `make test-hygiene-test`'s `time.Sleep`/`t.Skip` baseline ratchet; `make fuzz` (and `.github/workflows/fuzz.yml` weekly) exercises the repository's zero-dependency Go `Fuzz*` and property tests across model conversion, shell quoting, egress host policies, domain IDs, and pagination cursors; `internal/pgtest` clones a
 once-migrated template database per test (`NewPool`), while `FreshDB` keeps an empty
 database for migration tests, and `internal/dockertest` reaps confirmed dead-owner
 Linux fixture containers immediately alongside its six-hour age fallback. On top sits the eval

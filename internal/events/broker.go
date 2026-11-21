@@ -161,10 +161,12 @@ func (b *Broker) listen(ctx context.Context) {
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-		b.setReady(ctx, true)
-		// Heal the window between Subscribe/Append and LISTEN becoming
-		// active: everyone re-reads the log once.
-		b.wakeAll()
+		// Deliver the initial heal-wake to every current subscriber BEFORE closing
+		// b.ready under the same mutex. Otherwise a caller woken by Ready() can
+		// subscribe a second subscriber and drain wakes before wakeAll() runs,
+		// delivering a stale heal-wake to a subscriber that joined after LISTEN
+		// was already active.
+		b.markReadyAndWake(ctx)
 		for {
 			n, err := conn.Conn().WaitForNotification(ctx)
 			if err != nil {
@@ -176,6 +178,30 @@ func (b *Broker) listen(ctx context.Context) {
 		// the conn rather than returning LISTEN state to the pool.
 		_ = conn.Conn().Close(context.Background())
 		conn.Release()
+	}
+}
+
+// markReadyAndWake delivers a coalesced heal-wake to every current subscriber
+// and then closes b.ready atomically under b.mu. A canceled listener leaves
+// b.ready untouched because the next listener generation owns it.
+func (b *Broker) markReadyAndWake(ctx context.Context) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	for _, set := range b.subs {
+		for s := range set {
+			select {
+			case s.wake <- struct{}{}:
+			default:
+			}
+		}
+	}
+	select {
+	case <-b.ready:
+	default:
+		close(b.ready)
 	}
 }
 
@@ -197,19 +223,6 @@ func (b *Broker) setReady(ctx context.Context, ready bool) {
 		close(b.ready)
 	} else if !ready && closed {
 		b.ready = make(chan struct{})
-	}
-}
-
-func (b *Broker) wakeAll() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, set := range b.subs {
-		for s := range set {
-			select {
-			case s.wake <- struct{}{}:
-			default:
-			}
-		}
 	}
 }
 

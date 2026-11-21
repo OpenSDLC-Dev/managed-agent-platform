@@ -88,6 +88,7 @@ make verify               # the whole Go gate: build + crossbuild + vet + fmt-ch
 make build crossbuild     # host build + linux/arm cross-compile of ./internal/... (worker portability)
 make vet fmt-check        # lint
 make test-fast            # fast container-free unit/tool packages for inner-loop feedback (not a merge gate)
+make test-race            # go test -race over high-concurrency core packages (also CI `race` job)
 make fuzz                 # short fuzzing pass over all Fuzz* targets (outside verify; also scheduled in fuzz.yml)
 make test cover-gate      # go test -count=1 with the coverage profile, then the ≥90% gate
 ./deploy/compose/compose --profile console up --build   # local: Console+edge+controlplane+brain+executor+modelgateway+Postgres+Silo+OpenBao(+Jaeger)
@@ -99,6 +100,7 @@ make evals-alert-test    # ...and the eval notifier's classifier, which its sche
 make identifiers-test    # ...and the documentation, for the four shapes an operator's coordinates take (#356's rule)
 make pins-test           # ...and every `uses:` in .github/workflows/, for the commit-SHA pin dependabot.yml requires, every `actions/checkout` for the `persist-credentials: false` beside it, and every setup-go step and Go image reference for go.mod's `toolchain` release (images by digest too)
 make pipes-test          # ...and every pipeline in them, for a reading end that can exit 0 before EOF: under `pipefail` a `grep -q` that has matched carries the writer's SIGPIPE to 141 and the step reports a miss
+make test-hygiene-test   # ...and Go test files, ratcheting baseline counts of time.Sleep and t.Skip so new ad-hoc sleeps/skips require explicit justification
 make issue-triage-guard-test # ...and the issue-triage read-only wrapper and PreToolUse Bash guard (.claude/hooks/issue-triage-*.sh)
 make tf-corpus-check     # ...and terraform's own `fmt` exit on every fixture of the shared .tf corpus (tools/tfcorpus) that both hand-written readers are pinned to (#762)
 make sdk-bump-report     # (outside the gate) what an SDK pin bump moved under: anchors gone at the pin, `absent at` anchors back at it, line spans the sources contradict, stamps behind it, and what went unchecked; fails while a transition awaits a disposition (plan 51)
