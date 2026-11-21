@@ -884,6 +884,28 @@ func TestProvisionGateStartErrorRemovesGate(t *testing.T) {
 	}
 }
 
+func TestProvisionGateStartTransportErrorKeepsOwnership(t *testing.T) {
+	m := &fakeMinter{token: "test-gate-token"}
+	s := gatedSpec(m)
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/" + gateName(s.SessionID) + "/json":
+			http.NotFound(w, r)
+		case "/containers/create":
+			io.WriteString(w, `{"Id":"gate1"}`)
+		case "/containers/gate1/start":
+			// Docker received the POST, but the creator never sees its result.
+			panic(http.ErrAbortHandler)
+		default:
+			t.Errorf("unexpected operation after an ambiguous start: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	sb, err := p.Provision(t.Context(), s)
+	if sb != nil || err == nil || !slices.Equal(m.persisted, []string{m.token}) || len(m.scopedRevokes) != 0 {
+		t.Error("ambiguous gate start lost its token or returned a sandbox")
+	}
+}
+
 // TestDestroyRemovesGatePair removes the sandbox and its gate, and treats a 404
 // on either as success — and removes the gate even when the sandbox removal errors.
 func TestDestroyRemovesGatePair(t *testing.T) {

@@ -103,7 +103,12 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (container
 		return containerInfo{}, "", err
 	}
 	if err := p.api.startContainer(ctx, id); err != nil {
-		err = errors.Join(err, p.releaseFailedPair(ctx, spec, id, token, ""))
+		// A lost response can precede a successful start. Keep the labeled
+		// gate and token for adoption or the reaper while that is unknown.
+		var daemonErr *apiError
+		if errors.As(err, &daemonErr) {
+			err = errors.Join(err, p.releaseFailedPair(ctx, spec, id, token, ""))
+		}
 		return containerInfo{}, "", err
 	}
 	info, err = p.waitHealthy(ctx, id, "gate")
