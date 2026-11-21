@@ -9,7 +9,7 @@ import (
 // rewriteLinks returns rendered lines and the first bad target. Notes can use
 // the rendered length even if the group will be omitted. Other callers reject
 // any error before publishing the returned lines.
-func rewriteLinks(lines []string, code []bool, target func(string) (string, error)) ([]string, error) {
+func rewriteLinks(lines []string, layout []markdownLine, target func(string) (string, error)) ([]string, error) {
 	out := append([]string(nil), lines...)
 	var firstErr error
 	var b strings.Builder
@@ -21,7 +21,7 @@ func rewriteLinks(lines []string, code []bool, target func(string) (string, erro
 			b.Reset()
 		}
 	}
-	markdownDestinations(lines, code, func(i int, span textSpan) {
+	markdownDestinations(lines, layout, func(i int, span textSpan) {
 		dest := lines[i][span.start:span.end]
 		if !needsLinkBase(dest) {
 			return
@@ -77,9 +77,9 @@ func rootLink(dest, dotBase, docsBase string) (string, error) {
 	return base + rel, nil
 }
 
-func absolutizeLinks(lines []string, code []bool, base, version string) ([]string, error) {
+func absolutizeLinks(lines []string, layout []markdownLine, base, version string) ([]string, error) {
 	prefix := base + "/blob/v" + version + "/"
-	return rewriteLinks(lines, code, func(dest string) (string, error) {
+	return rewriteLinks(lines, layout, func(dest string) (string, error) {
 		result, err := rootLink(dest, prefix, prefix+"docs/")
 		if err == nil && base == "" {
 			return "", fmt.Errorf("relative link target %q cannot be made absolute without the [Unreleased] link reference", dest)
@@ -88,14 +88,14 @@ func absolutizeLinks(lines []string, code []bool, base, version string) ([]strin
 	})
 }
 
-func rebaseLinks(lines []string, code []bool) ([]string, error) {
-	return rewriteLinks(lines, code, func(dest string) (string, error) {
+func rebaseLinks(lines []string, layout []markdownLine) ([]string, error) {
+	return rewriteLinks(lines, layout, func(dest string) (string, error) {
 		return rootLink(dest, "../../", "../")
 	})
 }
 
-func unrebaseLinks(lines []string, code []bool) []string {
-	out, _ := rewriteLinks(lines, code, func(dest string) (string, error) {
+func unrebaseLinks(lines []string, layout []markdownLine) []string {
+	out, _ := rewriteLinks(lines, layout, func(dest string) (string, error) {
 		if rel, ok := strings.CutPrefix(dest, "../../"); ok {
 			return "./" + rel, nil
 		}

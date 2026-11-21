@@ -116,18 +116,18 @@ func loadFragments(dir string) ([]fragment, error) {
 			return nil, fmt.Errorf("changelog.d/%s: a fragment is the final CHANGELOG entry verbatim and must start with %q", name, "- ")
 		}
 		lines := strings.Split(body, "\n")
-		code, err := codeLines(lines)
+		layout, err := markdownLines(lines)
 		if err != nil {
 			return nil, fmt.Errorf("changelog.d/%s: %w", name, err)
 		}
 		for i, line := range lines {
-			if !code[i] && headingRe.MatchString(line) {
+			if layout[i] != codeLine && headingRe.MatchString(line) {
 				return nil, fmt.Errorf("changelog.d/%s: headings belong to the assembler, not a fragment", name)
 			}
 		}
 		// Use the release-notes rules with placeholder metadata. Keep the
 		// original body for assembly, which copies fragments verbatim.
-		if _, err := absolutizeLinks(lines, code, "https://example.invalid/repo", "0.0.0"); err != nil {
+		if _, err := absolutizeLinks(lines, layout, "https://example.invalid/repo", "0.0.0"); err != nil {
 			return nil, fmt.Errorf("changelog.d/%s: %w", name, err)
 		}
 		frags = append(frags, fragment{
@@ -191,9 +191,9 @@ func splitTrailingRefs(lines []string) (refs, doc []string) {
 	return refs, doc
 }
 
-func changelogSections(lines []string) (refs, doc []string, code []bool, err error) {
+func changelogSections(lines []string) (refs, doc []string, layout []markdownLine, err error) {
 	refs, doc = splitTrailingRefs(lines)
-	code, err = codeLines(doc)
+	layout, err = markdownLines(doc)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -221,7 +221,7 @@ func changelogSections(lines []string) (refs, doc []string, code []bool, err err
 		if key == "" {
 			continue
 		}
-		if code[i] {
+		if layout[i] == codeLine {
 			hidden = append(hidden, hiddenHeading{key, i})
 		} else {
 			visible[key] = true
@@ -232,12 +232,12 @@ func changelogSections(lines []string) (refs, doc []string, code []bool, err err
 			return nil, nil, nil, fmt.Errorf("Markdown fence hides changelog heading %q at line %d", doc[heading.line], heading.line+1)
 		}
 	}
-	return refs, doc, code, nil
+	return refs, doc, layout, nil
 }
 
-func sectionEnd(doc []string, code []bool, start int) int {
+func sectionEnd(doc []string, layout []markdownLine, start int) int {
 	for i := start + 1; i < len(doc); i++ {
-		if !code[i] && strings.HasPrefix(doc[i], "## ") {
+		if layout[i] != codeLine && strings.HasPrefix(doc[i], "## ") {
 			return i
 		}
 	}
@@ -336,18 +336,18 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		return "", fmt.Errorf("date %q is not a real YYYY-MM-DD date: %v", date, err)
 	}
-	refs, doc, code, err := changelogSections(strings.Split(content, "\n"))
+	refs, doc, layout, err := changelogSections(strings.Split(content, "\n"))
 	if err != nil {
 		return "", err
 	}
 	for i, l := range doc {
-		if !code[i] && strings.HasPrefix(l, "## ["+version+"]") {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			return "", fmt.Errorf("section [%s] already exists", version)
 		}
 	}
 	unrelIdx := -1
 	for i, l := range doc {
-		if !code[i] && l == "## [Unreleased]" {
+		if layout[i] != codeLine && l == "## [Unreleased]" {
 			if unrelIdx >= 0 {
 				return "", fmt.Errorf("two ## [Unreleased] sections — refusing to release only the first")
 			}
@@ -357,7 +357,7 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	if unrelIdx < 0 {
 		return "", fmt.Errorf("no ## [Unreleased] section")
 	}
-	restIdx := sectionEnd(doc, code, unrelIdx)
+	restIdx := sectionEnd(doc, layout, unrelIdx)
 	tail := joinTrimmed(doc[unrelIdx+1 : restIdx])
 	// The pointer paragraph is plumbing, never release content — strip it
 	// whether it stands alone or something was (wrongly) appended below it.
@@ -414,13 +414,13 @@ func notes(content, version string) (string, error) {
 	if !versionRe.MatchString(version) {
 		return "", fmt.Errorf("version %q is not X.Y.Z", version)
 	}
-	_, doc, code, err := changelogSections(strings.Split(content, "\n"))
+	_, doc, layout, err := changelogSections(strings.Split(content, "\n"))
 	if err != nil {
 		return "", err
 	}
 	secIdx := -1
 	for i, l := range doc {
-		if !code[i] && strings.HasPrefix(l, "## ["+version+"]") {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			secIdx = i
 			break
 		}
@@ -428,7 +428,7 @@ func notes(content, version string) (string, error) {
 	if secIdx < 0 {
 		return "", fmt.Errorf("no section [%s] in the changelog", version)
 	}
-	end := sectionEnd(doc, code, secIdx)
+	end := sectionEnd(doc, layout, secIdx)
 	body := joinTrimmed(doc[secIdx+1:end]) + "\n"
 	// An archived section's stub must never ship as a release body; re-runs
 	// of a release workflow read the tag's checkout, where the section is
@@ -507,12 +507,12 @@ func runAssemble(changelogPath, dir, version, date string) error {
 // gate a release. The release workflow's tag-sanity check compares it to
 // the tag.
 func latest(content string) (string, error) {
-	_, doc, code, err := changelogSections(strings.Split(content, "\n"))
+	_, doc, layout, err := changelogSections(strings.Split(content, "\n"))
 	if err != nil {
 		return "", err
 	}
 	for i, l := range doc {
-		if m := releaseHeadingRe.FindStringSubmatch(l); !code[i] && m != nil {
+		if m := releaseHeadingRe.FindStringSubmatch(l); layout[i] != codeLine && m != nil {
 			return m[1], nil
 		}
 	}
@@ -524,7 +524,7 @@ func latest(content string) (string, error) {
 // emitted. Successful rewrites still count toward the cap in every candidate.
 func renderNotes(body, base, version string, cap int) (string, error) {
 	lines := strings.Split(body, "\n")
-	code, err := codeLines(lines)
+	layout, err := markdownLines(lines)
 	if err != nil {
 		return "", err
 	}
@@ -535,10 +535,10 @@ func renderNotes(body, base, version string, cap int) (string, error) {
 	var groups []group
 	start, size := 0, 0
 	for end := 1; end <= len(lines); end++ {
-		if end < len(lines) && (code[end] || !strings.HasPrefix(lines[end], "### ")) {
+		if end < len(lines) && (layout[end] == codeLine || !strings.HasPrefix(lines[end], "### ")) {
 			continue
 		}
-		mapped, linkErr := absolutizeLinks(lines[start:end], code[start:end], base, version)
+		mapped, linkErr := absolutizeLinks(lines[start:end], layout[start:end], base, version)
 		text := strings.Join(mapped, "\n")
 		if end < len(lines) {
 			text += "\n"
@@ -650,13 +650,13 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 		return "", "", fmt.Errorf("archive path %q is not docs/changelog/ next to the changelog — the link re-base assumes that layout", linkPath)
 	}
 	lines := strings.Split(content, "\n")
-	_, doc, fenced, err := changelogSections(lines)
+	_, doc, layout, err := changelogSections(lines)
 	if err != nil {
 		return "", "", err
 	}
 	start := -1
 	for i, l := range doc {
-		if !fenced[i] && strings.HasPrefix(l, "## ["+version+"]") {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			start = i
 			break
 		}
@@ -664,7 +664,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if start < 0 {
 		return "", "", fmt.Errorf("no section [%s] in the changelog", version)
 	}
-	end := sectionEnd(doc, fenced, start)
+	end := sectionEnd(doc, layout, start)
 	section := lines[start:end]
 	// The archive must be exactly one section: the exact dated heading, then
 	// a body with no further section heading. The boundary scan above stops
@@ -677,7 +677,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 		return "", "", fmt.Errorf("section [%s] heading %q is not the exact dated grammar", version, section[0])
 	}
 	for j, l := range section[1:] {
-		if fenced[start+1+j] {
+		if layout[start+1+j] == codeLine {
 			continue
 		}
 		trim := strings.TrimLeft(l, " ")
@@ -689,7 +689,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if isArchiveStub(section[1:]) {
 		return "", "", fmt.Errorf("section [%s] is already archived", version)
 	}
-	pointer := archivePointer(section, fenced[start:end], linkPath)
+	pointer := archivePointer(section, layout[start:end], linkPath)
 	stub := []string{section[0], "", pointer}
 	if end < len(doc) {
 		stub = append(stub, "")
@@ -703,7 +703,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if strings.Replace(newContent, stubBlock, sectionBlock, 1) != content {
 		return "", "", fmt.Errorf("archiving [%s] would not round-trip byte-identically — refusing", version)
 	}
-	rebased, err := rebaseLinks(section, fenced[start:end])
+	rebased, err := rebaseLinks(section, layout[start:end])
 	if err != nil {
 		return "", "", fmt.Errorf("archiving [%s]: %v", version, err)
 	}
@@ -723,20 +723,20 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if appended {
 		candidate = strings.TrimSuffix(candidate, "\n")
 	}
-	restored := strings.Join(unrebaseLinks(strings.Split(candidate, "\n"), fenced[start:end]), "\n")
+	restored := strings.Join(unrebaseLinks(strings.Split(candidate, "\n"), layout[start:end]), "\n")
 	if restored != sectionBlock {
 		return "", "", fmt.Errorf("archiving [%s]: the written archive would not invert to the moved section byte-for-byte — refusing", version)
 	}
 	return newContent, archive, nil
 }
 
-func archivePointer(section []string, code []bool, linkPath string) string {
+func archivePointer(section []string, layout []markdownLine, linkPath string) string {
 	// Summarize the section's groups deduplicated in Keep-a-Changelog order —
 	// the absorbed legacy backlog repeats its group headings per PR era, and
 	// the stub names each group once.
 	seen := map[string]bool{}
 	for j, l := range section {
-		if !code[j] && strings.HasPrefix(l, "### ") {
+		if layout[j] != codeLine && strings.HasPrefix(l, "### ") {
 			seen[strings.TrimPrefix(l, "### ")] = true
 		}
 	}
@@ -748,7 +748,7 @@ func archivePointer(section []string, code []bool, linkPath string) string {
 		}
 	}
 	for j, l := range section {
-		if code[j] {
+		if layout[j] == codeLine {
 			continue
 		}
 		if g := strings.TrimPrefix(l, "### "); g != l && seen[g] {

@@ -674,17 +674,17 @@ func TestFragmentChecksLinksOutsideCode(t *testing.T) {
 func TestTheShippingArchivesMatchIndex(t *testing.T) {
 	root := filepath.Join("..", "..")
 	changelog := strings.Split(readFile(t, filepath.Join(root, "CHANGELOG.md")), "\n")
-	_, doc, code, err := changelogSections(changelog)
+	_, doc, layout, err := changelogSections(changelog)
 	if err != nil {
 		t.Fatal(err)
 	}
 	indexed := make(map[string]bool)
 	for i, heading := range doc {
 		m := releaseHeadingRe.FindStringSubmatch(heading)
-		if code[i] || m == nil {
+		if layout[i] == codeLine || m == nil {
 			continue
 		}
-		body := doc[i+1 : sectionEnd(doc, code, i)]
+		body := doc[i+1 : sectionEnd(doc, layout, i)]
 		if !isArchiveStub(body) {
 			continue
 		}
@@ -697,14 +697,14 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 			if lines[0] != heading {
 				t.Errorf("archive heading %q, want the index heading %q", lines[0], heading)
 			}
-			code, err := codeLines(lines)
+			layout, err := markdownLines(lines)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := archivePointer(lines, code, link); joinTrimmed(body) != want {
+			if want := archivePointer(lines, layout, link); joinTrimmed(body) != want {
 				t.Errorf("stub = %q, want %q", joinTrimmed(body), want)
 			}
-			checkArchiveLinks(t, file, lines, code)
+			checkArchiveLinks(t, file, lines, layout)
 		})
 	}
 	archives, err := filepath.Glob(filepath.Join(root, "docs", "changelog", "*.md"))
@@ -719,9 +719,9 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 	}
 }
 
-func checkArchiveLinks(t *testing.T, file string, lines []string, code []bool) {
+func checkArchiveLinks(t *testing.T, file string, lines []string, layout []markdownLine) {
 	t.Helper()
-	markdownDestinations(lines, code, func(i int, span textSpan) {
+	markdownDestinations(lines, layout, func(i int, span textSpan) {
 		dest := lines[i][span.start:span.end]
 		if !needsLinkBase(dest) {
 			return
@@ -756,11 +756,11 @@ func TestArchiveLinksResolveMarkdownEscapes(t *testing.T) {
 		t.Fatalf("archive did not preserve the escaped target: %q", archived)
 	}
 	lines := strings.Split(archived, "\n")
-	code, err := codeLines(lines)
+	layout, err := markdownLines(lines)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkArchiveLinks(t, file, lines, code)
+	checkArchiveLinks(t, file, lines, layout)
 }
 
 // A fragment name deleted by an earlier release and reused later must sort by
@@ -1137,6 +1137,7 @@ func TestReleaseAndArchiveKeepMarkdownExamples(t *testing.T) {
 		"- `a span that wraps\n  [wrapped](ignored.md)` and [anchor](#top).\n\n" +
 		"- Escaped \\](ignored.md).\n\n" +
 		"- Outer.\n  - Inner.\n\n  Back.\n\n    [nested list link]( docs/HISTORY.md).\n\n" +
+		"- The output includes a separator:\n      ---\n      [live after indented text]( docs/HISTORY.md).\n\n" +
 		"[absolute](https://example.com/a](docs/b) and [doc]( docs/HISTORY.md).\n" +
 		"[root](./docs/HISTORY.md) and [reference][ref].\n\n" +
 		"[ref]: ./docs/HISTORY.md \"Reference title\"\n"
@@ -1357,7 +1358,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "angle-bracket destination refused", in: "[x](<./a.md>)", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+			got, err := absolutizeLinks([]string{tc.in}, []markdownLine{proseLine}, base, "1.2.3")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("absolutizeLinks(%q) = %q, want an error", tc.in, got)
@@ -1374,14 +1375,14 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}
 
 	// A fenced line is a quoted example, left byte-identical.
-	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{true}, base, "1.2.3")
+	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []markdownLine{codeLine}, base, "1.2.3")
 	if err != nil || fenced[0] != "[a](docs/x.md)" {
 		t.Errorf("fenced line rewritten: %q, %v", fenced, err)
 	}
 
 	// With no [Unreleased] reference there is no repository URL to build, and
 	// a relative target must fail rather than publish unresolvable.
-	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{false}, "", "1.2.3"); err == nil {
+	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []markdownLine{proseLine}, "", "1.2.3"); err == nil {
 		t.Error("want an error for a relative target with no base URL")
 	}
 
@@ -1408,7 +1409,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		// release that had nothing wrong with it.
 		{name: "wrapped prose is not a definition", in: "  [expired]: computed at read time, never stored.", want: "  [expired]: computed at read time, never stored."},
 	} {
-		got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+		got, err := absolutizeLinks([]string{tc.in}, []markdownLine{proseLine}, base, "1.2.3")
 		switch {
 		case tc.wantErr && err == nil:
 			t.Errorf("%s: absolutizeLinks(%q) = %q, want an error", tc.name, tc.in, got)
@@ -1424,15 +1425,15 @@ func TestReferenceDefinitionsAfterBlockBoundaries(t *testing.T) {
 	const base = "https://github.com/o/r"
 	for _, block := range []string{"---", "* * *", "Section title\n==="} {
 		lines := strings.Split("- See [guide][g].\n\n"+block+"\n[g]: docs/HISTORY.md", "\n")
-		code, err := codeLines(lines)
+		layout, err := markdownLines(lines)
 		if err != nil {
 			t.Fatal(err)
 		}
-		notes, err := absolutizeLinks(lines, code, base, "0.4.0")
+		notes, err := absolutizeLinks(lines, layout, base, "0.4.0")
 		if err != nil || notes[len(notes)-1] != "[g]: "+base+"/blob/v0.4.0/docs/HISTORY.md" {
 			t.Errorf("notes after %q = %q, %v", block, notes, err)
 		}
-		archive, err := rebaseLinks(lines, code)
+		archive, err := rebaseLinks(lines, layout)
 		if err != nil || archive[len(archive)-1] != "[g]: ../HISTORY.md" {
 			t.Errorf("archive after %q = %q, %v", block, archive, err)
 		}

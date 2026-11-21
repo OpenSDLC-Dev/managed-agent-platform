@@ -17,10 +17,20 @@ var (
 	linkEscapeRe   = regexp.MustCompile(`\\([[:punct:]])`)
 )
 
-// codeLines recognizes fenced examples and indented code blocks in changelog
-// prose. A missing closing fence is an error because it can hide later releases.
-func codeLines(lines []string) ([]bool, error) {
-	code := make([]bool, len(lines))
+type markdownLine uint8
+
+const (
+	proseLine markdownLine = iota
+	codeLine
+	boundaryLine
+	listItemLine
+	blankLine
+)
+
+// markdownLines classifies block boundaries and code using indentation within
+// the current container. A missing closing fence can hide later releases.
+func markdownLines(lines []string) ([]markdownLine, error) {
+	layout := make([]markdownLine, len(lines))
 	var marker byte
 	var width, openedAt, quoteDepth, listIndent, fenceListQuotes int
 	var listIndents []int
@@ -49,13 +59,14 @@ func codeLines(lines []string) ([]bool, error) {
 				indent += listIndent
 			}
 			widthHere, tail := fenceRun(trim)
-			code[i] = true
+			layout[i] = codeLine
 			if indent >= listIndent && indent <= listIndent+3 && widthHere >= width && trim[0] == marker && strings.TrimSpace(tail) == "" {
 				width = 0
 			}
 			continue
 		}
 		if trim == "" {
+			layout[i] = blankLine
 			paragraph = false
 			continue
 		}
@@ -74,24 +85,28 @@ func codeLines(lines []string) ([]bool, error) {
 			content, innerQuotes = quoteBody(trim[item:], -1)
 			indent, trim = markdownIndent(content)
 			indent += listIndent
+			layout[i] = listItemLine
 			paragraph = false
 		}
 		widthHere, fenceTail := fenceRun(trim)
 		if indent <= listIndent+3 && widthHere >= 3 && (trim[0] != '`' || !strings.Contains(fenceTail, "`")) {
 			marker, width, openedAt, fenceListQuotes = trim[0], widthHere, i+1, innerQuotes
-			code[i], paragraph = true, false
+			layout[i], paragraph = codeLine, false
 			continue
 		}
 		if indent >= listIndent+4 && !paragraph {
-			code[i] = true
+			layout[i] = codeLine
 			continue
 		}
-		paragraph = !markdownBlockBoundary(trim)
+		paragraph = indent > listIndent+3 || !markdownBlockBoundary(trim)
+		if !paragraph {
+			layout[i] = boundaryLine
+		}
 	}
 	if width != 0 {
 		return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
 	}
-	return code, nil
+	return layout, nil
 }
 
 func markdownBlockBoundary(line string) bool {
@@ -191,19 +206,18 @@ func escapedAt(line string, at int) bool {
 // markdownDestinations finds source ranges so rewrites preserve the bytes
 // around the destination. Changelog links and definitions use single-line
 // destinations. Inline code can span continuation lines of a paragraph.
-func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)) {
+func markdownDestinations(lines []string, layout []markdownLine, visit func(int, textSpan)) {
 	for start := 0; start < len(lines); {
-		if code[start] || strings.TrimSpace(lines[start]) == "" {
+		if layout[start] == codeLine || layout[start] == blankLine {
 			start++
 			continue
 		}
 		end := start + 1
-		first, depth := quoteBody(lines[start], -1)
-		if !markdownBlockBoundary(strings.TrimLeft(first, " \t")) {
-			for end < len(lines) && !code[end] {
-				body, nextDepth := quoteBody(lines[end], -1)
-				body = strings.TrimLeft(body, " \t")
-				if depth != nextDepth || strings.TrimSpace(body) == "" || markdownBlockBoundary(body) || listItemRe.MatchString(body) {
+		_, depth := quoteBody(lines[start], -1)
+		if layout[start] != boundaryLine {
+			for end < len(lines) && layout[end] == proseLine {
+				_, nextDepth := quoteBody(lines[end], -1)
+				if depth != nextDepth {
 					break
 				}
 				end++
