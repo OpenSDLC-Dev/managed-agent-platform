@@ -237,6 +237,63 @@ class VerifyCommitGateTests(unittest.TestCase):
             self.assertEqual(b_next.returncode, 2)
             self.assertIn("[block 1/2]", b_next.stderr)
 
+    def test_multiline_and_semicolon_commit_boundaries_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / "hello.txt").write_text("v2\n", encoding="utf-8")
+
+            for idx, cmd in enumerate([
+                'git add hello.txt\ngit commit -m "multiline"',
+                'git add hello.txt;git commit -m "semicolon"',
+            ]):
+                with self.subTest(cmd=cmd):
+                    res = run_gate(repo, cmd, mode="enforce", session_id=f"s-sep-{idx}")
+                    self.assertEqual(res.returncode, 2, f"expected commit gate to catch {cmd!r}")
+
+    def test_unicode_filename_edit_invalidates_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            uni = repo / "é.txt"
+            uni.write_text("v1\n", encoding="utf-8")
+            run_git(repo, "add", "é.txt")
+            run_git(repo, "commit", "-q", "-m", "add unicode file")
+
+            uni.write_text("v2\n", encoding="utf-8")
+            run_stamp(repo, "--write", "make test-fast")
+            run_git(repo, "add", "é.txt")
+            ok = run_gate(repo, 'git commit -m "verified unicode"', mode="enforce")
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+
+            # Modifying the Unicode file after stamping must invalidate the stamp.
+            uni.write_text("v3\n", encoding="utf-8")
+            run_git(repo, "add", "é.txt")
+            stale = run_gate(repo, 'git commit -m "unverified unicode"', mode="enforce")
+            self.assertEqual(stale.returncode, 2)
+            self.assertIn("worktree changed since last verification", stale.stderr)
+
+    def test_partial_staging_mismatch_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+
+            # Stage v2, then edit worktree to v3 and stamp v3.
+            (repo / "hello.txt").write_text("v2-staged\n", encoding="utf-8")
+            run_git(repo, "add", "hello.txt")
+            (repo / "hello.txt").write_text("v3-worktree\n", encoding="utf-8")
+            run_stamp(repo, "--write", "make test-fast")
+
+            # Committing now would record unverified v2, so enforce mode must reject it.
+            res = run_gate(repo, 'git commit -m "partial"', mode="enforce")
+            self.assertEqual(res.returncode, 2)
+            self.assertIn("partial staging", res.stderr)
+
+            # Re-staging v3 aligns index with verified worktree and passes.
+            run_git(repo, "add", "hello.txt")
+            ok = run_gate(repo, 'git commit -m "aligned"', mode="enforce")
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

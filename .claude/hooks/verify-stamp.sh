@@ -57,15 +57,39 @@ compute_fingerprint() {
     (
       cd "$root"
       {
-        git diff --name-only HEAD 2>/dev/null || true
-        git diff --cached --name-only 2>/dev/null || true
-        git ls-files --others --exclude-standard 2>/dev/null || true
-      } | LC_ALL=C sort -u | while IFS= read -r rel; do
+        git diff -z --name-only HEAD 2>/dev/null || true
+        git diff -z --cached --name-only 2>/dev/null || true
+        git ls-files -z --others --exclude-standard 2>/dev/null || true
+      } | LC_ALL=C sort -z -u | while IFS= read -r -d '' rel; do
         [ -n "$rel" ] || continue
-        printf 'PATH %s %s\n' "$rel" "$(hash_file "$rel")"
+        printf 'PATH %s\0%s\n' "$rel" "$(hash_file "$rel")"
       done
     )
   } | hash_stdin
+}
+
+# has_partial_staging succeeds (exit 0) if any staged path differs from its
+# working-tree contents (e.g. MM, AM, MD, AD, RM, CM in `git status --porcelain=v1 -z`).
+has_partial_staging() {
+  local entry xy
+  while IFS= read -r -d '' entry; do
+    [ "${#entry}" -ge 3 ] || continue
+    xy="${entry:0:2}"
+    case "$xy" in
+      '??'|'!!'|' '*|?' ')
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+    # Rename/copy entries carry a second NUL-terminated source path; consume it.
+    case "${xy:0:1}" in
+      R|C)
+        IFS= read -r -d '' _ || true
+        ;;
+    esac
+  done < <(git status --porcelain=v1 -z 2>/dev/null)
+  return 1
 }
 
 write_stamp() {
@@ -93,6 +117,10 @@ case "${1:-}" in
   --stamp-path)
     require_git_repo || { echo "verify-stamp: not inside a git worktree" >&2; exit 1; }
     stamp_path
+    ;;
+  --check-partial-staging)
+    require_git_repo || exit 1
+    has_partial_staging
     ;;
   --write)
     shift

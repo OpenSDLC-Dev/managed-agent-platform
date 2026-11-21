@@ -86,11 +86,12 @@ if not isinstance(session_id, str) or not session_id:
     session_id = "default"
 session_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)[:64]
 
-# Split command into shell segments on &&, ||, ;, |, or newlines and check
+# Split command into shell segments on &&, ||, ;, |, &, or newlines and check
 # whether any segment executes `git ... commit` (not inside echo/grep/comments).
 def is_git_commit(command: str) -> bool:
     try:
-        lex = shlex.shlex(command, posix=True)
+        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+        lex.whitespace = " \t\r"
         lex.whitespace_split = True
         lex.commenters = "#"
         tokens = list(lex)
@@ -98,7 +99,7 @@ def is_git_commit(command: str) -> bool:
         # Unclosed quotes/heredocs: fall back to line-aware regex check.
         return bool(re.search(r"(^|[;&|\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git(?:\s+-[A-Za-z](?:\s+\S+)?|\s+--[a-z-]+(?:=\S+)?)*\s+commit(\s|$)", command))
 
-    seps = {"&&", "||", ";", "|", "&"}
+    seps = {"&&", "||", ";", "|", "&", "\n"}
     segments = []
     cur = []
     for tok in tokens:
@@ -212,6 +213,8 @@ if [ -f "$stamp_file" ]; then
     reason="verification stamp (${stamp_method:-unknown}) is older than ${max_age}s"
   elif [ "$stamp_fp" != "$cur_fp" ]; then
     reason="worktree changed since last verification (${stamp_method:-unknown})"
+  elif "$stamp_helper" --check-partial-staging; then
+    reason="staged index differs from verified working tree (partial staging)"
   else
     verified=1
   fi
