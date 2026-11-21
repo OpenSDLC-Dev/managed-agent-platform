@@ -2,7 +2,7 @@
 status: in-progress
 ---
 
-# Verification and testing hardening (plan 74)
+# Verification and testing hardening (plan 75)
 
 Strengthens the platform's verification loop across test speed, property and fuzz coverage, race detection, diff-triggered review rules, full-topology offline end-to-end tests, wire differential checks, commit verification gates, and reviewer evaluation.
 

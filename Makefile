@@ -121,7 +121,7 @@ test: ripgrep
 	set -x; \
 	go test -count=1 -timeout 30m -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
 
-# Fast local feedback loop (plan 74 slice 1): runs every package that does not
+# Fast local feedback loop (plan 75 slice 1): runs every package that does not
 # require Docker, Postgres, or a Kubernetes cluster. Not a substitute for
 # `make verify` — run this while iterating, then `make verify` before pushing.
 test-fast:

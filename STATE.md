@@ -4,12 +4,12 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-**Plan 74** ([docs/plan/74_verification-hardening.md](./docs/plan/74_verification-hardening.md)) — verification and testing hardening (8 slices).
+**Plan 75** ([docs/plan/75_verification-hardening.md](./docs/plan/75_verification-hardening.md)) — verification and testing hardening (8 slices).
 
 ## Tasks
 
-- [ ] Slice 1: `pgtest` template DB cloning, `dockertest` dead-owner reaping (#499), and `make test-fast` (in progress)
-- [ ] Slice 2: `.claude/skills/verify`, 3-round repair cap, and `main` branch protection alignment
+- [x] Slice 1: `pgtest` template DB cloning, `dockertest` dead-owner reaping (#499), and `make test-fast` (PR #1075)
+- [ ] Slice 2: `.claude/skills/verify`, 3-round repair cap, and `main` branch protection alignment (in progress)
 - [ ] Slice 3: Property tests, `Fuzz*` targets, and scheduled fuzz workflow
 - [ ] Slice 4: `make test-race`, CI `race` job, and test-hygiene guard
 - [ ] Slice 5: `REVIEW.md` diff-triggered reliability checklist and base-branch rule isolation
