@@ -351,6 +351,9 @@ type GateTokenMinter interface {
 	// Persist records token as sessionID's live gate token (by hash). The provider
 	// calls it only after creating the gate container with that token.
 	Persist(ctx context.Context, sessionID domain.ID, token string) error
+	// RevokeIfCurrent invalidates this gate's token during failed admission.
+	// A replacement gate may already have persisted a different token.
+	RevokeIfCurrent(ctx context.Context, sessionID domain.ID, token string) error
 }
 
 // GateTokenRevoker revokes a session's live gate token — the teardown half of

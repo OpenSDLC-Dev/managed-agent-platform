@@ -155,9 +155,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		return nil, err
 	}
 	p.warnUnenforceablePidsLimit(ctx, spec.Hardening)
-	workdir := spec.Workdir
-	if workdir == "" {
-		workdir = sandbox.DefaultWorkdir
+	workdir, err := spec.EffectiveWorkdir()
+	if err != nil {
+		return nil, err
 	}
 	name := podName(spec.SessionID)
 	gated := spec.Gate != nil
@@ -185,7 +185,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 					// re-Get, ready re-check, UID precondition — keep a merely
 					// slow pod another executor just created safe: deleting it
 					// only costs that executor one retried provision.
-					p.reclaimUnready(name, existing.UID, gated)
+					return nil, errors.Join(err, p.reclaimUnready(name, existing.UID, spec))
 				}
 				return nil, err
 			}
@@ -276,7 +276,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			// the wedged pod. reclaimUnready deletes only the exact pod we created
 			// and only while it is still not ready, so it cannot delete a
 			// same-named replacement or one another executor has since adopted.
-			p.reclaimUnready(name, created.UID, gated)
+			return nil, errors.Join(err, p.reclaimUnready(name, created.UID, spec))
 		}
 		return nil, err
 	}
@@ -587,26 +587,54 @@ func (p *Provider) deleteByUID(name string, uid types.UID) {
 //     one that has since become ready (another executor may be using it);
 //   - a UID precondition on the delete, so an ABA between the Get and the Delete
 //     still cannot remove a replacement.
-func (p *Provider) reclaimUnready(name string, uid types.UID, gated bool) {
+func (p *Provider) reclaimUnready(name string, uid types.UID, spec sandbox.Spec) error {
 	if uid == "" {
-		return // no identity to guard the delete with; leave it for an operator
+		return nil // no identity to guard the delete with; leave it for an operator
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
 	defer cancel()
 	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
 	pod, err := pods.Get(ctx, name, metav1.GetOptions{})
-	if err != nil || pod.UID != uid || podReady(pod, gated) {
-		return
+	if err != nil || pod.UID != uid || podReady(pod, spec.Gate != nil) {
+		return nil
+	}
+	if spec.Gate != nil && sandboxTermination(pod) != nil {
+		// RestartPolicyNever makes this sandbox's exit final. Retire only
+		// this pod's token before removing the last session-owned resource.
+		for _, c := range pod.Spec.InitContainers {
+			if c.Name != gateContainerName {
+				continue
+			}
+			for _, e := range c.Env {
+				if e.Name == "GATE_TOKEN" && e.Value != "" {
+					if err := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, e.Value); err != nil {
+						return fmt.Errorf("k8s: revoke failed gate for pod %s: %w", name, err)
+					}
+					return p.deleteAndWaitGone(ctx, name, uid)
+				}
+			}
+		}
+		return fmt.Errorf("k8s: refused pod %s has no gate token to retire", name)
 	}
 	zero := int64(0)
 	_ = pods.Delete(ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		Preconditions:      &metav1.Preconditions{UID: &uid},
 	})
+	return nil
 }
 
-// podReady reports whether the sandbox container is running and ready — and,
-// for a gated pod, whether the gate sidecar is too. The sidecar's readiness
+func sandboxTermination(pod *corev1.Pod) *corev1.ContainerStateTerminated {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName {
+			return cs.State.Terminated
+		}
+	}
+	return nil
+}
+
+// podReady reports whether the sandbox is ready. Provisioning a gated pod
+// also requires a ready gate sidecar. The sidecar's readiness
 // probe is the gate's own healthcheck, so a gated pod is never handed to a
 // tool run while its egress gate is down (the Docker provider's adopt-only-
 // healthy rule). A native sidecar reports in InitContainerStatuses.
@@ -1098,12 +1126,8 @@ func (p *Provider) waitReady(ctx context.Context, name string, gated bool) error
 		if err != nil {
 			return fmt.Errorf("k8s: wait ready %s: %w", name, err)
 		}
-		if gated {
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.Name == containerName && cs.State.Terminated != nil && cs.State.Terminated.ExitCode == uidguard.Refused {
-					return fmt.Errorf("k8s: sandbox in pod %s uses reserved gate UID %d", name, uidguard.GateUID)
-				}
-			}
+		if terminated := sandboxTermination(pod); gated && terminated != nil && terminated.ExitCode == uidguard.Refused {
+			return fmt.Errorf("k8s: sandbox in pod %s exited before admission with status %d (possible reserved gate UID %d refusal)", name, uidguard.Refused, uidguard.GateUID)
 		}
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return fmt.Errorf("k8s: pod %s is %s before it became ready", name, pod.Status.Phase)
@@ -1151,7 +1175,16 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 	if err := checkGuard(existing); err != nil {
 		return nil, err
 	}
-	if !podReady(existing, gated) {
+	// An archive revokes the gate before the final file harvest. The admitted
+	// sandbox can still serve guarded local commands after its proxy stops.
+	if !podReady(existing, false) {
+		if gated {
+			for _, cs := range existing.Status.ContainerStatuses {
+				if cs.Name == containerName && cs.State.Running != nil {
+					return nil, fmt.Errorf("k8s: running sandbox in pod %s is waiting for its startup probe", name)
+				}
+			}
+		}
 		return nil, sandbox.ErrNotFound
 	}
 	var workdir string

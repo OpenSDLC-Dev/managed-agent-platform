@@ -293,6 +293,27 @@ func TestValidateRefusesTheGatesOwnUID(t *testing.T) {
 	}
 }
 
+func TestGatedWorkdirRejectsTheGuardDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"", sandbox.DefaultWorkdir},
+		{"/map-sandbox-guard", ""},
+		{"/workspace/../map-sandbox-guard/files", ""},
+		{"/map-sandbox-guard-work", "/map-sandbox-guard-work"},
+	} {
+		got, err := (sandbox.Spec{Workdir: tc.path, Gate: &sandbox.GateSpec{}}).EffectiveWorkdir()
+		if got != tc.want || (err != nil) != (tc.want == "") {
+			t.Errorf("gated workdir %q: got (%q, %v), want %q", tc.path, got, err, tc.want)
+		}
+	}
+	const path = "/map-sandbox-guard"
+	if got, err := (sandbox.Spec{Workdir: path}).EffectiveWorkdir(); err != nil || got != path {
+		t.Errorf("ungated workdir: got %q, %v", got, err)
+	}
+}
+
 // Every capability the platform drops by default, and the wildcard, must
 // survive the name check — a set that rejected its own defaults would fail
 // every startup rather than only the typos it exists to catch.

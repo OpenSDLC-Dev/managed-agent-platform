@@ -260,6 +260,74 @@ func TestGatedPodRequiresTheStagedGuardVolumeAndProbe(t *testing.T) {
 	}
 }
 
+func TestAttachRetriesARunningGatedPodWhileProbesSettle(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	pod.Status.ContainerStatuses[0].Ready = false
+	pod.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+	sb, err := fakeProvider(pod).Attach(t.Context(), spec.SessionID)
+	if sb != nil || err == nil || errors.Is(err, sandbox.ErrNotFound) {
+		t.Fatalf("running pod awaiting startup probe: attach = %v, %v, want retryable error", sb, err)
+	}
+}
+
+func TestArchiveCanAttachToAdmittedWorkspaceAfterGateStops(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	resource := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	resource.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}}}
+	got, err := fakeProvider(resource).Attach(t.Context(), spec.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.(*pod).client.guarded {
+		t.Fatal("archive handle does not guard its local file commands")
+	}
+}
+
+func TestAdmissionDoesNotInferIdentityFromAnImageExit(t *testing.T) {
+	safe := int64(2048)
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{}),
+		Hardening: sandbox.Hardening{RunAsUser: &safe}}
+	resource := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	resource.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 77}}
+	err := fakeProvider(resource).waitReady(t.Context(), resource.Name, true)
+	if err == nil || !strings.Contains(err.Error(), "possible reserved gate UID") {
+		t.Fatalf("image startup exit 77: %v", err)
+	}
+}
+
+func TestFailedAdmissionRetiresOnlyThePodsTokenBeforeDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"retired", nil}, {"retry", errors.New("token storage unavailable")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mintRecorder{retireErr: tc.err}
+			spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(m)}
+			name := podName(spec.SessionID)
+			const token = "fixture-gate"
+			resource := fakeProvider().podSpec(name, sandbox.DefaultWorkdir, spec, token)
+			resource.Namespace = "default"
+			resource.UID = "refused-fixture"
+			resource.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 77}}}}
+			p := fakeProvider(resource)
+			if _, err := p.Provision(t.Context(), spec); err == nil || (tc.err != nil && !errors.Is(err, tc.err)) {
+				t.Fatalf("refused provision: %v", err)
+			}
+			if !slices.Equal(m.retired, []string{token}) {
+				t.Fatal("expected retirement of only the token carried by the refused pod")
+			}
+			_, err := p.client.cs.CoreV1().Pods("default").Get(t.Context(), name, metav1.GetOptions{})
+			if tc.err != nil && err != nil || tc.err == nil && !apierrors.IsNotFound(err) {
+				t.Fatalf("pod after token retirement: %v", err)
+			}
+		})
+	}
+}
+
 // A pod that is both wedged (its gate never turns ready) and spec-mismatched
 // must still be reclaimed: the readiness wait and its #198 reclaim run before
 // the spec check, deliberately — refusing first would strand a dead pod
@@ -2386,7 +2454,14 @@ type mintRecorder struct {
 	generated  int
 	persisted  []string // tokens handed to Persist
 	persistErr error
+	retired    []string
+	retireErr  error
 	revoked    []domain.ID // sessions handed to Revoke
+}
+
+func (m *mintRecorder) RevokeIfCurrent(_ context.Context, _ domain.ID, token string) error {
+	m.retired = append(m.retired, token)
+	return m.retireErr
 }
 
 func (m *mintRecorder) Generate() string { m.generated++; return "gtk_unit_test_token" }

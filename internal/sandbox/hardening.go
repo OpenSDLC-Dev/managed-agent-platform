@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 )
 
 // Hardening is the containment a provider applies to a session's sandbox when
@@ -176,6 +177,18 @@ const sessionResourceRoot = "/mnt"
 // holds to this), whatever the workdir. Under the default workdir it is the
 // workdir, and the dedupe below folds the two.
 const RepositoryRoot = "/workspace"
+
+// EffectiveWorkdir resolves the shared default before either provider creates
+// resources. A gated sandbox must keep its working tree outside the guard mount.
+func (s Spec) EffectiveWorkdir() (string, error) {
+	if s.Workdir == "" {
+		return DefaultWorkdir, nil
+	}
+	if w := gopath.Clean(s.Workdir); s.Gate != nil && (w == uidguard.Dir || strings.HasPrefix(w, uidguard.Dir+"/")) {
+		return "", fmt.Errorf("sandbox: workdir %q overlaps the reserved gate launcher directory %s", s.Workdir, uidguard.Dir)
+	}
+	return s.Workdir, nil
+}
 
 // WritablePaths are the mount points a read-only-rootfs sandbox still needs to
 // write, in the order a backend should mount them. Both backends take the list

@@ -581,16 +581,18 @@ owner-match firewall or becoming the gate's UID *at runtime*, so they are not
 configurable away. Docker and Kubernetes also check the actual user before
 starting image code and before executing sandbox commands. The gate image
 supplies a static launcher in a read-only sandbox mount at
-`/map-sandbox-guard`. UID 65532 is reserved for the gate. A gated image whose
+`/map-sandbox-guard`. Keep the workdir outside that mount.
+UID 65532 is reserved for the gate. A gated image whose
 numeric or named `USER` resolves to it fails provisioning. Choose a different
 image user or set `SANDBOX_RUN_AS_USER` to a UID that can use the image and
 workdir.
 
 For gated sandboxes, Docker replaces the image's `HEALTHCHECK` with the
 platform's identity check. Kubernetes runs that check as a startup probe.
-Deploy the matching gate image with the executor and worker. Existing gated
-sandboxes created without the launcher need to be drained and recreated during
-rollout. An executor refuses to adopt them and preserves their files.
+Set `EXECUTOR_GATE_IMAGE` to the matching image on executors that enable the gate.
+During rollout, drain and recreate old gated sandboxes and any gate left alone
+for a session. An executor refuses to adopt a workspace created without the
+launcher and preserves its files.
 The `NET_ADMIN` holders are the gate
 container/sidecar itself (it installs the firewall, then drops privileges) and,
 on Kubernetes, the short-lived `netsetup` init container that enforces gate-less

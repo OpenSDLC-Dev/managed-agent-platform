@@ -62,9 +62,6 @@ func gateRows(t *testing.T, newHarness func(t *testing.T) Harness) {
 					if sb != nil || err == nil || !strings.Contains(err.Error(), "reserved gate UID") {
 						t.Fatalf("image user %s: handle present = %v, err = %v, want reserved gate UID refusal", tc.user, sb != nil, err)
 					}
-					if err := h.Provider.Reap(ctx, spec.SessionID); err != nil {
-						t.Fatalf("reap refused fixture: %v", err)
-					}
 					override := int64(2048)
 					spec.Hardening.RunAsUser = &override
 					sb, err = h.Provider.Provision(ctx, spec)

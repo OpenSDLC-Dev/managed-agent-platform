@@ -141,6 +141,30 @@ func TestRevokeInvalidatesLiveToken(t *testing.T) {
 	}
 }
 
+func TestFailedGateRevocationPreservesItsSuccessor(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := t.Context()
+	sid, _ := pgtest.NewSession(t, pool, "cloud")
+	prior, current := gatetoken.Mint(), gatetoken.Mint()
+	for _, token := range []string{prior, current} {
+		if err := gatetoken.Ensure(ctx, pool, sid.String(), token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gatetoken.RevokeIfCurrent(ctx, pool, sid.String(), prior); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gatetoken.Authenticate(ctx, pool, current); err != nil || got != sid.String() {
+		t.Fatalf("successor authentication = %q, %v", got, err)
+	}
+	if err := gatetoken.RevokeIfCurrent(ctx, pool, sid.String(), current); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gatetoken.Authenticate(ctx, pool, current); err != nil || got != "" {
+		t.Fatalf("retired gate authentication = %q, %v", got, err)
+	}
+}
+
 func TestEnsureNonexistentSessionErrors(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	// A gate token can only be minted for a real session (the FK); a bad session

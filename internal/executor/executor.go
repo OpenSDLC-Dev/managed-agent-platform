@@ -865,6 +865,10 @@ func (m gateTokenMinter) Persist(ctx context.Context, sessionID domain.ID, token
 	return gatetoken.Ensure(ctx, m.pool, sessionID.String(), token)
 }
 
+func (m gateTokenMinter) RevokeIfCurrent(ctx context.Context, sessionID domain.ID, token string) error {
+	return gatetoken.RevokeIfCurrent(ctx, m.pool, sessionID.String(), token)
+}
+
 func (m gateTokenMinter) Revoke(ctx context.Context, sessionID domain.ID) error {
 	return gatetoken.Revoke(ctx, m.pool, sessionID.String())
 }
