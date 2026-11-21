@@ -12,7 +12,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 - [x] Slice 2: `.claude/skills/verify`, 3-round repair cap, and `main` branch protection alignment (PR #1077)
 - [x] Slice 3: Property tests, `Fuzz*` targets, and scheduled fuzz workflow (PR #1078)
 - [x] Slice 4: `make test-race`, CI `race` job, and test-hygiene guard (PR #1079)
-- [ ] Slice 5: `REVIEW.md` diff-triggered reliability checklist and base-branch rule isolation (in progress)
-- [ ] Slice 6: Full-topology offline E2E and wire differential test suite
+- [x] Slice 5: `REVIEW.md` diff-triggered reliability checklist and base-branch rule isolation (PR #1080)
+- [x] Slice 6: Full-topology offline E2E and wire differential test suite
 - [ ] Slice 7: Verification stamping and `off`/`observe`/`enforce` commit gate hook
 - [ ] Slice 8: `tools/revieweval` meta-evaluation framework, pruning policy, and plan archival
