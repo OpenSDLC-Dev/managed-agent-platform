@@ -74,8 +74,8 @@ func (s *server) listAdminAPIKeys(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	after, before := q.Get("after_id"), q.Get("before_id")
-	if after != "" && before != "" {
+	hasAfter, hasBefore := q.Has("after_id"), q.Has("before_id")
+	if hasAfter && hasBefore {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")
 	}
 	status := q.Get("status")
@@ -105,10 +105,10 @@ func (s *server) listAdminAPIKeys(r *http.Request) (any, error) {
 		` AND ($2::text='' OR created_by=$2)`
 	order := "DESC"
 	args := []any{status, creator, limit + 1}
-	if after != "" || before != "" {
-		cursor, comparison := after, "<"
-		if before != "" {
-			cursor, comparison, order = before, ">", "ASC"
+	if hasAfter || hasBefore {
+		cursor, comparison := q.Get("after_id"), "<"
+		if hasBefore {
+			cursor, comparison, order = q.Get("before_id"), ">", "ASC"
 		}
 		query += ` AND (created_at,id) ` + comparison + ` (SELECT created_at,id FROM api_keys WHERE ` + servedAPIKeyTenancy + ` AND id=$4)`
 		args = append(args, cursor)
@@ -133,7 +133,7 @@ func (s *server) listAdminAPIKeys(r *http.Request) (any, error) {
 		page.HasMore = true
 		page.Data = page.Data[:limit]
 	}
-	if before != "" {
+	if hasBefore {
 		slices.Reverse(page.Data)
 	}
 	if len(page.Data) > 0 {

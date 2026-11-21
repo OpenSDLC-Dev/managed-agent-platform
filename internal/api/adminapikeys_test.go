@@ -121,7 +121,7 @@ func TestAdminAPIKeyPagingAndProjection(t *testing.T) {
 		t.Fatalf("archived keys in the granted organization: %v", err)
 	}
 	auth := asBearer(token)
-	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?after_id=" + legacy} {
+	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?after_id=" + legacy, "?limit=1&before_id=", "?limit=1&after_id="} {
 		status, body := s.decode(s.doRaw("GET", auditKeysPath+path, nil, auth))
 		data, ok := body["data"].([]any)
 		if status != 200 || !ok || len(data) != 0 || body["first_id"] != nil || body["last_id"] != nil || body["has_more"] != false {
@@ -177,7 +177,7 @@ func TestAdminAPIKeyReadCredentials(t *testing.T) {
 	if status != 404 {
 		t.Fatalf("private proxy answered HTTP %d", status)
 	}
-	for _, q := range []string{"?after_id=a&before_id=b", "?limit=0", "?limit=1001", "?limit=x", "?status=unknown", "?status=active&status=archived", "?after_id=%00"} {
+	for _, q := range []string{"?after_id=a&before_id=b", "?after_id=a&before_id=", "?after_id=&before_id=b", "?limit=0", "?limit=1001", "?limit=x", "?status=unknown", "?status=active&status=archived", "?after_id=%00"} {
 		status, _ := s.decode(s.doRaw("GET", auditKeysPath+q, nil, asBearer(orgToken)))
 		if status != 400 {
 			t.Errorf("%s: HTTP %d", q, status)
