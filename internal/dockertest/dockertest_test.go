@@ -134,10 +134,11 @@ func TestSweepStraysReapsDeadOwnerAndSparesLiveOwner(t *testing.T) {
 	if isOwnerDead(foreignNSTok) {
 		t.Fatalf("foreign PID namespace token %q must not be reported dead", foreignNSTok)
 	}
-	// Same PID namespace, previous boot_id proves host rebooted -> dead.
-	oldBootTok := strings.Join([]string{"00000000-0000-0000-0000-000000000000", parts[1], parts[2], parts[3]}, "|")
-	if !isOwnerDead(oldBootTok) {
-		t.Fatalf("previous boot token %q was not reported dead", oldBootTok)
+	// Different boot_id could be another live Linux host sharing the same Docker
+	// daemon (initial PID namespace inodes match across hosts); must not reap early.
+	otherBootTok := strings.Join([]string{"00000000-0000-0000-0000-000000000000", parts[1], parts[2], parts[3]}, "|")
+	if isOwnerDead(otherBootTok) {
+		t.Fatalf("different boot_id token %q must fall back to strayAge rather than reaping early", otherBootTok)
 	}
 
 	deadContainer := plantWithOwner(t, time.Now(), deadTok)

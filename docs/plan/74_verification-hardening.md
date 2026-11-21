@@ -21,7 +21,7 @@ Strengthens the platform's verification loop across test speed, property and fuz
 
 1. **Zero new external test dependencies.** Property tests use Go's built-in `testing.F` and lightweight deterministic generators so `go.mod` stays minimal and `internal/domain` remains stdlib-only.
 2. **Template cloning preserves `FreshDB`.** `pgtest.NewPool` clones a once-migrated `pgtest_template` database (`CREATE DATABASE ... TEMPLATE`) serialized by a mutex; `pgtest.FreshDB` still returns an empty un-migrated database so migration tests exercise every migration from scratch.
-3. **Kernel-verified dead-owner reaping on Linux only.** `dockertest` records `boot_id`, PID namespace inode, PID, and `/proc/<pid>/stat` start ticks in one label and reaps an underage container only when the host boot and PID namespace match and the process is proven gone or recycled, or when `boot_id` changed across a reboot. Non-Linux hosts and unlabelled containers fall back conservatively to `strayAge`.
+3. **Kernel-verified dead-owner reaping on Linux only.** `dockertest` records `boot_id`, PID namespace inode, PID, and `/proc/<pid>/stat` start ticks in one label and reaps an underage container only when both `boot_id` and PID namespace match the current host and the process is proven gone or recycled. Different boots, foreign PID namespaces, non-Linux hosts, and unlabelled containers fall back conservatively to `strayAge`.
 4. **Gate isolation.** Review guidelines in `REVIEW.md` are read from `origin/main` so a PR cannot weaken the rules judging it.
 
 ## Pull requests

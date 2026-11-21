@@ -90,16 +90,14 @@ func isOwnerDead(token string) bool {
 	if !ok {
 		return false
 	}
-	// A container started from another PID namespace (for example a sibling
-	// container sharing the host Docker socket) cannot be inspected from this
-	// /proc view; never reap it early.
-	if tokNS != curNS {
+	// Require BOTH the same random per-boot UUID and the same PID namespace so
+	// we only inspect /proc when the container was started on this exact host
+	// boot and PID namespace. Two distinct Linux hosts sharing a remote Docker
+	// daemon often share the initial PID namespace inode (pid:[4026531836]) with
+	// different boot IDs, so a boot mismatch must fall back to strayAge rather
+	// than assuming a reboot.
+	if tokBoot != curBoot || tokNS != curNS {
 		return false
-	}
-	// Same PID namespace on an older boot means the host rebooted and every
-	// process from the previous boot is gone.
-	if tokBoot != curBoot {
-		return true
 	}
 	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
