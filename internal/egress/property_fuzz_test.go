@@ -3,6 +3,7 @@ package egress
 import (
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,7 @@ func FuzzValidateAndCanonicalHostEntry(f *testing.F) {
 		"a..b.com",
 		"has space.com",
 		"foo\x00bar.com",
+		strings.Repeat("a", maxCanonicalHost+1),
 	} {
 		f.Add(seed)
 	}
@@ -46,16 +48,23 @@ func FuzzValidateAndCanonicalHostEntry(f *testing.F) {
 			if err2 != nil || canon2 != canon {
 				t.Fatalf("CanonicalEntry not idempotent on %q: %q -> %q (%v)", raw, canon, canon2, err2)
 			}
-			// Reflexivity: a policy containing raw must cover raw and its canonical form.
+			// HostSet deliberately refuses hosts past maxCanonicalHost (1024 bytes).
+			// Within that lookup cap, policy coverage must be reflexive; past it,
+			// oversized entries must fail closed rather than match.
 			hs := NewHostSet([]string{raw})
-			if !hs.CoversEntry(raw) {
-				t.Fatalf("HostSet(%q) does not cover itself", raw)
-			}
-			if !hs.CoversEntry(canon) {
-				t.Fatalf("HostSet(%q) does not cover its canonical form %q", raw, canon)
-			}
-			if !NetworkingCovers(false, []string{raw}, false, []string{raw}) {
-				t.Fatalf("NetworkingCovers not reflexive on %q", raw)
+			stripped := strings.TrimPrefix(strings.TrimSpace(raw), "*.")
+			if len(stripped) <= maxCanonicalHost {
+				if !hs.CoversEntry(raw) {
+					t.Fatalf("HostSet(%q) does not cover itself", raw)
+				}
+				if !hs.CoversEntry(canon) {
+					t.Fatalf("HostSet(%q) does not cover its canonical form %q", raw, canon)
+				}
+				if !NetworkingCovers(false, []string{raw}, false, []string{raw}) {
+					t.Fatalf("NetworkingCovers not reflexive on %q", raw)
+				}
+			} else if hs.CoversEntry(raw) {
+				t.Fatalf("HostSet accepted over-cap entry of length %d", len(stripped))
 			}
 		}
 		// NetworkingBindingDigest must always emit a 64-hex digest and be order/dup invariant.
