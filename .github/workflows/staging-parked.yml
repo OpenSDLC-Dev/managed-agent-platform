@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # actions/checkout, for the shared script
-      issues: write # the tracking issue and its label
+      issues: write # the tracking issue and its triage labels
       id-token: write # mint the OIDC token WIF exchanges
     timeout-minutes: 10
     # Five of deploy.yml's eleven coordinates — this job reads one cluster and
@@ -105,9 +105,7 @@ jobs:
       GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
       WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
       DEPLOY_SERVICE_ACCOUNT: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
-      # The lookup is by LABEL, not by title: a title can be edited by anyone
-      # reading the issue.
-      LABEL: staging-parked
+      TITLE: staging is parked and nothing is deploying to it
     steps:
       # An unset repository variable renders as the EMPTY STRING rather than
       # failing, and `gcloud container clusters describe "" --zone ""` is a
@@ -150,14 +148,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Ensured before the lookup, so the query does not depend on how `gh`
-          # answers a filter naming a label that does not exist yet.
-          gh label create "$LABEL" --repo "$REPO" --color FBCA04 \
-            --description "Open while the staging environment is parked (#504)" \
-            >/dev/null 2>&1 || true
-
-          num="$(gh issue list --repo "$REPO" --state open --label "$LABEL" \
-            --limit 10 --json number --jq 'first | .number // empty')"
+          source .github/scripts/notifier-issues.sh
+          numbers="$(open_notifier_issues staging-parked "$TITLE")"
+          num="${numbers%%$'\n'*}"
           echo "issue=$num" >> "$GITHUB_OUTPUT"
 
           if [ -z "$num" ] && [ "$GITHUB_EVENT_NAME" = workflow_run ]; then
@@ -194,7 +187,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           OPEN_ISSUE: ${{ steps.lookup.outputs.issue }}
-          TITLE: staging is parked and nothing is deploying to it
         shell: bash
         run: |
           set -euo pipefail
@@ -253,14 +245,12 @@ jobs:
 
           RUN_URL="https://github.com/$REPO/actions/runs/$GITHUB_RUN_ID"
 
-          # EVERY open issue carrying the label, not just the first. A second one
-          # — filed by hand, or by two runs that overlapped — would otherwise
-          # stay open forever: the parked branch below stops at "one is already
-          # open" and never revisits the rest.
+          source .github/scripts/notifier-issues.sh
+
+          # A concurrent run could have changed the set since the first lookup.
           close_all() {
             local reason="$1" n found=0 numbers now
-            numbers="$(retry gh issue list --repo "$REPO" --state open \
-              --label "$LABEL" --limit 50 --json number --jq '.[].number')"
+            numbers="$(retry open_notifier_issues staging-parked "$TITLE")"
             for n in $numbers; do
               found=$((found + 1))
               if gh issue close "$n" --repo "$REPO" --comment "$reason"; then
@@ -331,6 +321,8 @@ jobs:
               # reaches everyone watching the repository, which is how every
               # other issue in this backlog reaches anyone.
               body="$(printf '%s\n' \
+                "$(notifier_marker staging-parked)" \
+                "" \
                 "The staging cluster \`$GKE_CLUSTER\` carries \`power-saved-*\` labels, so \`make gcp-env-stop\` parked it and nothing has deployed to it since." \
                 "" \
                 "Labels: \`$labels\`" \
@@ -350,7 +342,7 @@ jobs:
                 "" \
                 "It closes automatically: the next run of this workflow that finds the cluster unparked, or gone, closes it, and a completed \`deploy\` is one of its triggers.")"
 
-              url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+              url="$(gh issue create --repo "$REPO" --title "$TITLE" --label feature,p2,hard --body "$body")"
               echo "opened $url"
               ;;
           esac

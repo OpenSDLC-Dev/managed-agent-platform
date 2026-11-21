@@ -1,0 +1,1 @@
+- **Issue triage** — Issue reports now carry a type, a priority and a difficulty label. Maintainers can revise each choice as they triage the report. Deployment and evaluation alerts use the same labels as other issues.

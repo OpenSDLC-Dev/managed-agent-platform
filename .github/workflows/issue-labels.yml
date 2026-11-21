@@ -1,0 +1,30 @@
+name: Issue labels
+
+on:
+  issues:
+    types: [opened, reopened, edited, labeled, unlabeled, transferred]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: issue-labels-${{ github.event.changes.new_issue.number || github.event.issue.number || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.event.action != 'transferred' || github.event.changes.new_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Apply the issue labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.changes.new_issue.number || github.event.issue.number }}
+        run: python3 .github/scripts/issue_labels.py

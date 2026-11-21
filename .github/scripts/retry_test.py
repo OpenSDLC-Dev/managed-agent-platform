@@ -7,8 +7,7 @@
 three-attempt `retry` and wrap their READ calls in it — every one in
 `deploy-alert.yml` and `evals-alert.yml`, and all but `staging-parked.yml`'s
 issue lookup, which sits in an earlier step that defines no `retry` at all.
-Every value `retry` prints lands in a command substitution, either directly or
-by way of `open_issue_with`, which forwards it to one. The obvious
+Every value `retry` prints lands in a command substitution. The obvious
 spelling of the helper — `until "$@"` — runs each attempt with stdout already
 connected to that capture, so an attempt that emits bytes before failing leaves
 them in it and the caller parses them joined to the next attempt's. That is #507,
@@ -143,8 +142,8 @@ CASES = [
     ("all-attempts-fail", 3, '{"partial":', "", "", 1, 3,
      "the giving-up path: the caller gets a failure and NOT the junk"),
     ("empty-answer", 0, "", "", "", 0, 1,
-     "`gh issue list --jq 'first | .number // empty'` with nothing open — an"
-     " empty answer is a real answer here"),
+     "the notifier lookup with no tracking issue open — an empty answer is"
+     " a real answer here"),
     ("empty-answer-after-failures", 2, "123", "", "", 0, 3,
      "the same lookup after two failures. Bare, the caller reads `123123` and"
      " comments on an issue nobody filed"),

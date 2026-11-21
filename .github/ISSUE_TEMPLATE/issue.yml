@@ -1,0 +1,42 @@
+name: Report a bug or request a feature
+description: Describe the issue and select its type, priority and difficulty.
+body:
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Type
+      description: Choose bug for broken behavior or feature for a new capability or improvement.
+      options:
+        - bug
+        - feature
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Choose p0 for critical, urgent work, p1 for important work, or p2 for work that can wait.
+      options:
+        - p0
+        - p1
+        - p2
+    validations:
+      required: true
+  - type: dropdown
+    id: difficulty
+    attributes:
+      label: Difficulty
+      description: Choose easy if AI can proceed directly, medium if AI must write a plan first, or hard if a person must make a decision.
+      options:
+        - easy
+        - medium
+        - hard
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a bug, give the steps, expected result and actual result. For a feature, describe the change and who needs it.
+    validations:
+      required: true

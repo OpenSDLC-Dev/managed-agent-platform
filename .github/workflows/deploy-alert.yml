@@ -32,7 +32,7 @@ on:
 
 permissions:
   contents: read
-  # The issue, its label, and its assignee.
+  # The tracking issues, their triage labels and assignees.
   issues: write
   # Reading a run's per-step conclusions is how "parked" is told from
   # "deployed"; `workflow_run` itself carries only the overall conclusion.
@@ -73,11 +73,6 @@ jobs:
           STEP_NAME: Deploy the chart
           TITLE: "CD: the deploy workflow is failing on main"
           MISWIRED_TITLE: "CD: the deploy notifier can no longer tell deployed from parked"
-          # The lookup is by LABEL, not by title: a title can be edited by
-          # anyone reading the issue, and scanning open issues for an exact
-          # string only works while the issue is inside the page fetched.
-          LABEL: cd-failure
-          MISWIRED_LABEL: cd-notifier-miswired
           # How far back to look for a run that carries news. Parked weekends
           # are the reason this is not 1.
           WINDOW: 12
@@ -188,37 +183,12 @@ jobs:
           MARK="<!-- deploy-alert run:$RUN_ID attempt:$RUN_ATTEMPT -->"
           export MARK
 
-          ensure_label() {
-            gh label create "$1" --repo "$REPO" --color B60205 --description "$2" \
-              >/dev/null 2>&1 || true
-          }
-          open_issue_with() {
-            retry gh issue list --repo "$REPO" --state open --label "$1" --limit 10 \
-              --json number --jq 'first | .number // empty'
-          }
-
-          # Two labels, because these are two different problems with two
-          # different fixers: `broken` means CD is down, `miswired` means this
-          # notifier has gone blind. Sharing one issue would file a real outage
-          # as a comment under "the notifier can no longer tell deployed from
-          # parked" — a title that sends whoever triages it to the wrong place.
-          #
-          # Both are ensured before either is looked up, so `deployed` can ask
-          # about the one this run did not use without depending on how `gh`
-          # answers a filter naming a label that does not exist.
-          ensure_label "$LABEL" \
-            "Opened automatically when the deploy workflow fails (#479)"
-          ensure_label "$MISWIRED_LABEL" \
-            "Opened automatically when deploy-alert.yml loses the step it keys on (#479)"
-          case "$outcome" in
-            miswired) want_label="$MISWIRED_LABEL" ;;
-            *)        want_label="$LABEL" ;;
-          esac
-          num="$(open_issue_with "$want_label")"
+          source .github/scripts/notifier-issues.sh
 
           open_or_comment() {
-            local title="$1"
-            local body="$2"$'\n\n'"$MARK"
+            local kind="$1" title="$2" body="$3"$'\n\n'"$MARK" numbers num
+            numbers="$(retry open_notifier_issues "$kind" "$title")"
+            num="${numbers%%$'\n'*}"
             if [ -n "$num" ]; then
               # Never say the same thing twice: two invocations can settle on
               # the same run, and a bot that repeats itself is a bot people
@@ -253,7 +223,8 @@ jobs:
             # URL. Any `|| gh issue create` fallback behind that files the
             # outage a second time.
             local url
-            url="$(gh issue create --repo "$REPO" --title "$title" --label "$want_label" --body "$body")"
+            body="$(notifier_marker "$kind")"$'\n\n'"$body"
+            url="$(gh issue create --repo "$REPO" --title "$title" --label bug,p1,medium --body "$body")"
             echo "opened $url"
             gh issue edit "${url##*/}" --repo "$REPO" --add-assignee "$ACTOR" >/dev/null 2>&1 \
               || echo "::warning::opened $url but could not assign it to $ACTOR"
@@ -277,7 +248,7 @@ jobs:
                 *)
                   impact="\`$STEP_NAME\` itself ended **$step**, so the release state is **indeterminate**: \`helm upgrade\` may have applied part of this commit. Check \`helm history\` before assuming staging is on either version." ;;
               esac
-              open_or_comment "$TITLE" "$(printf '%s\n' \
+              open_or_comment deploy-failure "$TITLE" "$(printf '%s\n' \
                 "\`deploy\` finished **$RUN_CONCLUSION** on \`${HEAD_SHA:0:7}\`." \
                 "" \
                 "First failing step: **$failed**" \
@@ -292,19 +263,19 @@ jobs:
               # Closes BOTH identities, and the second is not belt-and-braces:
               # `deployed` requires the step this notifier keys on to have
               # concluded `success`, which is proof the miswiring is over too.
+              outages="$(retry open_notifier_issues deploy-failure "$TITLE")"
+              notifier="$(retry open_notifier_issues deploy-notifier "$MISWIRED_TITLE")"
               closed=0
-              for l in "$LABEL" "$MISWIRED_LABEL"; do
-                n="$(open_issue_with "$l")"
-                [ -n "$n" ] || continue
+              for n in $outages $notifier; do
                 gh issue close "$n" --repo "$REPO" --comment \
                   "Deployed successfully on \`${HEAD_SHA:0:7}\`: $RUN_URL"
-                echo "closed #$n ($l)"
+                echo "closed #$n"
                 closed=$((closed + 1))
               done
               [ "$closed" -gt 0 ] || echo "nothing to close"
               ;;
             miswired)
-              open_or_comment "$MISWIRED_TITLE" "$(printf '%s\n' \
+              open_or_comment deploy-notifier "$MISWIRED_TITLE" "$(printf '%s\n' \
                 "\`deploy\` succeeded on \`${HEAD_SHA:0:7}\`, but this workflow could not find a step named **$STEP_NAME** in it (found: \`$step\`)." \
                 "" \
                 "That step's conclusion is how a real deployment is told from a run skipped because staging is parked. Until the name matches again, **no successful deploy will close a CD issue**." \

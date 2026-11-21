@@ -167,12 +167,10 @@ whole cluster.
 
 It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only when
 somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten — and
-keeps one issue open while the labels are there. Only a scheduled or hand-dispatched run
-opens it, so the cadence is the grace period and there is no threshold to tune; while it
-stands it is never commented on again, because a standing flag's age is the answer to "how
-long"; and it closes itself, with a completed `deploy` among its triggers so reviving staging
-retires it in minutes rather than by the next Monday. Destroying staging closes it too — an
-environment that no longer exists cannot be forgotten, and the issue's own text offers
+keeps one `feature`, `p2`, `hard` issue open while the cluster carries those labels.
+A scheduled or manually dispatched run opens it. The issue's age shows how long staging
+has been parked. A completed `deploy` triggers a check, so reviving staging can close the
+issue before the next weekly check. Destroying staging closes it too. The issue offers
 `gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
 and `github.actor` on one is whoever last edited the cron.
 
@@ -700,9 +698,10 @@ nothing done to this file takes effect — or can be tested — until it merges.
 classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
 `make cd-outcome-test`, and why CI checks the three names the notifier borrows from
 `deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
-separates parked from deployed. Should that name go missing at runtime anyway, the notifier
-says so under a label of its own (`cd-notifier-miswired`) rather than filing it as an outage —
-a blind notifier and a broken deploy are different problems for different people.
+separates parked from deployed. If that name goes missing, the notifier opens a separate
+issue for the step-name mismatch. Both kinds of issue carry `bug`, `p1` and `medium`.
+The notifier identifies each by its author and a marker in the issue body, so changing
+triage labels or renaming an issue still lets the next successful deploy close it.
 
 **Application secrets are supplied separately from infrastructure bootstrap.**
 

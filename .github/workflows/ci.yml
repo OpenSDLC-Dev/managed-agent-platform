@@ -1379,6 +1379,10 @@ jobs:
       # each of them keeps them from drifting apart again.
       - name: no notifier's retry leaks a failed attempt's output
         run: make retry-test
+      - name: notifiers identify their own tracking issues across triage changes
+        run: make notifier-issues-test
+      - name: issue labels follow the triage policy
+        run: make issue-labels-test
       # Whether the nightly eval suite is passing, failing or has stopped is
       # one script's decision, and its scheduled caller first runs on `main`.
       - name: the eval notifier's classifier decides what it claims
