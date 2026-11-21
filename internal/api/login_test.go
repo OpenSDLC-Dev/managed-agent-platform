@@ -277,6 +277,10 @@ func TestNativePasswordRequiresDevelopment(t *testing.T) {
 }
 
 func TestNativePasswordLogin(t *testing.T) {
+	originalVersion := version.Version
+	version.Version = "1.2.3"
+	t.Cleanup(func() { version.Version = originalVersion })
+
 	s := newNativeServer(t, login.ModePassword)
 	id := s.seedLocal("ada", "user", "active")
 	body := `{"login_name":"ada","password":"` + localPassword + `"}`
