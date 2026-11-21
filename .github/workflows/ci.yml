@@ -20,7 +20,7 @@ jobs:
           # step — checkout v6+ would otherwise leave it in a credentials file
           # wired into the job's git config.
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       # The gate commands live in the Makefile — the single executable source
@@ -46,7 +46,7 @@ jobs:
           ref: 558712008767f2413cc5cc92e44a790a66f13aa7
           path: console-source
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -1302,7 +1302,7 @@ jobs:
       # `gcp-kms-role-check` is a Go program reading this tree. It belongs to
       # this job rather than the Go one for the reason the whole gcp-* group
       # does: the merge gate must not depend on deploy/gcp (plan 20, Decision 9).
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: terraform fmt
@@ -1708,7 +1708,7 @@ jobs:
           # step — checkout v6+ would otherwise leave it in a credentials file
           # wired into the job's git config.
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       # The Kubernetes sandbox backend's contract test runs against a real
