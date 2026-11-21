@@ -52,9 +52,10 @@ var (
 	// Only the labels Keep a Changelog itself puts in the trailing block:
 	// a released section body may legitimately end with its own
 	// reference-definition line, and that line must stay with the body.
-	linkRefRe       = regexp.MustCompile(`^\[(Unreleased|\d+\.\d+\.\d+)\]: \S+$`)
-	unreleasedRefRe = regexp.MustCompile(`^\[Unreleased\]: (\S+)/compare/v\S+\.\.\.HEAD$`)
-	releasedRefRe   = regexp.MustCompile(`^\[(\d+\.\d+\.\d+)\]: `)
+	linkRefRe        = regexp.MustCompile(`^\[(Unreleased|\d+\.\d+\.\d+)\]: \S+$`)
+	unreleasedRefRe  = regexp.MustCompile(`^\[Unreleased\]: (\S+)/compare/v\S+\.\.\.HEAD$`)
+	releasedRefRe    = regexp.MustCompile(`^\[(\d+\.\d+\.\d+)\]: `)
+	releaseHeadingRe = regexp.MustCompile(`^## \[((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\] - \d{4}-\d{2}-\d{2}$`)
 	// An ATX heading: up to three leading spaces, 1–6 hashes, then
 	// whitespace or end of line — `#123 fixed …` is entry text, not a heading.
 	headingRe = regexp.MustCompile(`^ {0,3}#{1,6}([ \t]|$)`)
@@ -115,14 +116,18 @@ func loadFragments(dir string) ([]fragment, error) {
 			return nil, fmt.Errorf("changelog.d/%s: a fragment is the final CHANGELOG entry verbatim and must start with %q", name, "- ")
 		}
 		lines := strings.Split(body, "\n")
-		for _, line := range lines {
-			if headingRe.MatchString(line) {
+		layout, err := markdownLines(lines)
+		if err != nil {
+			return nil, fmt.Errorf("changelog.d/%s: %w", name, err)
+		}
+		for i, line := range lines {
+			if layout[i] != codeLine && headingRe.MatchString(line) {
 				return nil, fmt.Errorf("changelog.d/%s: headings belong to the assembler, not a fragment", name)
 			}
 		}
 		// Use the release-notes rules with placeholder metadata. Keep the
 		// original body for assembly, which copies fragments verbatim.
-		if _, err := absolutizeLinks(lines, fenceStates(lines), "https://example.invalid/repo", "0.0.0"); err != nil {
+		if _, err := absolutizeLinks(lines, layout, "https://example.invalid/repo", "0.0.0"); err != nil {
 			return nil, fmt.Errorf("changelog.d/%s: %w", name, err)
 		}
 		frags = append(frags, fragment{
@@ -184,6 +189,59 @@ func splitTrailingRefs(lines []string) (refs, doc []string) {
 		doc = doc[:len(doc)-1]
 	}
 	return refs, doc
+}
+
+func changelogSections(lines []string) (refs, doc []string, layout []markdownLine, err error) {
+	refs, doc = splitTrailingRefs(lines)
+	layout, err = markdownLines(doc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Check the index independently of fence state. A fence that closes in
+	// a later release is balanced across the file but still hides a section.
+	indexed := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		if m := releasedRefRe.FindStringSubmatch(ref); m != nil {
+			indexed[m[1]] = true
+		}
+	}
+	visible := make(map[string]bool, len(refs)+1)
+	type hiddenHeading struct {
+		key  string
+		line int
+	}
+	var hidden []hiddenHeading
+	for i, line := range doc {
+		key := ""
+		if line == "## [Unreleased]" {
+			key = "Unreleased"
+		} else if m := releaseHeadingRe.FindStringSubmatch(line); m != nil && indexed[m[1]] {
+			key = m[1]
+		}
+		if key == "" {
+			continue
+		}
+		if layout[i] == codeLine {
+			hidden = append(hidden, hiddenHeading{key, i})
+		} else {
+			visible[key] = true
+		}
+	}
+	for _, heading := range hidden {
+		if !visible[heading.key] {
+			return nil, nil, nil, fmt.Errorf("Markdown fence hides changelog heading %q at line %d", doc[heading.line], heading.line+1)
+		}
+	}
+	return refs, doc, layout, nil
+}
+
+func sectionEnd(doc []string, layout []markdownLine, start int) int {
+	for i := start + 1; i < len(doc); i++ {
+		if layout[i] != codeLine && strings.HasPrefix(doc[i], "## ") {
+			return i
+		}
+	}
+	return len(doc)
 }
 
 // joinTrimmed joins lines after dropping leading and trailing blank ones;
@@ -278,15 +336,18 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	if _, err := time.Parse("2006-01-02", date); err != nil {
 		return "", fmt.Errorf("date %q is not a real YYYY-MM-DD date: %v", date, err)
 	}
-	refs, doc := splitTrailingRefs(strings.Split(content, "\n"))
-	for _, l := range doc {
-		if strings.HasPrefix(l, "## ["+version+"]") {
+	refs, doc, layout, err := changelogSections(strings.Split(content, "\n"))
+	if err != nil {
+		return "", err
+	}
+	for i, l := range doc {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			return "", fmt.Errorf("section [%s] already exists", version)
 		}
 	}
 	unrelIdx := -1
 	for i, l := range doc {
-		if l == "## [Unreleased]" {
+		if layout[i] != codeLine && l == "## [Unreleased]" {
 			if unrelIdx >= 0 {
 				return "", fmt.Errorf("two ## [Unreleased] sections — refusing to release only the first")
 			}
@@ -296,13 +357,7 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	if unrelIdx < 0 {
 		return "", fmt.Errorf("no ## [Unreleased] section")
 	}
-	restIdx := len(doc)
-	for i := unrelIdx + 1; i < len(doc); i++ {
-		if strings.HasPrefix(doc[i], "## ") {
-			restIdx = i
-			break
-		}
-	}
+	restIdx := sectionEnd(doc, layout, unrelIdx)
 	tail := joinTrimmed(doc[unrelIdx+1 : restIdx])
 	// The pointer paragraph is plumbing, never release content — strip it
 	// whether it stands alone or something was (wrongly) appended below it.
@@ -346,7 +401,11 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	}
 	out = append(out, "")
 	out = append(out, newRefs...)
-	return strings.Join(out, "\n") + "\n", nil
+	assembled := strings.Join(out, "\n") + "\n"
+	if _, _, _, err := changelogSections(strings.Split(assembled, "\n")); err != nil {
+		return "", fmt.Errorf("assembled changelog: %w", err)
+	}
+	return assembled, nil
 }
 
 // notes returns the body of version's released section, without the
@@ -355,10 +414,13 @@ func notes(content, version string) (string, error) {
 	if !versionRe.MatchString(version) {
 		return "", fmt.Errorf("version %q is not X.Y.Z", version)
 	}
-	_, doc := splitTrailingRefs(strings.Split(content, "\n"))
+	_, doc, layout, err := changelogSections(strings.Split(content, "\n"))
+	if err != nil {
+		return "", err
+	}
 	secIdx := -1
 	for i, l := range doc {
-		if strings.HasPrefix(l, "## ["+version+"]") {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			secIdx = i
 			break
 		}
@@ -366,13 +428,7 @@ func notes(content, version string) (string, error) {
 	if secIdx < 0 {
 		return "", fmt.Errorf("no section [%s] in the changelog", version)
 	}
-	end := len(doc)
-	for i := secIdx + 1; i < len(doc); i++ {
-		if strings.HasPrefix(doc[i], "## ") {
-			end = i
-			break
-		}
-	}
+	end := sectionEnd(doc, layout, secIdx)
 	body := joinTrimmed(doc[secIdx+1:end]) + "\n"
 	// An archived section's stub must never ship as a release body; re-runs
 	// of a release workflow read the tag's checkout, where the section is
@@ -451,66 +507,77 @@ func runAssemble(changelogPath, dir, version, date string) error {
 // gate a release. The release workflow's tag-sanity check compares it to
 // the tag.
 func latest(content string) (string, error) {
-	re := regexp.MustCompile(`^## \[((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\] - \d{4}-\d{2}-\d{2}$`)
-	_, doc := splitTrailingRefs(strings.Split(content, "\n"))
-	for _, l := range doc {
-		if m := re.FindStringSubmatch(l); m != nil {
+	_, doc, layout, err := changelogSections(strings.Split(content, "\n"))
+	if err != nil {
+		return "", err
+	}
+	for i, l := range doc {
+		if m := releaseHeadingRe.FindStringSubmatch(l); layout[i] != codeLine && m != nil {
 			return m[1], nil
 		}
 	}
 	return "", fmt.Errorf("no released section in the changelog")
 }
 
-// clampNotes bounds body to cap bytes for a GitHub Release (which rejects
-// oversized bodies outright): whole leading ### groups are kept while they
-// fit, and a trailer links to the full section in the changelog at the tag.
-// A cap even the trailer cannot satisfy is an error — over-cap output would
-// just move the 422 downstream. The first cut under the fragment scheme
-// absorbs the 5,300-line legacy backlog and needs this (plan 27 decision 4).
-func clampNotes(body, base, version string, cap int) (string, error) {
-	if cap <= 0 || len(body) <= cap {
-		return body, nil
+// renderNotes rewrites destinations at the tag and applies the byte cap to
+// complete groups. A bad destination only fails the render if its group is
+// emitted. Successful rewrites still count toward the cap in every candidate.
+func renderNotes(body, base, version string, cap int) (string, error) {
+	lines := strings.Split(body, "\n")
+	layout, err := markdownLines(lines)
+	if err != nil {
+		return "", err
 	}
-	trailer := fmt.Sprintf("---\n\nTruncated: the full section is in [CHANGELOG.md](%s/blob/v%s/CHANGELOG.md).\n", base, version)
-	if len(trailer) > cap {
-		return "", fmt.Errorf("cap %d is smaller than the %d-byte truncation trailer itself", cap, len(trailer))
+	type group struct {
+		text string
+		err  error
 	}
-	// Split into blocks at ### boundaries, then keep whole leading blocks
-	// while they (plus the trailer) fit — no group is ever cut mid-entry.
-	var blocks []string
-	cur := ""
-	for _, line := range strings.SplitAfter(body, "\n") {
-		if strings.HasPrefix(line, "### ") && cur != "" {
-			blocks = append(blocks, cur)
-			cur = ""
+	var groups []group
+	start, size := 0, 0
+	for end := 1; end <= len(lines); end++ {
+		if end < len(lines) && (layout[end] == codeLine || !strings.HasPrefix(lines[end], "### ")) {
+			continue
 		}
-		cur += line
+		mapped, linkErr := absolutizeLinks(lines[start:end], layout[start:end], base, version)
+		text := strings.Join(mapped, "\n")
+		if end < len(lines) {
+			text += "\n"
+		}
+		groups = append(groups, group{text, linkErr})
+		size += len(text)
+		start = end
 	}
-	if cur != "" {
-		blocks = append(blocks, cur)
+
+	trailer := ""
+	if cap > 0 && size > cap {
+		if base == "" {
+			return "", fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
+		}
+		trailer = fmt.Sprintf("---\n\nTruncated: the full section is in [CHANGELOG.md](%s/blob/v%s/CHANGELOG.md).\n", base, version)
+		if len(trailer) > cap {
+			return "", fmt.Errorf("cap %d is smaller than the %d-byte truncation trailer itself", cap, len(trailer))
+		}
 	}
-	kept := ""
-	for _, b := range blocks {
-		candidate := strings.TrimRight(kept+b, "\n") + "\n\n" + trailer
-		if len(candidate) > cap {
+	var out strings.Builder
+	for _, g := range groups {
+		if trailer != "" && out.Len()+len(strings.TrimRight(g.text, "\n"))+2+len(trailer) > cap {
 			break
 		}
-		kept += b
+		if g.err != nil {
+			return "", g.err
+		}
+		out.WriteString(g.text)
 	}
-	kept = strings.TrimRight(kept, "\n")
-	if kept == "" {
-		return trailer, nil
+	if trailer == "" {
+		return out.String(), nil
 	}
-	return kept + "\n\n" + trailer, nil
+	if kept := strings.TrimRight(out.String(), "\n"); kept != "" {
+		return kept + "\n\n" + trailer, nil
+	}
+	return trailer, nil
 }
 
-// runNotes is the `notes` subcommand; out == "" or "-" writes to stdout. On
-// every render — not only when clamping — the section's relative links are
-// made absolute at the tag (absolutizeLinks), so a link form that cannot be
-// mapped fails the subcommand rather than shipping a body whose links only
-// github.com's own renderer could resolve. A positive cap then clamps the
-// body. Both need the repository URL, which
-// repoBase reads from the [Unreleased] link reference.
+// runNotes is the notes subcommand. An empty out or "-" writes to stdout.
 func runNotes(changelogPath, version, out string, cap int) error {
 	content, err := os.ReadFile(changelogPath)
 	if err != nil {
@@ -520,21 +587,9 @@ func runNotes(changelogPath, version, out string, cap int) error {
 	if err != nil {
 		return err
 	}
-	base := repoBase(string(content))
-	lines := strings.Split(body, "\n")
-	abs, err := absolutizeLinks(lines, fenceStates(lines), base, version)
+	body, err = renderNotes(body, repoBase(string(content)), version, cap)
 	if err != nil {
 		return err
-	}
-	body = strings.Join(abs, "\n")
-	if cap > 0 && len(body) > cap {
-		if base == "" {
-			return fmt.Errorf("notes exceed the %d-byte cap and no [Unreleased] link reference exists to derive the changelog link from", cap)
-		}
-		var cerr error
-		if body, cerr = clampNotes(body, base, version, cap); cerr != nil {
-			return cerr
-		}
 	}
 	if out == "" || out == "-" {
 		_, err = os.Stdout.WriteString(body)
@@ -564,107 +619,6 @@ func isArchiveStub(body []string) bool {
 	return nonEmpty == 1 && marked
 }
 
-// fenceStates reports, per line, whether the line sits inside a fenced code
-// block (the fence markers themselves count as inside): a `## ` line in a
-// fenced example is quoted content, never a section boundary.
-func fenceStates(lines []string) []bool {
-	states := make([]bool, len(lines))
-	fenced := false
-	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimLeft(l, " "), "```") {
-			states[i] = true
-			fenced = !fenced
-			continue
-		}
-		states[i] = fenced
-	}
-	return states
-}
-
-// linkTargetRe captures inline-link targets — `](target` up to whitespace or
-// the closing paren — for rebaseLinks' unhandled-form guard.
-var linkTargetRe = regexp.MustCompile(`\]\(([^)\s]+)`)
-
-// refDefTargetRe captures a link-reference definition's target (`[label]:
-// target`) — a form the inline scan cannot see, checked separately. The
-// target must end the line, bar an optional title: without that anchor the
-// pattern also matches ordinary wrapped prose, since this repository's
-// two-space continuation indent sits inside the `{0,3}` allowance, and a
-// sentence like "[expired]: computed at read time, never stored." would be
-// read as a definition whose target is the word "computed".
-var refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:[ \t]*(\S+)[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$`)
-
-// linkSchemeRe matches an absolute-URL (or mailto:) target, which no rewrite
-// touches. Case-insensitive because a scheme is: `HTTPS://x` is absolute, and
-// reporting it as a relative target would fail a release over a capital.
-var linkSchemeRe = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*:`)
-
-// linkDestRe captures an inline link or image *destination*: `](`, the
-// optional whitespace CommonMark allows before a destination, then the
-// destination up to whitespace or the closing paren. absolutizeLinks rewrites
-// the captured span rather than the substring `](docs/`, which matters twice:
-// a destination written `]( ./x)` is seen at all (a raw-substring rewrite
-// leaves it relative and its guard never sees it), and a `](docs/` occurring
-// *inside* an already-absolute destination is consumed by that destination's
-// own match instead of being rewritten in place. Anchoring on `](` rather
-// than on a whole `[label](dest)` keeps the guard complete: a label
-// containing brackets would defeat a label-anchored pattern and let its
-// destination through unchecked.
-var linkDestRe = regexp.MustCompile(`\]\(\s*([^)\s]*)`)
-
-// rebaseLinks rewrites a section's relative link targets for a file two
-// directories below the changelog (docs/changelog/): `](./` becomes
-// `](../../`, and the bare `](docs/` form becomes `](../`. unrebaseLinks is
-// the exact inverse (longest prefix first), and archiveSection verifies the
-// inversion against the bytes it returns for writing. Fenced lines are
-// quoted examples and are left alone. What the inverse could not undo is
-// refused instead of guessed at: a `](../` already present would collide
-// with the rewrite's own output, and any other relative form needs a
-// mapping (and its inverse) added here first.
-func rebaseLinks(section []string, fenced []bool) ([]string, error) {
-	out := make([]string, len(section))
-	for i, l := range section {
-		if fenced[i] {
-			out[i] = l
-			continue
-		}
-		if strings.Contains(l, "](../") {
-			return nil, fmt.Errorf("%q: a parent-relative link cannot be re-based reversibly", strings.TrimSpace(l))
-		}
-		// A link-reference definition carries its target outside the `](`
-		// syntax; a relative one would move unrebased and silently break.
-		if m := refDefTargetRe.FindStringSubmatch(l); m != nil {
-			if t := m[1]; !strings.HasPrefix(t, "#") && !linkSchemeRe.MatchString(t) {
-				return nil, fmt.Errorf("%q: a link-reference definition with a relative target cannot be re-based — teach rebaseLinks its mapping first", strings.TrimSpace(l))
-			}
-		}
-		r := strings.ReplaceAll(l, "](./", "](../../")
-		r = strings.ReplaceAll(r, "](docs/", "](../")
-		for _, m := range linkTargetRe.FindAllStringSubmatch(r, -1) {
-			t := m[1]
-			if strings.HasPrefix(t, "../") || strings.HasPrefix(t, "#") || linkSchemeRe.MatchString(t) {
-				continue
-			}
-			return nil, fmt.Errorf("%q: unhandled relative link target %q — teach rebaseLinks its mapping first", strings.TrimSpace(l), t)
-		}
-		out[i] = r
-	}
-	return out, nil
-}
-
-// hasParentSegment reports whether a cleaned-of-`./` relative path contains a
-// `..` path segment anywhere. Prefix-stripping alone cannot see one: `./../x`
-// becomes `../x`, which concatenated onto a blob URL resolves back off the
-// ref and 404s.
-func hasParentSegment(p string) bool {
-	for _, seg := range strings.Split(p, "/") {
-		if seg == ".." {
-			return true
-		}
-	}
-	return false
-}
-
 // repoBase returns the repository URL carried by the [Unreleased] link
 // reference, or "" when the changelog has none.
 func repoBase(content string) string {
@@ -675,117 +629,6 @@ func repoBase(content string) string {
 		}
 	}
 	return ""
-}
-
-// absolutizeLinks rewrites a notes body's relative link targets to absolute
-// URLs at the release tag. The notes become a GitHub Release body, and
-// github.com's own renderer does resolve a repo-root-relative target there
-// against the repository at the tag, so the release page reads correctly. The
-// raw body does not: the REST API, `gh release view` and mirrors serve it with
-// no such base, and the API's body_html is root-relative — which is why
-// clampNotes already writes its own trailer absolute. The rewrite is what
-// makes the published body self-contained rather than dependent on the one
-// renderer that supplies the base. The two forms changelog.d/README.md permits are the two
-// mapped here; any other relative destination it sees is refused rather than
-// published broken, the same bargain rebaseLinks makes for docs/changelog/,
-// and so is one it could map but has no [Unreleased] reference to build a
-// repository URL from. Fenced lines are quoted examples and are left alone.
-//
-// What it sees is inline destinations and link-reference definitions, and
-// nothing else — so the refusal is not a promise that every dead link is
-// caught. A reference-style link (`[text][label]`) loses its definition when
-// notes drops the trailing block and renders as literal brackets; a raw HTML
-// `<a href="docs/…">`, which GitHub allows in a release body, and a relative
-// autolink `<docs/…>` both pass untouched. None occurs in changelog content
-// today.
-//
-// Of the forms it does see, three are known limits. Only ``` fences are
-// recognised, so a link inside an indented block or an inline code span is
-// rewritten as a real one (shared with rebaseLinks). An image destination
-// becomes a /blob/ URL, which renders the blob page rather than the image
-// bytes; changelog content has never contained image syntax. And an
-// angle-bracket destination — `](<./a b.md>)`, the CommonMark spelling that
-// admits spaces — is refused rather than rewritten, since the capture stops
-// at the space; a test pins that refusal so it cannot decay into a silent
-// pass. A balanced paren inside a destination is fine: the capture ends at
-// the first `)` and the untouched remainder is copied through.
-func absolutizeLinks(section []string, fenced []bool, base, version string) ([]string, error) {
-	prefix := ""
-	if base != "" {
-		prefix = fmt.Sprintf("%s/blob/v%s/", base, version)
-	}
-	out := make([]string, len(section))
-	for i, l := range section {
-		if fenced[i] {
-			out[i] = l
-			continue
-		}
-		// A link-reference definition carries its target outside the `](`
-		// syntax, so the destination scan below cannot see it. It maps by the
-		// same rules: a body may legitimately end with one (see notes).
-		refDef := refDefTargetRe.FindStringSubmatchIndex(l)
-		var b strings.Builder
-		last := 0
-		rewrite := func(ds, de int) error {
-			dest := l[ds:de]
-			// An empty destination has nothing to resolve, and `#anchor` and
-			// absolute targets already read correctly wherever the body is
-			// served, which is exactly what the rewrite buys the rest.
-			if dest == "" || strings.HasPrefix(dest, "#") || linkSchemeRe.MatchString(dest) {
-				return nil
-			}
-			rel, ok := strings.CutPrefix(dest, "./")
-			if !ok {
-				if !strings.HasPrefix(dest, "docs/") {
-					return fmt.Errorf("%q: unhandled relative link target %q — teach absolutizeLinks its mapping first", strings.TrimSpace(l), dest)
-				}
-				rel = dest
-			}
-			// `./../x` strips to `../x`, which would publish a URL holding a
-			// `/../` segment: a browser resolves it back off the blob path and
-			// the link 404s with a green exit — the one outcome this function
-			// exists to make impossible. Refused however it is spelled.
-			if hasParentSegment(rel) {
-				return fmt.Errorf("%q: relative link target %q climbs out of the repository root", strings.TrimSpace(l), dest)
-			}
-			if prefix == "" {
-				return fmt.Errorf("%q: relative link target %q cannot be made absolute — the changelog has no [Unreleased] link reference to derive the repository URL from", strings.TrimSpace(l), dest)
-			}
-			b.WriteString(l[last:ds])
-			b.WriteString(prefix + rel)
-			last = de
-			return nil
-		}
-		if refDef != nil {
-			if err := rewrite(refDef[2], refDef[3]); err != nil {
-				return nil, err
-			}
-		}
-		for _, ix := range linkDestRe.FindAllStringSubmatchIndex(l, -1) {
-			if err := rewrite(ix[2], ix[3]); err != nil {
-				return nil, err
-			}
-		}
-		b.WriteString(l[last:])
-		out[i] = b.String()
-	}
-	return out, nil
-}
-
-// unrebaseLinks is rebaseLinks' inverse: every `](../../` came from `](./`,
-// and the remaining `](../` from the bare `](docs/` form.
-func unrebaseLinks(section []string, fenced []bool) []string {
-	out := make([]string, len(section))
-	for i, l := range section {
-		if fenced[i] {
-			out[i] = l
-			continue
-		}
-		r := strings.ReplaceAll(l, "](../../", "](./")
-		r = strings.ReplaceAll(r, "](../", "](docs/")
-		out[i] = r
-	}
-	return out
 }
 
 // archiveSection moves the dated section for version out of content (plan 28):
@@ -807,11 +650,13 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 		return "", "", fmt.Errorf("archive path %q is not docs/changelog/ next to the changelog — the link re-base assumes that layout", linkPath)
 	}
 	lines := strings.Split(content, "\n")
-	_, doc := splitTrailingRefs(lines)
-	fenced := fenceStates(lines)
+	_, doc, layout, err := changelogSections(lines)
+	if err != nil {
+		return "", "", err
+	}
 	start := -1
 	for i, l := range doc {
-		if !fenced[i] && strings.HasPrefix(l, "## ["+version+"]") {
+		if layout[i] != codeLine && strings.HasPrefix(l, "## ["+version+"]") {
 			start = i
 			break
 		}
@@ -819,13 +664,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if start < 0 {
 		return "", "", fmt.Errorf("no section [%s] in the changelog", version)
 	}
-	end := len(doc)
-	for i := start + 1; i < len(doc); i++ {
-		if !fenced[i] && strings.HasPrefix(doc[i], "## ") {
-			end = i
-			break
-		}
-	}
+	end := sectionEnd(doc, layout, start)
 	section := lines[start:end]
 	// The archive must be exactly one section: the exact dated heading, then
 	// a body with no further section heading. The boundary scan above stops
@@ -834,11 +673,11 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	// `## ` heading indented one to three spaces — plus, under a future
 	// boundary regression, the swallowed neighbor itself (the mutation the
 	// tests pin). A fenced `## ` line is a quoted example and stays.
-	if !regexp.MustCompile(`^## \[` + regexp.QuoteMeta(version) + `\] - \d{4}-\d{2}-\d{2}$`).MatchString(section[0]) {
+	if !releaseHeadingRe.MatchString(section[0]) {
 		return "", "", fmt.Errorf("section [%s] heading %q is not the exact dated grammar", version, section[0])
 	}
 	for j, l := range section[1:] {
-		if fenced[start+1+j] {
+		if layout[start+1+j] == codeLine {
 			continue
 		}
 		trim := strings.TrimLeft(l, " ")
@@ -850,35 +689,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if isArchiveStub(section[1:]) {
 		return "", "", fmt.Errorf("section [%s] is already archived", version)
 	}
-	// Summarize the section's groups deduplicated in Keep-a-Changelog order —
-	// the absorbed legacy backlog repeats its group headings per PR era, and
-	// the stub names each group once.
-	seen := map[string]bool{}
-	for j, l := range section {
-		if !fenced[start+j] && strings.HasPrefix(l, "### ") {
-			seen[strings.TrimPrefix(l, "### ")] = true
-		}
-	}
-	groups := []string{}
-	for _, g := range kacOrder {
-		if seen[g] {
-			groups = append(groups, g)
-			delete(seen, g)
-		}
-	}
-	for j, l := range section {
-		if fenced[start+j] {
-			continue
-		}
-		if g := strings.TrimPrefix(l, "### "); g != l && seen[g] {
-			groups = append(groups, g)
-			delete(seen, g)
-		}
-	}
-	pointer := "The " + archiveMark + linkPath + "](./" + linkPath + ")."
-	if len(groups) > 0 {
-		pointer = strings.Join(groups, " · ") + " — the " + archiveMark + linkPath + "](./" + linkPath + ")."
-	}
+	pointer := archivePointer(section, layout[start:end], linkPath)
 	stub := []string{section[0], "", pointer}
 	if end < len(doc) {
 		stub = append(stub, "")
@@ -892,7 +703,7 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if strings.Replace(newContent, stubBlock, sectionBlock, 1) != content {
 		return "", "", fmt.Errorf("archiving [%s] would not round-trip byte-identically — refusing", version)
 	}
-	rebased, err := rebaseLinks(section, fenced[start:end])
+	rebased, err := rebaseLinks(section, layout[start:end])
 	if err != nil {
 		return "", "", fmt.Errorf("archiving [%s]: %v", version, err)
 	}
@@ -912,11 +723,44 @@ func archiveSection(content, version, linkPath string) (string, string, error) {
 	if appended {
 		candidate = strings.TrimSuffix(candidate, "\n")
 	}
-	restored := strings.Join(unrebaseLinks(strings.Split(candidate, "\n"), fenced[start:end]), "\n")
+	restored := strings.Join(unrebaseLinks(strings.Split(candidate, "\n"), layout[start:end]), "\n")
 	if restored != sectionBlock {
 		return "", "", fmt.Errorf("archiving [%s]: the written archive would not invert to the moved section byte-for-byte — refusing", version)
 	}
 	return newContent, archive, nil
+}
+
+func archivePointer(section []string, layout []markdownLine, linkPath string) string {
+	// Summarize the section's groups deduplicated in Keep-a-Changelog order —
+	// the absorbed legacy backlog repeats its group headings per PR era, and
+	// the stub names each group once.
+	seen := map[string]bool{}
+	for j, l := range section {
+		if layout[j] != codeLine && strings.HasPrefix(l, "### ") {
+			seen[strings.TrimPrefix(l, "### ")] = true
+		}
+	}
+	groups := []string{}
+	for _, g := range kacOrder {
+		if seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	for j, l := range section {
+		if layout[j] == codeLine {
+			continue
+		}
+		if g := strings.TrimPrefix(l, "### "); g != l && seen[g] {
+			groups = append(groups, g)
+			delete(seen, g)
+		}
+	}
+	pointer := "The " + archiveMark + linkPath + "](./" + linkPath + ")."
+	if len(groups) > 0 {
+		pointer = strings.Join(groups, " · ") + " — the " + archiveMark + linkPath + "](./" + linkPath + ")."
+	}
+	return pointer
 }
 
 // runArchive is the `archive` subcommand: the archive file is written first

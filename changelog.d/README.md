@@ -43,8 +43,8 @@ Keeping it short loses nothing: the PR body and `git log` hold the full account
 permanently, and a released entry is frozen the moment `make changelog` folds
 it in — so an over-long fragment is a paragraph the project maintains forever.
 
-**Links:** a relative target must be written `](./…)` from the repo root, or
-`](docs/…)`. Those are the only two forms the tooling can rewrite, and it
+**Links:** write relative targets on one line as `](./…)` from the repo root,
+or as `](docs/…)`. The tooling supports both forms and
 rewrites them twice over: `make changelog-notes` makes them absolute at the
 tag, because the release body is also served raw — by the REST API, by `gh
 release view`, by mirrors — where nothing supplies the repository base that
@@ -53,12 +53,14 @@ github.com's own renderer applies on the release page, and the post-release
 docs/changelog/. Every other relative form — `](../…)` and bare `](deploy/…)`
 alike — is refused rather than guessed at, by `absolutizeLinks` and
 `rebaseLinks` respectively. Absolute URLs and `#anchor` targets are always
-fine, and a link-reference definition (`[label]: docs/…`) follows the same
-rules as an inline target.
+fine. Keep link titles and reference definitions (`[label]: docs/…`) on a
+single line. Keep each reference definition in the same changelog group as
+its links so they stay together when release notes are capped. The tool
+leaves destinations inside code examples as written.
 
-**Fragment loading checks release-notes link forms.** CI runs the loader
-against `changelog.d/`, so an unsupported link form fails the PR that adds it.
-The error names the fragment and the link target.
+**Fragment loading checks link targets and code fences.** CI runs the loader
+against `changelog.d/`. An unsupported relative target or an unclosed fence
+fails the PR that adds it. The error names the fragment and the target or line.
 
 At release time `make changelog VERSION=X.Y.Z` folds every fragment into a
 dated CHANGELOG.md section (groups in Keep-a-Changelog order, entries

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -644,6 +645,132 @@ func TestTheShippingFragmentsLoad(t *testing.T) {
 	}
 }
 
+func TestFragmentChecksLinksOutsideCode(t *testing.T) {
+	dir := t.TempDir()
+	const name = "example.fixed.md"
+	file := filepath.Join(dir, name)
+	const example = "- ```md\n  ## A sample heading\n  [sample](bare.md)\n  ```\n\n"
+	for _, tc := range []struct {
+		body, wantErr string
+	}{
+		{body: example + "- A [link](./docs/RELEASING.md).\n"},
+		{body: "-     [indented example](bare.md)\n"},
+		{body: "- \t  [tab-indented example](bare.md)\n"},
+		{body: "- > ```md\n  > [quoted example](bare.md)\n  > ```\n"},
+		{body: "- One display reads\n    [expired]: disabled\n"},
+		{body: example + "- A [link](bare.md).\n", wantErr: "bare.md"},
+		{body: "- A note.\n\n  ```\n", wantErr: "unclosed Markdown fence"},
+		{body: "- ```\n  Sample.\n- Next item [guide](bare.md).\n  ```\n", wantErr: "unclosed Markdown fence"},
+	} {
+		if err := os.WriteFile(file, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadFragments(dir)
+		if tc.wantErr == "" && err != nil || tc.wantErr != "" &&
+			(err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), tc.wantErr)) {
+			t.Errorf("loadFragments with %q: got %v, want %q", tc.body, err, tc.wantErr)
+		}
+	}
+}
+
+func TestTheShippingArchivesMatchIndex(t *testing.T) {
+	root := filepath.Join("..", "..")
+	changelog := strings.Split(readFile(t, filepath.Join(root, "CHANGELOG.md")), "\n")
+	_, doc, layout, err := changelogSections(changelog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed := make(map[string]bool)
+	for i, heading := range doc {
+		m := releaseHeadingRe.FindStringSubmatch(heading)
+		if layout[i] == codeLine || m == nil {
+			continue
+		}
+		body := doc[i+1 : sectionEnd(doc, layout, i)]
+		if !isArchiveStub(body) {
+			continue
+		}
+		name := m[1] + ".md"
+		indexed[name] = true
+		t.Run(name, func(t *testing.T) {
+			link := "docs/changelog/" + name
+			file := filepath.Join(root, filepath.FromSlash(link))
+			lines := strings.Split(readFile(t, file), "\n")
+			if lines[0] != heading {
+				t.Errorf("archive heading %q, want the index heading %q", lines[0], heading)
+			}
+			layout, err := markdownLines(lines)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 1; i < len(lines); i++ {
+				line := strings.TrimLeft(lines[i], " ")
+				if layout[i] != codeLine && len(lines[i])-len(line) <= 3 && releaseHeadingRe.MatchString(line) {
+					t.Errorf("line %d: unexpected second release heading %q", i+1, lines[i])
+				}
+			}
+			if want := archivePointer(lines, layout, link); joinTrimmed(body) != want {
+				t.Errorf("stub = %q, want %q", joinTrimmed(body), want)
+			}
+			checkArchiveLinks(t, file, lines, layout)
+		})
+	}
+	archives, err := filepath.Glob(filepath.Join(root, "docs", "changelog", "*.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range archives {
+		name := filepath.Base(file)
+		if versionRe.MatchString(strings.TrimSuffix(name, ".md")) && !indexed[name] {
+			t.Errorf("%s has no changelog stub", file)
+		}
+	}
+}
+
+func checkArchiveLinks(t *testing.T, file string, lines []string, layout []markdownLine) {
+	t.Helper()
+	markdownDestinations(lines, layout, func(i int, span textSpan) {
+		dest := lines[i][span.start:span.end]
+		if !needsLinkBase(dest) {
+			return
+		}
+		target, err := url.Parse(unescapeLink(dest))
+		if err != nil {
+			t.Errorf("line %d: invalid link %q: %v", i+1, dest, err)
+			return
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(file), filepath.FromSlash(target.Path))); err != nil {
+			t.Errorf("line %d: relative target %q: %v", i+1, dest, err)
+		}
+	})
+}
+
+func TestArchiveLinksResolveMarkdownEscapes(t *testing.T) {
+	root := t.TempDir()
+	const path = "docs/changelog/0.4.0.md"
+	file := filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "Example(1).md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content := "## [0.4.0] - 2026-09-01\n\n" + `- [guide](docs/Example\(1\).md).` + "\n"
+	_, archived, err := archiveSection(content, "0.4.0", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(archived, `](../Example\(1\).md)`) {
+		t.Fatalf("archive did not preserve the escaped target: %q", archived)
+	}
+	lines := strings.Split(archived, "\n")
+	layout, err := markdownLines(lines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkArchiveLinks(t, file, lines, layout)
+}
+
 // A fragment name deleted by an earlier release and reused later must sort by
 // the commit that added the CURRENT file, not the historical first add.
 func TestReusedFragmentNameSortsByCurrentAdd(t *testing.T) {
@@ -869,7 +996,7 @@ func TestNotesCapChargesTrailer(t *testing.T) {
 	body := "### Added\n\n- " + strings.Repeat("a", 250) + "\n\n" +
 		"### Fixed\n\n- " + strings.Repeat("b", 172) + "\n"
 	cap := len(body) - 1
-	got, err := clampNotes(body, base, "0.2.0", cap)
+	got, err := renderNotes(body, base, "0.2.0", cap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,6 +1131,139 @@ func TestNotes(t *testing.T) {
 	}
 }
 
+func TestReleaseAndArchiveKeepMarkdownExamples(t *testing.T) {
+	const base = "https://github.com/o/r"
+	const path = "docs/changelog/0.4.0.md"
+	const heading = "## [0.4.0] - 2026-09-01\n"
+	example := "````md\n```\n## An example heading\n### An example group\n" +
+		"[example](ignored.md)\n````\n\n" +
+		"~~~md\n[tilde](ignored.md)\n~~~\n\n" +
+		"    [indent](ignored.md)\n\n" +
+		"> ~~~md\n> [quoted fence](ignored.md)\n> > More code.\n> ~~~\n\n" +
+		">     [quoted indent](ignored.md)\n\n" +
+		"- ` [inline](ignored.md) ` and `` `[nested](ignored.md)` ``.\n" +
+		"- `a span that wraps\n  [wrapped](ignored.md)` and [anchor](#top).\n\n" +
+		"- Escaped \\](ignored.md).\n\n" +
+		"- Outer.\n  - Inner.\n\n  Back.\n\n    [nested list link]( docs/HISTORY.md).\n\n" +
+		"- The output includes a separator:\n      ---\n      [live after indented text]( docs/HISTORY.md).\n\n" +
+		"[absolute](https://example.com/a](docs/b) and [doc]( docs/HISTORY.md).\n" +
+		"[root](./docs/HISTORY.md) and [reference][ref].\n\n" +
+		"[ref]: ./docs/HISTORY.md \"Reference title\"\n"
+	cl, _ := writeFixture(t, "# Changelog\n\n"+heading+"\n### Fixed\n\n"+example+
+		"\n## [0.3.0] - 2026-08-08\n\nOlder.\n\n"+
+		"[Unreleased]: "+base+"/compare/v0.4.0...HEAD\n[0.4.0]: https://example.com/4\n[0.3.0]: https://example.com/3\n", nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	if err := runNotes(cl, "0.4.0", out, 0); err != nil {
+		t.Error(err)
+	} else {
+		want := "### Fixed\n\n" + strings.NewReplacer(
+			"( docs/HISTORY.md", "( "+base+"/blob/v0.4.0/docs/HISTORY.md",
+			"(./docs/HISTORY.md", "("+base+"/blob/v0.4.0/docs/HISTORY.md",
+			": ./docs/HISTORY.md", ": "+base+"/blob/v0.4.0/docs/HISTORY.md",
+		).Replace(example)
+		if got := readFile(t, out); got != want {
+			t.Errorf("notes = %q\nwant %q", got, want)
+		}
+	}
+	newContent, archived, err := archiveSection(readFile(t, cl), "0.4.0", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := heading + "\n### Fixed\n\n" + strings.NewReplacer(
+		"( docs/HISTORY.md", "( ../HISTORY.md",
+		"(./docs/HISTORY.md", "(../../docs/HISTORY.md",
+		": ./docs/HISTORY.md", ": ../../docs/HISTORY.md",
+	).Replace(example)
+	if archived != want || !strings.Contains(newContent, "## [0.3.0] - 2026-08-08\n\nOlder.") ||
+		!strings.Contains(newContent, "\nFixed — the full section lives in") {
+		t.Errorf("archive = %q\nwant %q\nstub = %q", archived, want, newContent)
+	}
+}
+
+func TestReleaseAndArchiveRejectUnclosedFence(t *testing.T) {
+	cl := "# Changelog\n\n## [0.4.0] - 2026-09-01\n\n```text\nQuoted.\n\n" +
+		"## [0.3.0] - 2026-08-08\n\nOlder.\n\n[0.4.0]: https://example.com/4\n[0.3.0]: https://example.com/3\n"
+	if _, err := notes(cl, "0.4.0"); err == nil || !strings.Contains(err.Error(), "fence") {
+		t.Errorf("notes: want fence error, got %v", err)
+	}
+	clPath, _ := writeFixture(t, cl, nil)
+	dir := filepath.Join(filepath.Dir(clPath), "docs", "changelog")
+	if err := runArchive(clPath, dir, "0.4.0"); err == nil || !strings.Contains(err.Error(), "fence") {
+		t.Errorf("archive: want fence error, got %v", err)
+	}
+	if readFile(t, clPath) != cl {
+		t.Error("refused archive changed the changelog")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "0.4.0.md")); !os.IsNotExist(err) {
+		t.Errorf("refused archive wrote a file: stat = %v", err)
+	}
+}
+
+func TestFenceCannotCloseInAnotherRelease(t *testing.T) {
+	cl := "## [0.4.0] - 2026-09-01\n\n```\nExample.\n\n" +
+		"## [0.3.0] - 2026-08-08\n\n```\n\n" +
+		"[0.4.0]: https://example.com/4\n[0.3.0]: https://example.com/3\n"
+	if _, err := notes(cl, "0.4.0"); err == nil || !strings.Contains(err.Error(), "fence hides") {
+		t.Errorf("notes: want hidden release error, got %v", err)
+	}
+	if _, _, err := archiveSection(cl, "0.4.0", "docs/changelog/0.4.0.md"); err == nil || !strings.Contains(err.Error(), "fence hides") {
+		t.Errorf("archive: want hidden release error, got %v", err)
+	}
+}
+
+func TestFencedExamplesMayQuoteVisibleReleaseHeadings(t *testing.T) {
+	cl := "## [Unreleased]\n\n```md\n## [Unreleased]\n## [0.4.0] - 2026-08-30\n```\n\n" +
+		"## [0.4.0] - 2026-09-01\n\nActual release.\n\n[0.4.0]: https://example.com/4\n"
+	got, err := notes(cl, "0.4.0")
+	if err != nil || got != "Actual release.\n" {
+		t.Errorf("notes = %q, %v", got, err)
+	}
+}
+
+func TestNotesCapValidatesOnlyEmittedGroups(t *testing.T) {
+	const base = "https://github.com/o/r"
+	const first = "### Added\n\n- [checked](./docs/a.md).\n"
+	big := "## [0.2.0] - 2026-08-07\n\n" + first +
+		"\n### Fixed\n\n- [bad](other.md) " + strings.Repeat("b", 400) +
+		"\n\n[Unreleased]: " + base + "/compare/v0.2.0...HEAD\n"
+	clPath, _ := writeFixture(t, big, nil)
+	out := filepath.Join(t.TempDir(), "notes.md")
+	const cap = 200
+	if err := runNotes(clPath, "0.2.0", out, cap); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, out)
+	if len(got) > cap || !strings.Contains(got, base+"/blob/v0.2.0/docs/a.md") ||
+		!strings.Contains(got, "Truncated:") || strings.Contains(got, "### Fixed") {
+		t.Errorf("capped notes = %q", got)
+	}
+	if err := runNotes(clPath, "0.2.0", out, 0); err == nil || !strings.Contains(err.Error(), "other.md") {
+		t.Errorf("uncapped notes should reject the emitted link, got %v", err)
+	}
+	if readFile(t, out) != got {
+		t.Error("refused render changed the previous output")
+	}
+}
+
+func TestNotesCapKeepsFencedGroupTogether(t *testing.T) {
+	const body = "### Added\n\n- A real group.\n\n```md\n### Example\n" +
+		"[example](bare.md)\n```\n"
+	const base = "https://github.com/o/r"
+	full := body + "\n### Fixed\n\n- " + strings.Repeat("x", 200) + "\n"
+	got, err := renderNotes(full, base, "0.2.0", 195)
+	if err != nil || !strings.HasPrefix(got, body+"\n---\n") || strings.Contains(got, "### Fixed") {
+		t.Errorf("capped notes = %q, %v", got, err)
+	}
+	const trailer = "---\n\nTruncated: the full section is in [CHANGELOG.md](" + base + "/blob/v0.2.0/CHANGELOG.md).\n"
+	// The prefix through the opening fence fits at this cap. The complete
+	// group does not. A split at the sample heading would emit a broken fence.
+	cap := len("### Added\n\n- A real group.\n\n```md\n\n") + len(trailer)
+	got, err = renderNotes(full, base, "0.2.0", cap)
+	if err != nil || got != trailer {
+		t.Errorf("capped notes = %q, %v, want trailer only", got, err)
+	}
+}
+
 // The notes become a GitHub Release body. github.com's renderer resolves a
 // repo-root-relative target there against the repository at the tag, but the
 // raw body the REST API and mirrors serve carries no such base. Both forms
@@ -1092,6 +1352,9 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "anchor untouched", in: "[a](#top)", want: "[a](#top)"},
 		{name: "empty destination untouched", in: "[a]()", want: "[a]()"},
 		{name: "title after the destination", in: `[a](docs/y.md "T")`, want: "[a](" + pre + `docs/y.md "T")`},
+		{name: "link-looking title", in: `[a](docs/y.md "[x](ignored.md)")`, want: "[a](" + pre + `docs/y.md "[x](ignored.md)")`},
+		{name: "backticks in link titles", in: "[one](https://e/1 \"a `\") and [middle](docs/y.md) and [two](https://e/2 \"a `\")",
+			want: "[one](https://e/1 \"a `\") and [middle](" + pre + "docs/y.md) and [two](https://e/2 \"a `\")"},
 		{name: "several destinations on one line", in: "[a](docs/x.md), [b](./y.md), [c](#z)", want: "[a](" + pre + "docs/x.md), [b](" + pre + "y.md), [c](#z)"},
 		// Only the captured span is replaced, so a destination whose tail
 		// contains a balanced paren keeps it: the `)` ends the capture, and
@@ -1103,6 +1366,8 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		// `./../x` strips to `../x` and would publish a URL holding `/../`,
 		// which resolves off the blob path and 404s with a green exit.
 		{name: "parent escape via the dot form refused", in: "[a](./../deploy/x.md)", wantErr: true},
+		{name: "escaped parent segment refused", in: `[a](./\.\./deploy/x.md)`, wantErr: true},
+		{name: "encoded parent segment refused", in: "[a](./%2e%2e/deploy/x.md)", wantErr: true},
 		{name: "parent segment mid-path refused", in: "[a](docs/../../x.md)", wantErr: true},
 		{name: "uppercase scheme is absolute", in: "[a](HTTPS://example.com/x)", want: "[a](HTTPS://example.com/x)"},
 		// An angle-bracket destination is a known gap, asserted so it stays a
@@ -1110,7 +1375,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "angle-bracket destination refused", in: "[x](<./a.md>)", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+			got, err := absolutizeLinks([]string{tc.in}, []markdownLine{proseLine}, base, "1.2.3")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("absolutizeLinks(%q) = %q, want an error", tc.in, got)
@@ -1127,14 +1392,14 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}
 
 	// A fenced line is a quoted example, left byte-identical.
-	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{true}, base, "1.2.3")
+	fenced, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []markdownLine{codeLine}, base, "1.2.3")
 	if err != nil || fenced[0] != "[a](docs/x.md)" {
 		t.Errorf("fenced line rewritten: %q, %v", fenced, err)
 	}
 
 	// With no [Unreleased] reference there is no repository URL to build, and
 	// a relative target must fail rather than publish unresolvable.
-	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []bool{false}, "", "1.2.3"); err == nil {
+	if _, err := absolutizeLinks([]string{"[a](docs/x.md)"}, []markdownLine{proseLine}, "", "1.2.3"); err == nil {
 		t.Error("want an error for a relative target with no base URL")
 	}
 
@@ -1148,6 +1413,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}{
 		{name: "bare docs definition mapped", in: "[l]: docs/x.md", want: "[l]: " + pre + "docs/x.md"},
 		{name: "dot-form definition mapped", in: "[l]: ./docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "list reference definition mapped", in: "- [l]: docs/x.md", want: "- [l]: " + pre + "docs/x.md"},
 		{name: "definition with a title mapped", in: `[l]: docs/x.md "T"`, want: "[l]: " + pre + `docs/x.md "T"`},
 		{name: "parent-relative definition refused", in: "[l]: ../x.md", wantErr: true},
 		{name: "unmapped definition refused", in: "[l]: x.md", wantErr: true},
@@ -1160,7 +1426,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		// release that had nothing wrong with it.
 		{name: "wrapped prose is not a definition", in: "  [expired]: computed at read time, never stored.", want: "  [expired]: computed at read time, never stored."},
 	} {
-		got, err := absolutizeLinks([]string{tc.in}, []bool{false}, base, "1.2.3")
+		got, err := absolutizeLinks([]string{tc.in}, []markdownLine{proseLine}, base, "1.2.3")
 		switch {
 		case tc.wantErr && err == nil:
 			t.Errorf("%s: absolutizeLinks(%q) = %q, want an error", tc.name, tc.in, got)
@@ -1168,6 +1434,25 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 			t.Errorf("%s: absolutizeLinks(%q): %v", tc.name, tc.in, err)
 		case !tc.wantErr && got[0] != tc.want:
 			t.Errorf("%s: absolutizeLinks(%q)\n got %q\nwant %q", tc.name, tc.in, got[0], tc.want)
+		}
+	}
+}
+
+func TestReferenceDefinitionsAfterBlockBoundaries(t *testing.T) {
+	const base = "https://github.com/o/r"
+	for _, block := range []string{"---", "* * *", "Section title\n==="} {
+		lines := strings.Split("- See [guide][g].\n\n"+block+"\n[g]: docs/HISTORY.md", "\n")
+		layout, err := markdownLines(lines)
+		if err != nil {
+			t.Fatal(err)
+		}
+		notes, err := absolutizeLinks(lines, layout, base, "0.4.0")
+		if err != nil || notes[len(notes)-1] != "[g]: "+base+"/blob/v0.4.0/docs/HISTORY.md" {
+			t.Errorf("notes after %q = %q, %v", block, notes, err)
+		}
+		archive, err := rebaseLinks(lines, layout)
+		if err != nil || archive[len(archive)-1] != "[g]: ../HISTORY.md" {
+			t.Errorf("archive after %q = %q, %v", block, archive, err)
 		}
 	}
 }
@@ -1366,11 +1651,10 @@ func TestArchiveRefusesUnhandledLinkForms(t *testing.T) {
 	if _, _, err := archiveSection(bare, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "unhandled relative link target") {
 		t.Errorf("want unhandled-form refusal, got %v", err)
 	}
-	// A link-reference definition carries a relative target in a form the
-	// inline scan does not see — refused, not moved unrebased.
-	refDef := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [plan][p] entry.\n\n[p]: docs/plan/29_x.md\n\n[0.4.0]: https://e/1\n"
-	if _, _, err := archiveSection(refDef, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "link-reference definition with a relative target") {
-		t.Errorf("want ref-def refusal, got %v", err)
+	// Link-reference definitions use the same mappings as inline links.
+	refDef := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [plan][p] entry.\n\n[p]: plan/29_x.md\n\n[0.4.0]: https://e/1\n"
+	if _, _, err := archiveSection(refDef, "0.4.0", link); err == nil || !strings.Contains(err.Error(), "unhandled relative link target") {
+		t.Errorf("want unmapped ref-def refusal, got %v", err)
 	}
 	// An absolute-URL definition is untouched and archives fine.
 	absDef := "# C\n\n## [0.4.0] - 2026-09-01\n\n- A [site][s] entry.\n\n[s]: https://example.com/x\n\n[0.4.0]: https://e/1\n"

@@ -1,0 +1,1 @@
+- **Release notes and changelog archives** — Both commands preserve code examples and rewrite relative Markdown links with the same rules. Release notes keep whole groups within the byte cap. The archive command refuses fences that hide a release section, and CI checks the shipped archive stubs and relative links (#424).
