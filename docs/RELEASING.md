@@ -106,9 +106,10 @@ schedule. Preconditions:
    be inline at tag time (step 2 of the trigger list renders the notes from
    it), and the stub keeps the dated heading, so existing
    `CHANGELOG.md § [X.Y.Z]` citations resolve through it — no citation
-   sweep. This is also the PR that closes the release out in STATE.md: the
-   archive is the last task the release tracked, so the release leaves Active
-   work here — returning it to **None** if nothing else is in flight.
+   sweep. CI checks the archive against its stub and checks that relative
+   links still resolve from the archive directory. Archiving is the last
+   task in STATE.md for a release. Its PR returns Active work to **None**
+   if nothing else is in flight.
 
 ## What the tag triggers
 
@@ -130,15 +131,13 @@ also runs locally, where without `PUSH=1` nothing leaves the machine:
    Keep-a-Changelog groups under GitHub's 125,000-character body cap, then
    a link to the full CHANGELOG.md section (the first cut's absorbed
    backlog exceeded the cap, and so did v0.4.0's section, whose notes carry
-   its `Added` and `Changed` groups alone). Keeping stops at the first group
-   that does not fit, so a later group that would fit — `Security` after an
-   oversized `Fixed` — is left to the link as well. The section's relative links are rewritten
-   absolute at the tag on the way out: github.com's release renderer does
-   resolve a repo-root-relative target against the repository at the tag,
-   so the page itself reads correctly, but the raw body the REST API and
-   mirrors serve carries no such base and its `body_html` is root-relative,
-   so the link survives only on github.com. Fragment loading applies the same
-   link check. CI runs it against `changelog.d/` before fragments reach a tag.
+   its `Added` and `Changed` groups alone). The cap counts the rewritten
+   bytes and the trailer. Keeping stops at the first group that does not
+   fit. The tag renderer reports invalid links in the groups it publishes.
+   It rewrites their relative links to absolute URLs at the tag so the
+   GitHub REST API, mirrors, and other consumers of the raw body can resolve
+   them. CI checks links and code fences in `changelog.d/` before fragments
+   reach a tag.
 3. `make release-images PUSH=1 VERSION=X.Y.Z` — one server build
    (linux/amd64 + arm64; the build stage cross-compiles rather than
    emulating the Go toolchain, after `go run ./tools/ripgrepfetch` — what
