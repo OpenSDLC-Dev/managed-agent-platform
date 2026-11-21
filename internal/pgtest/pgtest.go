@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,11 +25,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const pgImage = "postgres:16-alpine"
+const (
+	pgImage        = "postgres:16-alpine"
+	templateDBName = "pgtest_template"
+)
 
 var (
 	adminDSN  string
 	dbCounter atomic.Int64
+
+	// templateOnce migrates templateDBName once per test binary so NewPool can
+	// clone it via CREATE DATABASE ... TEMPLATE instead of re-running every SQL
+	// migration per test (#499). templateMu serializes CREATE DATABASE calls
+	// against the template because Postgres rejects concurrent clones of the
+	// same source database (SQLSTATE 55006), and guards the reused adminConn.
+	templateOnce sync.Once
+	templateErr  error
+	templateMu   sync.Mutex
+	adminConn    *pgx.Conn
 )
 
 // readyTimeout bounds one container's readiness wait. Longer would not help:
@@ -62,6 +76,7 @@ func Main(m *testing.M) int {
 		}
 	}
 	defer removeContainer(containerID)
+	defer closeAdminConn()
 	code := m.Run()
 	if code != 0 {
 		fmt.Fprintf(os.Stderr, "pgtest: suite failed (exit code %d): %s\n", code, containerDiag(containerID))
@@ -79,10 +94,17 @@ func startReady() (string, error) {
 	// forensic a dead start leaves. Removal is wholly removeContainer's job.
 	// Databases share a postmaster until binary teardown; give this test
 	// fixture a bounded 128 MiB shared-memory budget instead of the default 64 MiB.
+	// Disable crash-recovery disk flushes (fsync, synchronous_commit,
+	// full_page_writes): this container is ephemeral and removed on exit, and
+	// skipping per-commit fsyncs keeps SQL/MVCC/isolation semantics identical
+	// while cutting migration and template-clone wall time dramatically (#499).
 	out, err := exec.Command("docker", dockertest.RunArgs("pgtest",
 		"--shm-size=128m",
 		"-e", "POSTGRES_PASSWORD=test",
-		"-p", "127.0.0.1:0:5432", pgImage)...).Output()
+		"-p", "127.0.0.1:0:5432", pgImage,
+		"-c", "fsync=off",
+		"-c", "synchronous_commit=off",
+		"-c", "full_page_writes=off")...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -229,31 +251,118 @@ func waitReady(dsn, containerID string, timeout time.Duration) error {
 	}
 }
 
+// closeAdminConn closes the cached admin connection before container teardown.
+func closeAdminConn() {
+	templateMu.Lock()
+	defer templateMu.Unlock()
+	if adminConn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = adminConn.Close(ctx)
+		cancel()
+		adminConn = nil
+	}
+}
+
+// execAdmin runs sql against adminDSN using a cached connection (reconnecting
+// once if the cached connection was dropped). Caller must hold templateMu.
+func execAdmin(ctx context.Context, sql string) error {
+	if adminConn == nil || adminConn.IsClosed() {
+		conn, err := pgx.Connect(ctx, adminDSN)
+		if err != nil {
+			return fmt.Errorf("connect admin: %w", err)
+		}
+		adminConn = conn
+	}
+	if _, err := adminConn.Exec(ctx, sql); err != nil {
+		// Retry once on a fresh connection if the cached socket died.
+		_ = adminConn.Close(ctx)
+		adminConn = nil
+		conn, cerr := pgx.Connect(ctx, adminDSN)
+		if cerr != nil {
+			return err
+		}
+		adminConn = conn
+		if _, err2 := adminConn.Exec(ctx, sql); err2 != nil {
+			return err2
+		}
+	}
+	return nil
+}
+
+// ensureTemplate creates and migrates templateDBName once per test binary, then
+// marks it as a read-only template (IS_TEMPLATE = true, ALLOW_CONNECTIONS = false)
+// so no stray connection can ever block CREATE DATABASE ... TEMPLATE (#499).
+func ensureTemplate() error {
+	templateOnce.Do(func() {
+		ctx := context.Background()
+		templateMu.Lock()
+		defer templateMu.Unlock()
+
+		if err := execAdmin(ctx, "CREATE DATABASE "+templateDBName); err != nil {
+			templateErr = fmt.Errorf("create template db %s: %w", templateDBName, err)
+			return
+		}
+		dsn := strings.TrimSuffix(adminDSN, "/postgres") + "/" + templateDBName
+		pool, err := store.Open(ctx, dsn)
+		if err != nil {
+			templateErr = fmt.Errorf("migrate template db %s: %w", templateDBName, err)
+			return
+		}
+		pool.Close()
+		// Terminate any backend still winding down after pool.Close so
+		// CREATE DATABASE ... TEMPLATE never races a closing session.
+		_ = execAdmin(ctx, fmt.Sprintf(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid()",
+			templateDBName,
+		))
+		if err := execAdmin(ctx, "ALTER DATABASE "+templateDBName+" WITH IS_TEMPLATE = true ALLOW_CONNECTIONS = false"); err != nil {
+			templateErr = fmt.Errorf("seal template db %s: %w", templateDBName, err)
+			return
+		}
+	})
+	return templateErr
+}
+
 // FreshDB creates a new empty database in the shared container and returns
 // its DSN, un-migrated, so a suite can exercise store.Open/Migrate itself
 // from a clean slate.
 func FreshDB(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, adminDSN)
-	if err != nil {
-		t.Fatalf("connect admin: %v", err)
-	}
-	defer conn.Close(ctx)
 	name := fmt.Sprintf("pgtest_%d", dbCounter.Add(1))
-	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+	templateMu.Lock()
+	err := execAdmin(ctx, "CREATE DATABASE "+name)
+	templateMu.Unlock()
+	if err != nil {
 		t.Fatalf("create database %s: %v", name, err)
 	}
 	return strings.TrimSuffix(adminDSN, "/postgres") + "/" + name
 }
 
-// NewPool creates a fresh database in the shared container, migrates it, and
-// returns a pool closed at test end.
+// NewPool clones the once-migrated template database in the shared container
+// and returns a ready pool closed at test end (#499). Each test still owns an
+// isolated Postgres database with every migration applied.
 func NewPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := store.Open(context.Background(), FreshDB(t))
+	if err := ensureTemplate(); err != nil {
+		t.Fatalf("prepare template db: %v", err)
+	}
+	ctx := context.Background()
+	name := fmt.Sprintf("pgtest_%d", dbCounter.Add(1))
+	templateMu.Lock()
+	err := execAdmin(ctx, "CREATE DATABASE "+name+" TEMPLATE "+templateDBName+" STRATEGY = FILE_COPY")
+	templateMu.Unlock()
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		t.Fatalf("clone template database %s: %v", name, err)
+	}
+	dsn := strings.TrimSuffix(adminDSN, "/postgres") + "/" + name
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open cloned pool %s: %v", name, err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping cloned pool %s: %v", name, err)
 	}
 	t.Cleanup(pool.Close)
 	return pool

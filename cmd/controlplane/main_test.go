@@ -259,7 +259,9 @@ func TestStartupNativeHTTP(t *testing.T) {
 	req, _ := http.NewRequest("POST", origin+"/api/console/organizations/default/setup_code/redeem", bytes.NewReader(body))
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Content-Type", "application/json")
-	res, err := client.Do(req)
+	redeemClient := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
+	defer redeemClient.CloseIdleConnections()
+	res, err := redeemClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

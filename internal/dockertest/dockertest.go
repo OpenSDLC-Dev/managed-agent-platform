@@ -45,6 +45,12 @@ const ownerLabel = "dev.opensdlc.managed-agent-platform.test-fixture"
 // going to pass.
 const startedLabel = ownerLabel + "-started"
 
+// ownerProcLabel carries the owning test binary's kernel process identity on
+// Linux ("<boot_id>|<pid_ns>|<pid>|<starttime_ticks>") so SweepStrays can reap
+// a killed run's fixture right away without risking a live parallel session's
+// container (#499). Empty/absent on non-Linux hosts, which fall back to strayAge.
+const ownerProcLabel = ownerLabel + "-owner"
+
 // strayAge is how long a fixture container must have been alive before a later
 // run may treat it as a corpse rather than a peer. `go test ./...` runs the
 // fixture-using package binaries concurrently — eleven of them use pgtest — so
@@ -80,10 +86,14 @@ const sweepBudget = time.Minute
 // Every fixture starts its container through this, so none of them can start an
 // unlabelled one — the invariant the sweep's completeness rests on.
 func RunArgs(harness string, rest ...string) []string {
-	return append([]string{"run", "-d",
+	args := []string{"run", "-d",
 		"--label", ownerLabel + "=" + harness,
 		"--label", startedLabel + "=" + strconv.FormatInt(time.Now().Unix(), 10),
-	}, rest...)
+	}
+	if tok := currentOwnerToken(); tok != "" {
+		args = append(args, "--label", ownerProcLabel+"="+tok)
+	}
+	return append(args, rest...)
 }
 
 // SweepStrays force-removes every fixture container older than strayAge, with
@@ -112,11 +122,11 @@ func SweepStrays(harness string) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--all",
 		"--filter", "label="+ownerLabel,
-		"--format", `{{.ID}} {{.Label "`+startedLabel+`"}} {{.Label "`+ownerLabel+`"}}`).Output()
+		"--format", `{{.ID}} {{.Label "`+startedLabel+`"}} {{.Label "`+ownerProcLabel+`"}} {{.Label "`+ownerLabel+`"}}`).Output()
 	if err != nil {
 		return
 	}
-	for _, s := range strays(string(out), time.Now()) {
+	for _, s := range strays(string(out), time.Now(), isOwnerDead) {
 		if ctx.Err() != nil {
 			fmt.Fprintf(os.Stderr, "%s: stray sweep ran out of its %s budget; the next run retries (#346)\n",
 				harness, sweepBudget)
@@ -211,30 +221,39 @@ func gone(ctx context.Context, id string) bool {
 type stray struct{ id, owner string }
 
 // strays picks the corpses out of `docker ps` output — one line per container,
-// "<id> <started unix seconds> <harness>". A line missing either label value,
-// or carrying a timestamp that does not parse, is left alone: something other
-// than RunArgs wrote that label, and destroying a container this package cannot
-// account for is worse than leaving one behind.
+// "<id> <started unix seconds> <owner proc token> <harness>". A line missing
+// the started timestamp or harness, or carrying a timestamp that does not
+// parse, is left alone: something other than RunArgs wrote that label, and
+// destroying a container this package cannot account for is worse than leaving
+// one behind.
+//
+// A container is reaped if either its age exceeds strayAge OR deadOwner reports
+// that its recorded owning process has exited (#499).
 //
 // The split is positional (SplitN), not whitespace-collapsing (Fields), because
 // a missing label renders as an empty column rather than no column: Fields
-// closes the gap and slides the harness name into the timestamp's place, so a
+// closes the gap and slides a later column into the timestamp's place, so a
 // container labelled by something else — with no start time and a value whose
 // first word happens to parse as a number — would be read as ancient and
 // removed. SplitN leaves the empty column empty, where ParseInt rejects it, and
 // keeps a harness name containing spaces intact for the message.
-func strays(psOutput string, now time.Time) []stray {
+func strays(psOutput string, now time.Time, deadOwner func(string) bool) []stray {
 	var found []stray
 	for _, line := range strings.Split(psOutput, "\n") {
-		fields := strings.SplitN(strings.TrimSpace(line), " ", 3)
-		if len(fields) < 3 {
+		fields := strings.SplitN(strings.TrimSpace(line), " ", 4)
+		if len(fields) < 4 || fields[3] == "" {
 			continue
 		}
 		started, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil || now.Sub(time.Unix(started, 0)) <= strayAge {
+		if err != nil {
 			continue
 		}
-		found = append(found, stray{id: fields[0], owner: fields[2]})
+		aged := now.Sub(time.Unix(started, 0)) > strayAge
+		dead := deadOwner != nil && fields[2] != "" && deadOwner(fields[2])
+		if !aged && !dead {
+			continue
+		}
+		found = append(found, stray{id: fields[0], owner: fields[3]})
 	}
 	return found
 }
