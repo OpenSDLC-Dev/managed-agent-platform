@@ -363,6 +363,7 @@ esac
 		t.Errorf("startReady shared-memory budget: got %d literal --shm-size=128m options, want exactly 1; run arguments = %q", budgetOptions, args)
 	}
 	const startedPrefix = "dev.opensdlc.managed-agent-platform.test-fixture-started="
+	const ownerProcPrefix = "dev.opensdlc.managed-agent-platform.test-fixture-owner="
 	if len(args) < 6 || !strings.HasPrefix(args[5], startedPrefix) {
 		t.Fatalf("missing startup time label in run arguments = %q", args)
 	}
@@ -373,8 +374,15 @@ esac
 	want := []string{"run", "-d",
 		"--label", "dev.opensdlc.managed-agent-platform.test-fixture=pgtest",
 		"--label", startedPrefix + strconv.FormatInt(started, 10),
+	}
+	if len(args) > 7 && args[6] == "--label" && strings.HasPrefix(args[7], ownerProcPrefix) {
+		want = append(want, "--label", args[7])
+	}
+	want = append(want,
 		"--shm-size=128m", "-e", "POSTGRES_PASSWORD=test",
-		"-p", "127.0.0.1:0:5432", "postgres:16-alpine"}
+		"-p", "127.0.0.1:0:5432", "postgres:16-alpine",
+		"-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off",
+	)
 	if string(run) != strings.Join(want, "\n")+"\n" {
 		t.Errorf("startReady run arguments = %q; want %q", args, want)
 	}

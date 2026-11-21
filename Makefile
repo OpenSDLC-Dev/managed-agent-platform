@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build build-worker crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
+.PHONY: build build-worker crossbuild vet fmt-check test test-fast cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
@@ -120,6 +120,17 @@ test: ripgrep
 	coverpkg="$$(go list ./internal/... | grep -vE '/(pgtest|dockertest|sandboxtest|hookedtest|modeltest|blobtest|gcstest|providertest|secretstest|gcpkmstest|webtooltest|identitytest|mcptest|apitest)$$' | paste -sd, -)"; \
 	set -x; \
 	go test -count=1 -timeout 30m -coverpkg="$$coverpkg" -coverprofile=coverage.out ./...
+
+# Fast local feedback loop (plan 74 slice 1): runs every package that does not
+# require Docker, Postgres, or a Kubernetes cluster. Not a substitute for
+# `make verify` — run this while iterating, then `make verify` before pushing.
+test-fast:
+	@set -euo pipefail; \
+	pkgs="$$(go list -f '{{.ImportPath}} {{.Imports}} {{.TestImports}} {{.XTestImports}}' ./... \
+		| grep -vE 'pgtest|dockertest|sandboxtest|sandbox/docker|sandbox/k8s|blobtest|secretstest|gcstest|cmd/gate|acceptance|evals|internal/toolset' \
+		| awk '{print $$1}')"; \
+	set -x; \
+	go test -count=1 $$pkgs
 
 # Gates the coverage.out that `make test` (or the CI test step) just wrote —
 # it deliberately does NOT depend on `test`, so CI can run the two as separate

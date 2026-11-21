@@ -62,27 +62,94 @@ func labelsOf(args []string) map[string]string {
 func TestStraysReapsTheAgedAndSparesEverythingElse(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	at := func(d time.Duration) string { return strconv.FormatInt(now.Add(d).Unix(), 10) }
+	dead := func(tok string) bool { return tok == "dead-owner" }
 	ps := strings.Join([]string{
-		"aaaa " + at(-strayAge-time.Second) + " pgtest",   // a corpse
-		"bbbb " + at(-strayAge+time.Second) + " blobtest", // a peer, still inside the window
-		"cccc " + at(-strayAge) + " secretstest",          // exactly at the bound: still a peer
-		"dddd " + at(-9*time.Hour) + " gcstest",           // another corpse
-		"eeee not-a-timestamp pgtest",                     // not ours to judge
-		"ffff " + at(-9*time.Hour),                        // no owner value: the same
-		// No start time, and an owner value whose first word parses as an
-		// ancient one. Collapsing the empty column would slide that word into
-		// the timestamp's place and destroy a container nothing here started.
-		"gggg  1700000000 manual",
+		"aaaa " + at(-strayAge-time.Second) + "  pgtest",       // aged corpse without owner label
+		"bbbb " + at(-strayAge+time.Second) + "  blobtest",     // a peer, still inside the window
+		"cccc " + at(-strayAge) + "  secretstest",              // exactly at the bound: still a peer
+		"dddd " + at(-9*time.Hour) + " live-owner gcstest",     // aged corpse (reaped even if owner live)
+		"eeee not-a-timestamp  pgtest",                         // not ours to judge
+		"ffff " + at(-9*time.Hour) + " ",                       // no owner value: the same
+		"gggg  1700000000 manual",                              // shifted column: refused
+		"hhhh " + at(-time.Minute) + " dead-owner pgtest",      // young, but owning process is gone (#499)
+		"iiii " + at(-time.Minute) + " live-owner pgtest",      // young, owning process alive: spared
+		"jjjj " + at(-time.Minute) + "  pgtest with spaces",    // harness with spaces, spared
+		"kkkk " + at(-strayAge-time.Hour) + "  pgtest with sp", // aged harness with spaces, reaped
 		"",
 	}, "\n") + "\n"
 
-	got := strays(ps, now)
-	want := []stray{{id: "aaaa", owner: "pgtest"}, {id: "dddd", owner: "gcstest"}}
+	got := strays(ps, now, dead)
+	want := []stray{
+		{id: "aaaa", owner: "pgtest"},
+		{id: "dddd", owner: "gcstest"},
+		{id: "hhhh", owner: "pgtest"},
+		{id: "kkkk", owner: "pgtest with sp"},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("strays = %v, want %v", got, want)
 	}
-	if s := strays("", now); s != nil {
+	if s := strays("", now, dead); s != nil {
 		t.Errorf("strays of no output = %v, want none", s)
+	}
+}
+
+func TestSweepStraysReapsDeadOwnerAndSparesLiveOwner(t *testing.T) {
+	liveTok := currentOwnerToken()
+	if liveTok == "" {
+		t.Skip("dead-owner identity labels are Linux-only")
+	}
+	// Spawn a short-lived child that prints its own /proc/$$/stat, then wait for
+	// it to exit so its exact (pid, starttime) pair is guaranteed dead.
+	out, err := exec.Command("sh", "-c", `printf '%s\n' "$$"; cat "/proc/$$/stat"`).Output()
+	if err != nil {
+		t.Fatalf("probe short-lived child: %v", err)
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)
+	if len(lines) != 2 {
+		t.Fatalf("unexpected child probe output %q", out)
+	}
+	childPID := strings.TrimSpace(lines[0])
+	parts := strings.Split(liveTok, "|")
+	if len(parts) != 4 {
+		t.Fatalf("unexpected live owner token %q", liveTok)
+	}
+	// Parse starttime from child's /proc/<pid>/stat using the same parser.
+	idx := strings.LastIndexByte(lines[1], ')')
+	if idx < 0 {
+		t.Fatalf("malformed child stat %q", lines[1])
+	}
+	fields := strings.Fields(lines[1][idx+2:])
+	if len(fields) <= 19 {
+		t.Fatalf("short child stat %q", lines[1])
+	}
+	deadTok := strings.Join([]string{parts[0], parts[1], childPID, fields[19]}, "|")
+	if !isOwnerDead(deadTok) {
+		t.Fatalf("exited child token %q was not reported dead", deadTok)
+	}
+	if isOwnerDead(liveTok) {
+		t.Fatalf("current process token %q was falsely reported dead", liveTok)
+	}
+	// Different PID namespace must never be reaped early.
+	foreignNSTok := strings.Join([]string{parts[0], "pid:[0]", childPID, fields[19]}, "|")
+	if isOwnerDead(foreignNSTok) {
+		t.Fatalf("foreign PID namespace token %q must not be reported dead", foreignNSTok)
+	}
+	// Same PID namespace, previous boot_id proves host rebooted -> dead.
+	oldBootTok := strings.Join([]string{"00000000-0000-0000-0000-000000000000", parts[1], parts[2], parts[3]}, "|")
+	if !isOwnerDead(oldBootTok) {
+		t.Fatalf("previous boot token %q was not reported dead", oldBootTok)
+	}
+
+	deadContainer := plantWithOwner(t, time.Now(), deadTok)
+	liveContainer := plantWithOwner(t, time.Now(), liveTok)
+
+	SweepStrays("dockertest")
+
+	if !gone(context.Background(), deadContainer) {
+		t.Errorf("dead-owner container %s survived SweepStrays", deadContainer)
+	}
+	if gone(context.Background(), liveContainer) {
+		t.Errorf("live-owner container %s was reaped by SweepStrays", liveContainer)
 	}
 }
 
@@ -260,10 +327,20 @@ func stderrOf(t *testing.T, f func()) string {
 // later run's sweep if this run is the one that gets killed.
 func plant(t *testing.T, started time.Time) string {
 	t.Helper()
-	out, err := exec.Command("docker", "create",
-		"--label", ownerLabel+"=dockertest",
-		"--label", startedLabel+"="+strconv.FormatInt(started.Unix(), 10),
-		plantImage).Output()
+	return plantWithOwner(t, started, "")
+}
+
+func plantWithOwner(t *testing.T, started time.Time, ownerTok string) string {
+	t.Helper()
+	args := []string{"create",
+		"--label", ownerLabel + "=dockertest",
+		"--label", startedLabel + "=" + strconv.FormatInt(started.Unix(), 10),
+	}
+	if ownerTok != "" {
+		args = append(args, "--label", ownerProcLabel+"="+ownerTok)
+	}
+	args = append(args, plantImage)
+	out, err := exec.Command("docker", args...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {

@@ -885,7 +885,11 @@ new backend inherits the whole battery. The queue still has one production imple
 (Postgres) contract-tested in its own package; a second queue backend would owe the same
 extraction. The merge gate is `make verify`
 (build, linux/arm cross-compile, vet, gofmt, `go test -count=1`, and **≥90% total
-statement coverage** over the logic packages of `./internal/...`). On top sits the eval
+statement coverage** over the logic packages of `./internal/...`). `make test-fast`
+runs the container-free packages for fast local iteration; `internal/pgtest` clones a
+once-migrated template database per test (`NewPool`), while `FreshDB` keeps an empty
+database for migration tests, and `internal/dockertest` reaps confirmed dead-owner
+Linux fixture containers immediately alongside its six-hour age fallback. On top sits the eval
 system (`make eval`, [plan 02](./plan/02_evals-system.md)): nineteen deterministic regression
 tasks driving whole sessions through the public API against a real model, graded
 code-only with per-trial nonces and Platform/Model/Either failure classing. The classing
