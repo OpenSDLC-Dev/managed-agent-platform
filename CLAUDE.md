@@ -122,7 +122,7 @@ The module path `github.com/OpenSDLC-Dev/managed-agent-platform` carries the own
 
 ## Iteration workflow (branch → review → PR → CI → squash merge)
 
-Every change lands through a PR; **never commit directly to `main`**. Main's branch protection requires a PR for every change, from admins too (#920). A merge needs the `ci` and `coverage` checks to pass. The protection checks only those two; the green CI that steps 6 and 7 require covers the whole workflow. Only the user can make an exception to that rule. An admin then turns off `enforce_admins` ("Do not allow bypassing the above settings"), merges with `gh pr merge --squash --admin`, and turns it back on at once. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
+Every change lands through a PR; **never commit directly to `main`**. Main's branch protection requires a PR for every change, from admins too (#920). A merge needs all six required CI checks to pass: `ci`, `coverage`, `helm`, `terraform`, `compose`, and `native-console`. Only the user can make an exception to that rule. An admin then turns off `enforce_admins` ("Do not allow bypassing the above settings"), merges with `gh pr merge --squash --admin`, and turns it back on at once. Releases are their own ritual — a release PR plus an annotated tag; versioning policy and the steps live in [docs/RELEASING.md](./docs/RELEASING.md).
 
 Review tiering: a diff whose changed paths (by `git diff main...HEAD --name-only`) are exclusively documentation markdown — `*.md` files outside `.claude/`, excluding CLAUDE.md and AGENTS.md themselves — may run a **single** code reviewer instead of the dual pass in step 4, but always keeps the verifier run, including its docs-consistency rung. Markdown that steers behavior (`.claude/` agents and skills, CLAUDE.md, AGENTS.md), anything else, or any ambiguity takes the full ritual.
 
@@ -142,7 +142,7 @@ These bias toward caution over speed. For trivial changes, use judgment.
 
 **Assessment is a deliverable too.** When the user is describing a problem or asking a question rather than requesting a change, report your findings and stop — don't fix until asked. Before any state-changing command (killing a server, dropping a test database, rewriting `.claude/` or workflow config), check the evidence supports *that specific* action — a pattern-matched signal may have a different cause.
 
-**Pause only when the work genuinely requires the user.** That means three things:
+**Pause only when the work genuinely requires the user.** That means four things:
 
 - a destructive or irreversible action the user did not ask for:
   - deleting data or resources this run did not create, such as a database, a container, a branch or a cloud resource (a tracked file that a branch deletes does not count, because git keeps it);
@@ -150,9 +150,10 @@ These bias toward caution over speed. For trivial changes, use judgment.
   - a `gcp-*` target that changes cloud state;
   - editing configuration outside this repository, such as `~/.claude/settings.json`, `~/.codex/config.toml` or a GitHub repository setting like main's branch protection;
 - a real scope change;
-- input only they can provide (credentials, account approvals, a product decision).
+- input only they can provide (credentials, account approvals, a product decision);
+- a failing check or test that still fails after **three consecutive diagnose-and-fix rounds** — stop, report the exact command, failure output, and hypotheses tried, and escalate to a human rather than looping indefinitely, adding sleeps, or weakening assertions.
 
-Hitting one of these, ask as soon as you know, with your recommendation. Then carry on with whatever part of the task does not depend on the answer, and end the turn when nothing else can advance. Everything else — retries, missing information you can gather, long verification loops — is yours to push through. While work you were asked for is still owed, these are not pauses:
+Hitting one of these, ask as soon as you know, with your recommendation. Then carry on with whatever part of the task does not depend on the answer, and end the turn when nothing else can advance. Everything else — bounded retries (up to three rounds per failing check), missing information you can gather, and verification runs — is yours to push through. While work you were asked for is still owed, these are not pauses:
 
 - a summary that names the next step instead of taking it;
 - an offer to continue;
@@ -179,7 +180,7 @@ Put status notes in the same message as your next tool call. Waiting is the exce
 
 Concretely here: "add validation" → write the failing test for invalid input first; "fix the bug" → write the reproducing test first; "refactor X" → tests green before and after. Strong success criteria let you loop to done without check-ins; weak ones ("make it work") don't.
 
-**Independent verification (definition of done).** The implementer never certifies their own work. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify. Dispatch it with no model or effort override so its pins win — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
+**Independent verification (definition of done).** The implementer never certifies their own work. Use `.claude/skills/verify/SKILL.md` for repeatable local runtime smoke checks while developing. Before any nontrivial change is declared done — before STATE.md's task progress claims new behavior, before a commit that claims working behavior — dispatch the **`verifier` subagent** with what changed and the success criteria; `.claude/agents/verifier.md` defines the rungs it runs, docs consistency among them. A FAIL or an unresolved blocker means the work is **not done**: fix, then re-verify (escalating to a human if the same check still fails after three consecutive repair rounds). Dispatch it with no model or effort override so its pins win — a weak verifier certifies anything. Its verdict and evidence belong in the final report to the user.
 
 **Report only what you can evidence.** Every progress claim cites a tool result from this session — a test run, a diff, a CLI transcript. Unverified work is labeled as such, naming where you looked; failures are reported with their output; skipped steps are named. Done-and-verified is stated plainly, without hedging.
 
