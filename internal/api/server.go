@@ -118,7 +118,9 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+cliAuthorizePath, s.cliAuthorize)
 	mux.HandleFunc("POST "+cliAuthorizePath, s.cliAuthorize)
 	mux.HandleFunc("POST "+cliTokenPath, s.cliToken)
-	mux.HandleFunc("GET /v1/organizations/workspaces", s.handle(identity.RoleAdmin, s.cliWorkspaces))
+	mux.HandleFunc("GET /v1/organizations/workspaces", s.handle(identity.RoleAdmin, cliAdminRead(s.cliWorkspaces)))
+	mux.HandleFunc("GET /v1/organizations/api_keys", noStore(s.handle(identity.RoleAdmin, cliAdminRead(s.listAdminAPIKeys))))
+	mux.HandleFunc("GET /v1/organizations/api_keys/{id}", noStore(s.handle(identity.RoleAdmin, cliAdminRead(s.getAdminAPIKey))))
 
 	mux.HandleFunc("POST /v1/agents", s.handle(identity.RoleDeveloper, s.createAgent))
 	mux.HandleFunc("GET /v1/agents", s.handle(identity.RoleDeveloper, s.listAgents))
@@ -255,11 +257,8 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	// manage only their owned rows; admins manage all non-preset rows. The
 	// handlers enforce row permission and fence current authority through commit.
 	//
-	// There is deliberately no /v1 twin. The reference withholds key creation from
-	// its public API on purpose ("new API keys can only be created through the
-	// Claude Console for security reasons"), and its read/update pair lives on the
-	// Admin API, behind an `sk-ant-admin…` credential class this platform does not
-	// have. Both registered in docs/DIVERGENCES.md.
+	// Key creation and updates require the browser. Only the two organization
+	// audit reads above are public, both under the CLI org:admin grant.
 	//
 	// The update is served twice: on the reference's own route, which names no
 	// workspace, and on the workspace-scoped one served first, kept as an alias
@@ -349,6 +348,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 		writeError(w, r, errUnknownPath(r))
 	})
 	for _, pattern := range []string{
+		adminAPIKeysPath, adminAPIKeysPath + "/{id}",
 		"/v1/agents", "/v1/agents/{id}", "/v1/agents/{id}/versions", "/v1/agents/{id}/archive",
 		"/v1/environments", "/v1/environments/{id}", "/v1/environments/{id}/archive",
 		"/v1/sessions", "/v1/sessions/{id}", "/v1/sessions/{id}/archive",

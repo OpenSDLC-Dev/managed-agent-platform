@@ -1459,6 +1459,29 @@ inference both check the granted scopes and the current stored role. Inference
 uses the gateway base URL. Signing out of the browser ends the browser session.
 The CLI grant has its own lifecycle. Private routes retain their cookie rule.
 
+#### Audit archived API keys
+
+Use a CLI profile with `org:admin` and a current administrator account.
+Set `PLATFORM_URL` to the public control-plane origin and `CONSOLE_URL` to
+the Console origin. With those values, log in and list the archived keys.
+
+```sh
+ant auth login --profile key-audit --base-url "$PLATFORM_URL" \
+  --console-url "$CONSOLE_URL" --scope org:admin
+ant --profile key-audit beta:organization:api-keys list --status archived
+```
+
+Set `KEY_ID` to an `apikey_…` ID from the result to retrieve its metadata.
+
+```sh
+ant --profile key-audit beta:organization:api-keys retrieve --api-key-id "$KEY_ID"
+```
+
+These commands read `GET /v1/organizations/api_keys?status=archived` and
+`GET /v1/organizations/api_keys/{id}`. An archived key keeps its ID and
+status for auditing. New requests authenticated with the archived key receive
+HTTP 401. Issue, disable and delete keys through Console.
+
 #### The CERT/CC VU#780781 posture, stated plainly
 
 Casdoor is bundled with its security record priced in rather than hidden. CERT/CC
@@ -1724,7 +1747,7 @@ What you own:
   row and manage keys issued by a principal. Historical preset rows remain immutable; `can_manage` is a
   list-only permission hint, not permission to bypass lifecycle guards.
   These are conservative local rules; lower-human-role reference behavior is
-  still unconfirmed. The four key routes require developer, while workspace
+  still unconfirmed. The four private key routes require developer, while workspace
   reads, environment-key administration and Memory redaction retain admin.
   An admin cookie may name an active service account, never another human.
   All issuance and mutations require the browser session; API keys cannot authorize them.

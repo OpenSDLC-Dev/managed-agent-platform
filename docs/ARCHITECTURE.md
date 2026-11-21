@@ -432,6 +432,7 @@ list rejects the token before passing its position to the database. Event
 cursors also name the session or child thread being listed. Other nested
 lists can reuse a position across parents, and their queries constrain results
 to the requested parent. The new format rejects tokens issued before plan 71.
+The public Admin key list takes resource IDs as its `after_id` and `before_id` cursors.
 
 An application Caddy edge serves the published Console at the same origin
 as private CP and gateway routes. The edge sends login, management, OAuth
