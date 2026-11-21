@@ -1420,6 +1420,25 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}
 }
 
+func TestReferenceDefinitionsAfterBlockBoundaries(t *testing.T) {
+	const base = "https://github.com/o/r"
+	for _, block := range []string{"---", "* * *", "Section title\n==="} {
+		lines := strings.Split("- See [guide][g].\n\n"+block+"\n[g]: docs/HISTORY.md", "\n")
+		code, err := codeLines(lines)
+		if err != nil {
+			t.Fatal(err)
+		}
+		notes, err := absolutizeLinks(lines, code, base, "0.4.0")
+		if err != nil || notes[len(notes)-1] != "[g]: "+base+"/blob/v0.4.0/docs/HISTORY.md" {
+			t.Errorf("notes after %q = %q, %v", block, notes, err)
+		}
+		archive, err := rebaseLinks(lines, code)
+		if err != nil || archive[len(archive)-1] != "[g]: ../HISTORY.md" {
+			t.Errorf("archive after %q = %q, %v", block, archive, err)
+		}
+	}
+}
+
 // --- archive: the CHANGELOG slimming subcommand (plan 28) ---
 
 // slimmed is steadyChangelog after archiving 0.2.0 — the golden document

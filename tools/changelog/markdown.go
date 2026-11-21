@@ -9,6 +9,7 @@ import (
 var (
 	listItemRe = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)`)
 	backticks  = regexp.MustCompile("`+")
+	blockEndRe = regexp.MustCompile(`^ {0,3}(?:=+|-+|(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})[ \t]*$`)
 	// The end anchor keeps wrapped prose such as "[expired]: computed at
 	// read time" from being treated as a reference definition.
 	refDefTargetRe = regexp.MustCompile(`^\[[^\]]+\]:[ \t]*(\S+)[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$`)
@@ -66,7 +67,7 @@ func codeLines(lines []string) ([]bool, error) {
 			listIndent = listIndents[len(listIndents)-1]
 		}
 		innerQuotes := 0
-		if item := listContentStart(trim); item > 0 && indent <= listIndent+3 {
+		if item := listContentStart(trim); item > 0 && indent <= listIndent+3 && !blockEndRe.MatchString(trim) {
 			listIndent = indent + item
 			listIndents = append(listIndents, listIndent)
 			var content string
@@ -85,12 +86,16 @@ func codeLines(lines []string) ([]bool, error) {
 			code[i] = true
 			continue
 		}
-		paragraph = !headingRe.MatchString(line)
+		paragraph = !markdownBlockBoundary(trim)
 	}
 	if width != 0 {
 		return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
 	}
 	return code, nil
+}
+
+func markdownBlockBoundary(line string) bool {
+	return headingRe.MatchString(line) || blockEndRe.MatchString(line)
 }
 
 func markdownIndent(line string) (int, string) {
@@ -194,10 +199,11 @@ func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)
 		}
 		end := start + 1
 		first, depth := quoteBody(lines[start], -1)
-		if !headingRe.MatchString(first) {
+		if !markdownBlockBoundary(strings.TrimLeft(first, " \t")) {
 			for end < len(lines) && !code[end] {
 				body, nextDepth := quoteBody(lines[end], -1)
-				if depth != nextDepth || strings.TrimSpace(body) == "" || headingRe.MatchString(body) || listItemRe.MatchString(strings.TrimLeft(body, " \t")) {
+				body = strings.TrimLeft(body, " \t")
+				if depth != nextDepth || strings.TrimSpace(body) == "" || markdownBlockBoundary(body) || listItemRe.MatchString(body) {
 					break
 				}
 				end++
