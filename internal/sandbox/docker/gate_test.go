@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -63,8 +64,10 @@ func inspectRef(path string) string {
 }
 
 func healthJSON(id, health string, s sandbox.Spec, running bool) string {
-	return `{"Id":"` + id + `","State":{"Running":` + boolStr(running) +
-		`,"Health":{"Status":"` + health + `"}},"Config":{"Labels":{"` + sessionLabel + `":"` + string(s.SessionID) + `"}}}`
+	return fmt.Sprintf(`{"Id":%q,"State":{"Running":%t,"Health":{"Status":%q}},"Config":{"Labels":{%q:%q},
+		"Env":["GATE_UID=65532","MAP_STAGE_SANDBOX_GUARD=1"]},
+		"Mounts":[{"Type":"volume","Name":"gate-guard","Destination":%q,"RW":true}]}`,
+		id, running, health, sessionLabel, s.SessionID, uidguard.Dir)
 }
 
 // sandboxJSON is an owned, running sandbox container inspect body carrying a
@@ -77,15 +80,15 @@ func sandboxJSON(id string, s sandbox.Spec, networkMode string) string {
 	if workdir == "" {
 		workdir = sandbox.DefaultWorkdir
 	}
-	return fmt.Sprintf(`{"Id":%q,"State":{"Running":true},"Config":{"Labels":{%q:%q},"Image":%q,"WorkingDir":%q},"HostConfig":{"NetworkMode":%q}}`,
-		id, sessionLabel, string(s.SessionID), s.Image, workdir, networkMode)
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
+	if !strings.HasPrefix(networkMode, "container:") {
+		return fmt.Sprintf(`{"Id":%q,"State":{"Running":true},"Config":{"Labels":{%q:%q},"Image":%q,"WorkingDir":%q},"HostConfig":{"NetworkMode":%q}}`,
+			id, sessionLabel, s.SessionID, s.Image, workdir, networkMode)
 	}
-	return "false"
+	return fmt.Sprintf(`{"Id":%q,"State":{"Running":true,"Health":{"Status":"healthy"}},
+		"Config":{"Labels":{%q:%q},"Image":%q,"WorkingDir":%q,"Entrypoint":[%q,"/bin/bash"],
+		"Healthcheck":{"Test":["CMD",%q]}},"HostConfig":{"NetworkMode":%q},
+		"Mounts":[{"Type":"volume","Name":"gate-guard","Destination":%q,"RW":false}]}`,
+		id, sessionLabel, string(s.SessionID), s.Image, workdir, uidguard.Path, uidguard.Path, networkMode, uidguard.Dir)
 }
 
 // TestProvisionCreatesGatePair drives the create path: the gate is created first
@@ -104,6 +107,8 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName, sbName: // neither exists yet
 				http.Error(w, `{"message":"No such container: x"}`, http.StatusNotFound)
 			case "gate1": // health poll
@@ -172,6 +177,20 @@ func TestProvisionCreatesGatePair(t *testing.T) {
 	// gate's uid and slip past the owner-match rule.
 	if sbBody.HostConfig.NetworkMode != "container:gate1" {
 		t.Errorf("sandbox network = %q, want container:gate1", sbBody.HostConfig.NetworkMode)
+	}
+	if len(sbBody.Entrypoint) < 2 || !slices.Equal(sbBody.Entrypoint[:2], []string{uidguard.Path, "/bin/bash"}) ||
+		sbBody.Healthcheck == nil || !slices.Equal(sbBody.Healthcheck.Test, []string{"CMD", uidguard.Path}) {
+		t.Fatalf("gated entrypoint %v, healthcheck %+v", sbBody.Entrypoint, sbBody.Healthcheck)
+	}
+	if mounts := gateBody.HostConfig.Mounts; len(mounts) != 1 || mounts[0].Type != "volume" ||
+		mounts[0].Target != uidguard.Dir || mounts[0].Source != "" || mounts[0].VolumeOptions == nil ||
+		mounts[0].VolumeOptions.Labels[guardSessionLabel] != string(s.SessionID) ||
+		!slices.Contains(gateBody.Env, uidguard.StageEnv+"=1") {
+		t.Errorf("gate does not stage its guard in an anonymous volume: %+v", gateBody.HostConfig.Mounts)
+	}
+	if mounts := sbBody.HostConfig.Mounts; len(mounts) != 1 || mounts[0].Target != uidguard.Dir || mounts[0].Source != "gate-guard" ||
+		!mounts[0].ReadOnly || mounts[0].VolumeOptions == nil || !mounts[0].VolumeOptions.NoCopy {
+		t.Errorf("sandbox guard mount = %+v", mounts)
 	}
 	if !slices.Equal(sbBody.HostConfig.CapDrop, []string{"NET_RAW", "SETUID", "SETGID"}) {
 		t.Errorf("sandbox CapDrop = %v", sbBody.HostConfig.CapDrop)
@@ -252,6 +271,162 @@ func TestProvisionAdoptsExistingGate(t *testing.T) {
 	}
 }
 
+func TestGatedDockerHandlesRequireTheActualSandboxGuard(t *testing.T) {
+	s := gatedSpec(&fakeMinter{})
+	safeOverride := int64(10001)
+	s.Hardening.RunAsUser = &safeOverride
+	for _, path := range []string{"existing", "race", "attach"} {
+		for _, tc := range []struct {
+			name, from, to string
+		}{
+			{"valid", "", ""},
+			{"legacy entrypoint", `"Entrypoint":["/map-sandbox-guard/uidguard"`, `"Entrypoint":["/bin/bash"`},
+			{"image healthcheck", `"Test":["CMD","/map-sandbox-guard/uidguard"]`, `"Test":["CMD","/bin/true"]`},
+			{"different volume", `"Name":"gate-guard"`, `"Name":"other-volume"`},
+			{"writable volume", `"RW":false`, `"RW":true`},
+			{"nested image mount", `"RW":false}`, `"RW":false},{"Type":"volume","Destination":"/map-sandbox-guard/uidguard"}`},
+		} {
+			t.Run(path+"/"+tc.name, func(t *testing.T) {
+				inspects := 0
+				p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/containers/" + gateName(s.SessionID) + "/json":
+						io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+					case "/containers/" + containerName(s.SessionID) + "/json", "/containers/sb1/json":
+						inspects++
+						if path == "race" && inspects == 1 {
+							http.NotFound(w, r)
+							return
+						}
+						body := sandboxJSON("sb1", s, "container:gate1")
+						if tc.from != "" {
+							body = strings.Replace(body, tc.from, tc.to, 1)
+						}
+						io.WriteString(w, body)
+					case "/containers/create":
+						if path != "race" {
+							t.Errorf("unexpected create on %s", path)
+						}
+						w.WriteHeader(http.StatusConflict)
+					case "/containers/sb1/start":
+						if path != "race" || tc.name != "valid" {
+							t.Errorf("started an unverified or already-running sandbox")
+						}
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+					}
+				})
+				var sb sandbox.Sandbox
+				var err error
+				if path == "attach" {
+					sb, err = p.Attach(context.Background(), s.SessionID)
+				} else {
+					sb, err = p.Provision(context.Background(), s)
+				}
+				if tc.name == "valid" {
+					if err != nil || sb == nil {
+						t.Fatalf("guarded sandbox: %v, %v", sb, err)
+					}
+				} else if sb != nil || !errors.Is(err, sandbox.ErrSpecMismatch) {
+					t.Fatalf("unverified sandbox: got %v, %v", sb, err)
+				}
+			})
+		}
+	}
+}
+
+func TestGatedDockerStartupRefusalRemovesOnlyTheNewSandbox(t *testing.T) {
+	s := gatedSpec(&fakeMinter{})
+	started := false
+	var removed []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/" + gateName(s.SessionID) + "/json":
+			io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+		case "/containers/" + containerName(s.SessionID) + "/json":
+			http.NotFound(w, r)
+		case "/containers/create":
+			io.WriteString(w, `{"Id":"sb1"}`)
+		case "/containers/sb1/json":
+			body := sandboxJSON("sb1", s, "container:gate1")
+			if started {
+				body = strings.Replace(body, `"Running":true`, `"Running":false,"ExitCode":77`, 1)
+			}
+			io.WriteString(w, body)
+		case "/containers/sb1/start":
+			started = true
+			w.WriteHeader(http.StatusNoContent)
+		case "/containers/sb1":
+			if r.Method != http.MethodDelete {
+				t.Errorf("unexpected method %s", r.Method)
+			}
+			removed = append(removed, "sb1")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	sb, err := p.Provision(context.Background(), s)
+	if sb != nil || err == nil || !strings.Contains(err.Error(), "reserved gate UID") {
+		t.Fatalf("admission = %v, %v", sb, err)
+	}
+	if !slices.Equal(removed, []string{"sb1"}) {
+		t.Fatalf("removed %v, want only the new sandbox", removed)
+	}
+}
+
+func TestGatedDockerExecChecksTheRuntimeSelectedUID(t *testing.T) {
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/sb1/exec":
+			var cfg execConfig
+			if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+				t.Error(err)
+			}
+			if len(cfg.Cmd) < 2 || !slices.Equal(cfg.Cmd[:2], []string{uidguard.Path, "/bin/bash"}) {
+				t.Errorf("gated exec argv = %v", cfg.Cmd)
+			}
+			io.WriteString(w, `{"Id":"exec1"}`)
+		case "/exec/exec1/start":
+			w.WriteHeader(http.StatusOK)
+		case "/exec/exec1/json":
+			io.WriteString(w, `{"Running":false,"ExitCode":77}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	res, err := p.attach("sb1", "/workspace", "gate1", false).Exec(context.Background(), sandbox.ExecRequest{Command: "exit 77"})
+	if err != nil || res.ExitCode != 77 {
+		t.Fatalf("ordinary command exit status: %v, %v", res, err)
+	}
+}
+
+func TestReapRemovesTheGuardOfAVanishedGate(t *testing.T) {
+	sid := domain.ID("sesn_oldguard")
+	var removed []string
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/containers/json":
+			fmt.Fprintf(w, `[{"Id":"sandbox","Names":["/map-sesn_oldguard"],"Mounts":[
+				{"Type":"volume","Name":"old-guard","Destination":%q,"RW":false}]}]`, uidguard.Dir)
+		case r.Method == http.MethodDelete:
+			removed = append(removed, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/volumes/old-guard":
+			io.WriteString(w, `{"Labels":{"dev.opensdlc.managed-agent-platform.guard-session":"sesn_oldguard"}}`)
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	if err := p.Reap(context.Background(), sid); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(removed, []string{"/containers/sandbox", "/volumes/old-guard"}) {
+		t.Fatalf("removed %v", removed)
+	}
+}
+
 // TestProvisionWaitsForAdoptedRunningGateHealth: adopting a running gate that is
 // not yet healthy (Docker reports Running before the gate finishes installing its
 // firewall and its proxy) waits for healthy before it admits a sandbox — the
@@ -268,6 +443,8 @@ func TestProvisionWaitsForAdoptedRunningGateHealth(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName:
 				io.WriteString(w, healthJSON("gate1", "starting", s, true)) // running, not yet healthy
 			case "gate1":
@@ -583,6 +760,8 @@ func TestProvisionRecreatesStoppedGate(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gateNew"))
 			case gateName:
 				io.WriteString(w, healthJSON("gateOld", "", s, false)) // owned but stopped
 			case "gateNew":
@@ -651,6 +830,8 @@ func TestProvisionRebuildsMispairedSandbox(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName:
 				io.WriteString(w, healthJSON("gate1", "healthy", s, true)) // gate healthy → adopt
 			case sbName:
@@ -712,6 +893,8 @@ func TestProvisionUngatedReshapeDismantlesGatePair(t *testing.T) {
 	})
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes/gate-guard":
+			http.NotFound(w, r)
 		case r.Method == http.MethodDelete:
 			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/containers/"))
 			w.WriteHeader(http.StatusNoContent)
@@ -776,6 +959,8 @@ func TestProvisionUngatedReshapeRefusesForeignGateName(t *testing.T) {
 	var removed []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes/gate-guard":
+			http.NotFound(w, r)
 		case r.Method == http.MethodDelete:
 			removed = append(removed, strings.TrimPrefix(r.URL.Path, "/containers/"))
 			w.WriteHeader(http.StatusNoContent)
@@ -862,6 +1047,8 @@ func TestProvisionRemovesSandboxOnStartFailure(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName, sbName:
 				http.Error(w, `{"message":"No such container: x"}`, http.StatusNotFound)
 			case "gate1":
@@ -905,6 +1092,8 @@ func TestProvisionPullsMissingGateImage(t *testing.T) {
 			pulled = true // empty body → pullImage reads EOF and succeeds
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName, sbName:
 				http.Error(w, `{"message":"No such container: x"}`, http.StatusNotFound)
 			case "gate1":
@@ -956,6 +1145,8 @@ func TestProvisionAdoptsGateCreateRace(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/json"):
 			switch inspectRef(r.URL.Path) {
+			case "sb1":
+				io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 			case gateName:
 				gateInspects++
 				if gateInspects == 1 {
@@ -1074,6 +1265,8 @@ func TestGateContainerAppliesIndependentResourceLimits(t *testing.T) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "/json"):
 				switch inspectRef(r.URL.Path) {
+				case "sb1":
+					io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 				case gateName, sbName:
 					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
 				case "gate1":
@@ -1124,6 +1317,8 @@ func TestGateContainerAppliesIndependentResourceLimits(t *testing.T) {
 				io.WriteString(w, `{"NCPU":2}`)
 			case strings.HasSuffix(r.URL.Path, "/json"):
 				switch inspectRef(r.URL.Path) {
+				case "sb1":
+					io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
 				case gateName, sbName:
 					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
 				case "gate1":

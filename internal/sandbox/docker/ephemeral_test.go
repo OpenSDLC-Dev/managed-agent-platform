@@ -21,9 +21,9 @@ import (
 // ignoring PidsLimit. This row is what keeps it deliberate: the create payload
 // for a disk cap must be the payload for no disk cap.
 func TestSandboxConfigIgnoresEphemeralStorage(t *testing.T) {
-	plain := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "", 0)
+	plain := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "", "", 0)
 	disk := sandboxConfig(hardenedSpec(sandbox.Hardening{EphemeralStorageBytes: 2 << 30}),
-		"/workspace", "", 0)
+		"/workspace", "", "", 0)
 	// The whole payload, not a chosen field: the failure this guards against is
 	// the cap leaking into *some* other limit, and naming the fields in advance
 	// would be guessing which one.

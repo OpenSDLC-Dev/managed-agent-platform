@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -24,22 +28,23 @@ const (
 	// Docker's container health states (State.Health.Status).
 	healthStatusHealthy   = "healthy"
 	healthStatusUnhealthy = "unhealthy"
+	guardSessionLabel     = "dev.opensdlc.managed-agent-platform.guard-session"
 )
 
 func gateName(sessionID domain.ID) string { return "map-gate-" + string(sessionID) }
 
-// ensureGate creates or adopts the session's gate container and returns its id,
+// ensureGate creates or adopts the session's gate container and returns its inspection,
 // running and healthy. created reports whether this call created it, so the
 // caller can remove the orphan if the sandbox half then fails. The gate owns the
 // network namespace the sandbox joins and enforces its egress, so it must exist
 // and be healthy before the sandbox is created — the admission gate.
-func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string, created bool, err error) {
+func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (containerInfo, bool, error) {
 	name := gateName(spec.SessionID)
 	info, ierr := p.api.inspectContainer(ctx, name)
 	switch {
 	case ierr == nil: // an existing gate (a re-lease, or a later tool call)
 		if err := ours(info, spec.SessionID); err != nil {
-			return "", false, err
+			return containerInfo{}, false, err
 		}
 		if info.State.Running {
 			// A running gate has already installed its firewall — one that could
@@ -47,12 +52,11 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string
 			// serves fail-open. Still require healthy, so a gate whose proxy is
 			// not yet (or no longer) serving is not handed a sandbox; an
 			// already-healthy gate returns on the first poll.
-			if info.State.Health.Status != healthStatusHealthy {
-				if err := p.waitGateHealthy(ctx, info.ID); err != nil {
-					return "", false, err
-				}
+			if info.State.Health.Status == healthStatusHealthy {
+				return info, false, nil
 			}
-			return info.ID, false, nil
+			info, err := p.waitHealthy(ctx, info.ID, "gate")
+			return info, false, err
 		}
 		// A stopped gate is not safe to restart: it may have been created but
 		// never had its token persisted (a crash between the create and Persist
@@ -62,10 +66,10 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string
 		// its netns (verified), so a dependent sandbox does not block this; that
 		// sandbox is then rebuilt by the NetworkMode-aware adoption in Provision.
 		if err := p.api.removeContainer(ctx, info.ID); err != nil && !statusIs(err, 404) {
-			return "", false, err
+			return containerInfo{}, false, err
 		}
 	case !statusIs(ierr, 404):
-		return "", false, ierr
+		return containerInfo{}, false, ierr
 	}
 
 	// Create. Mint an in-memory token, create the container with it, and persist
@@ -78,49 +82,50 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (id string
 		cpuMillis = p.clampCPU(ctx, cpuMillis)
 	}
 	cfg := gateConfigWithCPU(spec, token, p.gateNetwork, cpuMillis)
-	id, err = p.api.createContainer(ctx, name, cfg)
+	id, err := p.api.createContainer(ctx, name, cfg)
 	if statusIs(err, 404) { // the gate image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Gate.Image); perr != nil {
-			return "", false, perr
+			return containerInfo{}, false, perr
 		}
 		id, err = p.api.createContainer(ctx, name, cfg)
 	}
 	if statusIs(err, 409) { // another executor won the create; adopt its gate
 		won, werr := p.api.inspectContainer(ctx, name)
 		if werr != nil {
-			return "", false, werr
+			return containerInfo{}, false, werr
 		}
 		if werr := ours(won, spec.SessionID); werr != nil {
-			return "", false, werr
+			return containerInfo{}, false, werr
 		}
-		if werr := p.waitGateHealthy(ctx, won.ID); werr != nil {
-			return "", false, werr
-		}
-		return won.ID, false, nil
+		won, werr = p.waitHealthy(ctx, won.ID, "gate")
+		return won, false, werr
 	}
 	if err != nil {
-		return "", false, err
+		return containerInfo{}, false, err
 	}
 	// Won the create. Persist the token before starting, so the gate authenticates
 	// its first config fetch; on any failure remove the container we just created.
 	if err := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, token); err != nil {
 		p.removeDetached(ctx, id)
-		return "", false, err
+		return containerInfo{}, false, err
 	}
 	if err := p.api.startContainer(ctx, id); err != nil {
 		p.removeDetached(ctx, id)
-		return "", false, err
+		return containerInfo{}, false, err
 	}
-	if err := p.waitGateHealthy(ctx, id); err != nil {
+	info, err = p.waitHealthy(ctx, id, "gate")
+	if err != nil {
 		p.removeDetached(ctx, id)
-		return "", false, err
+		return containerInfo{}, false, err
 	}
-	return id, true, nil
+	return info, true, nil
 }
 
-// waitGateHealthy blocks until the gate reports healthy, failing if it reports
-// unhealthy or does not become healthy within gateHealthTimeout.
-func (p *Provider) waitGateHealthy(ctx context.Context, id string) error {
+// waitHealthy reads the daemon's result of either the gate's proxy healthcheck
+// or the sandbox's passive UID check. A sandbox's launcher can refuse before
+// Docker gets to its first healthcheck. A gate create-race winner, on the
+// other hand, may still be waiting for its creator to start it.
+func (p *Provider) waitHealthy(ctx context.Context, id, kind string) (containerInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, gateHealthTimeout)
 	defer cancel()
 	ticker := time.NewTicker(gateHealthPoll)
@@ -128,20 +133,81 @@ func (p *Provider) waitGateHealthy(ctx context.Context, id string) error {
 	for {
 		info, err := p.api.inspectContainer(ctx, id)
 		if err != nil {
-			return err
+			return info, err
+		}
+		if kind == "sandbox" && !info.State.Running {
+			if info.State.ExitCode == uidguard.Refused {
+				return info, fmt.Errorf("docker: sandbox %s exited before admission with status %d (reserved gate UID %d refusal)", id, uidguard.Refused, uidguard.GateUID)
+			}
+			return info, fmt.Errorf("docker: sandbox %s stopped before UID admission (exit %d)", id, info.State.ExitCode)
 		}
 		switch info.State.Health.Status {
 		case healthStatusHealthy:
-			return nil
+			if info.State.Running {
+				return info, nil
+			}
 		case healthStatusUnhealthy:
-			return fmt.Errorf("docker: gate %s reported unhealthy", id)
+			return info, fmt.Errorf("docker: %s %s reported unhealthy", kind, id)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("docker: gate %s not healthy within %s: %w", id, gateHealthTimeout, ctx.Err())
+			return info, fmt.Errorf("docker: %s %s not healthy within %s: %w", kind, id, gateHealthTimeout, ctx.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+// guardVolume reads the name assigned by the daemon, so a sandbox can borrow
+// this volume alone. An older gate without the staged launcher cannot admit one.
+func guardVolume(gate containerInfo) (string, error) {
+	if slices.Contains(gate.Config.Env, uidguard.StageEnv+"=1") &&
+		slices.Contains(gate.Config.Env, "GATE_UID="+strconv.Itoa(uidguard.GateUID)) {
+		for _, m := range gate.Mounts {
+			if m.Destination == uidguard.Dir && m.Type == "volume" && m.RW && m.Name != "" {
+				return m.Name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("docker: gate %s has no verified sandbox UID guard volume: %w", gate.ID, sandbox.ErrSpecMismatch)
+}
+
+func borrowedGuard(mounts []mountedVolume) string {
+	for _, m := range mounts {
+		if m.Destination == uidguard.Dir && m.Type == "volume" && !m.RW {
+			return m.Name
+		}
+	}
+	return ""
+}
+
+// Removing the gate with v=1 normally removes its anonymous volume. When
+// the gate goes first, Docker retains the volume while a borrower holds it.
+// The borrower's mount references it by name, so its own v=1 will leave it.
+func (api *apiClient) releaseGuard(ctx context.Context, sid domain.ID, name string) error {
+	if name == "" {
+		return nil
+	}
+	path := "/volumes/" + url.PathEscape(name)
+	var v struct{ Labels map[string]string }
+	if err := api.getJSON(ctx, path, &v); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	if v.Labels[guardSessionLabel] != string(sid) || sid.IsZero() {
+		return nil
+	}
+	resp, err := api.request(ctx, http.MethodDelete, path, nil, nil, "")
+	if err != nil {
+		// A surviving owner or borrower still needs it. Docker checks this
+		// at deletion, so a racing provision never loses a mounted volume.
+		if statusIs(err, http.StatusConflict) || statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	return resp.Body.Close()
 }
 
 // removeDetached best-effort removes a container on a cleanup path (an orphaned
@@ -174,6 +240,7 @@ func gateConfigWithCPU(spec sandbox.Spec, token, network string, cpuMillis int64
 	env := map[string]string{
 		"CONTROLPLANE_URL": spec.Gate.ControlplaneURL,
 		"GATE_TOKEN":       token,
+		uidguard.StageEnv:  "1",
 		// Stated rather than left to the image's own default, because the
 		// platform now depends on knowing it: Hardening.Validate refuses a
 		// sandbox running as this uid, since the gate's owner-match rule ACCEPTs
@@ -198,9 +265,12 @@ func gateConfigWithCPU(spec sandbox.Spec, token, network string, cpuMillis int64
 			NetworkMode: network,
 			Init:        true,
 			CapAdd:      []string{"NET_ADMIN"},
-			Memory:      res.MemoryBytes,
-			NanoCpus:    cpuMillis * 1_000_000,
-			PidsLimit:   res.PidsLimit,
+			Mounts: []mount{{Type: "volume", Target: uidguard.Dir, VolumeOptions: &volumeOptions{
+				Labels: map[string]string{guardSessionLabel: string(spec.SessionID)},
+			}}},
+			Memory:    res.MemoryBytes,
+			NanoCpus:  cpuMillis * 1_000_000,
+			PidsLimit: res.PidsLimit,
 		},
 	}
 }

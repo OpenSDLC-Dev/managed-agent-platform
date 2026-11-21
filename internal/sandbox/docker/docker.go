@@ -29,6 +29,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -302,6 +303,9 @@ func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 			errs = errors.Join(errs, removeWaitingGone(ctx, p.api, c.ID))
 		}
 	}
+	for _, c := range list {
+		errs = errors.Join(errs, p.api.releaseGuard(ctx, sessionID, borrowedGuard(c.Mounts)))
+	}
 	return errs
 }
 
@@ -407,13 +411,13 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 	}
 	name := containerName(spec.SessionID)
 
-	var gateID string
+	var gateID, volume string
 	if spec.Gate != nil {
-		id, created, gerr := p.ensureGate(ctx, spec)
+		gate, created, gerr := p.ensureGate(ctx, spec)
 		if gerr != nil {
 			return nil, gerr
 		}
-		gateID = id
+		gateID = gate.ID
 		if created {
 			// The gate is live but the sandbox half is not yet. Any error return
 			// below (a lost adopt, a failed create/start) leaves this gate an
@@ -431,6 +435,10 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 				}
 			}()
 		}
+		volume, err = guardVolume(gate)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	info, ierr := p.api.inspectContainer(ctx, name)
@@ -446,12 +454,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			if aerr := adoptable(info, spec, workdir, gateID); aerr != nil {
 				return nil, aerr
 			}
-			if !info.State.Running {
-				if serr := p.api.startContainer(ctx, info.ID); serr != nil {
-					return nil, serr
-				}
-			}
-			return p.attach(info.ID, workdir, gateID, info.HostConfig.ReadonlyRootfs), nil
+			return p.startSandbox(ctx, info, workdir, gateID, volume, !info.State.Running)
 		}
 		// The sandbox's egress path no longer matches the session's shape: gated
 		// but attached to a different (or since-removed) gate — a stale pairing (a
@@ -472,8 +475,19 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 				}
 			}
 		}
+		oldGuard := borrowedGuard(info.Mounts)
+		if gateID != "" && strings.HasPrefix(info.HostConfig.NetworkMode, "container:") {
+			// A stale guarded pair can be rebuilt. A legacy workspace has
+			// never passed admission; refuse it intact even if its gate died.
+			if err := guardedSandbox(info, oldGuard); err != nil {
+				return nil, err
+			}
+		}
 		if rerr := removeIgnoring404(ctx, p.api, info.ID); rerr != nil {
 			return nil, rerr
+		}
+		if err := p.api.releaseGuard(ctx, spec.SessionID, oldGuard); err != nil {
+			return nil, err
 		}
 		if gateID == "" {
 			// The gate half of the dismantled pair, found by its deterministic
@@ -501,8 +515,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		return nil, ierr
 	}
 
-	cfg := sandboxConfig(spec, workdir, gateID, p.clampCPU(ctx, spec.Hardening.CPUMillis))
-	readOnlyRoot := cfg.HostConfig.ReadonlyRootfs
+	cfg := sandboxConfig(spec, workdir, gateID, volume, p.clampCPU(ctx, spec.Hardening.CPUMillis))
 	id, cerr := p.api.createContainer(ctx, name, cfg)
 	if statusIs(cerr, 404) { // the image is not on this host yet
 		if perr := p.api.pullImage(ctx, spec.Image); perr != nil {
@@ -531,22 +544,67 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 		}
 		// Adopted as created, hardening included (adoptable): the root is
 		// read-only if the winner's is, whatever this spec asked for.
-		id, cerr, readOnlyRoot = winner.ID, nil, winner.HostConfig.ReadonlyRootfs
+		info, cerr = winner, nil
 	}
 	if cerr != nil {
 		return nil, cerr
 	}
-	if serr := p.api.startContainer(ctx, id); serr != nil {
-		if createdSandbox {
-			// Remove the sandbox we just created. Its immutable network mode
-			// references a gate this call is about to tear down (the deferred gate
-			// cleanup), so a stopped leftover would poison every later retry —
-			// adopting it and failing to start against the vanished gate forever.
-			p.removeDetached(ctx, id)
+	if createdSandbox {
+		defer func() {
+			if err != nil {
+				p.removeDetached(ctx, id)
+			}
+		}()
+		info = containerInfo{ID: id}
+		info.HostConfig.ReadonlyRootfs = cfg.HostConfig.ReadonlyRootfs
+		if gateID != "" {
+			// Inspect the actual mounts before starting any image code: an
+			// image may itself declare a volume below the guard directory.
+			info, err = p.api.inspectContainer(ctx, id)
+			if err != nil {
+				return nil, err
+			}
 		}
-		return nil, serr
 	}
-	return p.attach(id, workdir, gateID, readOnlyRoot), nil
+	return p.startSandbox(ctx, info, workdir, gateID, volume, true)
+}
+
+func (p *Provider) startSandbox(ctx context.Context, info containerInfo, workdir, gateID, volume string, start bool) (sandbox.Sandbox, error) {
+	if gateID != "" {
+		if err := guardedSandbox(info, volume); err != nil {
+			return nil, err
+		}
+	}
+	if start {
+		if err := p.api.startContainer(ctx, info.ID); err != nil {
+			return nil, err
+		}
+	}
+	if gateID != "" && (start || info.State.Health.Status != healthStatusHealthy) {
+		if _, err := p.waitHealthy(ctx, info.ID, "sandbox"); err != nil {
+			return nil, err
+		}
+	}
+	return p.attachInfo(info, workdir, gateID), nil
+}
+
+// The immutable startup command and healthcheck must both enter the launcher's
+// read-only gate volume. An unguarded legacy container keeps its workspace.
+func guardedSandbox(info containerInfo, volume string) error {
+	mounted := false
+	for _, m := range info.Mounts {
+		if strings.HasPrefix(m.Destination, uidguard.Dir+"/") {
+			return fmt.Errorf("docker: mount %s shadows the sandbox UID guard: %w", m.Destination, sandbox.ErrSpecMismatch)
+		}
+		if m.Destination == uidguard.Dir {
+			mounted = volume != "" && m.Type == "volume" && m.Name == volume && !m.RW
+		}
+	}
+	if mounted && len(info.Config.Entrypoint) > 0 && info.Config.Entrypoint[0] == uidguard.Path &&
+		info.Config.Healthcheck != nil && slices.Equal(info.Config.Healthcheck.Test, []string{"CMD", uidguard.Path}) {
+		return nil
+	}
+	return fmt.Errorf("docker: sandbox %s has no verified gate UID launcher: %w", info.ID, sandbox.ErrSpecMismatch)
 }
 
 // pairedWithGate reports whether an existing sandbox's egress path matches the
@@ -619,7 +677,7 @@ func (p *Provider) daemonCPUs(ctx context.Context) int64 {
 	return int64(n)
 }
 
-func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) containerConfig {
+func sandboxConfig(spec sandbox.Spec, workdir, gateID, volume string, cpuMillis int64) containerConfig {
 	// Tools background processes and orphan them; an init process reaps them
 	// instead of letting them pile up as zombies for the session's whole life.
 	host := hostConfig{Init: true}
@@ -664,6 +722,17 @@ func sandboxConfig(spec sandbox.Spec, workdir, gateID string, cpuMillis int64) c
 	}
 	if h.RunAsUser != nil {
 		cfg.User = strconv.FormatInt(*h.RunAsUser, 10)
+	}
+	if gateID != "" {
+		cfg.Entrypoint = uidguard.Command(cfg.Entrypoint)
+		cfg.Healthcheck = &healthcheck{
+			Test: []string{"CMD", uidguard.Path}, Interval: 2 * time.Second,
+			Timeout: 2 * time.Second, Retries: 1, StartPeriod: time.Second, StartInterval: time.Second,
+		}
+		cfg.HostConfig.Mounts = append(cfg.HostConfig.Mounts, mount{
+			Type: "volume", Source: volume, Target: uidguard.Dir, ReadOnly: true,
+			VolumeOptions: &volumeOptions{NoCopy: true},
+		})
 	}
 	return cfg
 }
@@ -779,30 +848,38 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 	if !info.State.Running {
 		return nil, sandbox.ErrNotFound
 	}
-	return p.attach(info.ID, info.Config.WorkingDir, p.pairedGate(ctx, sessionID, info),
-		info.HostConfig.ReadonlyRootfs), nil
+	gateID, gated := strings.CutPrefix(info.HostConfig.NetworkMode, "container:")
+	if !gated {
+		gateID = ""
+	} else {
+		gate, err := p.api.inspectContainer(ctx, gateName(sessionID))
+		if err != nil {
+			return nil, err
+		}
+		if gate.ID != gateID || ours(gate, sessionID) != nil {
+			return nil, fmt.Errorf("docker: sandbox %s is not paired with its session's gate: %w", info.ID, sandbox.ErrSpecMismatch)
+		}
+		volume, err := guardVolume(gate)
+		if err != nil {
+			return nil, err
+		}
+		if err := guardedSandbox(info, volume); err != nil {
+			return nil, err
+		}
+		if !gate.State.Running || gate.State.Health.Status != healthStatusHealthy || info.State.Health.Status != healthStatusHealthy {
+			return nil, sandbox.ErrNotFound
+		}
+	}
+	return p.attachInfo(info, info.Config.WorkingDir, gateID), nil
 }
 
-// pairedGate is the gate the attached handle may tear down with its sandbox: the
-// container the sandbox is networked through, but only once that container is
-// confirmed to be this session's own gate. Provision's gateID comes from the gate
-// it just ensured; this one would otherwise come from a string a container
-// carries, and Destroy removes what it names without asking again. A container of
-// this platform's pointed at anything else is a shape nothing here writes — a
-// legacy or hand-edited one — and a handle whose Destroy would remove an
-// unrelated container is not one to hand out. So an unverifiable pairing yields
-// "": the handle tears down its sandbox and leaves the gate to the standalone
-// teardown reaper, which is what collects an orphaned one anyway.
-func (p *Provider) pairedGate(ctx context.Context, sessionID domain.ID, info containerInfo) string {
-	gateID := strings.TrimPrefix(info.HostConfig.NetworkMode, "container:")
-	if gateID == info.HostConfig.NetworkMode {
-		return ""
+func (p *Provider) attachInfo(info containerInfo, workdir, gateID string) *container {
+	c := p.attach(info.ID, workdir, gateID, info.HostConfig.ReadonlyRootfs)
+	if gateID != "" {
+		c.sessionID = domain.ID(info.Config.Labels[sessionLabel])
+		c.guardVolume = borrowedGuard(info.Mounts)
 	}
-	gi, err := p.api.inspectContainer(ctx, gateName(sessionID))
-	if err != nil || gi.ID != gateID || ours(gi, sessionID) != nil {
-		return ""
-	}
-	return gateID
+	return c
 }
 
 func (p *Provider) attach(id, workdir, gateID string, readOnlyRoot bool) *container {
@@ -848,6 +925,8 @@ type container struct {
 	id          string
 	workdir     string
 	gateID      string // the session's egress-gate container, or "" when ungated
+	sessionID   domain.ID
+	guardVolume string
 	killGrace   time.Duration
 	overrunSlop time.Duration
 	exitBudget  time.Duration
@@ -1021,12 +1100,17 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 	deadline := time.Duration(seconds) * time.Second
 
 	state := execState()
+	argv := []string{"/bin/bash", "-c", execWrapper,
+		"map-exec", req.Command, strconv.Itoa(seconds), state}
+	if c.gateID != "" {
+		// The daemon can resolve a named image user again for each exec.
+		argv = uidguard.Command(argv)
+	}
 	execID, err := c.api.execCreate(ctx, c.id, execConfig{
 		AttachStdout: true,
 		AttachStderr: true,
-		Cmd: []string{"/bin/bash", "-c", execWrapper,
-			"map-exec", req.Command, strconv.Itoa(seconds), state},
-		WorkingDir: c.workdir,
+		Cmd:          argv,
+		WorkingDir:   c.workdir,
 	})
 	if err != nil {
 		return sandbox.ExecResult{}, c.wrap(err)
@@ -2087,6 +2171,7 @@ func (c *container) Destroy(ctx context.Context) error {
 	err := removeIgnoring404(ctx, c.api, c.id)
 	if c.gateID != "" {
 		err = errors.Join(err, removeIgnoring404(ctx, c.api, c.gateID))
+		err = errors.Join(err, c.api.releaseGuard(ctx, c.sessionID, c.guardVolume))
 	}
 	return err
 }

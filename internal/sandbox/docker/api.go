@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // A hand-rolled slice of the Docker Engine API. The official client pulls in
@@ -157,11 +158,9 @@ func (c *apiClient) getJSON(ctx context.Context, path string, out any) error {
 type containerInfo struct {
 	ID    string `json:"Id"`
 	State struct {
-		Running bool `json:"Running"`
-		// Health is present only for a container whose image declares a
-		// HEALTHCHECK (the gate image does). Status is "starting" | "healthy" |
-		// "unhealthy"; absent → "". The gate pair waits for "healthy" before it
-		// admits the sandbox, so a gate that failed to fail-close never serves.
+		Running  bool `json:"Running"`
+		ExitCode int  `json:"ExitCode"`
+		// Both halves of a gated pair have a healthcheck.
 		Health struct {
 			Status string `json:"Status"`
 		} `json:"Health"`
@@ -171,10 +170,15 @@ type containerInfo struct {
 		// adoption compares them against the requested spec (`adoptable`, #29) —
 		// an owned container is not necessarily one created from the spec this
 		// call is asking for.
-		Image      string            `json:"Image"`
-		WorkingDir string            `json:"WorkingDir"`
-		Labels     map[string]string `json:"Labels"`
+		Image       string            `json:"Image"`
+		WorkingDir  string            `json:"WorkingDir"`
+		Labels      map[string]string `json:"Labels"`
+		Env         []string          `json:"Env"`
+		Entrypoint  []string          `json:"Entrypoint"`
+		Healthcheck *healthcheck      `json:"Healthcheck"`
 	} `json:"Config"`
+	// The daemon assigns an anonymous volume its Name at container creation.
+	Mounts []mountedVolume `json:"Mounts"`
 	// HostConfig.NetworkMode is the container's fixed-at-create networking. A
 	// gated sandbox must be `container:<gateID>`; adoption checks it so a sandbox
 	// paired with a since-removed gate (or a pre-gate `bridge` sandbox) is rebuilt
@@ -186,6 +190,11 @@ type containerInfo struct {
 	} `json:"HostConfig"`
 }
 
+type mountedVolume struct {
+	Type, Name, Destination string
+	RW                      bool
+}
+
 // containerSummary is one row of the daemon's container list — just enough to
 // map an owned container back to its session and to order a reap (the gate,
 // found by name, goes last).
@@ -193,6 +202,7 @@ type containerSummary struct {
 	ID     string            `json:"Id"`
 	Names  []string          `json:"Names"`
 	Labels map[string]string `json:"Labels"`
+	Mounts []mountedVolume   `json:"Mounts"`
 }
 
 // listContainers returns every container — running or stopped (all=1) —
@@ -259,10 +269,8 @@ type hostConfig struct {
 	Mounts         []mount `json:"Mounts,omitempty"`
 }
 
-// mount is one writable path in a read-only-rootfs sandbox. Only anonymous
-// volumes are used — Type "volume" with no Source — so the daemon creates them
-// with the container and removeContainer's `v=1` takes them away with it, and
-// nothing has to be named, tracked or reaped.
+// Workspace mounts and the gate's guard volume are anonymous. The sandbox
+// borrows the latter read-only, by the name the daemon assigned to the gate.
 //
 // A volume rather than a tmpfs, which would otherwise be the obvious choice:
 // the daemon refuses PUT /containers/{id}/archive on a read-only-rootfs
@@ -272,8 +280,25 @@ type hostConfig struct {
 // a sandbox that runs commands but can never receive a file — no skills, no
 // files, no write tool. Measured against the daemon, not inferred.
 type mount struct {
-	Type   string `json:"Type"`
-	Target string `json:"Target"`
+	Type          string         `json:"Type"`
+	Target        string         `json:"Target"`
+	Source        string         `json:"Source,omitempty"`
+	ReadOnly      bool           `json:"ReadOnly,omitempty"`
+	VolumeOptions *volumeOptions `json:"VolumeOptions,omitempty"`
+}
+
+type volumeOptions struct {
+	NoCopy bool              `json:"NoCopy,omitempty"`
+	Labels map[string]string `json:"Labels,omitempty"`
+}
+
+type healthcheck struct {
+	Test          []string      `json:"Test"`
+	Interval      time.Duration `json:"Interval,omitempty"`
+	Timeout       time.Duration `json:"Timeout,omitempty"`
+	Retries       int           `json:"Retries,omitempty"`
+	StartPeriod   time.Duration `json:"StartPeriod,omitempty"`
+	StartInterval time.Duration `json:"StartInterval,omitempty"`
 }
 
 type containerConfig struct {
@@ -290,10 +315,11 @@ type containerConfig struct {
 	// the default, and always the gate's — keeps the image's user, which for the
 	// platform's default image is root; a root sandbox is safe to the extent
 	// that its capability drops and no-new-privileges make it so.
-	User       string            `json:"User,omitempty"`
-	WorkingDir string            `json:"WorkingDir"`
-	Labels     map[string]string `json:"Labels"`
-	HostConfig hostConfig        `json:"HostConfig"`
+	User        string            `json:"User,omitempty"`
+	WorkingDir  string            `json:"WorkingDir"`
+	Labels      map[string]string `json:"Labels"`
+	Healthcheck *healthcheck      `json:"Healthcheck,omitempty"`
+	HostConfig  hostConfig        `json:"HostConfig"`
 }
 
 func (c *apiClient) createContainer(ctx context.Context, name string, cfg containerConfig) (string, error) {
