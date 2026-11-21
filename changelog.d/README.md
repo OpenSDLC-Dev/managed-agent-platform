@@ -53,8 +53,10 @@ github.com's own renderer applies on the release page, and the post-release
 docs/changelog/. Every other relative form — `](../…)` and bare `](deploy/…)`
 alike — is refused rather than guessed at, by `absolutizeLinks` and
 `rebaseLinks` respectively. Absolute URLs and `#anchor` targets are always
-fine. A link-reference definition (`[label]: docs/…`) follows the same rules
-as an inline target. The tool leaves links in code examples as written.
+fine. Keep link titles and reference definitions (`[label]: docs/…`) on a
+single line. Keep each reference definition in the same changelog group as
+its links so they stay together when release notes are capped. The tool
+leaves destinations inside code examples as written.
 
 **Fragment loading checks link targets and code fences.** CI runs the loader
 against `changelog.d/`. An unsupported relative target or an unclosed fence

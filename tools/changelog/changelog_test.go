@@ -655,10 +655,12 @@ func TestFragmentChecksLinksOutsideCode(t *testing.T) {
 	}{
 		{body: example + "- A [link](./docs/RELEASING.md).\n"},
 		{body: "-     [indented example](bare.md)\n"},
+		{body: "- \t  [tab-indented example](bare.md)\n"},
 		{body: "- > ```md\n  > [quoted example](bare.md)\n  > ```\n"},
 		{body: "- One display reads\n    [expired]: disabled\n"},
 		{body: example + "- A [link](bare.md).\n", wantErr: "bare.md"},
 		{body: "- A note.\n\n  ```\n", wantErr: "unclosed Markdown fence"},
+		{body: "- ```\n  Sample.\n- Next item [guide](bare.md).\n  ```\n", wantErr: "unclosed Markdown fence"},
 	} {
 		if err := os.WriteFile(file, []byte(tc.body), 0o644); err != nil {
 			t.Fatal(err)
@@ -700,6 +702,12 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 			layout, err := markdownLines(lines)
 			if err != nil {
 				t.Fatal(err)
+			}
+			for i := 1; i < len(lines); i++ {
+				line := strings.TrimLeft(lines[i], " ")
+				if layout[i] != codeLine && len(lines[i])-len(line) <= 3 && releaseHeadingRe.MatchString(line) {
+					t.Errorf("line %d: unexpected second release heading %q", i+1, lines[i])
+				}
 			}
 			if want := archivePointer(lines, layout, link); joinTrimmed(body) != want {
 				t.Errorf("stub = %q, want %q", joinTrimmed(body), want)
@@ -1241,9 +1249,18 @@ func TestNotesCapKeepsFencedGroupTogether(t *testing.T) {
 	const body = "### Added\n\n- A real group.\n\n```md\n### Example\n" +
 		"[example](bare.md)\n```\n"
 	const base = "https://github.com/o/r"
-	got, err := renderNotes(body+"\n### Fixed\n\n- "+strings.Repeat("x", 200)+"\n", base, "0.2.0", 195)
+	full := body + "\n### Fixed\n\n- " + strings.Repeat("x", 200) + "\n"
+	got, err := renderNotes(full, base, "0.2.0", 195)
 	if err != nil || !strings.HasPrefix(got, body+"\n---\n") || strings.Contains(got, "### Fixed") {
 		t.Errorf("capped notes = %q, %v", got, err)
+	}
+	const trailer = "---\n\nTruncated: the full section is in [CHANGELOG.md](" + base + "/blob/v0.2.0/CHANGELOG.md).\n"
+	// The prefix through the opening fence fits at this cap. The complete
+	// group does not. A split at the sample heading would emit a broken fence.
+	cap := len("### Added\n\n- A real group.\n\n```md\n\n") + len(trailer)
+	got, err = renderNotes(full, base, "0.2.0", cap)
+	if err != nil || got != trailer {
+		t.Errorf("capped notes = %q, %v, want trailer only", got, err)
 	}
 }
 

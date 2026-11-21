@@ -50,6 +50,9 @@ func markdownLines(lines []string) ([]markdownLine, error) {
 		}
 		indent, trim := markdownIndent(line)
 		if width != 0 {
+			if trim != "" && indent < listIndent {
+				return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
+			}
 			if fenceListQuotes != 0 {
 				body, depth := quoteBody(trim, fenceListQuotes)
 				if indent < listIndent || indent > listIndent+3 || depth != fenceListQuotes {
@@ -78,13 +81,20 @@ func markdownLines(lines []string) ([]markdownLine, error) {
 			listIndent = listIndents[len(listIndents)-1]
 		}
 		innerQuotes := 0
-		if item := listContentStart(trim); item > 0 && indent <= listIndent+3 && !blockEndRe.MatchString(trim) {
-			listIndent = indent + item
+		if item := listItemRe.FindStringSubmatchIndex(trim); item != nil && indent <= listIndent+3 && !blockEndRe.MatchString(trim) {
+			markerEnd := indent + item[2]
+			contentColumn := markdownColumns(markerEnd, trim[item[2]:item[3]])
+			listIndent = contentColumn
+			content := trim[item[1]:]
+			if contentColumn-markerEnd > 4 {
+				// Extra padding belongs to the item's indented code block.
+				listIndent = markerEnd + 1
+			} else {
+				content, innerQuotes = quoteBody(content, -1)
+			}
 			listIndents = append(listIndents, listIndent)
-			var content string
-			content, innerQuotes = quoteBody(trim[item:], -1)
 			indent, trim = markdownIndent(content)
-			indent += listIndent
+			indent += contentColumn
 			layout[i] = listItemLine
 			paragraph = false
 		}
@@ -115,26 +125,18 @@ func markdownBlockBoundary(line string) bool {
 
 func markdownIndent(line string) (int, string) {
 	trim := strings.TrimLeft(line, " \t")
-	indent := 0
-	for _, ch := range line[:len(line)-len(trim)] {
-		if ch == '\t' {
-			indent += 4 - indent%4
-		} else {
-			indent++
-		}
-	}
-	return indent, trim
+	return markdownColumns(0, line[:len(line)-len(trim)]), trim
 }
 
-func listContentStart(line string) int {
-	if item := listItemRe.FindStringSubmatchIndex(line); item != nil {
-		if item[3]-item[2] > 4 {
-			// Four or more spaces after the list's padding can start code.
-			return item[2] + 1
+func markdownColumns(column int, space string) int {
+	for _, ch := range space {
+		if ch == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
 		}
-		return item[1]
 	}
-	return 0
+	return column
 }
 
 // quoteBody removes the blockquote markers and their optional padding. Inside
@@ -230,8 +232,8 @@ func markdownDestinations(lines []string, layout []markdownLine, visit func(int,
 			line := lines[i]
 			body, _ := quoteBody(line, depth)
 			body = strings.TrimLeft(body, " \t")
-			if item := listContentStart(body); item > 0 {
-				body = body[item:]
+			if item := listItemRe.FindStringIndex(body); item != nil {
+				body = body[item[1]:]
 				body, _ = quoteBody(body, -1)
 			}
 			body = strings.TrimLeft(body, " \t")
