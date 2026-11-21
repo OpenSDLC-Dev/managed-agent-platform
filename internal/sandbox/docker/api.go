@@ -202,27 +202,36 @@ type containerSummary struct {
 	ID     string            `json:"Id"`
 	Names  []string          `json:"Names"`
 	Labels map[string]string `json:"Labels"`
-	Mounts []mountedVolume   `json:"Mounts"`
 }
 
 // listContainers returns every container — running or stopped (all=1) —
-// matching the label filters ("key" for presence, "key=value" for equality).
-func (c *apiClient) listContainers(ctx context.Context, labelFilters ...string) ([]containerSummary, error) {
-	filters, err := json.Marshal(map[string][]string{"label": labelFilters})
-	if err != nil {
-		return nil, fmt.Errorf("docker: encode list filters: %w", err)
-	}
-	resp, err := c.request(ctx, http.MethodGet, "/containers/json",
-		url.Values{"all": {"1"}, "filters": {string(filters)}}, nil, "")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+// matching the label filter ("key" for presence, "key=value" for equality).
+func (c *apiClient) listContainers(ctx context.Context, label string) ([]containerSummary, error) {
 	var out []containerSummary
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("docker: decode /containers/json reply: %w", err)
+	err := c.filteredList(ctx, "/containers/json", url.Values{"all": {"1"}},
+		map[string][]string{"label": {label}}, &out)
+	return out, err
+}
+
+type volumeInfo struct {
+	Name   string
+	Labels map[string]string
+}
+
+func (c *apiClient) listUnusedGuards(ctx context.Context, label string) ([]volumeInfo, error) {
+	var out struct{ Volumes []volumeInfo }
+	err := c.filteredList(ctx, "/volumes", url.Values{},
+		map[string][]string{"label": {label}, "dangling": {"true"}}, &out)
+	return out.Volumes, err
+}
+
+func (c *apiClient) filteredList(ctx context.Context, path string, query url.Values, filter map[string][]string, out any) error {
+	filters, err := json.Marshal(filter)
+	if err != nil {
+		return fmt.Errorf("docker: encode list filters: %w", err)
 	}
-	return out, nil
+	query.Set("filters", string(filters))
+	return c.getJSON(ctx, path+"?"+query.Encode(), out)
 }
 
 // hostCPUs is the daemon's CPU count. The daemon refuses a create whose

@@ -408,8 +408,12 @@ func TestReapRemovesTheGuardOfAVanishedGate(t *testing.T) {
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/containers/json":
-			fmt.Fprintf(w, `[{"Id":"sandbox","Names":["/map-sesn_oldguard"],"Mounts":[
-				{"Type":"volume","Name":"old-guard","Destination":%q,"RW":false}]}]`, uidguard.Dir)
+			io.WriteString(w, `[{"Id":"sandbox","Names":["/map-sesn_oldguard"]}]`)
+		case r.URL.Path == "/volumes":
+			if !slices.Equal(removed, []string{"/containers/sandbox"}) {
+				t.Errorf("listed dangling volumes before removing the borrower: %v", removed)
+			}
+			fmt.Fprintf(w, `{"Volumes":[{"Name":"old-guard","Labels":{%q:%q}}]}`, guardSessionLabel, sid)
 		case r.Method == http.MethodDelete:
 			removed = append(removed, r.URL.Path)
 			w.WriteHeader(http.StatusNoContent)

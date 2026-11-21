@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	gopath "path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -288,24 +289,40 @@ func checkGuard(pod *corev1.Pod) error {
 	if !hasGateSidecar(pod) {
 		return nil
 	}
+	privateVolume := slices.ContainsFunc(pod.Spec.Volumes, func(v corev1.Volume) bool {
+		return v.Name == guardVolumeName && v.EmptyDir != nil
+	})
+	gateMount := slices.ContainsFunc(pod.Spec.InitContainers, func(c corev1.Container) bool {
+		return c.Name == gateContainerName && hasGuardMount(c.VolumeMounts, false)
+	})
+	if !privateVolume || !gateMount {
+		return fmt.Errorf("k8s: pod %s lacks the gate's private launcher volume: %w", pod.Name, sandbox.ErrSpecMismatch)
+	}
 	for _, c := range pod.Spec.Containers {
-		if c.Name != containerName || len(c.Command) == 0 || c.Command[0] != uidguard.Path {
-			continue
-		}
-		mounted := false
-		for _, m := range c.VolumeMounts {
-			if strings.HasPrefix(m.MountPath, uidguard.Dir+"/") {
-				return fmt.Errorf("k8s: pod %s shadows the sandbox identity guard: %w", pod.Name, sandbox.ErrSpecMismatch)
-			}
-			if m.Name == guardVolumeName && m.MountPath == uidguard.Dir && m.ReadOnly && m.SubPath == "" && m.SubPathExpr == "" {
-				mounted = true
-			}
-		}
-		if mounted {
+		probe := c.StartupProbe
+		if c.Name == containerName && len(c.Command) > 0 && c.Command[0] == uidguard.Path &&
+			probe != nil && probe.Exec != nil && slices.Equal(probe.Exec.Command, []string{uidguard.Path}) &&
+			hasGuardMount(c.VolumeMounts, true) {
 			return nil
 		}
 	}
 	return fmt.Errorf("k8s: pod %s lacks gated sandbox identity admission: %w", pod.Name, sandbox.ErrSpecMismatch)
+}
+
+func hasGuardMount(mounts []corev1.VolumeMount, readOnly bool) bool {
+	mounted := false
+	for _, m := range mounts {
+		if strings.HasPrefix(m.MountPath, uidguard.Dir+"/") {
+			return false
+		}
+		if m.MountPath == uidguard.Dir || m.Name == guardVolumeName {
+			if m.Name != guardVolumeName || m.MountPath != uidguard.Dir || m.ReadOnly != readOnly || m.SubPath != "" || m.SubPathExpr != "" {
+				return false
+			}
+			mounted = true
+		}
+	}
+	return mounted
 }
 
 // hasGateSidecar reports whether the pod carries the egress-gate sidecar — the

@@ -251,25 +251,35 @@ func New(cfg Config) (*Provider, error) {
 	return &Provider{api: api, gateNetwork: gateNetwork, revoker: cfg.GateTokenRevoker}, nil
 }
 
-// Owned lists the distinct session ids of every container — running or stopped,
-// sandboxes and gates alike — carrying this daemon's ownership label.
+// Owned finds sessions through their containers or a guard volume left after
+// both containers disappeared. A failed volume release remains discoverable.
 func (p *Provider) Owned(ctx context.Context) ([]domain.ID, error) {
 	list, err := p.api.listContainers(ctx, sessionLabel)
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[domain.ID]struct{}, len(list))
+	volumes, err := p.api.listUnusedGuards(ctx, guardSessionLabel)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[domain.ID]struct{}, len(list)+len(volumes))
 	var out []domain.ID
-	for _, c := range list {
-		id := domain.ID(c.Labels[sessionLabel])
+	add := func(label string) {
+		id := domain.ID(label)
 		if id == "" {
-			continue
+			return
 		}
 		if _, dup := seen[id]; dup {
-			continue
+			return
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
+	}
+	for _, c := range list {
+		add(c.Labels[sessionLabel])
+	}
+	for _, v := range volumes {
+		add(v.Labels[guardSessionLabel])
 	}
 	return out, nil
 }
@@ -303,8 +313,12 @@ func (p *Provider) Reap(ctx context.Context, sessionID domain.ID) error {
 			errs = errors.Join(errs, removeWaitingGone(ctx, p.api, c.ID))
 		}
 	}
-	for _, c := range list {
-		errs = errors.Join(errs, p.api.releaseGuard(ctx, sessionID, borrowedGuard(c.Mounts)))
+	volumes, err := p.api.listUnusedGuards(ctx, guardSessionLabel+"="+string(sessionID))
+	if err != nil {
+		return errors.Join(errs, err)
+	}
+	for _, v := range volumes {
+		errs = errors.Join(errs, p.api.releaseGuard(ctx, sessionID, v.Name))
 	}
 	return errs
 }

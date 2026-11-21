@@ -586,6 +586,8 @@ numeric or named `USER` resolves to it fails provisioning. Choose a different
 image user or set `SANDBOX_RUN_AS_USER` to a UID that can use the image and
 workdir.
 
+For gated sandboxes, Docker replaces the image's `HEALTHCHECK` with the
+platform's identity check. Kubernetes runs that check as a startup probe.
 Deploy the matching gate image with the executor and worker. Existing gated
 sandboxes created without the launcher need to be drained and recreated during
 rollout. An executor refuses to adopt them and preserves their files.

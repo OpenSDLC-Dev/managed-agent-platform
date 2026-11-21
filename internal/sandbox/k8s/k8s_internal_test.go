@@ -239,6 +239,27 @@ func TestGatedPodWithoutIdentityGuardIsRefused(t *testing.T) {
 	}
 }
 
+func TestGatedPodRequiresTheStagedGuardVolumeAndProbe(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	for _, tc := range []struct {
+		name string
+		edit func(*corev1.Pod)
+	}{
+		{"missing startup probe", func(p *corev1.Pod) { p.Spec.Containers[0].StartupProbe = nil }},
+		{"missing gate mount", func(p *corev1.Pod) { p.Spec.InitContainers[0].VolumeMounts = nil }},
+		{"missing private volume", func(p *corev1.Pod) { p.Spec.Volumes = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+			tc.edit(pod)
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+			if _, err := fakeProvider(pod).Attach(t.Context(), spec.SessionID); !errors.Is(err, sandbox.ErrSpecMismatch) {
+				t.Fatalf("attach with %s: %v, want a spec mismatch", tc.name, err)
+			}
+		})
+	}
+}
+
 // A pod that is both wedged (its gate never turns ready) and spec-mismatched
 // must still be reclaimed: the readiness wait and its #198 reclaim run before
 // the spec check, deliberately — refusing first would strand a dead pod

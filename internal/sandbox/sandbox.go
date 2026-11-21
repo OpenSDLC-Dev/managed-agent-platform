@@ -796,11 +796,10 @@ type Provider interface {
 	// the session's name without its ownership label is an error, not a miss —
 	// the same refusal every adoption path makes.
 	Attach(ctx context.Context, sessionID domain.ID) (Sandbox, error)
-	// Owned lists the distinct session ids of every sandbox asset — sandbox
-	// containers/pods and gate containers, running or stopped — this endpoint
-	// currently holds, read from the ownership label. Endpoint-local by
-	// design: an executor lists one daemon's containers or one namespace's
-	// pods, which is what lets the reaper run on every executor with no
+	// Owned lists the distinct session ids from labels on this endpoint's
+	// sandbox assets. Docker includes running and stopped containers and any
+	// unused guard volume. Kubernetes lists the pods in one namespace.
+	// This local scope lets the reaper run on every executor with no
 	// coordination (plan 24). Not a partition — the chart's replicas share a
 	// namespace and so list each other's pods; what makes that safe is that
 	// Reap is idempotent and the reaper serializes on a per-session lock.

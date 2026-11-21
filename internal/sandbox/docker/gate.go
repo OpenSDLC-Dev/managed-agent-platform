@@ -188,7 +188,7 @@ func (api *apiClient) releaseGuard(ctx context.Context, sid domain.ID, name stri
 		return nil
 	}
 	path := "/volumes/" + url.PathEscape(name)
-	var v struct{ Labels map[string]string }
+	var v volumeInfo
 	if err := api.getJSON(ctx, path, &v); err != nil {
 		if statusIs(err, http.StatusNotFound) {
 			return nil
