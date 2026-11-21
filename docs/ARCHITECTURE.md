@@ -594,6 +594,9 @@ The five server binaries under `cmd/` — `controlplane`, `brain`, `executor`,
 `worker`, `modelgateway` — are thin glue: they map the environment to a config and call into the
 packages above. `cmd/gate` is not a server but the per-session egress sidecar,
 and holds the two OS-touching adapters `gaterun/` declares.
+The gate image also ships the static `cmd/uidguard` launcher. Docker and
+Kubernetes expose it read-only in gated sandboxes. It checks the kernel's
+effective UID before entering the image's startup command or a tool exec.
 
 ## Security invariants
 
