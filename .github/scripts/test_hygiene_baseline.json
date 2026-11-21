@@ -1,0 +1,326 @@
+{
+  "acceptance/live_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "cmd/gate/firewall_docker_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "evals/dream_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/consoleapi_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/deploymentscheduler_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/api/dreamrunner_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/dreamstart_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/api/fileretention_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/api/filescopieslocks_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/gateconfig_internal_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/gateconfig_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/api/memoryretention_internal_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/api/memoryversions_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/objectdebt_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/objectdeletes_test.go": {
+    "skip": 0,
+    "sleep": 7
+  },
+  "internal/api/sessionmemory_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/sessions_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/threadexec_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/api/workapi_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/brain/brain_test.go": {
+    "skip": 0,
+    "sleep": 6
+  },
+  "internal/brain/telemetry_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/brain/thinking_live_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/brain/webdate_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/dockertest/dockertest_test.go": {
+    "skip": 1,
+    "sleep": 1
+  },
+  "internal/events/log_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/events/metrics_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/events/span_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/executor/clonetransport_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/executor/executor_integration_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/executor/executor_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/executor/mcpexec_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/executor/memory_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/executor/packages_credentials_test.go": {
+    "skip": 2,
+    "sleep": 0
+  },
+  "internal/executor/reaper_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/executor/reapkick_test.go": {
+    "skip": 0,
+    "sleep": 5
+  },
+  "internal/executor/repos_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/gate/gate_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/gate/limiter_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/gate/withdrawal_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/gatetoken/gatetoken_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/mcp/mcp_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/memsync/shell_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/modelgateway/catalog/catalog_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/modelgateway/chat_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/converted_test.go": {
+    "skip": 0,
+    "sleep": 6
+  },
+  "internal/modelgateway/live_chat_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/live_convert_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/live_gitee_test.go": {
+    "skip": 1,
+    "sleep": 1
+  },
+  "internal/modelgateway/live_responses_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/live_test.go": {
+    "skip": 4,
+    "sleep": 0
+  },
+  "internal/modelgateway/live_vendor_test.go": {
+    "skip": 1,
+    "sleep": 1
+  },
+  "internal/modelgateway/messages_test.go": {
+    "skip": 0,
+    "sleep": 10
+  },
+  "internal/modelgateway/responses_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/routing_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/modelgateway/store/usage_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/modelgateway/store/window_wait_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/modelgateway/telemetry_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/modelgateway/thinking_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/modelgateway/usage_test.go": {
+    "skip": 0,
+    "sleep": 6
+  },
+  "internal/pgtest/pgtest_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/provider/anthropic/integration_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/provider/openai/integration_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/provider/stall_test.go": {
+    "skip": 0,
+    "sleep": 6
+  },
+  "internal/queue/inference_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/queue/keeper_test.go": {
+    "skip": 0,
+    "sleep": 5
+  },
+  "internal/queue/keeperbudget_test.go": {
+    "skip": 0,
+    "sleep": 4
+  },
+  "internal/queue/queue_test.go": {
+    "skip": 0,
+    "sleep": 3
+  },
+  "internal/sandbox/bulkshell_test.go": {
+    "skip": 5,
+    "sleep": 0
+  },
+  "internal/sandbox/bulkwrite_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/sandbox/docker/api_test.go": {
+    "skip": 0,
+    "sleep": 5
+  },
+  "internal/sandbox/docker/errexit_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/sandbox/docker/watchdogmark_test.go": {
+    "skip": 1,
+    "sleep": 1
+  },
+  "internal/sandbox/filefault_test.go": {
+    "skip": 1,
+    "sleep": 0
+  },
+  "internal/sandbox/hookedtest/hooked_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/sandbox/k8s/k8s_internal_test.go": {
+    "skip": 5,
+    "sleep": 1
+  },
+  "internal/store/drop_file_copy_guard_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/store/files_object_key_test.go": {
+    "skip": 0,
+    "sleep": 1
+  },
+  "internal/store/store_test.go": {
+    "skip": 0,
+    "sleep": 2
+  },
+  "internal/worker/lease_test.go": {
+    "skip": 0,
+    "sleep": 9
+  },
+  "tools/changelog/changelog_test.go": {
+    "skip": 3,
+    "sleep": 0
+  },
+  "tools/sdkref/pin_test.go": {
+    "skip": 1,
+    "sleep": 0
+  }
+}

@@ -31,6 +31,21 @@ jobs:
       - name: gofmt
         run: make fmt-check
 
+  # Race detector over high-concurrency core packages (plan 75 slice 4).
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: race detector (high-concurrency packages)
+        run: make test-race
+
   # Model-free native browser and SDK checks use source, not a published image.
   native-console:
     name: native-console
@@ -1450,6 +1465,8 @@ jobs:
       # 65,536 bytes, so the same step had passed on every runner (#763).
       - name: no workflow pipeline stops reading before its input ends
         run: make pipes-test
+      - name: Go tests do not add unannotated time.Sleep or t.Skip calls above baseline
+        run: make test-hygiene-test
       - name: issue-triage read-only wrapper and Bash guard hold their boundary
         run: make issue-triage-guard-test
       # deploy-alert.yml couples to deploy.yml three ways, and all three fail

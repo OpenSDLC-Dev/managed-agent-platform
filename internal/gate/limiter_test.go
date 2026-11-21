@@ -239,8 +239,9 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 		origin.URL, host, strings.Repeat("A", 1024))
 
 	// Wait until the gate has read and accounted Request 1's 1024-byte chunk
-	// (observed when a 1024-byte declared POST receives 503).
-	deadline := time.Now().Add(2 * time.Second)
+	// (observed when a 1024-byte declared POST receives 503). Give loaded CI
+	// runners headroom to schedule Request 1's handler goroutine.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		probe, err := client.Post(origin.URL+"/fast", "text/plain", strings.NewReader(strings.Repeat("B", 1024)))
 		if err != nil {

@@ -92,6 +92,42 @@ func TestWorkChannelWakesEnvironmentKeyedSubscriber(t *testing.T) {
 	}
 }
 
+// TestReadyDeliversHealWakeBeforeReturning verifies that Broker.Ready does not
+// return until the initial connect heal-wake has already been delivered, so a
+// subscriber joining after Ready() never receives a delayed wake from the prior
+// connect.
+func TestReadyDeliversHealWakeBeforeReturning(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := context.Background()
+	for i := range 20 {
+		broker := events.NewBroker(pool)
+		envA, envB := domain.NewID("env"), domain.NewID("env")
+		subA := subscribeReady(t, broker, envA)
+		// Initial subscriber must already have its heal-wake buffered by the
+		// time Ready() returns.
+		select {
+		case <-subA.Wake():
+		default:
+			t.Fatalf("iter %d: initial subscriber missed heal-wake before Ready returned", i)
+		}
+		// A second subscriber joining after Ready() must not receive a stray
+		// heal-wake from the connect that already completed.
+		subB := subscribeReady(t, broker, envB)
+		if _, err := pool.Exec(ctx, `SELECT pg_notify('map_work_items', $1)`,
+			`{"environment_id":"`+envA.String()+`"}`); err != nil {
+			t.Fatal(err)
+		}
+		waitWake(t, subA)
+		select {
+		case <-subB.Wake():
+			t.Fatalf("iter %d: post-Ready subscriber received stale heal-wake", i)
+		default:
+		}
+		subA.Close()
+		subB.Close()
+	}
+}
+
 func TestSubscribeWakesOnAppend(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	log := events.NewLog(pool)

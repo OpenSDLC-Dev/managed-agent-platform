@@ -17,10 +17,10 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build build-worker crossbuild vet fmt-check test test-fast fuzz cover-gate verify eval ripgrep third-party-licenses \
+.PHONY: build build-worker crossbuild vet fmt-check test test-fast test-race fuzz cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -131,6 +131,18 @@ test-fast:
 		| awk '{print $$1}')"; \
 	set -x; \
 	go test -count=1 $$pkgs
+
+# Race detector over the high-concurrency core packages (plan 75 slice 4).
+# Requires Docker (for pgtest in events/queue/brain) and no Kubernetes cluster.
+# Runs as its own CI job (`race`) so PRs catch data races without tripling the
+# coverage job's wall time.
+test-race:
+	go test -race -count=1 -timeout 15m \
+		./internal/gate ./internal/gaterun/... ./internal/egress ./internal/dialguard \
+		./internal/mcp ./internal/modelgateway/convert ./internal/modelgateway/profile \
+		./internal/modelgateway/upstream ./internal/provider ./internal/cron ./internal/domain \
+		./internal/identity ./internal/oauthrefresh ./internal/skills ./internal/transcript \
+		./internal/webtool/... ./internal/events ./internal/queue ./internal/brain
 
 # Short fuzzing pass over every Fuzz* target in the repository (plan 75 slice 3).
 # Outside `verify` on purpose: `make test` replays every seed corpus, while
@@ -441,6 +453,12 @@ pins-test:
 # later edit revokes. It self-tests before it scans.
 pipes-test:
 	python3 .github/scripts/pipes_test.py
+
+# Test-hygiene ratchet for ad-hoc time.Sleep and t.Skip calls in *_test.go
+# (plan 75 slice 4). Existing occurrences are baselined per file; new uses
+# require synchronization or an explicit `// hygiene:allow <reason>` comment.
+test-hygiene-test:
+	python3 .github/scripts/test_hygiene_test.py
 
 # The issue-triage subagent's structured read-only wrapper and PreToolUse Bash
 # guard (.claude/hooks/issue-triage-{read,bash-guard}.sh, #1052).
