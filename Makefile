@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build build-worker crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -358,6 +358,13 @@ parked-test:
 # capture, joined to the attempt that worked.
 retry-test:
 	python3 .github/scripts/retry_test.py
+
+issue-labels-test:
+	python3 .github/scripts/issue_labels_test.py
+
+notifier-issues-test:
+	shellcheck .github/scripts/notifier-issues.sh
+	python3 .github/scripts/notifier_issues_test.py
 
 # The classifier evals-alert.yml keys on: whether the nightly eval suite is
 # passing, failing, or has stopped reaching a verdict. A scheduled workflow

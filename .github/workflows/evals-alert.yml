@@ -55,7 +55,7 @@ jobs:
     permissions:
       contents: read # actions/checkout, for the classifier
       actions: read # the evals run history
-      issues: write # the tracking issue and its label
+      issues: write # the tracking issue and its triage labels
     timeout-minutes: 10
     steps:
       # Nothing here pushes, so the token has no reason to outlive the step.
@@ -74,9 +74,6 @@ jobs:
           # again. A larger value would delay every real stall by as much.
           STALE_HOURS: 48
           TITLE: "evals: the nightly eval suite is not passing on main"
-          # The lookup is by LABEL, not by title: anyone reading the issue can
-          # edit a title.
-          LABEL: evals-failure
         shell: bash
         run: |
           set -euo pipefail
@@ -128,15 +125,8 @@ jobs:
           RUN_URL="$GITHUB_SERVER_URL/$REPO/actions/runs/$RUN_ID"
           LIST_URL="$GITHUB_SERVER_URL/$REPO/actions/workflows/$EVALS_WORKFLOW"
 
-          # Ensured before the lookup, so the query does not depend on how `gh`
-          # answers a filter naming a label that does not exist yet.
-          gh label create "$LABEL" --repo "$REPO" --color B60205 \
-            --description "Open while the nightly eval suite is failing or has stopped (evals-alert.yml)" \
-            >/dev/null 2>&1 || true
-          # Every open issue carrying the label: `healthy` closes them all, so a
-          # second one, filed by hand, does not stay open forever.
-          numbers="$(retry gh issue list --repo "$REPO" --state open --label "$LABEL" \
-            --limit 50 --json number --jq '.[].number')"
+          source .github/scripts/notifier-issues.sh
+          numbers="$(retry open_notifier_issues evals "$TITLE")"
           num="${numbers%%$'\n'*}"
 
           # Filed unassigned, for staging-parked.yml's reason: `github.actor` on
@@ -164,7 +154,7 @@ jobs:
               return
             fi
             local url
-            url="$(gh issue create --repo "$REPO" --title "$TITLE" --label "$LABEL" --body "$body")"
+            url="$(create_notifier_issue evals "$TITLE" "$body")"
             echo "opened $url"
           }
 

@@ -15,9 +15,21 @@ We take Anthropic's **Claude Managed Agents** as our **reference implementation*
 - **Plan files carry no progress tracking** — no checklists ticked as work lands, whatever the status. While a plan is active its progress lives in STATE.md; once it archives, the delivery record is docs/HISTORY.md and CHANGELOG.md.
 - **Current state: [STATE.md](./STATE.md)** — the active-work tracker, and nothing else: what is in flight (**none** when nothing is) and its task checklist, within a ~30-line budget it enforces on itself. Read it at the start of a session; update it in every PR that starts, advances, or finishes the work it tracks — a plan's PRs and plan-less issue work alike. Its own header says where everything it refuses to hold lives; the routing rule behind that is workflow step 2 below.
 - **The backlog is GitHub issues** — the only backlog. Neither plan files nor STATE.md accumulate future work. Wire assumptions awaiting a real managed-agents recording are cross-linked from [docs/DIVERGENCES.md](./docs/DIVERGENCES.md)'s INFERRED section.
-- **Starting work from a GitHub issue?** Dispatch the **`issue-triage` subagent** first (`.claude/agents/issue-triage.md`, which states its own judgment criteria) to decide whether the issue needs a plan file before implementing. Its verdict is advisory: drafting the plan, or turning its tasks into STATE.md's, stays with the main agent. Not for work that already has a plan, or for requests that never touch an issue.
+- **Starting work from a GitHub issue?** For work without an existing plan, ask the **`issue-triage` subagent** to check its difficulty against the current evidence. Its [judgment criteria](./.claude/agents/issue-triage.md) guide the review. Update the label if the evidence has changed. For `hard` work, record the human decision before implementing.
 
 The v1 design plan is [docs/plan/01_v1-managed-agent-platform.md](./docs/plan/01_v1-managed-agent-platform.md) (archived; mostly implemented) — consult it for rationale before large architectural changes.
+
+## Issue triage
+
+Assign each open issue and every new issue a GitHub issue type and exactly two labels.
+
+| Field | Choices |
+| --- | --- |
+| Issue type | `Bug` for unexpected behavior, `Feature` for a new capability or improvement, `Task` for a specific piece of work such as maintenance or verification. |
+| Priority label | `p0` for critical work that needs immediate attention, `p1` for important near-term work, `p2` for work that can wait. |
+| Difficulty label | `easy` when AI can resolve the issue directly, `medium` when AI can resolve it after writing a plan, `hard` when a person must make a judgment or decision. |
+
+Choose the type, priority and difficulty when filing an issue. For missing information, use `Feature`, `p1` or `hard` for the corresponding field. Maintainers can revise each choice as evidence arrives.
 
 ## Core architecture — decouple brain / hands / session
 

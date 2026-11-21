@@ -167,13 +167,11 @@ whole cluster.
 
 It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only when
 somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten — and
-keeps one issue open while the labels are there. Only a scheduled or hand-dispatched run
-opens it, so the cadence is the grace period and there is no threshold to tune; while it
-stands it is never commented on again, because a standing flag's age is the answer to "how
-long"; and it closes itself, with a completed `deploy` among its triggers so reviving staging
-retires it in minutes rather than by the next Monday. Destroying staging closes it too — an
-environment that no longer exists cannot be forgotten, and the issue's own text offers
-`gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
+keeps one `Task` open with the `p2` and `hard` labels while the cluster is parked.
+A scheduled or manually dispatched run opens it. Its age measures the time since that
+run detected the parked cluster. A completed `deploy` triggers another check, so reviving
+staging can close the issue before the next weekly check. Destroying staging closes it
+too. The issue offers `gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
 and `github.actor` on one is whoever last edited the cron.
 
 Two bounds worth knowing before relying on it. A cluster it cannot find reads the same
@@ -700,9 +698,10 @@ nothing done to this file takes effect — or can be tested — until it merges.
 classification sits in [`cd-outcome.sh`](../../.github/scripts/cd-outcome.sh) behind
 `make cd-outcome-test`, and why CI checks the three names the notifier borrows from
 `deploy.yml`: its filename, its `name:`, and the **`Deploy the chart`** step whose conclusion
-separates parked from deployed. Should that name go missing at runtime anyway, the notifier
-says so under a label of its own (`cd-notifier-miswired`) rather than filing it as an outage —
-a blind notifier and a broken deploy are different problems for different people.
+separates parked from deployed. If that name goes missing, the notifier opens a separate
+issue for the step-name mismatch. Both alerts use the `Bug` issue type with the `p1` and
+`medium` labels. The notifier identifies each by its author and a marker in the issue body, so changing
+triage labels or renaming an issue still lets the next successful deploy close it.
 
 **Application secrets are supplied separately from infrastructure bootstrap.**
 
