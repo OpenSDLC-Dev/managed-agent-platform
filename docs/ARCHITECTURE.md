@@ -918,9 +918,9 @@ hours. It keeps one `Bug` open with the `p1` and `medium` labels while the newes
 failure or is more than 48 hours old, and closes it when a run passes. The age is the half a red job cannot
 report: from 2026-10-07 one stuck run blocked every scheduled run for ten days, and nothing said so (#950).
 
-Beside the evals sits the top-level `acceptance/` suite (plan 21): the define-outcomes
-doc example driven end-to-end through the latest Go SDK. Its deterministic rehearsal —
-a scripted model standing in for the real one — runs in the merge gate like any other
+Beside the evals sits the top-level `acceptance/` suite (plan 21, expanded in plan 75): the define-outcomes
+doc example driven end-to-end through the latest Go SDK, offline full-topology E2E suites (`topology_e2e_test.go`) exercising `controlplane`, `brain`, `modelgateway` (delegated inference claims and usage attribution), real Docker sandboxes with the real `gate` image, and the BYOC `worker` pull loop against a scripted Anthropic SSE upstream, plus a bidirectional SDK wire-differential suite (`wire_differential_test.go`) verifying required fields, zero undocumented extra fields against `docs/DIVERGENCES.md`, pagination, and structured error envelopes across every major resource family. Its deterministic rehearsals —
+a scripted model standing in for the real one — run in the merge gate like any other
 suite; the live variant (`TestLiveDefineOutcomesAcceptance`) points the same harness at
 a running compose stack and a real model, consented by its own tier variable
 `RUN_LIVE_ACCEPTANCE_TESTS` (whole sessions cost an order of magnitude more than the
