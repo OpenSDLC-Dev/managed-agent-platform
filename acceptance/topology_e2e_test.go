@@ -23,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api/apitest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob/blobtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/executor"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway"
@@ -320,19 +321,24 @@ func waitUsageRows(ctx context.Context, t *testing.T, st *mgstore.Store, session
 	}
 }
 
-// extractToolResultText decodes a replayed Anthropic Messages request body and
-// returns the concatenated text of the first tool_result block, asserting that
-// is_error is false. Searching only the tool_result prevents false passes from
-// markers that also appear verbatim inside the assistant's bash command string.
-func extractToolResultText(t *testing.T, body string) string {
+// extractToolResultText decodes a replayed Anthropic Messages request body,
+// locates the assistant tool_use block for wantToolName, and returns the
+// concatenated text of the matching user tool_result block (asserting
+// tool_use_id equality and is_error == false). Searching only the matching
+// tool_result prevents false passes from markers embedded in the assistant's
+// bash command or unrelated tool results.
+func extractToolResultText(t *testing.T, body, wantToolName string) string {
 	t.Helper()
 	var req struct {
 		Messages []struct {
 			Role    string `json:"role"`
 			Content []struct {
-				Type    string `json:"type"`
-				IsError bool   `json:"is_error"`
-				Content []struct {
+				Type      string `json:"type"`
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				ToolUseID string `json:"tool_use_id"`
+				IsError   bool   `json:"is_error"`
+				Content   []struct {
 					Type string `json:"type"`
 					Text string `json:"text"`
 				} `json:"content"`
@@ -342,6 +348,21 @@ func extractToolResultText(t *testing.T, body string) string {
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
 		t.Fatalf("unmarshal upstream request body: %v\nbody: %s", err, body)
 	}
+	var wantToolUseID string
+	for _, msg := range req.Messages {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, blk := range msg.Content {
+			if blk.Type == "tool_use" && blk.Name == wantToolName {
+				wantToolUseID = blk.ID
+			}
+		}
+	}
+	if wantToolUseID == "" {
+		t.Fatalf("no assistant tool_use block for %q found in upstream request body:\n%s", wantToolName, body)
+	}
+
 	var out strings.Builder
 	found := false
 	for _, msg := range req.Messages {
@@ -349,12 +370,12 @@ func extractToolResultText(t *testing.T, body string) string {
 			continue
 		}
 		for _, blk := range msg.Content {
-			if blk.Type != "tool_result" {
+			if blk.Type != "tool_result" || blk.ToolUseID != wantToolUseID {
 				continue
 			}
 			found = true
 			if blk.IsError {
-				t.Errorf("tool_result returned is_error=true: %+v", blk.Content)
+				t.Errorf("tool_result %s returned is_error=true: %+v", wantToolUseID, blk.Content)
 			}
 			for _, inner := range blk.Content {
 				if inner.Type == "text" {
@@ -364,15 +385,23 @@ func extractToolResultText(t *testing.T, body string) string {
 		}
 	}
 	if !found {
-		t.Fatalf("no tool_result block found in upstream request body:\n%s", body)
+		t.Fatalf("no user tool_result matching tool_use_id %q found in upstream request body:\n%s", wantToolUseID, body)
 	}
 	return out.String()
 }
 
-func reapSessionContainers(sessionID string, withGate bool) {
-	_ = exec.Command("docker", "rm", "--force", "--volumes", "map-"+sessionID).Run()
-	if withGate {
-		_ = exec.Command("docker", "rm", "--force", "--volumes", "map-gate-"+sessionID).Run()
+func assertDelegatedUsage(t *testing.T, rows []mgstore.Usage, sessionID string) {
+	t.Helper()
+	if len(rows) != 2 {
+		t.Fatalf("modelgateway usage rows for session %s = %d, want 2", sessionID, len(rows))
+	}
+	for i, row := range rows {
+		if row.SessionID != sessionID || row.APIKeyID != "" || row.PrincipalID == "" {
+			t.Errorf("usage row %d = %+v, want delegated attribution (session=%s, empty api_key_id, non-empty principal_id)", i, row, sessionID)
+		}
+		if row.Model != topologyModelAlias || row.Status != http.StatusOK {
+			t.Errorf("usage row %d model=%q status=%d, want %q/200", i, row.Model, row.Status, topologyModelAlias)
+		}
 	}
 }
 
@@ -395,15 +424,17 @@ func TestFullTopologyCloudGatedWithModelGateway(t *testing.T) {
 	hostAddr := sandboxtest.DockerHostAddr(t)
 
 	// Control plane bound on all interfaces so the gate container can fetch
-	// /internal/v1/gate/config over the Docker bridge.
+	// /internal/v1/gate/config over the Docker bridge; host-side SDK traffic
+	// uses explicit loopback so HTTP_PROXY never intercepts it.
 	var gateConfigHits sync.Map
 	cpBase := api.NewHandler(pool, blobs, cipher, nil, apitest.PasswordLogin(pool))
-	cpSrv, cpPort := startHostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, cpPort := startHostServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/internal/v1/gate/config" {
 			gateConfigHits.Store(time.Now().UnixNano(), r.RemoteAddr)
 		}
 		cpBase.ServeHTTP(w, r)
 	}))
+	cpLocalURL := "http://" + net.JoinHostPort("127.0.0.1", cpPort)
 	cpGateURL := "http://" + net.JoinHostPort(hostAddr, cpPort)
 
 	// Host origin reachable only through the gate once allowed_hosts admits hostAddr.
@@ -418,29 +449,29 @@ func TestFullTopologyCloudGatedWithModelGateway(t *testing.T) {
 	originAddr := net.JoinHostPort(hostAddr, originPort)
 
 	// Bash script executed inside the gated sandbox:
-	// 1. Waits up to 45s (past cmd/gate's 30s defaultFetchInterval if the
-	//    initial fetch races token persistence) for the allowed origin to
-	//    return 200 through the gate proxy.
+	// 1. Waits up to 45s wall-clock (past cmd/gate's 30s defaultFetchInterval
+	//    if the initial fetch races token persistence) for the allowed origin
+	//    to return 200 through the gate proxy, with each connect+read bounded.
 	// 2. Verifies a non-allowed host is rejected with 403 by the gate proxy.
 	// 3. Verifies a direct TCP dial bypassing the proxy is blocked by iptables.
 	probeScript := fmt.Sprintf(`set -u
 hp=${HTTP_PROXY#http://}; hp=${hp%%/}
+phost=${hp%%%%:*}
+pport=${hp##*:}
 allowed_out=""
-for i in $(seq 1 90); do
-  allowed_out=$(exec 3<>"/dev/tcp/${hp%%%%:*}/${hp##*:}" 2>/dev/null && {
-    printf '%%b' 'GET http://%s/echo HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' >&3
-    timeout 5 cat <&3
-  })
+deadline=$((SECONDS + 45))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  rem=$((deadline - SECONDS))
+  [ "$rem" -gt 5 ] && rem=5
+  [ "$rem" -lt 1 ] && rem=1
+  allowed_out=$(timeout "$rem" bash -c 'exec 3<>"/dev/tcp/$1/$2" && { printf "%%b" "$3" >&3; cat <&3; }' _ "$phost" "$pport" 'GET http://%s/echo HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' 2>/dev/null)
   case "$allowed_out" in
     *"HTTP/1.1 200"*) break ;;
   esac
   sleep 0.5
 done
 printf 'ALLOWED_OUT=%%s\n' "$allowed_out"
-denied_out=$(exec 3<>"/dev/tcp/${hp%%%%:*}/${hp##*:}" && {
-  printf '%%b' 'GET http://denied.invalid/ HTTP/1.1\r\nHost: denied.invalid\r\nConnection: close\r\n\r\n' >&3
-  timeout 5 cat <&3
-})
+denied_out=$(timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2" && { printf "%%b" "$3" >&3; cat <&3; }' _ "$phost" "$pport" 'GET http://denied.invalid/ HTTP/1.1\r\nHost: denied.invalid\r\nConnection: close\r\n\r\n' 2>/dev/null)
 printf 'DENIED_OUT=%%s\n' "$denied_out"
 if timeout 2 bash -c 'exec 3<>"/dev/tcp/%s/%s"' 2>/dev/null; then
   echo "DIRECT=OPEN"
@@ -485,7 +516,9 @@ fi`, originAddr, originAddr, hostAddr, originPort)
 		ids := append([]string(nil), tracked...)
 		mu.Unlock()
 		for _, id := range ids {
-			reapSessionContainers(id, true)
+			if err := sbx.Reap(context.Background(), domain.ID(id)); err != nil {
+				t.Errorf("reap session %s: %v", id, err)
+			}
 		}
 	})
 
@@ -511,8 +544,8 @@ fi`, originAddr, originAddr, hostAddr, originPort)
 		waitLoop(t, "executor", execDone)
 	})
 
-	apiKey := apitest.SetupKey(t, pool, cpSrv.URL)
-	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(cpSrv.URL))
+	apiKey := apitest.SetupKey(t, pool, cpLocalURL)
+	client := anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(cpLocalURL))
 
 	env, err := client.Beta.Environments.New(ctx, anthropic.BetaEnvironmentNewParams{
 		Name: "topology-cloud-gated",
@@ -591,12 +624,12 @@ fi`, originAddr, originAddr, hostAddr, originPort)
 			t.Errorf("upstream call %d x-api-key = %q, want sealed vendor secret (not delegated token)", i+1, c.APIKey)
 		}
 	}
-	toolOut := extractToolResultText(t, calls[1].Body)
+	toolOut := extractToolResultText(t, calls[1].Body, "bash")
 	for _, want := range []string{"HTTP/1.1 200", "topology-origin-ok", "HTTP/1.1 403", "DIRECT=BLOCKED"} {
 		if !strings.Contains(toolOut, want) {
 			hits := 0
 			gateConfigHits.Range(func(_, _ any) bool { hits++; return true })
-			logs, _ := exec.Command("docker", "logs", "map-gate-"+sess.ID).CombinedOutput()
+			logs, _ := exec.Command("docker", "--host", docker.DaemonHost(), "logs", "map-gate-"+sess.ID).CombinedOutput()
 			t.Errorf("turn 2 tool_result missing %q (gate config fetches=%d, cpGateURL=%s);\ngate logs:\n%s\ntool_result:\n%s", want, hits, cpGateURL, logs, toolOut)
 		}
 	}
@@ -605,17 +638,7 @@ fi`, originAddr, originAddr, hostAddr, originPort)
 	}
 
 	rows := waitUsageRows(ctx, t, mgSt, sess.ID, 2)
-	if len(rows) != 2 {
-		t.Fatalf("modelgateway usage rows for session %s = %d, want 2", sess.ID, len(rows))
-	}
-	for i, row := range rows {
-		if row.SessionID != sess.ID || row.APIKeyID != "" || row.PrincipalID == "" {
-			t.Errorf("usage row %d = %+v, want delegated attribution (session=%s, empty api_key_id, non-empty principal_id)", i, row, sess.ID)
-		}
-		if row.Model != topologyModelAlias || row.Status != http.StatusOK {
-			t.Errorf("usage row %d model=%q status=%d, want %q/200", i, row.Model, row.Status, topologyModelAlias)
-		}
-	}
+	assertDelegatedUsage(t, rows, sess.ID)
 }
 
 // TestFullTopologyBYOCWorkerWithModelGateway drives the full offline BYOC
@@ -692,7 +715,9 @@ func TestFullTopologyBYOCWorkerWithModelGateway(t *testing.T) {
 		ids := append([]string(nil), tracked...)
 		mu.Unlock()
 		for _, id := range ids {
-			reapSessionContainers(id, false)
+			if err := sbx.Reap(context.Background(), domain.ID(id)); err != nil {
+				t.Errorf("reap session %s: %v", id, err)
+			}
 		}
 	})
 
@@ -775,13 +800,11 @@ func TestFullTopologyBYOCWorkerWithModelGateway(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("upstream calls = %d, want 2", len(calls))
 	}
-	toolOut := extractToolResultText(t, calls[1].Body)
+	toolOut := extractToolResultText(t, calls[1].Body, "bash")
 	if !strings.Contains(toolOut, "byoc-worker-proof-ok") {
 		t.Errorf("turn 2 tool_result missing BYOC worker output; got:\n%s", toolOut)
 	}
 
 	rows := waitUsageRows(ctx, t, mgSt, sess.ID, 2)
-	if len(rows) != 2 {
-		t.Fatalf("modelgateway usage rows for session %s = %d, want 2", sess.ID, len(rows))
-	}
+	assertDelegatedUsage(t, rows, sess.ID)
 }

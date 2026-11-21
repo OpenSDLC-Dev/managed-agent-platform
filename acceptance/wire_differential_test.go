@@ -33,16 +33,18 @@ var approvedWireExtras = map[string]map[string]string{
 }
 
 // approvedNullableRequired enumerates the specific `api:"required"` SDK fields
-// whose reference JSON schema permits null (the Go SDK code generator omits a
-// `nullable` struct tag on response fields, so listing them explicitly keeps
-// non-nullable required fields such as id, type, name, and created_at strictly
-// rejecting JSON null).
+// (keyed by concrete SDK struct type name) whose reference JSON schema permits
+// null. The Go SDK code generator omits a `nullable` struct tag on response
+// fields, so listing them per concrete struct type keeps non-nullable required
+// fields such as id, type, name, model.id, and created_at strictly rejecting
+// JSON null at every nesting depth.
 var approvedNullableRequired = map[string]map[string]bool{
-	"agent":       {"archived_at": true, "multiagent": true},
-	"environment": {"archived_at": true},
-	"session":     {"archived_at": true, "budget": true},
-	"vault":       {"archived_at": true},
-	"credential":  {"archived_at": true},
+	"BetaManagedAgentsAgent":        {"archived_at": true, "multiagent": true},
+	"BetaManagedAgentsSessionAgent": {"multiagent": true},
+	"BetaEnvironment":               {"archived_at": true},
+	"BetaManagedAgentsSession":      {"archived_at": true, "budget": true},
+	"BetaManagedAgentsVault":        {"archived_at": true},
+	"BetaManagedAgentsCredential":   {"archived_at": true},
 }
 
 // approvedOmittedRequired records the narrow set of SDK `api:"required"` keys
@@ -66,7 +68,8 @@ func jsonFieldName(tag string) string {
 }
 
 // checkWireShape returns all wire-conformance violations for a decoded SDK
-// response struct:
+// response struct and any nested SDK response structs (structs carrying a
+// `JSON` respjson metadata struct) or slices of them:
 //  1. Unknown extra wire fields outside approvedWireExtras[surface].
 //  2. Missing or invalid `api:"required"` fields (accepting explicit JSON null
 //     only when the field carries a nullable tag or is explicitly listed in
@@ -83,59 +86,86 @@ func checkWireShape(surface string, val any) []string {
 	if rv.Kind() != reflect.Struct {
 		return []string{surface + ": expected struct, got " + rv.Kind().String()}
 	}
+	return checkWireStruct(surface, surfaceFamily(surface), rv)
+}
 
+func isRespJSONStruct(v reflect.Value) bool {
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	jf := v.FieldByName("JSON")
+	return jf.IsValid() && jf.Kind() == reflect.Struct
+}
+
+func checkWireStruct(path, family string, rv reflect.Value) []string {
 	jsonField := rv.FieldByName("JSON")
 	if !jsonField.IsValid() || jsonField.Kind() != reflect.Struct {
-		return []string{surface + ": struct " + rv.Type().String() + " has no respjson metadata struct JSON"}
+		return []string{path + ": struct " + rv.Type().String() + " has no respjson metadata struct JSON"}
 	}
 
 	var errs []string
-	allowed := approvedWireExtras[surface]
+	allowed := approvedWireExtras[path]
 	if extrasVal := jsonField.FieldByName("ExtraFields"); extrasVal.IsValid() {
 		if extras, ok := extrasVal.Interface().(map[string]respjson.Field); ok {
 			for k := range extras {
 				if _, ok := allowed[k]; !ok {
-					errs = append(errs, surface+": undocumented extra wire field "+k+" (record in docs/DIVERGENCES.md and approvedWireExtras if intentional)")
+					errs = append(errs, path+": undocumented extra wire field "+k+" (record in docs/DIVERGENCES.md and approvedWireExtras if intentional)")
 				}
 			}
 		}
 	}
 
-	family := surfaceFamily(surface)
-	nullableOK := approvedNullableRequired[family]
-	omittedOK := approvedOmittedRequired[family]
 	rt := rv.Type()
+	nullableOK := approvedNullableRequired[rt.Name()]
+	omittedOK := approvedOmittedRequired[family]
 	for i := 0; i < rt.NumField(); i++ {
 		sf := rt.Field(i)
 		if sf.Name == "JSON" || !sf.IsExported() {
 			continue
 		}
-		apiTag := sf.Tag.Get("api")
-		if !hasTagToken(apiTag, "required") {
-			continue
-		}
 		meta := jsonField.FieldByName(sf.Name)
-		if !meta.IsValid() {
-			continue
+		var rf respjson.Field
+		var hasMeta bool
+		if meta.IsValid() {
+			rf, hasMeta = meta.Interface().(respjson.Field)
 		}
-		rf, ok := meta.Interface().(respjson.Field)
-		if !ok {
-			continue
-		}
-		if rf.Valid() {
-			continue
-		}
+		apiTag := sf.Tag.Get("api")
 		wireKey := jsonFieldName(sf.Tag.Get("json"))
-		isNullable := hasTagToken(apiTag, "nullable") || hasTagToken(sf.Tag.Get("json"), "nullable") || nullableOK[wireKey]
-		if isNullable && rf.Raw() == "null" {
-			continue
-		}
-		if rf.Raw() == "" {
-			if _, ok := omittedOK[wireKey]; ok {
-				continue
+		if hasTagToken(apiTag, "required") && hasMeta {
+			if !rf.Valid() {
+				isNullable := hasTagToken(apiTag, "nullable") || hasTagToken(sf.Tag.Get("json"), "nullable") || nullableOK[wireKey]
+				switch {
+				case isNullable && rf.Raw() == "null":
+				case rf.Raw() == "" && omittedOK[wireKey] != "":
+				default:
+					errs = append(errs, path+": required SDK field "+sf.Name+" ("+wireKey+") was missing or invalid on the wire (raw="+rf.Raw()+")")
+				}
 			}
 		}
-		errs = append(errs, surface+": required SDK field "+sf.Name+" ("+wireKey+") was missing or invalid on the wire (raw="+rf.Raw()+")")
+
+		// Recurse into present, non-null nested SDK response structs and slices
+		// of them (skipping free-form maps and union types without a JSON
+		// metadata struct).
+		if hasMeta && !rf.Valid() {
+			continue
+		}
+		fv := rv.Field(i)
+		switch fv.Kind() {
+		case reflect.Struct:
+			if isRespJSONStruct(fv) {
+				errs = append(errs, checkWireStruct(path+"."+wireKey, family, fv)...)
+			}
+		case reflect.Slice:
+			for idx := 0; idx < fv.Len(); idx++ {
+				elem := fv.Index(idx)
+				for elem.Kind() == reflect.Pointer && !elem.IsNil() {
+					elem = elem.Elem()
+				}
+				if isRespJSONStruct(elem) {
+					errs = append(errs, checkWireStruct(path+"."+wireKey, family, elem)...)
+				}
+			}
+		}
 	}
 	return errs
 }
@@ -151,8 +181,9 @@ func assertWireShape(t *testing.T, surface string, val any) {
 }
 
 // TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras proves the wire
-// shape helper catches all three defect classes: null on a non-nullable
-// required field, omitted required field, and undocumented extra keys.
+// shape helper catches all four defect classes: null on a non-nullable
+// required field, missing nested required field, nested undocumented extra
+// field, and top-level undocumented extra keys.
 func TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras(t *testing.T) {
 	var a anthropic.BetaManagedAgentsAgent
 	if err := json.Unmarshal([]byte(`{
@@ -160,7 +191,7 @@ func TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras(t *testing.T) {
 		"type": "agent",
 		"name": "x",
 		"version": 1,
-		"model": {"id": "claude-sonnet-4-6"},
+		"model": {"bogus_nested": 1},
 		"system": "",
 		"description": "",
 		"tools": [],
@@ -177,11 +208,15 @@ func TestCheckWireShapeRejectsNullNonNullableAndUnknownExtras(t *testing.T) {
 	}
 	errs := checkWireShape("agent.synthetic", &a)
 	joined := strings.Join(errs, "\n")
-	if !strings.Contains(joined, "required SDK field ID (id)") {
-		t.Errorf("expected rejection of null non-nullable required field id; got:\n%s", joined)
-	}
-	if !strings.Contains(joined, "undocumented extra wire field undocumented_field") {
-		t.Errorf("expected rejection of undocumented extra field; got:\n%s", joined)
+	for _, want := range []string{
+		"required SDK field ID (id)",
+		"undocumented extra wire field undocumented_field",
+		"agent.synthetic.model: required SDK field ID (id)",
+		"agent.synthetic.model: undocumented extra wire field bogus_nested",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected violation %q; got:\n%s", want, joined)
+		}
 	}
 	if strings.Contains(joined, "ArchivedAt") || strings.Contains(joined, "Multiagent") {
 		t.Errorf("nullable required fields archived_at/multiagent should be accepted as null; got:\n%s", joined)
@@ -307,17 +342,24 @@ func TestWireDifferentialManagedAgentsSurfaces(t *testing.T) {
 		}
 		assertWireShape(t, "agent.update", updated)
 
-		// Paginate with limit=1 and verify all created agents are visited.
-		seen := map[string]bool{}
-		pager := client.Beta.Agents.ListAutoPaging(ctx, anthropic.BetaAgentListParams{Limit: anthropic.Int(1)})
-		for pager.Next() {
-			cur := pager.Current()
-			assertWireShape(t, "agent.list.item", cur)
-			seen[cur.ID] = true
+		// Explicitly cross a page boundary with limit=1 and continuation cursor.
+		p1, err := client.Beta.Agents.List(ctx, anthropic.BetaAgentListParams{Limit: anthropic.Int(1)})
+		if err != nil {
+			t.Fatalf("list agents page 1: %v", err)
 		}
-		if err := pager.Err(); err != nil {
-			t.Fatalf("list agents autopaging: %v", err)
+		if len(p1.Data) != 1 || p1.NextPage == "" {
+			t.Fatalf("agents page 1 len=%d next_page=%q, want 1 item and non-empty cursor", len(p1.Data), p1.NextPage)
 		}
+		assertWireShape(t, "agent.list.item", p1.Data[0])
+		p2, err := client.Beta.Agents.List(ctx, anthropic.BetaAgentListParams{Limit: anthropic.Int(1), Page: anthropic.String(p1.NextPage)})
+		if err != nil {
+			t.Fatalf("list agents page 2: %v", err)
+		}
+		if len(p2.Data) != 1 {
+			t.Fatalf("agents page 2 len=%d, want 1", len(p2.Data))
+		}
+		assertWireShape(t, "agent.list.item", p2.Data[0])
+		seen := map[string]bool{p1.Data[0].ID: true, p2.Data[0].ID: true}
 		if !seen[a1.ID] || !seen[a2.ID] {
 			t.Errorf("agents pagination missed created ids: seen=%v", seen)
 		}
@@ -383,16 +425,23 @@ func TestWireDifferentialManagedAgentsSurfaces(t *testing.T) {
 		}
 		assertWireShape(t, "environment.update", updated)
 
-		seen := map[string]bool{}
-		pager := client.Beta.Environments.ListAutoPaging(ctx, anthropic.BetaEnvironmentListParams{Limit: anthropic.Int(1)})
-		for pager.Next() {
-			cur := pager.Current()
-			assertWireShape(t, "environment.list.item", cur)
-			seen[cur.ID] = true
+		p1, err := client.Beta.Environments.List(ctx, anthropic.BetaEnvironmentListParams{Limit: anthropic.Int(1)})
+		if err != nil {
+			t.Fatalf("list envs page 1: %v", err)
 		}
-		if err := pager.Err(); err != nil {
-			t.Fatalf("list envs autopaging: %v", err)
+		if len(p1.Data) != 1 || p1.NextPage == "" {
+			t.Fatalf("envs page 1 len=%d next_page=%q, want 1 item and non-empty cursor", len(p1.Data), p1.NextPage)
 		}
+		assertWireShape(t, "environment.list.item", p1.Data[0])
+		p2, err := client.Beta.Environments.List(ctx, anthropic.BetaEnvironmentListParams{Limit: anthropic.Int(1), Page: anthropic.String(p1.NextPage)})
+		if err != nil {
+			t.Fatalf("list envs page 2: %v", err)
+		}
+		if len(p2.Data) != 1 {
+			t.Fatalf("envs page 2 len=%d, want 1", len(p2.Data))
+		}
+		assertWireShape(t, "environment.list.item", p2.Data[0])
+		seen := map[string]bool{p1.Data[0].ID: true, p2.Data[0].ID: true}
 		if !seen[cloudEnv.ID] || !seen[byocEnv.ID] {
 			t.Errorf("environments pagination missed ids: seen=%v", seen)
 		}
@@ -468,6 +517,9 @@ func TestWireDifferentialManagedAgentsSurfaces(t *testing.T) {
 		if len(sent.Data) != 1 || !strings.HasPrefix(sent.Data[0].ID, "sevt_") {
 			t.Fatalf("sent events = %+v, want 1 sevt_*", sent.Data)
 		}
+		assertWireShape(t, "session.event.send", sent)
+		sentMsg := sent.Data[0].AsUserMessage()
+		assertWireShape(t, "session.event.send.user_message", sentMsg)
 
 		evPage, err := client.Beta.Sessions.Events.List(ctx, s1.ID, anthropic.BetaSessionEventListParams{})
 		if err != nil {
@@ -476,17 +528,37 @@ func TestWireDifferentialManagedAgentsSurfaces(t *testing.T) {
 		if len(evPage.Data) == 0 {
 			t.Fatalf("session events list empty")
 		}
+		matchedSent := false
+		for _, ev := range evPage.Data {
+			if ev.Type == "user.message" {
+				um := ev.AsUserMessage()
+				assertWireShape(t, "session.event.list.user_message", um)
+				if um.ID == sentMsg.ID && len(um.Content) == 1 && um.Content[0].Text == "hello wire diff" {
+					matchedSent = true
+				}
+			}
+		}
+		if !matchedSent {
+			t.Errorf("listed events did not contain sent user.message %s with text %q", sentMsg.ID, "hello wire diff")
+		}
 
-		seen := map[string]bool{}
-		pager := client.Beta.Sessions.ListAutoPaging(ctx, anthropic.BetaSessionListParams{Limit: anthropic.Int(1)})
-		for pager.Next() {
-			cur := pager.Current()
-			assertWireShape(t, "session.list.item", cur)
-			seen[cur.ID] = true
+		p1, err := client.Beta.Sessions.List(ctx, anthropic.BetaSessionListParams{Limit: anthropic.Int(1)})
+		if err != nil {
+			t.Fatalf("list sessions page 1: %v", err)
 		}
-		if err := pager.Err(); err != nil {
-			t.Fatalf("list sessions autopaging: %v", err)
+		if len(p1.Data) != 1 || p1.NextPage == "" {
+			t.Fatalf("sessions page 1 len=%d next_page=%q, want 1 item and non-empty cursor", len(p1.Data), p1.NextPage)
 		}
+		assertWireShape(t, "session.list.item", p1.Data[0])
+		p2, err := client.Beta.Sessions.List(ctx, anthropic.BetaSessionListParams{Limit: anthropic.Int(1), Page: anthropic.String(p1.NextPage)})
+		if err != nil {
+			t.Fatalf("list sessions page 2: %v", err)
+		}
+		if len(p2.Data) != 1 {
+			t.Fatalf("sessions page 2 len=%d, want 1", len(p2.Data))
+		}
+		assertWireShape(t, "session.list.item", p2.Data[0])
+		seen := map[string]bool{p1.Data[0].ID: true, p2.Data[0].ID: true}
 		if !seen[s1.ID] || !seen[s2.ID] {
 			t.Errorf("sessions pagination missed ids: seen=%v", seen)
 		}
