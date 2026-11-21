@@ -1,0 +1,47 @@
+name: fuzz
+
+# Scheduled and on-demand Go fuzzing across all Fuzz* targets (plan 75 slice 3).
+# `make verify` runs every fuzz target's seed corpus on every PR; this workflow
+# spends real fuzzing time generating adversarial inputs without slowing PR CI.
+on:
+  schedule:
+    # Weekly on Sunday at 05:23 UTC (off the hour to avoid GitHub cron spikes).
+    - cron: '23 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: 'Duration per Fuzz target (e.g. 15s, 60s)'
+        required: false
+        default: '15s'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: run fuzz targets
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '15s' }}
+        run: make fuzz FUZZTIME="$FUZZTIME"
+      - name: upload failing fuzz corpora
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failure-corpora
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
+          retention-days: 7

@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build build-worker crossbuild vet fmt-check test test-fast cover-gate verify eval ripgrep third-party-licenses \
+.PHONY: build build-worker crossbuild vet fmt-check test test-fast fuzz cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
@@ -131,6 +131,22 @@ test-fast:
 		| awk '{print $$1}')"; \
 	set -x; \
 	go test -count=1 $$pkgs
+
+# Short fuzzing pass over every Fuzz* target in the repository (plan 75 slice 3).
+# Outside `verify` on purpose: `make test` replays every seed corpus, while
+# `make fuzz` spends FUZZTIME per target exploring generated edge cases (also
+# run weekly by .github/workflows/fuzz.yml).
+FUZZTIME ?= 5s
+fuzz:
+	@set -euo pipefail; \
+	targets="$$(grep -rnE '^func (Fuzz[A-Za-z0-9_]+)\(' --include='*_test.go' internal/ tools/ \
+		| sed -E 's|^([^:]+)/[^/:]+:[0-9]+:func (Fuzz[A-Za-z0-9_]+)\(.*|./\1 \2|' \
+		| sort -u)"; \
+	while read -r pkg fn; do \
+		[ -n "$$pkg" ] || continue; \
+		echo "==> $$pkg -fuzz=^$$fn\$$ -fuzztime=$(FUZZTIME)"; \
+		go test -run='^$$' -fuzz="^$$fn\$$" -fuzztime="$(FUZZTIME)" "$$pkg"; \
+	done <<< "$$targets"
 
 # Gates the coverage.out that `make test` (or the CI test step) just wrote —
 # it deliberately does NOT depend on `test`, so CI can run the two as separate
