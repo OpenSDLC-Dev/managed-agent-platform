@@ -205,12 +205,31 @@ func changelogSections(lines []string) (refs, doc []string, code []bool, err err
 			indexed[m[1]] = true
 		}
 	}
+	visible := make(map[string]bool, len(refs)+1)
+	type hiddenHeading struct {
+		key  string
+		line int
+	}
+	var hidden []hiddenHeading
 	for i, line := range doc {
-		if !code[i] || !strings.HasPrefix(line, "## [") {
+		key := ""
+		if line == "## [Unreleased]" {
+			key = "Unreleased"
+		} else if m := releaseHeadingRe.FindStringSubmatch(line); m != nil && indexed[m[1]] {
+			key = m[1]
+		}
+		if key == "" {
 			continue
 		}
-		if m := releaseHeadingRe.FindStringSubmatch(line); line == "## [Unreleased]" || m != nil && indexed[m[1]] {
-			return nil, nil, nil, fmt.Errorf("Markdown fence hides changelog heading %q at line %d", line, i+1)
+		if code[i] {
+			hidden = append(hidden, hiddenHeading{key, i})
+		} else {
+			visible[key] = true
+		}
+	}
+	for _, heading := range hidden {
+		if !visible[heading.key] {
+			return nil, nil, nil, fmt.Errorf("Markdown fence hides changelog heading %q at line %d", doc[heading.line], heading.line+1)
 		}
 	}
 	return refs, doc, code, nil

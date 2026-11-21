@@ -7,12 +7,13 @@ import (
 )
 
 var (
-	listItemRe = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+`)
+	listItemRe = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)`)
 	backticks  = regexp.MustCompile("`+")
 	// The end anchor keeps wrapped prose such as "[expired]: computed at
 	// read time" from being treated as a reference definition.
-	refDefTargetRe = regexp.MustCompile(`^ {0,3}\[[^\]]+\]:[ \t]*(\S+)[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$`)
+	refDefTargetRe = regexp.MustCompile(`^\[[^\]]+\]:[ \t]*(\S+)[ \t]*(?:"[^"]*"|'[^']*'|\([^)]*\))?[ \t]*$`)
 	linkSchemeRe   = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*:`)
+	linkEscapeRe   = regexp.MustCompile(`\\([[:punct:]])`)
 )
 
 // codeLines recognizes fenced examples and indented code blocks in changelog
@@ -20,7 +21,7 @@ var (
 func codeLines(lines []string) ([]bool, error) {
 	code := make([]bool, len(lines))
 	var marker byte
-	var width, openedAt, quoteDepth, listIndent int
+	var width, openedAt, quoteDepth, listIndent, fenceListQuotes int
 	paragraph := false
 	for i, raw := range lines {
 		limit := -1
@@ -34,16 +35,16 @@ func codeLines(lines []string) ([]bool, error) {
 			}
 			quoteDepth, listIndent, paragraph = depth, 0, false
 		}
-		trim := strings.TrimLeft(line, " \t")
-		indent := 0
-		for _, ch := range line[:len(line)-len(trim)] {
-			if ch == '\t' {
-				indent += 4 - indent%4
-			} else {
-				indent++
-			}
-		}
+		indent, trim := markdownIndent(line)
 		if width != 0 {
+			if fenceListQuotes != 0 {
+				body, depth := quoteBody(trim, fenceListQuotes)
+				if indent < listIndent || indent > listIndent+3 || depth != fenceListQuotes {
+					return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
+				}
+				indent, trim = markdownIndent(body)
+				indent += listIndent
+			}
 			widthHere, tail := fenceRun(trim)
 			code[i] = true
 			if indent >= listIndent && indent <= listIndent+3 && widthHere >= width && trim[0] == marker && strings.TrimSpace(tail) == "" {
@@ -58,13 +59,18 @@ func codeLines(lines []string) ([]bool, error) {
 		if indent < listIndent {
 			listIndent = 0
 		}
-		if item := listItemRe.FindStringIndex(line); item != nil {
-			listIndent = item[1]
-			indent, trim = listIndent, line[item[1]:]
+		innerQuotes := 0
+		if item := listContentStart(line); item > 0 {
+			listIndent = item
+			var content string
+			content, innerQuotes = quoteBody(line[item:], -1)
+			indent, trim = markdownIndent(content)
+			indent += listIndent
+			paragraph = false
 		}
 		widthHere, fenceTail := fenceRun(trim)
 		if indent <= listIndent+3 && widthHere >= 3 && (trim[0] != '`' || !strings.Contains(fenceTail, "`")) {
-			marker, width, openedAt = trim[0], widthHere, i+1
+			marker, width, openedAt, fenceListQuotes = trim[0], widthHere, i+1, innerQuotes
 			code[i], paragraph = true, false
 			continue
 		}
@@ -78,6 +84,30 @@ func codeLines(lines []string) ([]bool, error) {
 		return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
 	}
 	return code, nil
+}
+
+func markdownIndent(line string) (int, string) {
+	trim := strings.TrimLeft(line, " \t")
+	indent := 0
+	for _, ch := range line[:len(line)-len(trim)] {
+		if ch == '\t' {
+			indent += 4 - indent%4
+		} else {
+			indent++
+		}
+	}
+	return indent, trim
+}
+
+func listContentStart(line string) int {
+	if item := listItemRe.FindStringSubmatchIndex(line); item != nil {
+		if item[3]-item[2] > 4 {
+			// Four or more spaces after the list's padding can start code.
+			return item[2] + 1
+		}
+		return item[1]
+	}
+	return 0
 }
 
 // quoteBody removes the blockquote markers and their optional padding. Inside
@@ -114,37 +144,27 @@ func fenceRun(line string) (int, string) {
 
 type textSpan struct{ start, end int }
 
-// inlineCode finds matching runs of backticks in one paragraph. An escaped
-// run starts with one literal backtick. Inside a span backslashes are literal,
-// so a closing run must match the complete run's length.
-func inlineCode(paragraph string) []textSpan {
+// inlineCodeEnds pairs each possible opener with its nearest matching run.
+// The scanner uses a pair only if it reaches the opener in prose. Backticks
+// inside a destination or title are skipped along with the rest of the link.
+func inlineCodeEnds(paragraph string) map[int]int {
 	runs := backticks.FindAllStringIndex(paragraph, -1)
-	next := make(map[int]int)
-	closers := make([]int, len(runs))
-	escaped := make([]bool, len(runs))
+	next, ends := make(map[int]int), make(map[int]int)
 	for i := len(runs) - 1; i >= 0; i-- {
 		run := runs[i]
-		escaped[i] = escapedAt(paragraph, run[0])
 		width := run[1] - run[0]
 		openWidth := width
-		if escaped[i] {
+		if escapedAt(paragraph, run[0]) {
+			// Only the first backtick is escaped in prose. Inside a code
+			// span, backslashes are literal and the full run can close it.
 			openWidth--
 		}
-		closers[i] = next[openWidth]
-		next[width] = i + 1
-	}
-	var spans []textSpan
-	for i := 0; i < len(runs); i++ {
-		if close := closers[i]; close != 0 {
-			start := runs[i][0]
-			if escaped[i] {
-				start++
-			}
-			i = close - 1
-			spans = append(spans, textSpan{start, runs[i][1]})
+		if close := next[openWidth]; close != 0 {
+			ends[run[0]] = close
 		}
+		next[width] = run[1]
 	}
-	return spans
+	return ends
 }
 
 func escapedAt(line string, at int) bool {
@@ -176,23 +196,21 @@ func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)
 				end++
 			}
 		}
-		spans := inlineCode(strings.Join(lines[start:end], "\n"))
-		offset := 0
+		codeEnds := inlineCodeEnds(strings.Join(lines[start:end], "\n"))
+		offset, cursor := 0, 0
 		for i := start; i < end; i++ {
 			line := lines[i]
-			outsideCode := func(at int) bool {
-				pos := offset + at
-				for len(spans) > 0 && spans[0].end <= pos {
-					spans = spans[1:]
-				}
-				return len(spans) == 0 || spans[0].start > pos
-			}
 			body, _ := quoteBody(line, depth)
+			if item := listContentStart(body); item > 0 {
+				body = body[item:]
+				body, _ = quoteBody(body, -1)
+			}
+			body = strings.TrimLeft(body, " \t")
 			prefix := len(line) - len(body)
-			if ref := refDefTargetRe.FindStringSubmatchIndex(body); ref != nil && outsideCode(prefix) {
+			if ref := refDefTargetRe.FindStringSubmatchIndex(body); ref != nil && cursor <= offset+prefix {
 				visit(i, textSpan{prefix + ref[2], prefix + ref[3]})
 			} else {
-				inlineDestinations(line, outsideCode, func(span textSpan) { visit(i, span) })
+				cursor = inlineDestinations(line, max(cursor-offset, 0), offset, codeEnds, func(span textSpan) { visit(i, span) })
 			}
 			offset += len(line) + 1
 		}
@@ -200,18 +218,23 @@ func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)
 	}
 }
 
-func inlineDestinations(line string, outsideCode func(int) bool, visit func(textSpan)) {
-	for cursor := 0; cursor < len(line); {
-		opener := strings.Index(line[cursor:], "](")
-		if opener < 0 {
-			return
-		}
-		opener += cursor
-		cursor = opener + 2
-		if !outsideCode(opener) || escapedAt(line, opener) {
+func inlineDestinations(line string, cursor, offset int, codeEnds map[int]int, visit func(textSpan)) int {
+	for cursor < len(line) {
+		if line[cursor] == '`' {
+			if end := codeEnds[offset+cursor]; end != 0 {
+				cursor = end - offset
+			} else {
+				for cursor < len(line) && line[cursor] == '`' {
+					cursor++
+				}
+			}
 			continue
 		}
-		start := skipLinkSpace(line, cursor)
+		if !strings.HasPrefix(line[cursor:], "](") || escapedAt(line, cursor) {
+			cursor++
+			continue
+		}
+		start := skipLinkSpace(line, cursor+2)
 		end, depth := start, 0
 		for ; end < len(line); end++ {
 			ch := line[end]
@@ -234,6 +257,7 @@ func inlineDestinations(line string, outsideCode func(int) bool, visit func(text
 			cursor = skipLinkTitle(line, title, end)
 		}
 	}
+	return offset + cursor
 }
 
 func skipLinkSpace(line string, start int) int {
@@ -269,4 +293,8 @@ func skipLinkTitle(line string, start, fallback int) int {
 
 func needsLinkBase(dest string) bool {
 	return dest != "" && !strings.HasPrefix(dest, "#") && !linkSchemeRe.MatchString(dest)
+}
+
+func unescapeLink(dest string) string {
+	return linkEscapeRe.ReplaceAllString(dest, "${1}")
 }

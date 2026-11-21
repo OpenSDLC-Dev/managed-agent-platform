@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -61,9 +62,12 @@ func rootLink(dest, dotBase, docsBase string) (string, error) {
 	default:
 		return "", fmt.Errorf("unhandled relative link target %q", dest)
 	}
-	path := rel
+	path := unescapeLink(rel)
 	if end := strings.IndexAny(path, "?#"); end >= 0 {
 		path = path[:end]
+	}
+	if decoded, err := url.PathUnescape(path); err == nil {
+		path = decoded
 	}
 	for _, part := range strings.Split(path, "/") {
 		if part == ".." {

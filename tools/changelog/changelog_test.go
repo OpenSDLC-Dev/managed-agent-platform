@@ -654,6 +654,8 @@ func TestFragmentChecksLinksOutsideCode(t *testing.T) {
 		body, wantErr string
 	}{
 		{body: example + "- A [link](./docs/RELEASING.md).\n"},
+		{body: "-     [indented example](bare.md)\n"},
+		{body: "- > ```md\n  > [quoted example](bare.md)\n  > ```\n"},
 		{body: example + "- A [link](bare.md).\n", wantErr: "bare.md"},
 		{body: "- A note.\n\n  ```\n", wantErr: "unclosed Markdown fence"},
 	} {
@@ -706,7 +708,7 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 				if !needsLinkBase(dest) {
 					return
 				}
-				target, err := url.Parse(dest)
+				target, err := url.Parse(unescapeLink(dest))
 				if err != nil {
 					t.Errorf("line %d: invalid link %q: %v", i+1, dest, err)
 					return
@@ -1167,6 +1169,15 @@ func TestFenceCannotCloseInAnotherRelease(t *testing.T) {
 	}
 }
 
+func TestFencedExamplesMayQuoteVisibleReleaseHeadings(t *testing.T) {
+	cl := "## [Unreleased]\n\n```md\n## [Unreleased]\n## [0.4.0] - 2026-08-30\n```\n\n" +
+		"## [0.4.0] - 2026-09-01\n\nActual release.\n\n[0.4.0]: https://example.com/4\n"
+	got, err := notes(cl, "0.4.0")
+	if err != nil || got != "Actual release.\n" {
+		t.Errorf("notes = %q, %v", got, err)
+	}
+}
+
 func TestNotesCapValidatesOnlyEmittedGroups(t *testing.T) {
 	const base = "https://github.com/o/r"
 	const first = "### Added\n\n- [checked](./docs/a.md).\n"
@@ -1291,6 +1302,8 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		{name: "empty destination untouched", in: "[a]()", want: "[a]()"},
 		{name: "title after the destination", in: `[a](docs/y.md "T")`, want: "[a](" + pre + `docs/y.md "T")`},
 		{name: "link-looking title", in: `[a](docs/y.md "[x](ignored.md)")`, want: "[a](" + pre + `docs/y.md "[x](ignored.md)")`},
+		{name: "backticks in link titles", in: "[one](https://e/1 \"a `\") and [middle](docs/y.md) and [two](https://e/2 \"a `\")",
+			want: "[one](https://e/1 \"a `\") and [middle](" + pre + "docs/y.md) and [two](https://e/2 \"a `\")"},
 		{name: "several destinations on one line", in: "[a](docs/x.md), [b](./y.md), [c](#z)", want: "[a](" + pre + "docs/x.md), [b](" + pre + "y.md), [c](#z)"},
 		// Only the captured span is replaced, so a destination whose tail
 		// contains a balanced paren keeps it: the `)` ends the capture, and
@@ -1302,6 +1315,8 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 		// `./../x` strips to `../x` and would publish a URL holding `/../`,
 		// which resolves off the blob path and 404s with a green exit.
 		{name: "parent escape via the dot form refused", in: "[a](./../deploy/x.md)", wantErr: true},
+		{name: "escaped parent segment refused", in: `[a](./\.\./deploy/x.md)`, wantErr: true},
+		{name: "encoded parent segment refused", in: "[a](./%2e%2e/deploy/x.md)", wantErr: true},
 		{name: "parent segment mid-path refused", in: "[a](docs/../../x.md)", wantErr: true},
 		{name: "uppercase scheme is absolute", in: "[a](HTTPS://example.com/x)", want: "[a](HTTPS://example.com/x)"},
 		// An angle-bracket destination is a known gap, asserted so it stays a
@@ -1347,6 +1362,7 @@ func TestAbsolutizeLinksDestinations(t *testing.T) {
 	}{
 		{name: "bare docs definition mapped", in: "[l]: docs/x.md", want: "[l]: " + pre + "docs/x.md"},
 		{name: "dot-form definition mapped", in: "[l]: ./docs/x.md", want: "[l]: " + pre + "docs/x.md"},
+		{name: "list reference definition mapped", in: "- [l]: docs/x.md", want: "- [l]: " + pre + "docs/x.md"},
 		{name: "definition with a title mapped", in: `[l]: docs/x.md "T"`, want: "[l]: " + pre + `docs/x.md "T"`},
 		{name: "parent-relative definition refused", in: "[l]: ../x.md", wantErr: true},
 		{name: "unmapped definition refused", in: "[l]: x.md", wantErr: true},
