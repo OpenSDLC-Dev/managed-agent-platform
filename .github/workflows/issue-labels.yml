@@ -21,7 +21,8 @@ permissions:
   issues: write
 
 concurrency:
-  group: issue-labels-${{ github.event.changes.new_issue.number || github.event.issue.number || 'sweep' }}
+  group: issue-triage
+  queue: max
   cancel-in-progress: false
 
 jobs:

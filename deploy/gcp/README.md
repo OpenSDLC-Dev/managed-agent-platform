@@ -168,10 +168,10 @@ whole cluster.
 It asks the CLUSTER weekly rather than the deploy history — a deploy run exists only when
 somebody pushes, and a quiet fortnight is exactly when an environment gets forgotten — and
 keeps one `Task` open with the `p2` and `hard` labels while the cluster is parked.
-A scheduled or manually dispatched run opens it. The issue's age shows how long staging
-has been parked. A completed `deploy` triggers a check, so reviving staging can close the
-issue before the next weekly check. Destroying staging closes it too. The issue offers
-`gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
+A scheduled or manually dispatched run opens it. Its age measures the time since that
+run detected the parked cluster. A completed `deploy` triggers another check, so reviving
+staging can close the issue before the next weekly check. Destroying staging closes it
+too. The issue offers `gcp-env-destroy` as one of the two ways out. Nobody is assigned: a schedule has no actor,
 and `github.actor` on one is whoever last edited the cron.
 
 Two bounds worth knowing before relying on it. A cluster it cannot find reads the same

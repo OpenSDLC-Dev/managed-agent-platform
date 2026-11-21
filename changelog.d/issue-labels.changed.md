@@ -1,1 +1,1 @@
-- **Issue triage** — Issue reports now use GitHub's Bug, Feature and Task types. Two labels show priority and difficulty. Deployment and evaluation alerts follow the same rules.
+- **Issue triage** — Issue reports now use GitHub's Bug, Feature and Task types. Two labels show priority and difficulty. Deployment and evaluation alerts follow the same rules (#1069).
