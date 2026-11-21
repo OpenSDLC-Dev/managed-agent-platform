@@ -148,17 +148,42 @@ def self_test() -> None:
 
 
 def diff_files(base_ref: str) -> list[str]:
+    # --no-renames ensures a renamed gate file (e.g. moving .claude/agents/verifier.md)
+    # reports its source path too so R16 and the gate-modification audit still fire.
     out = subprocess.check_output(
-        ["git", "diff", "--name-only", f"{base_ref}...HEAD"], cwd=ROOT, text=True
+        ["git", "diff", "--no-renames", "--name-only", f"{base_ref}...HEAD"],
+        cwd=ROOT,
+        text=True,
     )
     files = [line.strip() for line in out.splitlines() if line.strip()]
     # Include uncommitted tracked changes when run locally before commit.
-    wt = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True)
+    wt = subprocess.check_output(
+        ["git", "diff", "--no-renames", "--name-only", "HEAD"], cwd=ROOT, text=True
+    )
     for line in wt.splitlines():
         p = line.strip()
         if p and p not in files:
             files.append(p)
     return sorted(files)
+
+
+def load_review_from_base(base_ref: str) -> tuple[str, str]:
+    """Load REVIEW.md from base_ref so a PR cannot weaken its own checklist.
+
+    Falls back to the working-tree REVIEW.md only when REVIEW.md does not exist
+    at base_ref (for example, on the PR introducing REVIEW.md).
+    """
+    proc = subprocess.run(
+        ["git", "show", f"{base_ref}:REVIEW.md"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return proc.stdout, f"{base_ref}:REVIEW.md"
+    if REVIEW_MD.exists():
+        return REVIEW_MD.read_text(encoding="utf-8"), f"{REVIEW_MD.name} (fallback: absent on {base_ref})"
+    raise FileNotFoundError(f"REVIEW.md absent on {base_ref} and in working tree")
 
 
 def main() -> int:
@@ -171,27 +196,46 @@ def main() -> int:
     parser.add_argument(
         "--file",
         type=pathlib.Path,
-        default=REVIEW_MD,
-        help="Path to REVIEW.md (default: repo root REVIEW.md)",
+        default=None,
+        help="Explicit path to REVIEW.md (overrides base-ref loading in --diff mode)",
     )
     args = parser.parse_args()
 
     self_test()
-    if not args.file.exists():
-        print(f"missing {args.file}", file=sys.stderr)
-        return 1
-    items = parse_checklist(args.file.read_text(encoding="utf-8"))
+    if args.file is not None:
+        if not args.file.exists():
+            print(f"missing {args.file}", file=sys.stderr)
+            return 1
+        text = args.file.read_text(encoding="utf-8")
+        source_label = args.file.name
+    elif args.diff:
+        try:
+            text, source_label = load_review_from_base(args.diff)
+        except FileNotFoundError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 1
+    else:
+        if not REVIEW_MD.exists():
+            print(f"missing {REVIEW_MD}", file=sys.stderr)
+            return 1
+        text = REVIEW_MD.read_text(encoding="utf-8")
+        source_label = REVIEW_MD.name
+
+    items = parse_checklist(text)
     errs = validate_items(items)
     if errs:
         for e in errs:
-            print(f"FAIL: {e}", file=sys.stderr)
+            print(f"FAIL ({source_label}): {e}", file=sys.stderr)
         return 1
 
     if args.diff:
         files = diff_files(args.diff)
         matched = match_items(items, files)
         gate_hits = gate_modifications(files)
-        print(f"Triggered reliability checklist items against {args.diff} ({len(files)} changed file(s)):")
+        print(
+            f"Triggered reliability checklist items against {args.diff} "
+            f"(rules from {source_label}; {len(files)} changed file(s)):"
+        )
         if not matched:
             print("  (none triggered)")
         for it in matched:
@@ -204,7 +248,7 @@ def main() -> int:
             print("Verify no gate, coverage denominator, or review rule was weakened without rationale.")
         return 0
 
-    print(f"ok — {args.file.name} defines {len(items)} valid diff-triggered checklist items")
+    print(f"ok — {source_label} defines {len(items)} valid diff-triggered checklist items")
     return 0
 
 

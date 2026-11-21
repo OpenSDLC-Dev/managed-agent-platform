@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          changed="$(git diff --name-only "$BASE_SHA" HEAD)"
+          changed="$(git diff --no-renames --name-only "$BASE_SHA" HEAD)"
           gate_hits="$(printf '%s\n' "$changed" | grep -E '^(\.claude/|REVIEW\.md$|Makefile$|\.github/workflows/ci\.yml$|\.github/scripts/test_hygiene_baseline\.json$)' || true)"
           if [ -n "$gate_hits" ]; then
             {
