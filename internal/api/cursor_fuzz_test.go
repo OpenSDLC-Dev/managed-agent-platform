@@ -39,13 +39,16 @@ func FuzzDecodeCursorNoPanic(f *testing.F) {
 		if c.dir != dirNext && c.dir != dirPrev {
 			t.Fatalf("decodeCursor(%q) returned invalid dir %q", token, c.dir)
 		}
-		// Any valid cursor must be rejected as foreign on every other list.
-		for _, other := range allCursorLists {
-			if other == c.list {
-				continue
-			}
-			if ferr := foreignCursorError(other, c, "mismatch"); ferr == nil {
-				t.Fatalf("foreignCursorError(%q, %q) returned nil", other, c.list)
+		// Exercise the real list-binding guard (foreignToTime) across all lists:
+		// a time cursor must be accepted on its own list and rejected on every
+		// other list; non-time cursors must be rejected by every time-keyed list.
+		timeKeyed := !c.versioned && !c.seqKeyed && !c.pathKeyed
+		for _, target := range allCursorLists {
+			gotForeign := c.foreignToTime(target)
+			wantForeign := !timeKeyed || target != c.list
+			if gotForeign != wantForeign {
+				t.Fatalf("foreignToTime(target=%q) for cursor(list=%q, timeKeyed=%v) = %v, want %v",
+					target, c.list, timeKeyed, gotForeign, wantForeign)
 			}
 		}
 	})

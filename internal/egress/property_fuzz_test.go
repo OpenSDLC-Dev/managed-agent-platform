@@ -26,6 +26,7 @@ func FuzzValidateAndCanonicalHostEntry(f *testing.F) {
 		"has space.com",
 		"foo\x00bar.com",
 		strings.Repeat("a", maxCanonicalHost+1),
+		"*." + strings.Repeat("a", maxCanonicalHost+1),
 	} {
 		f.Add(seed)
 	}
@@ -48,12 +49,18 @@ func FuzzValidateAndCanonicalHostEntry(f *testing.F) {
 			if err2 != nil || canon2 != canon {
 				t.Fatalf("CanonicalEntry not idempotent on %q: %q -> %q (%v)", raw, canon, canon2, err2)
 			}
-			// HostSet deliberately refuses hosts past maxCanonicalHost (1024 bytes).
-			// Within that lookup cap, policy coverage must be reflexive; past it,
-			// oversized entries must fail closed rather than match.
+			// HostSet.Match deliberately refuses exact hosts past maxCanonicalHost
+			// (1024 bytes), while wildcard coverage checks suffixes directly.
+			// Assert fail-closed refusal for over-cap exact hosts and reflexivity
+			// for all other valid entries.
 			hs := NewHostSet([]string{raw})
-			stripped := strings.TrimPrefix(strings.TrimSpace(raw), "*.")
-			if len(stripped) <= maxCanonicalHost {
+			trimmed := strings.TrimSpace(raw)
+			isWildcard := strings.HasPrefix(trimmed, "*.")
+			if !isWildcard && len(trimmed) > maxCanonicalHost {
+				if hs.CoversEntry(raw) {
+					t.Fatalf("HostSet accepted over-cap exact entry of length %d", len(trimmed))
+				}
+			} else {
 				if !hs.CoversEntry(raw) {
 					t.Fatalf("HostSet(%q) does not cover itself", raw)
 				}
@@ -63,8 +70,6 @@ func FuzzValidateAndCanonicalHostEntry(f *testing.F) {
 				if !NetworkingCovers(false, []string{raw}, false, []string{raw}) {
 					t.Fatalf("NetworkingCovers not reflexive on %q", raw)
 				}
-			} else if hs.CoversEntry(raw) {
-				t.Fatalf("HostSet accepted over-cap entry of length %d", len(stripped))
 			}
 		}
 		// NetworkingBindingDigest must always emit a 64-hex digest and be order/dup invariant.

@@ -92,28 +92,32 @@ func FuzzConvertAnswersNoPanic(f *testing.F) {
 	for _, seed := range []string{
 		`{}`,
 		`{"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`,
+		`{"choices":[{"message":{"role":"assistant","reasoning_content":"step 1","content":"hi"},"finish_reason":"stop"}]}`,
 		`{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`,
+		`{"candidates":[{"content":{"parts":[{"thought":true,"text":"think"},{"text":"hi"}]},"finishReason":"STOP"}]}`,
 		`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`,
-		`{"choices":[{"delta":{"content":"a"}}]}`,
+		`{"choices":[{"delta":{"reasoning_content":"step","content":"a"}}]}`,
 		`not json`,
 	} {
 		f.Add([]byte(seed))
 	}
+	sig := func() string { return "fuzz-sig" }
+	gSign := func(value string) string { return "fuzz-gsig:" + value }
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		if out, err := Answer(raw, "alias", "msg_1", nil, nil, nil); err == nil && !json.Valid(out) {
+		if out, err := Answer(raw, "alias", "msg_1", nil, sig, nil); err == nil && !json.Valid(out) {
 			t.Fatalf("Answer produced invalid JSON: %q", out)
 		}
-		if out, err := GeminiAnswer(raw, "alias", "msg_1", nil, nil, nil); err == nil && !json.Valid(out) {
+		if out, err := GeminiAnswer(raw, "alias", "msg_1", nil, gSign, nil); err == nil && !json.Valid(out) {
 			t.Fatalf("GeminiAnswer produced invalid JSON: %q", out)
 		}
 		meta := ResponseMeta{ID: "resp_1", Model: "alias", CreatedAt: 1700000000}
 		if out, err := ResponsesAnswer(raw, meta); err == nil && !json.Valid(out) {
 			t.Fatalf("ResponsesAnswer produced invalid JSON: %q", out)
 		}
-		s := NewStream("alias", "msg_1", nil, nil)
+		s := NewStream("alias", "msg_1", sig, nil)
 		_, _ = s.Chunk(raw)
 		_ = s.End()
-		gs := NewGeminiStream("alias", "msg_1", nil, nil)
+		gs := NewGeminiStream("alias", "msg_1", gSign, nil)
 		_, _ = gs.Chunk(raw)
 		_ = gs.End()
 	})
