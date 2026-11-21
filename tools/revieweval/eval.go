@@ -49,7 +49,10 @@ type Case struct {
 	ExpectedRules    []string `json:"expected_rules"`
 	ExpectedSeverity string   `json:"expected_severity"`
 	AnswerKey        string   `json:"answer_key"`
-	MatchKeywords    []string `json:"match_keywords"`
+	// MatchGroups encodes AND-of-ORs defect facets: a finding matches the case
+	// only when it satisfies EVERY facet group (preventing unrelated findings
+	// sharing one generic subsystem noun from counting as incident recall).
+	MatchGroups [][]string `json:"match_groups"`
 }
 
 // ReviewRule represents one parsed diff-triggered checklist item from REVIEW.md.
@@ -280,8 +283,13 @@ func ValidateDataset(cases []Case, rules []ReviewRule) error {
 			if strings.TrimSpace(c.AnswerKey) == "" {
 				return fmt.Errorf("case %s: incident missing answer_key", c.ID)
 			}
-			if len(c.MatchKeywords) == 0 {
-				return fmt.Errorf("case %s: incident missing match_keywords", c.ID)
+			if len(c.MatchGroups) < 2 {
+				return fmt.Errorf("case %s: incident must define at least 2 defect facet match_groups", c.ID)
+			}
+			for gi, g := range c.MatchGroups {
+				if len(g) == 0 {
+					return fmt.Errorf("case %s: match_groups[%d] is empty", c.ID, gi)
+				}
 			}
 			if c.ExpectedSeverity != "Important" && c.ExpectedSeverity != "Nit" {
 				return fmt.Errorf("case %s: invalid expected_severity %q", c.ID, c.ExpectedSeverity)
@@ -303,48 +311,49 @@ func ValidateDataset(cases []Case, rules []ReviewRule) error {
 	return nil
 }
 
-// MatchesCase reports whether a finding matches an incident case's answer key
-// (via expected rule ID or at least 2 distinct keyword hits, or 1 exact rule
-// ID + 1 keyword hit).
+// MatchesCase reports whether a finding identifies every required defect facet
+// in c.MatchGroups. Requiring every facet group (AND-of-ORs) prevents generic
+// comments mentioning one subsystem noun or rule ID without naming the actual
+// defect from inflating incident recall.
 func MatchesCase(c Case, f Finding) bool {
-	if c.Kind != "incident" {
+	if c.Kind != "incident" || len(c.MatchGroups) == 0 {
 		return false
 	}
 	text := strings.ToLower(f.Summary + " " + f.Evidence)
-	ruleMatch := false
-	for _, rid := range c.ExpectedRules {
-		if strings.EqualFold(strings.TrimSpace(f.RuleID), rid) {
-			ruleMatch = true
-			break
+	for _, group := range c.MatchGroups {
+		matchedGroup := false
+		for _, kw := range group {
+			if strings.Contains(text, strings.ToLower(kw)) {
+				matchedGroup = true
+				break
+			}
+		}
+		if !matchedGroup {
+			return false
 		}
 	}
-	kwHits := 0
-	for _, kw := range c.MatchKeywords {
-		if strings.Contains(text, strings.ToLower(kw)) {
-			kwHits++
-		}
-	}
-	if ruleMatch && kwHits >= 1 {
-		return true
-	}
-	return kwHits >= 2
+	return true
 }
 
 func isImportant(sev string) bool {
 	return strings.EqualFold(strings.TrimSpace(sev), "Important")
 }
 
-func evalStage(c Case, findings []Finding) (hit bool, importantHit bool, controlFP bool) {
+func evalStage(c Case, findings []Finding) (hit bool, calibratedHit bool, controlFP bool) {
 	if c.Kind == "incident" {
+		wantSev := c.ExpectedSeverity
+		if wantSev == "" {
+			wantSev = "Important"
+		}
 		for _, f := range findings {
 			if MatchesCase(c, f) {
 				hit = true
-				if isImportant(f.Severity) {
-					importantHit = true
+				if strings.EqualFold(strings.TrimSpace(f.Severity), wantSev) {
+					calibratedHit = true
 				}
 			}
 		}
-		return hit, importantHit, false
+		return hit, calibratedHit, false
 	}
 	for _, f := range findings {
 		if isImportant(f.Severity) {
@@ -532,9 +541,23 @@ func IsShallowClone(repoRoot string) bool {
 	return strings.TrimSpace(string(out)) == "true"
 }
 
-// GitDiffForCase returns the changed paths and unified diff (capped at maxBytes)
-// for a historical case. When the commit is absent (e.g. a shallow CI clone),
-// ok is false and err is nil.
+// diffPriority orders changed paths so implementation source hunks always fit
+// inside maxBytes before test files and documentation/changelog noise.
+func diffPriority(p string) int {
+	switch {
+	case strings.HasPrefix(p, "changelog.d/") || strings.HasPrefix(p, "docs/") || strings.HasSuffix(p, ".md"):
+		return 2
+	case strings.HasSuffix(p, "_test.go") || strings.HasSuffix(p, "_test.py"):
+		return 1
+	default:
+		return 0
+	}
+}
+
+// GitDiffForCase returns the changed paths and unified diff (capped at maxBytes,
+// prioritizing implementation source files ahead of tests and docs) for a
+// historical case. When the commit is absent (e.g. a shallow CI clone), ok is
+// false and err is nil.
 func GitDiffForCase(repoRoot string, c Case, maxBytes int) (changedPaths []string, diff string, ok bool, err error) {
 	check := exec.Command("git", "-C", repoRoot, "cat-file", "-e", c.Commit+"^{commit}")
 	if err := check.Run(); err != nil {
@@ -561,14 +584,32 @@ func GitDiffForCase(repoRoot string, c Case, maxBytes int) (changedPaths []strin
 	}
 	sort.Strings(changedPaths)
 
-	diffOut, err := exec.Command("git", "-C", repoRoot, "diff", "--no-renames", "-U3", fromRef, toRef).Output()
-	if err != nil {
-		return nil, "", false, fmt.Errorf("git diff %s..%s: %w", fromRef, toRef, err)
+	ordered := append([]string(nil), changedPaths...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return diffPriority(ordered[i]) < diffPriority(ordered[j])
+	})
+
+	var buf bytes.Buffer
+	truncated := false
+	for _, p := range ordered {
+		part, err := exec.Command("git", "-C", repoRoot, "diff", "--no-renames", "-U3", fromRef, toRef, "--", p).Output()
+		if err != nil {
+			return nil, "", false, fmt.Errorf("git diff %s..%s -- %s: %w", fromRef, toRef, p, err)
+		}
+		if maxBytes > 0 && buf.Len()+len(part) > maxBytes {
+			rem := maxBytes - buf.Len()
+			if rem > 0 {
+				buf.Write(part[:rem])
+			}
+			truncated = true
+			break
+		}
+		buf.Write(part)
 	}
-	if maxBytes > 0 && len(diffOut) > maxBytes {
-		diffOut = append(diffOut[:maxBytes], []byte("\n... [diff truncated for revieweval budget] ...\n")...)
+	if truncated {
+		buf.WriteString("\n... [diff truncated for revieweval budget] ...\n")
 	}
-	return changedPaths, string(diffOut), true, nil
+	return changedPaths, buf.String(), true, nil
 }
 
 // LLMClient calls an OpenAI-compatible or Anthropic-compatible endpoint.
@@ -591,6 +632,13 @@ func (c *LLMClient) Complete(ctx context.Context, systemPrompt, userPrompt strin
 	default:
 		return "", fmt.Errorf("unsupported protocol %q", c.Cfg.Protocol)
 	}
+}
+
+func (c *LLMClient) redact(s string) string {
+	if c.Cfg.APIKey == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, c.Cfg.APIKey, "[redacted]")
 }
 
 func (c *LLMClient) completeAnthropic(ctx context.Context, hc *http.Client, systemPrompt, userPrompt string) (string, error) {
@@ -625,7 +673,7 @@ func (c *LLMClient) completeAnthropic(ctx context.Context, hc *http.Client, syst
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("anthropic endpoint status %d: %s", resp.StatusCode, truncateString(string(raw), 300))
+		return "", fmt.Errorf("anthropic endpoint status %d: %s", resp.StatusCode, truncateString(c.redact(string(raw)), 300))
 	}
 	var parsed struct {
 		Content []struct {
@@ -678,7 +726,7 @@ func (c *LLMClient) completeOpenAI(ctx context.Context, hc *http.Client, systemP
 		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("openai endpoint status %d: %s", resp.StatusCode, truncateString(string(raw), 300))
+		return "", fmt.Errorf("openai endpoint status %d: %s", resp.StatusCode, truncateString(c.redact(string(raw)), 300))
 	}
 	var parsed struct {
 		Choices []struct {
@@ -703,11 +751,39 @@ func truncateString(s string, max int) string {
 	return s[:max] + "..."
 }
 
-// ParseFindingsJSON extracts a JSON array (or {"findings": [...]}) of Findings
-// from an LLM response, tolerating markdown code fences.
+func normalizeSeverity(sev string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(sev)) {
+	case "important":
+		return "Important", true
+	case "nit":
+		return "Nit", true
+	case "pre-existing":
+		return "Pre-existing", true
+	default:
+		return "", false
+	}
+}
+
+func validateFindings(arr []Finding) ([]Finding, error) {
+	if arr == nil {
+		return nil, errors.New("findings JSON must be a non-null array")
+	}
+	out := make([]Finding, len(arr))
+	for i, f := range arr {
+		norm, ok := normalizeSeverity(f.Severity)
+		if !ok {
+			return nil, fmt.Errorf("finding[%d]: unsupported severity %q (want Important, Nit, or Pre-existing)", i, f.Severity)
+		}
+		f.Severity = norm
+		out[i] = f
+	}
+	return out, nil
+}
+
+// ParseFindingsJSON extracts a non-null JSON array (or {"findings": [...]}) of
+// Findings from an LLM response, rejecting null and unsupported severities.
 func ParseFindingsJSON(raw string) ([]Finding, error) {
 	s := strings.TrimSpace(raw)
-	// Strip leading/trailing markdown code fences if present.
 	if idx := strings.Index(s, "```"); idx >= 0 {
 		rest := s[idx+3:]
 		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
@@ -719,19 +795,21 @@ func ParseFindingsJSON(raw string) ([]Finding, error) {
 	}
 	var arr []Finding
 	if err := json.Unmarshal([]byte(s), &arr); err == nil {
-		return arr, nil
+		return validateFindings(arr)
 	}
 	var obj struct {
 		Findings []Finding `json:"findings"`
 	}
-	if err := json.Unmarshal([]byte(s), &obj); err == nil && obj.Findings != nil {
-		return obj.Findings, nil
+	if err := json.Unmarshal([]byte(s), &obj); err == nil {
+		if obj.Findings == nil {
+			return nil, errors.New("findings object field is null or missing")
+		}
+		return validateFindings(obj.Findings)
 	}
-	// Fallback: locate the outermost JSON array brackets.
 	start, end := strings.IndexByte(s, '['), strings.LastIndexByte(s, ']')
 	if start >= 0 && end > start {
 		if err := json.Unmarshal([]byte(s[start:end+1]), &arr); err == nil {
-			return arr, nil
+			return validateFindings(arr)
 		}
 	}
 	return nil, fmt.Errorf("could not parse findings JSON from model output: %s", truncateString(raw, 240))

@@ -10,7 +10,10 @@
     "expected_rules": ["R04"],
     "expected_severity": "Important",
     "answer_key": "Defining a synthetic placeholder tool when an agent has tool history but no active tools diverges from the reference wire behavior and broke callers, requiring revert in PR #1031.",
-    "match_keywords": ["placeholder", "tool", "reverted", "diverge", "wire", "history", "no tools", "schema", "unrequested"]
+    "match_groups": [
+      ["placeholder", "synthetic", "dummy", "fabricated"],
+      ["tool history", "no tools", "no active tools", "wire", "diverge", "unrequested", "schema"]
+    ]
   },
   {
     "id": "incident-1037-redacted-at-lock-clock",
@@ -23,7 +26,10 @@
     "expected_rules": ["R02"],
     "expected_severity": "Important",
     "answer_key": "Using now() instead of clock_timestamp() after acquiring the store lock stamps redacted_at with transaction start time rather than post-lock time, breaking ordering under contention.",
-    "match_keywords": ["clock_timestamp", "now()", "lock", "redacted_at", "timestamp", "contention", "transaction"]
+    "match_groups": [
+      ["clock_timestamp", "now()"],
+      ["redacted_at", "lock", "transaction start", "after acquiring", "contention"]
+    ]
   },
   {
     "id": "incident-1057-docker-single-quote-path",
@@ -36,7 +42,10 @@
     "expected_rules": ["R08"],
     "expected_severity": "Important",
     "answer_key": "Expanding quote-heavy paths before checking command or filename length limits breaks or truncates Docker writes on long paths with single quotes.",
-    "match_keywords": ["single quote", "quote", "escape", "long path", "path", "length", "shell", "docker"]
+    "match_groups": [
+      ["single quote", "single-quote", "quote-heavy", "quoting"],
+      ["length", "limit", "long path", "truncat", "exceed", "cap", "expand", "maxcommand", "checkcommand"]
+    ]
   },
   {
     "id": "control-1058-shared-write-temp-path",
@@ -49,7 +58,7 @@
     "expected_rules": [],
     "expected_severity": "",
     "answer_key": "",
-    "match_keywords": []
+    "match_groups": []
   },
   {
     "id": "control-1055-changelog-fragment-links",
@@ -62,7 +71,7 @@
     "expected_rules": [],
     "expected_severity": "",
     "answer_key": "",
-    "match_keywords": []
+    "match_groups": []
   },
   {
     "id": "incident-1064-cursor-list-binding",
@@ -75,7 +84,10 @@
     "expected_rules": ["R05"],
     "expected_severity": "Important",
     "answer_key": "Omitting list-scoped cursor binding allows a page token minted by one list route to be replayed against a different list endpoint instead of returning 400 invalid_request_error.",
-    "match_keywords": ["cursor", "page token", "list", "cross-list", "binding", "scope", "foreign", "replay"]
+    "match_groups": [
+      ["cursor", "page token", "next_page"],
+      ["list", "scope", "cross-list", "foreign", "replay", "bind", "endpoint"]
+    ]
   },
   {
     "id": "incident-1060-egress-policy-withdrawal",
@@ -88,7 +100,10 @@
     "expected_rules": ["R07"],
     "expected_severity": "Important",
     "answer_key": "Without re-checking the live policy snapshot at outbound admission and severing active tunnels/requests upon withdrawal, a revoked host or credential stays usable after policy update.",
-    "match_keywords": ["withdraw", "egress", "policy", "tunnel", "sever", "outbound", "admission", "revok", "stale"]
+    "match_groups": [
+      ["withdraw", "revok", "stale", "policy update", "policy snapshot"],
+      ["egress", "tunnel", "sever", "outbound", "admission", "in-flight", "active"]
+    ]
   },
   {
     "id": "incident-1032-unicode-host-refusal",
@@ -101,7 +116,10 @@
     "expected_rules": ["R07"],
     "expected_severity": "Important",
     "answer_key": "Accepting or punycode-folding non-ASCII Unicode hostnames in allowed_hosts or MCP server URLs diverges from the reference refusal and risks host-matching surprises.",
-    "match_keywords": ["unicode", "non-ascii", "ascii", "punycode", "allowed_hosts", "host", "mcp"]
+    "match_groups": [
+      ["unicode", "non-ascii", "punycode", "idna", "a-label"],
+      ["allowed_hosts", "mcp", "host", "refus", "reject"]
+    ]
   },
   {
     "id": "control-1068-browser-session-version",
@@ -114,7 +132,7 @@
     "expected_rules": [],
     "expected_severity": "",
     "answer_key": "",
-    "match_keywords": []
+    "match_groups": []
   },
   {
     "id": "control-1067-changelog-link-rewriting",
@@ -127,6 +145,6 @@
     "expected_rules": [],
     "expected_severity": "",
     "answer_key": "",
-    "match_keywords": []
+    "match_groups": []
   }
 ]

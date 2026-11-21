@@ -56,10 +56,10 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 - **Test speed & hygiene:** `pgtest` template database cloning (`CREATE DATABASE ... TEMPLATE pgtest_template STRATEGY = FILE_COPY`) cut `internal/events` from >159s to ~25s, `internal/queue` from >159s to ~31s, and `internal/executor` from ~613s to ~370s (closing `#499`). `make test-race` and CI's required `race` job uncovered and fixed a real ordering race in `internal/events/broker.go` (`Broker.markReadyAndWake`), and `make test-hygiene-test` baselined 81 test files (164 `time.Sleep`, 31 `t.Skip`).
 - **Rejected alternative (per-test `DROP DATABASE WITH (FORCE)`):** evaluated in slice 1 and discarded because tearing down cloned databases in `t.Cleanup` triggered extra Postgres checkpoints and interrupted lingering event-broker connections; closing the pool cleanly and relying on ephemeral container teardown proved faster and flake-free.
 - **Branch protection:** `main` branch protection now enforces all seven required CI checks (`ci`, `coverage`, `race`, `helm`, `terraform`, `compose`, `native-console`).
-- **Initial `tools/revieweval` live baseline (`MiniMax-M3`, Anthropic-compatible endpoint, 10 historical cases: 6 incidents / 4 controls):**
-  - Raw stage: incident recall `3/6 (50.0%)`, severity calibration `100.0%`, control false-positive rate `3/4 (75.0%)`.
-  - Post-verify & Final stages: incident recall `2/6 (33.3%)`, severity calibration `100.0%`, control false-positive rate `1/4 (25.0%)`.
-  - The adversarial verification stage reduced control false positives by 50 percentage points (`control-1055`, `control-1067`) while exposing one true-positive drop (`incident-1032-unicode-host-refusal`), validating stage-by-stage observability as the baseline for future prompt and rule tuning.
+- **Initial `tools/revieweval` live baseline (`MiniMax-M3`, Anthropic-compatible endpoint, 10 historical cases: 6 incidents / 4 controls, implementation-prioritized diffs):**
+  - Raw stage: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `3/4 (75.0%)`.
+  - Post-verify & Final stages: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `2/4 (50.0%)`.
+  - Caught five of six real historical incidents (`#1023`, `#1037`, `#1064`, `#1060`, `#1032`) with zero true-positive drops across verification while trimming control false positives (`control-1055`), establishing a quantitative baseline for future prompt and `REVIEW.md` tuning.
 
 ## Plan 69 completion and staging cleanup
 

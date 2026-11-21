@@ -86,6 +86,7 @@ func main() {
 	triggered := map[string][]string{}
 
 	if *dryRun {
+		shallow := IsShallowClone(root)
 		checkedCommits := 0
 		for _, c := range selected {
 			paths, _, ok, err := GitDiffForCase(root, c, *maxDiffBytes)
@@ -94,6 +95,10 @@ func main() {
 				os.Exit(1)
 			}
 			if !ok {
+				if !shallow {
+					fmt.Fprintf(os.Stderr, "revieweval: case %s references commit %s missing in a full git clone\n", c.ID, c.Commit)
+					os.Exit(1)
+				}
 				continue
 			}
 			checkedCommits++

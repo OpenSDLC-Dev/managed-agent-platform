@@ -34,11 +34,12 @@ func TestEmbeddedDatasetValidAndMatchesReviewMD(t *testing.T) {
 		t.Fatalf("ValidateDataset: %v", err)
 	}
 
-	// Whenever full git history is present, verify every case's commit exists
-	// and every incident case triggers its declared REVIEW.md rules.
+	// Whenever full git history is present, verify every case's commit exists,
+	// its budgeted diff includes implementation source hunks ahead of docs, and
+	// every incident case triggers its declared REVIEW.md rules.
 	shallow := IsShallowClone(root)
 	for _, c := range cases {
-		paths, _, ok, err := GitDiffForCase(root, c, 4096)
+		paths, diff, ok, err := GitDiffForCase(root, c, 18000)
 		if err != nil {
 			t.Fatalf("GitDiffForCase(%s): %v", c.ID, err)
 		}
@@ -47,6 +48,9 @@ func TestEmbeddedDatasetValidAndMatchesReviewMD(t *testing.T) {
 				t.Fatalf("case %s references commit %s which is missing in a full git clone", c.ID, c.Commit)
 			}
 			continue
+		}
+		if c.Kind == "incident" && !strings.Contains(diff, "diff --git a/internal/") {
+			t.Errorf("incident case %s budgeted diff omitted internal/ implementation hunks", c.ID)
 		}
 		matched := MatchRules(rules, paths)
 		got := map[string]bool{}
@@ -73,7 +77,7 @@ func TestScoreRunTracksStageDropsAndFalsePositives(t *testing.T) {
 			ExpectedRules:    []string{"R02"},
 			ExpectedSeverity: "Important",
 			AnswerKey:        "uses now() after lock instead of clock_timestamp()",
-			MatchKeywords:    []string{"clock_timestamp", "now()", "lock"},
+			MatchGroups:      [][]string{{"clock_timestamp", "now()"}, {"lock", "redacted_at"}},
 		},
 		{
 			ID:               "inc-2",
@@ -85,7 +89,7 @@ func TestScoreRunTracksStageDropsAndFalsePositives(t *testing.T) {
 			ExpectedRules:    []string{"R05"},
 			ExpectedSeverity: "Important",
 			AnswerKey:        "cursor not bound to issuing list",
-			MatchKeywords:    []string{"cursor", "list", "binding"},
+			MatchGroups:      [][]string{{"cursor", "page token"}, {"list", "binding"}},
 		},
 		{
 			ID:            "ctrl-1",
@@ -152,6 +156,65 @@ func TestScoreRunTracksStageDropsAndFalsePositives(t *testing.T) {
 	}
 }
 
+func TestMatchesCaseRejectsGenericOverlappingVocabulary(t *testing.T) {
+	cases, err := LoadCases("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Case{}
+	for _, c := range cases {
+		byID[c.ID] = c
+	}
+
+	// Unrelated Nit mentioning single quotes without the length/limit failure facet.
+	if MatchesCase(byID["incident-1057-docker-single-quote-path"], Finding{
+		Severity: "Nit",
+		Summary:  "Add a comment documenting single quote handling",
+	}) {
+		t.Error("unrelated single-quote comment must not be credited as catching incident-1057")
+	}
+
+	// Unrelated R02 finding mentioning lock without now()/clock_timestamp().
+	if MatchesCase(byID["incident-1037-redacted-at-lock-clock"], Finding{
+		Severity: "Nit",
+		RuleID:   "R02",
+		Summary:  "Rename the lock helper for clarity",
+	}) {
+		t.Error("unrelated lock rename with R02 must not be credited as catching incident-1037")
+	}
+
+	// Nit-expected incident calibrates cleanly when matched by a Nit finding.
+	nitCase := Case{
+		ID:               "nit-inc",
+		Kind:             "incident",
+		Subset:           "eval",
+		ExpectedSeverity: "Nit",
+		MatchGroups:      [][]string{{"metric"}, {"label"}},
+	}
+	rep := ScoreRun([]Case{nitCase}, map[string]StageOutput{
+		"nit-inc": {Final: []Finding{{Severity: "Nit", Summary: "metric missing label"}}},
+	}, nil)
+	if rep.Final.SeverityCalibration != 1.0 {
+		t.Errorf("expected Nit severity calibration = 1.0, got %.2f", rep.Final.SeverityCalibration)
+	}
+}
+
+func TestParseFindingsJSONRejectsNullAndInvalidSeverity(t *testing.T) {
+	for _, bad := range []string{
+		`null`,
+		`{"findings": null}`,
+		`[{"severity":"Critical","summary":"bad severity"}]`,
+	} {
+		if _, err := ParseFindingsJSON(bad); err == nil {
+			t.Errorf("ParseFindingsJSON(%q) succeeded, want error", bad)
+		}
+	}
+	got, err := ParseFindingsJSON(`[]`)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("ParseFindingsJSON([]) = %v, %v, want empty non-error", got, err)
+	}
+}
+
 func TestEndpointConfigDotEnvAndRedaction(t *testing.T) {
 	tmp := t.TempDir()
 	const secret = "sk-super-secret-value-never-print"
@@ -172,6 +235,22 @@ func TestEndpointConfigDotEnvAndRedaction(t *testing.T) {
 			t.Errorf("EndpointConfig leaked secret in formatted output: %s", formatted)
 		}
 	}
+
+	// Upstream error responses that echo the API key must be redacted too.
+	for _, proto := range []string{"openai", "anthropic"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "invalid key: "+secret, http.StatusUnauthorized)
+		}))
+		client := &LLMClient{Cfg: EndpointConfig{Protocol: proto, BaseURL: srv.URL, APIKey: secret, Model: "m"}}
+		_, err := client.Complete(context.Background(), "sys", "usr")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%s: expected error on 401", proto)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s error message leaked secret: %v", proto, err)
+		}
+	}
 }
 
 func TestRunTwoStageReviewOpenAIAndAnthropicMockServers(t *testing.T) {
@@ -182,9 +261,10 @@ func TestRunTwoStageReviewOpenAIAndAnthropicMockServers(t *testing.T) {
 				n := calls.Add(1)
 				var text string
 				if n == 1 {
-					text = "```json\n[{\"severity\":\"Important\",\"rule_id\":\"R02\",\"summary\":\"now() stamped after lock instead of clock_timestamp()\",\"evidence\":\"SET redacted_at = now()\"},{\"severity\":\"Important\",\"rule_id\":\"R02\",\"summary\":\"now() stamped after lock instead of clock_timestamp()\",\"evidence\":\"dup\"}]\n```"
+					text = "```json\n[{\"severity\":\"Important\",\"rule_id\":\"R02\",\"summary\":\"now() stamped after lock instead of clock_timestamp()\",\"evidence\":\"SET redacted_at = now()\"},{\"severity\":\"Important\",\"rule_id\":\"R02\",\"summary\":\"now() stamped after lock instead of clock_timestamp()\",\"evidence\":\"dup\"},{\"severity\":\"Nit\",\"summary\":\"dropped by verifier\"}]\n```"
 				} else {
-					text = `[{"severity":"Important","rule_id":"R02","summary":"now() stamped after lock instead of clock_timestamp()","evidence":"SET redacted_at = now()"}]`
+					// Return duplicate verified findings so final-stage deduplication is exercised.
+					text = `[{"severity":"Important","rule_id":"R02","summary":"now() stamped after lock instead of clock_timestamp()","evidence":"SET redacted_at = now()"},{"severity":"Important","rule_id":"R02","summary":"now() stamped after lock instead of clock_timestamp()","evidence":"dup"}]`
 				}
 				w.Header().Set("Content-Type", "application/json")
 				if proto == "anthropic" {
@@ -217,8 +297,8 @@ func TestRunTwoStageReviewOpenAIAndAnthropicMockServers(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RunTwoStageReview(%s): %v", proto, err)
 			}
-			if len(out.Raw) != 2 || len(out.PostVerify) != 1 || len(out.Final) != 1 {
-				t.Fatalf("stage counts raw=%d verify=%d final=%d, want 2/1/1", len(out.Raw), len(out.PostVerify), len(out.Final))
+			if len(out.Raw) != 3 || len(out.PostVerify) != 2 || len(out.Final) != 1 {
+				t.Fatalf("stage counts raw=%d verify=%d final=%d, want 3/2/1", len(out.Raw), len(out.PostVerify), len(out.Final))
 			}
 		})
 	}
