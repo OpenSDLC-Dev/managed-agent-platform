@@ -1700,8 +1700,9 @@ origin. Source support alone is not deployment evidence. No key fallback is adde
 
 #### Issued API credentials
 
-All API keys are issued through Console. Historical unowned rows remain readable
-for audit, but never authenticate. The platform generates each secret —
+All API keys are issued through Console. Administrators can read the unowned
+historical rows retained after [upgrade cleanup](./UPGRADING_PLAN69.md#cleanup-after-acceptance).
+Those credentials cannot authenticate. The platform generates each secret —
 256 bits of CSPRNG behind an `sk-map-api01-` prefix — returns it exactly once in
 the issuing response, and stores only its SHA-256 hash. Nothing can render the
 value again, so a lost key is reissued, never recovered; what survives is a
