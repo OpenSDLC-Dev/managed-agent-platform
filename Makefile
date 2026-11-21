@@ -20,7 +20,7 @@ SHELL := /usr/bin/env bash
 .PHONY: build build-worker crossbuild vet fmt-check test test-fast test-race fuzz cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
-	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test review-checklist-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
+	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test review-checklist-test verify-commit-gate-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
@@ -130,7 +130,8 @@ test-fast:
 		| grep -vE 'pgtest|dockertest|sandboxtest|sandbox/docker|sandbox/k8s|blobtest|secretstest|gcstest|cmd/gate|acceptance|evals|internal/toolset' \
 		| awk '{print $$1}')"; \
 	set -x; \
-	go test -count=1 $$pkgs
+	go test -count=1 $$pkgs; \
+	./.claude/hooks/verify-stamp.sh --write "make test-fast"
 
 # Race detector over the high-concurrency core packages (plan 75 slice 4).
 # Requires Docker (for pgtest in events/queue/brain) and no Kubernetes cluster.
@@ -143,6 +144,7 @@ test-race:
 		./internal/modelgateway/upstream ./internal/provider ./internal/cron ./internal/domain \
 		./internal/identity ./internal/oauthrefresh ./internal/skills ./internal/transcript \
 		./internal/webtool/... ./internal/events ./internal/queue ./internal/brain
+	./.claude/hooks/verify-stamp.sh --write "make test-race"
 
 # Short fuzzing pass over every Fuzz* target in the repository (plan 75 slice 3).
 # Outside `verify` on purpose: `make test` replays every seed corpus, while
@@ -179,6 +181,7 @@ cover-gate:
 	     }' coverage.out
 
 verify: build crossbuild vet fmt-check test cover-gate
+	./.claude/hooks/verify-stamp.sh --write "make verify"
 
 # The live end-to-end eval suite: whole sessions through the public API against
 # the .env endpoint and real Docker sandboxes. NOT part of `verify` — it spends
@@ -465,6 +468,11 @@ test-hygiene-test:
 # by the current branch.
 review-checklist-test:
 	python3 .github/scripts/review_checklist_test.py
+
+# Regression suite for the verification stamping helper and PreToolUse commit
+# gate hook (.claude/hooks/verify-{stamp,commit-gate}.sh, plan 75 slice 7).
+verify-commit-gate-test:
+	python3 .github/scripts/verify_commit_gate_test.py
 
 # The issue-triage subagent's structured read-only wrapper and PreToolUse Bash
 # guard (.claude/hooks/issue-triage-{read,bash-guard}.sh, #1052).
