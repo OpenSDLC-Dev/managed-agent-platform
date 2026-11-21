@@ -106,5 +106,9 @@ Each item has a diff-readable trigger, a concrete check, and the incident or PR 
 
 ## Rule lifecycle (addition and pruning)
 
-- **Add a rule** when a missed defect recurs across at least two PRs (or represents a high-severity security/data-loss class) and can be spotted from a diff, or when an incident replay shows reviewers missed it on a small diff.
-- **Prune a rule** once an automated compile-time, runtime, or CI guard makes the failure mode impossible, or during periodic review if a rule generates noise without catching real bugs.
+- **Add a rule** when a missed defect recurs across at least two PRs (or represents a high-severity security/data-loss class) and can be spotted from a diff, or when a `tools/revieweval` incident replay shows reviewers missed it on a small diff.
+- **Evaluate before editing rules or prompts:** run `make revieweval-dry-run` (offline structural and trigger validation) and `go run ./tools/revieweval -live -subset tuning` (followed by `-subset eval` once frozen) to verify recall improves without raising the control false-positive rate or hiding drops between `raw` and `post_verify`.
+- **Quarterly / release-cadence pruning policy:** once per minor release (or quarterly, whichever comes first), audit every `R01`–`R16` entry and prune or promote it when any of these holds:
+  1. An automated compile-time check, unit/property test, or CI guard (`make verify`, `test-hygiene-test`, `pins-test`, `pipes-test`) now makes the failure mode impossible or strictly enforced — remove the redundant review bullet.
+  2. A rule has triggered across recent PRs while producing only `Nit` or false-positive comments without catching a real `Important` defect — tighten its trigger glob or retire it.
+  3. The checklist grows beyond ~20 rules — consolidate overlapping items so a typical PR still triggers only 2 to 6 focused checks.

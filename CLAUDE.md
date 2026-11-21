@@ -103,6 +103,7 @@ make pipes-test          # ...and every pipeline in them, for a reading end that
 make test-hygiene-test   # ...and Go test files, ratcheting baseline counts of time.Sleep and t.Skip so new ad-hoc sleeps/skips require explicit justification
 make review-checklist-test # ...and REVIEW.md's diff-triggered reliability checklist grammar and matcher
 make verify-commit-gate-test # ...and the PreToolUse verification commit gate hook and worktree stamping helper (.claude/hooks/verify-*.sh)
+make revieweval-dry-run   # ...and tools/revieweval's historical incident/control dataset and REVIEW.md trigger coverage (run `-live` to benchmark an LLM reviewer)
 make issue-triage-guard-test # ...and the issue-triage read-only wrapper and PreToolUse Bash guard (.claude/hooks/issue-triage-*.sh)
 make tf-corpus-check     # ...and terraform's own `fmt` exit on every fixture of the shared .tf corpus (tools/tfcorpus) that both hand-written readers are pinned to (#762)
 make sdk-bump-report     # (outside the gate) what an SDK pin bump moved under: anchors gone at the pin, `absent at` anchors back at it, line spans the sources contradict, stamps behind it, and what went unchecked; fails while a transition awaits a disposition (plan 51)
