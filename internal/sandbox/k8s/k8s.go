@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	gopath "path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
@@ -50,6 +52,8 @@ const netSetupContainerName = "netsetup"
 // native sidecars the gate never leaves the init phase and the pod never
 // starts — fail-closed, not fail-open.
 const gateContainerName = "gate"
+
+const guardVolumeName = "sandbox-uidguard"
 
 // readyTimeout bounds how long Provision waits for a freshly-created pod to
 // schedule and start. A pull of a cold image is the slow case.
@@ -151,9 +155,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 		return nil, err
 	}
 	p.warnUnenforceablePidsLimit(ctx, spec.Hardening)
-	workdir := spec.Workdir
-	if workdir == "" {
-		workdir = sandbox.DefaultWorkdir
+	workdir, err := spec.EffectiveWorkdir()
+	if err != nil {
+		return nil, err
 	}
 	name := podName(spec.SessionID)
 	gated := spec.Gate != nil
@@ -166,6 +170,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			return nil, aerr
 		}
 		if hasGateSidecar(existing) == gated {
+			if err := checkGuard(existing); err != nil {
+				return nil, err
+			}
 			if err := p.waitReady(ctx, name, gated); err != nil {
 				if gated {
 					// A gated pod that never turns ready may be wedged for good: an
@@ -178,7 +185,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 					// re-Get, ready re-check, UID precondition — keep a merely
 					// slow pod another executor just created safe: deleting it
 					// only costs that executor one retried provision.
-					p.reclaimUnready(name, existing.UID, gated)
+					return nil, errors.Join(err, p.reclaimUnready(name, existing.UID, spec))
 				}
 				return nil, err
 			}
@@ -192,7 +199,7 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			if aerr := adoptable(existing, spec, workdir); aerr != nil {
 				return nil, aerr
 			}
-			return p.attach(name, workdir), nil
+			return p.attach(name, workdir, gated), nil
 		}
 		// The pod's gate shape no longer matches the session's (a pre-gate pod
 		// for a now-gated session, or the reverse) — a pod spec is immutable, so
@@ -224,7 +231,11 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	if gated {
 		gateToken = spec.Gate.TokenMinter.Generate()
 	}
-	created, createErr := pods.Create(ctx, p.podSpec(name, workdir, spec, gateToken), metav1.CreateOptions{})
+	requested := p.podSpec(name, workdir, spec, gateToken)
+	if err := checkGuard(requested); err != nil {
+		return nil, err
+	}
+	created, createErr := pods.Create(ctx, requested, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) { // another executor created it first
 		existing, gerr := pods.Get(ctx, name, metav1.GetOptions{})
 		if gerr != nil {
@@ -238,6 +249,9 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			// next attempt replace it rather than serve a mismatched sandbox.
 			return nil, fmt.Errorf("k8s: pod %s raced into a mismatched gate shape", name)
 		}
+		if err := checkGuard(existing); err != nil {
+			return nil, err
+		}
 		if aerr := adoptable(existing, spec, workdir); aerr != nil {
 			return nil, aerr
 		}
@@ -247,11 +261,12 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	if createErr == nil && gated {
 		if perr := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, gateToken); perr != nil {
-			// The pod exists but its token was never recorded: its gate can only
-			// ever 401 and terminate. Remove the pod we just created (UID-guarded)
-			// so the next attempt starts clean.
-			p.deleteByUID(name, created.UID)
-			return nil, fmt.Errorf("k8s: persist gate token for %s: %w", name, perr)
+			// A lost commit reply leaves persistence uncertain. Retire this
+			// exact token before dropping the pod that makes it discoverable.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reclaimTimeout)
+			defer cancel()
+			return nil, errors.Join(fmt.Errorf("k8s: persist gate token for %s: %w", name, perr),
+				p.discardFailedGate(cleanupCtx, name, created.UID, spec, gateToken))
 		}
 	}
 	if err := p.waitReady(ctx, name, gated); err != nil {
@@ -262,11 +277,53 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			// the wedged pod. reclaimUnready deletes only the exact pod we created
 			// and only while it is still not ready, so it cannot delete a
 			// same-named replacement or one another executor has since adopted.
-			p.reclaimUnready(name, created.UID, gated)
+			return nil, errors.Join(err, p.reclaimUnready(name, created.UID, spec))
 		}
 		return nil, err
 	}
-	return p.attach(name, workdir), nil
+	return p.attach(name, workdir, gated), nil
+}
+
+// A pod created with an image-selected entrypoint cannot supply evidence of
+// admission when a later executor adopts it or reaches it for a checkpoint.
+func checkGuard(pod *corev1.Pod) error {
+	if !hasGateSidecar(pod) {
+		return nil
+	}
+	privateVolume := slices.ContainsFunc(pod.Spec.Volumes, func(v corev1.Volume) bool {
+		return v.Name == guardVolumeName && v.EmptyDir != nil
+	})
+	gateMount := slices.ContainsFunc(pod.Spec.InitContainers, func(c corev1.Container) bool {
+		return c.Name == gateContainerName && hasGuardMount(c.VolumeMounts, false)
+	})
+	if !privateVolume || !gateMount {
+		return fmt.Errorf("k8s: pod %s lacks the gate's private launcher volume: %w", pod.Name, sandbox.ErrSpecMismatch)
+	}
+	for _, c := range pod.Spec.Containers {
+		probe := c.StartupProbe
+		if c.Name == containerName && len(c.Command) > 0 && c.Command[0] == uidguard.Path &&
+			probe != nil && probe.Exec != nil && slices.Equal(probe.Exec.Command, []string{uidguard.Path}) &&
+			hasGuardMount(c.VolumeMounts, true) {
+			return nil
+		}
+	}
+	return fmt.Errorf("k8s: pod %s lacks gated sandbox identity admission: %w", pod.Name, sandbox.ErrSpecMismatch)
+}
+
+func hasGuardMount(mounts []corev1.VolumeMount, readOnly bool) bool {
+	mounted := false
+	for _, m := range mounts {
+		if strings.HasPrefix(m.MountPath, uidguard.Dir+"/") {
+			return false
+		}
+		if m.MountPath == uidguard.Dir || m.Name == guardVolumeName {
+			if m.Name != guardVolumeName || m.MountPath != uidguard.Dir || m.ReadOnly != readOnly || m.SubPath != "" || m.SubPathExpr != "" {
+				return false
+			}
+			mounted = true
+		}
+	}
+	return mounted
 }
 
 // hasGateSidecar reports whether the pod carries the egress-gate sidecar — the
@@ -409,6 +466,10 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 		return nil, sandbox.ErrNotFound
 	}
 	name := pods.Items[0].Name
+	if err := checkGuard(&pods.Items[0]); err != nil {
+		return nil, err
+	}
+	client := p.client.forSandbox(hasGateSidecar(&pods.Items[0]))
 	// A three-way probe, not a bare `test -e`: an exit-1 there conflates a
 	// genuinely missing root with one an unsearchable ancestor hides (an
 	// agent chmod-000ing a directory it owns), and skipping the latter would
@@ -426,7 +487,7 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 	// (#860). One that did not reach the output whole is unanswerable, and
 	// fails the capture as an ancestor that denies search does.
 	f := sandbox.NewFrame("export")
-	out, cut, _, err := p.client.execOutput(ctx, name, containerName, []string{"sh", "-c", f.Wrap(exportProbe), "probe", root})
+	out, cut, _, err := client.execOutput(ctx, name, containerName, []string{"sh", "-c", f.Wrap(exportProbe), "probe", root})
 	if err != nil {
 		return nil, fmt.Errorf("k8s: probe %s in pod %s: %w", root, name, err)
 	}
@@ -445,7 +506,7 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 	pr, pw := io.Pipe()
 	go func() {
 		errOut := &cappedBuffer{limit: 4096}
-		res, err := p.client.exec(ctx, name, containerName,
+		res, err := client.exec(ctx, name, containerName,
 			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, errOut)
 		if err == nil && res.code != 0 {
 			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s: %s",
@@ -500,20 +561,16 @@ func (p *Provider) deleteAndWaitGone(ctx context.Context, name string, uid types
 	}
 }
 
-// deleteByUID removes a pod this call created, on a detached context (the
-// caller may already be cancelled) with a UID precondition so an ABA cannot
-// remove a replacement. Best-effort, like the Docker provider's removeDetached.
-func (p *Provider) deleteByUID(name string, uid types.UID) {
-	if uid == "" {
-		return
+// discardFailedGate retires only the credential of this pod. If the store
+// cannot confirm that, keep the pod visible to a retry and the session reaper.
+func (p *Provider) discardFailedGate(ctx context.Context, name string, uid types.UID, spec sandbox.Spec, token string) error {
+	if uid == "" || token == "" {
+		return fmt.Errorf("k8s: cannot identify the failed gate in pod %s", name)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
-	defer cancel()
-	zero := int64(0)
-	_ = p.client.cs.CoreV1().Pods(p.client.namespace).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
-		Preconditions:      &metav1.Preconditions{UID: &uid},
-	})
+	if err := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, token); err != nil {
+		return fmt.Errorf("k8s: revoke failed gate for pod %s: %w", name, err)
+	}
+	return p.deleteAndWaitGone(ctx, name, uid)
 }
 
 // reclaimUnready deletes a pod that could not be brought to readiness — one
@@ -527,26 +584,49 @@ func (p *Provider) deleteByUID(name string, uid types.UID) {
 //     one that has since become ready (another executor may be using it);
 //   - a UID precondition on the delete, so an ABA between the Get and the Delete
 //     still cannot remove a replacement.
-func (p *Provider) reclaimUnready(name string, uid types.UID, gated bool) {
+func (p *Provider) reclaimUnready(name string, uid types.UID, spec sandbox.Spec) error {
 	if uid == "" {
-		return // no identity to guard the delete with; leave it for an operator
+		return nil // no identity to guard the delete with; leave it for an operator
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
 	defer cancel()
 	pods := p.client.cs.CoreV1().Pods(p.client.namespace)
 	pod, err := pods.Get(ctx, name, metav1.GetOptions{})
-	if err != nil || pod.UID != uid || podReady(pod, gated) {
-		return
+	if err != nil || pod.UID != uid || podReady(pod, spec.Gate != nil) {
+		return nil
+	}
+	if spec.Gate != nil {
+		for _, c := range pod.Spec.InitContainers {
+			if c.Name != gateContainerName {
+				continue
+			}
+			for _, e := range c.Env {
+				if e.Name == "GATE_TOKEN" {
+					return p.discardFailedGate(ctx, name, uid, spec, e.Value)
+				}
+			}
+		}
+		return fmt.Errorf("k8s: refused pod %s has no gate token to retire", name)
 	}
 	zero := int64(0)
 	_ = pods.Delete(ctx, name, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		Preconditions:      &metav1.Preconditions{UID: &uid},
 	})
+	return nil
 }
 
-// podReady reports whether the sandbox container is running and ready — and,
-// for a gated pod, whether the gate sidecar is too. The sidecar's readiness
+func sandboxTermination(pod *corev1.Pod) *corev1.ContainerStateTerminated {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName {
+			return cs.State.Terminated
+		}
+	}
+	return nil
+}
+
+// podReady reports whether the sandbox is ready. Provisioning a gated pod
+// also requires a ready gate sidecar. The sidecar's readiness
 // probe is the gate's own healthcheck, so a gated pod is never handed to a
 // tool run while its egress gate is down (the Docker provider's adopt-only-
 // healthy rule). A native sidecar reports in InitContainerStatuses.
@@ -661,6 +741,15 @@ func (p *Provider) podSpec(name, workdir string, spec sandbox.Spec, gateToken st
 		// (the gate needs them) and the owner-match firewall the gate installs
 		// is the isolation. The flush would strand the gate.
 		pod.Spec.InitContainers = []corev1.Container{gateSidecar(spec.Gate, gateToken)}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: guardVolumeName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		sb := &pod.Spec.Containers[0]
+		sb.VolumeMounts = append(sb.VolumeMounts, corev1.VolumeMount{Name: guardVolumeName, MountPath: uidguard.Dir, ReadOnly: true})
+		sb.Command = uidguard.Command(sb.Command)
+		sb.StartupProbe = &corev1.Probe{
+			ProbeHandler:  corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: uidguard.Command(nil)}},
+			PeriodSeconds: 1, TimeoutSeconds: 3, FailureThreshold: 30,
+		}
 	case spec.Networking.Type == domain.NetLimited:
 		pod.Spec.InitContainers = []corev1.Container{p.netSetup()}
 	}
@@ -893,6 +982,7 @@ func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
 		// depends on knowing the uid the gate's owner-match rule ACCEPTs, since
 		// Hardening.Validate refuses a sandbox running as it.
 		{Name: "GATE_UID", Value: strconv.Itoa(gaterun.DefaultGateUID)},
+		{Name: uidguard.StageEnv, Value: "1"},
 	}
 	// Only when a collector is configured; an empty endpoint runs the gate
 	// without an exporter, matching the Docker wiring and telemetry.Run.
@@ -910,6 +1000,7 @@ func gateSidecar(g *sandbox.GateSpec, token string) corev1.Container {
 		Image:           g.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &restartAlways,
+		VolumeMounts:    []corev1.VolumeMount{{Name: guardVolumeName, MountPath: uidguard.Dir}},
 		Env:             env,
 		Resources:       gateResourceRequirements(g.Resources),
 		SecurityContext: &corev1.SecurityContext{
@@ -1027,11 +1118,17 @@ func (p *Provider) waitReady(ctx context.Context, name string, gated bool) error
 		if err != nil {
 			return fmt.Errorf("k8s: wait ready %s: %w", name, err)
 		}
+		if terminated := sandboxTermination(pod); gated && terminated != nil && terminated.ExitCode == uidguard.Refused {
+			return fmt.Errorf("k8s: sandbox in pod %s exited before admission with status %d (possible reserved gate UID %d refusal)", name, uidguard.Refused, uidguard.GateUID)
+		}
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return fmt.Errorf("k8s: pod %s is %s before it became ready", name, pod.Status.Phase)
 		}
 		if podReady(pod, gated) {
-			return nil
+			if hasGateSidecar(pod) != gated {
+				return fmt.Errorf("k8s: ready pod %s has a different gate configuration: %w", name, sandbox.ErrSpecMismatch)
+			}
+			return checkGuard(pod)
 		}
 		select {
 		case <-ctx.Done():
@@ -1066,7 +1163,20 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 	if aerr := ours(existing, sessionID); aerr != nil {
 		return nil, aerr
 	}
-	if !podReady(existing, hasGateSidecar(existing)) {
+	gated := hasGateSidecar(existing)
+	if err := checkGuard(existing); err != nil {
+		return nil, err
+	}
+	// An archive revokes the gate before the final file harvest. The admitted
+	// sandbox can still serve guarded local commands after its proxy stops.
+	if !podReady(existing, false) {
+		if gated {
+			for _, cs := range existing.Status.ContainerStatuses {
+				if cs.Name == containerName && cs.State.Running != nil {
+					return nil, fmt.Errorf("k8s: running sandbox in pod %s is waiting for its startup probe", name)
+				}
+			}
+		}
 		return nil, sandbox.ErrNotFound
 	}
 	var workdir string
@@ -1079,12 +1189,12 @@ func (p *Provider) Attach(ctx context.Context, sessionID domain.ID) (sandbox.San
 		return nil, fmt.Errorf("k8s: pod %s carries no %s container: %w",
 			name, containerName, sandbox.ErrSpecMismatch)
 	}
-	return p.attach(name, workdir), nil
+	return p.attach(name, workdir, gated), nil
 }
 
-func (p *Provider) attach(name, workdir string) *pod {
+func (p *Provider) attach(name, workdir string, gated bool) *pod {
 	return &pod{
-		client: p.client, name: name, workdir: workdir,
+		client: p.client.forSandbox(gated), name: name, workdir: workdir,
 		killGrace: defaultKillGrace, overrunSlop: defaultOverrunSlop, probeLead: defaultProbeLead,
 	}
 }

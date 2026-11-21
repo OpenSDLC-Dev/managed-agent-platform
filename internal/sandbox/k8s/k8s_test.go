@@ -204,6 +204,11 @@ func k8sGateFixture(t *testing.T) sandboxtest.GateFixture {
 	}
 	stub := sandboxtest.StartGateStubAt(t, k8sHostAddr(t, kubeCtx))
 	return sandboxtest.GateFixture{
+		SandboxImage: func(t *testing.T, dockerfile string) string {
+			ref := dockertest.ImageFrom(t, "image-identity", dockerfile)
+			sandboxtest.LoadIntoKind(t, kubeCtx, ref)
+			return ref
+		},
 		Spec: &sandbox.GateSpec{
 			Image:           image,
 			ControlplaneURL: "http://" + stub.Addr,

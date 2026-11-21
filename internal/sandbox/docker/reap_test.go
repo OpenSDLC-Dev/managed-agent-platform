@@ -34,6 +34,70 @@ func summaryJSON(id, name string, sid domain.ID) string {
 	return fmt.Sprintf(`{"Id":%q,"Names":[%q],"Labels":{%q:%q}}`, id, "/"+name, sessionLabel, string(sid))
 }
 
+func TestReapRetriesAnOrphanedGuardAfterBothContainersDisappear(t *testing.T) {
+	sid := domain.ID("sesn_oldguard")
+	exists, deletes := true, 0
+	wantLabel := guardSessionLabel
+	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/json":
+			io.WriteString(w, `[]`)
+		case "/volumes":
+			var filters map[string][]string
+			if err := json.Unmarshal([]byte(r.URL.Query().Get("filters")), &filters); err != nil {
+				t.Error(err)
+			}
+			if !slices.Equal(filters["label"], []string{wantLabel}) ||
+				!slices.Equal(filters["dangling"], []string{"true"}) {
+				t.Errorf("unexpected guard volume filters: %v", filters)
+			}
+			if exists {
+				fmt.Fprintf(w, `{"Volumes":[{"Name":"orphan","Labels":{%q:%q}}]}`, guardSessionLabel, sid)
+			} else {
+				io.WriteString(w, `{"Volumes":[]}`)
+			}
+		case "/volumes/orphan":
+			if r.Method == http.MethodGet {
+				fmt.Fprintf(w, `{"Labels":{%q:%q}}`, guardSessionLabel, sid)
+				return
+			}
+			if r.Method != http.MethodDelete || r.URL.Query().Has("force") {
+				t.Errorf("unexpected guard deletion: %s %s", r.Method, r.URL)
+			}
+			deletes++
+			switch deletes {
+			case 1:
+				http.Error(w, "transient volume failure", http.StatusInternalServerError)
+			case 2:
+				// A borrower attached between the dangling list and the delete.
+				http.Error(w, "volume is in use", http.StatusConflict)
+			default:
+				exists = false
+				w.WriteHeader(http.StatusNoContent)
+			}
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	})
+	ctx := context.Background()
+	for attempt := 1; attempt <= 3; attempt++ {
+		wantLabel = guardSessionLabel
+		owned, err := p.Owned(ctx)
+		if err != nil || !slices.Equal(owned, []domain.ID{sid}) {
+			t.Fatalf("pass %d: owned %v, %v", attempt, owned, err)
+		}
+		wantLabel = guardSessionLabel + "=" + string(sid)
+		err = p.Reap(ctx, sid)
+		if (err != nil) != (attempt == 1) {
+			t.Fatalf("pass %d: reap error %v", attempt, err)
+		}
+	}
+	wantLabel = guardSessionLabel
+	if owned, err := p.Owned(ctx); err != nil || len(owned) != 0 || deletes != 3 {
+		t.Fatalf("after release: owned %v, %v, deletes %d", owned, err, deletes)
+	}
+}
+
 // TestReapRemovesGatePairAndRevokesTokenFirst: a gated session's reap revokes
 // the persisted token before any removal (revoke-before-teardown keeps a
 // partial failure retryable, #197), then removes the sandbox before the gate —
@@ -52,6 +116,8 @@ func TestReapRemovesGatePairAndRevokesTokenFirst(t *testing.T) {
 	})
 	p := fakeDaemonWithRevoker(t, revoker, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes":
+			io.WriteString(w, `{"Volumes":[]}`)
 		case r.URL.Path == "/containers/json":
 			if r.URL.Query().Get("all") != "1" {
 				t.Errorf("list query all = %q, want 1 (a stopped container is still owned)", r.URL.Query().Get("all"))
@@ -109,6 +175,10 @@ func TestReapNothingOwnedStillRevokes(t *testing.T) {
 	revoked := 0
 	revoker := revokerFunc(func(context.Context, domain.ID) error { revoked++; return nil })
 	p := fakeDaemonWithRevoker(t, revoker, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/volumes" {
+			io.WriteString(w, `{"Volumes":[]}`)
+			return
+		}
 		if r.URL.Path == "/containers/json" {
 			w.Write([]byte(`[]`))
 			return
@@ -129,6 +199,8 @@ func TestReapTreats404AsRemoved(t *testing.T) {
 	sid := domain.NewID("sesn")
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes":
+			io.WriteString(w, `{"Volumes":[]}`)
 		case r.URL.Path == "/containers/json":
 			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "]"))
 		case r.Method == http.MethodDelete:
@@ -149,6 +221,8 @@ func TestReapRemovalFailuresSurfaceAndContinue(t *testing.T) {
 	var attempted []string
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes":
+			io.WriteString(w, `{"Volumes":[]}`)
 		case r.URL.Path == "/containers/json":
 			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "," +
 				summaryJSON("gate1", gateName(sid), sid) + "]"))
@@ -178,6 +252,11 @@ func TestReapRemovalFailuresSurfaceAndContinue(t *testing.T) {
 func TestOwnedListsDistinctSessions(t *testing.T) {
 	sidA, sidB := domain.NewID("sesn"), domain.NewID("sesn")
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/volumes" {
+			// A detached volume can coexist with a newer container for its session.
+			fmt.Fprintf(w, `{"Volumes":[{"Name":"old","Labels":{%q:%q}}]}`, guardSessionLabel, sidA)
+			return
+		}
 		if r.URL.Path != "/containers/json" {
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			return
@@ -241,6 +320,8 @@ func TestReapWaitsOutInProgressRemoval(t *testing.T) {
 	inspects := 0
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes":
+			io.WriteString(w, `{"Volumes":[]}`)
 		case r.URL.Path == "/containers/json":
 			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "]"))
 		case r.Method == http.MethodDelete:
@@ -270,6 +351,8 @@ func TestReapSurfacesForeignConflict(t *testing.T) {
 	sid := domain.NewID("sesn")
 	p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/volumes":
+			io.WriteString(w, `{"Volumes":[]}`)
 		case r.URL.Path == "/containers/json":
 			w.Write([]byte("[" + summaryJSON("sb1", containerName(sid), sid) + "]"))
 		case r.Method == http.MethodDelete:

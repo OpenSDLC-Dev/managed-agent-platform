@@ -217,6 +217,117 @@ func TestProvisionRefusesAMismatchedGatedPod(t *testing.T) {
 	}
 }
 
+func TestGatedPodWithoutIdentityGuardIsRefused(t *testing.T) {
+	sid := domain.NewID("sesn")
+	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	pod.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "sleep 3600"}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+	p := fakeProvider(pod)
+	ctx := t.Context()
+	if _, err := p.Provision(ctx, spec); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("adopt unguarded pod: %v", err)
+	}
+	if _, err := p.Attach(ctx, sid); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("attach unguarded pod: %v", err)
+	}
+	if _, err := p.Export(ctx, sid, "/workspace"); !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Errorf("export unguarded pod: %v", err)
+	}
+	if _, err := p.client.cs.CoreV1().Pods("default").Get(ctx, pod.Name, metav1.GetOptions{}); err != nil {
+		t.Fatalf("existing pod after refusal: %v", err)
+	}
+}
+
+func TestGatedPodRequiresTheStagedGuardVolumeAndProbe(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	for _, tc := range []struct {
+		name string
+		edit func(*corev1.Pod)
+	}{
+		{"missing startup probe", func(p *corev1.Pod) { p.Spec.Containers[0].StartupProbe = nil }},
+		{"missing gate mount", func(p *corev1.Pod) { p.Spec.InitContainers[0].VolumeMounts = nil }},
+		{"missing private volume", func(p *corev1.Pod) { p.Spec.Volumes = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+			tc.edit(pod)
+			pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+			if _, err := fakeProvider(pod).Attach(t.Context(), spec.SessionID); !errors.Is(err, sandbox.ErrSpecMismatch) {
+				t.Fatalf("attach with %s: %v, want a spec mismatch", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestAttachRetriesARunningGatedPodWhileProbesSettle(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	pod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	pod.Status.ContainerStatuses[0].Ready = false
+	pod.Status.ContainerStatuses[0].State.Running = &corev1.ContainerStateRunning{}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+	sb, err := fakeProvider(pod).Attach(t.Context(), spec.SessionID)
+	if sb != nil || err == nil || errors.Is(err, sandbox.ErrNotFound) {
+		t.Fatalf("running pod awaiting startup probe: attach = %v, %v, want retryable error", sb, err)
+	}
+}
+
+func TestArchiveCanAttachToAdmittedWorkspaceAfterGateStops(t *testing.T) {
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{})}
+	resource := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	resource.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}}}
+	got, err := fakeProvider(resource).Attach(t.Context(), spec.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.(*pod).client.guarded {
+		t.Fatal("archive handle does not guard its local file commands")
+	}
+}
+
+func TestAdmissionDoesNotInferIdentityFromAnImageExit(t *testing.T) {
+	safe := int64(2048)
+	spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(&mintRecorder{}),
+		Hardening: sandbox.Hardening{RunAsUser: &safe}}
+	resource := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	resource.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 77}}
+	err := fakeProvider(resource).waitReady(t.Context(), resource.Name, true)
+	if err == nil || !strings.Contains(err.Error(), "possible reserved gate UID") {
+		t.Fatalf("image startup exit 77: %v", err)
+	}
+}
+
+func TestFailedAdmissionRetiresOnlyThePodsTokenBeforeDeletion(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"retired", nil}, {"retry", errors.New("token storage unavailable")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mintRecorder{retireErr: tc.err}
+			spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: "img", Gate: gateSpecFixture(m)}
+			name := podName(spec.SessionID)
+			const token = "fixture-gate"
+			resource := fakeProvider().podSpec(name, sandbox.DefaultWorkdir, spec, token)
+			resource.Namespace = "default"
+			resource.UID = "refused-fixture"
+			resource.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: containerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 77}}}}
+			p := fakeProvider(resource)
+			if _, err := p.Provision(t.Context(), spec); err == nil || (tc.err != nil && !errors.Is(err, tc.err)) {
+				t.Fatalf("refused provision: %v", err)
+			}
+			if !slices.Equal(m.retired, []string{token}) {
+				t.Fatal("expected retirement of only the token carried by the refused pod")
+			}
+			_, err := p.client.cs.CoreV1().Pods("default").Get(t.Context(), name, metav1.GetOptions{})
+			if tc.err != nil && err != nil || tc.err == nil && !apierrors.IsNotFound(err) {
+				t.Fatalf("pod after token retirement: %v", err)
+			}
+		})
+	}
+}
+
 // A pod that is both wedged (its gate never turns ready) and spec-mismatched
 // must still be reclaimed: the readiness wait and its #198 reclaim run before
 // the spec check, deliberately — refusing first would strand a dead pod
@@ -316,7 +427,7 @@ func TestExecErrReclassifiesVanishedPod(t *testing.T) {
 
 	// No pod exists: a generic exec error becomes ErrNotFound once the existence
 	// check confirms the pod is gone (remotecommand's upgrade error hides this).
-	gone := fakeProvider().attach(podName(sid), "/workspace")
+	gone := fakeProvider().attach(podName(sid), "/workspace", false)
 	if gone.execErr(ctx, nil) != nil {
 		t.Error("execErr(nil) = non-nil, want nil")
 	}
@@ -330,7 +441,7 @@ func TestExecErrReclassifiesVanishedPod(t *testing.T) {
 
 	// The pod is present: a transient error is surfaced unchanged, not masked as
 	// a vanished sandbox.
-	live := fakeProvider(readyPod(sid)).attach(podName(sid), "/workspace")
+	live := fakeProvider(readyPod(sid)).attach(podName(sid), "/workspace", false)
 	transient := errors.New("transient stream reset")
 	if err := live.execErr(ctx, transient); err != transient {
 		t.Errorf("execErr(present pod, transient) = %v, want the original error", err)
@@ -2343,7 +2454,14 @@ type mintRecorder struct {
 	generated  int
 	persisted  []string // tokens handed to Persist
 	persistErr error
+	retired    []string
+	retireErr  error
 	revoked    []domain.ID // sessions handed to Revoke
+}
+
+func (m *mintRecorder) RevokeIfCurrent(_ context.Context, _ domain.ID, token string) error {
+	m.retired = append(m.retired, token)
+	return m.retireErr
 }
 
 func (m *mintRecorder) Generate() string { m.generated++; return "gtk_unit_test_token" }
@@ -2599,16 +2717,27 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 // TestProvisionGatedPersistFailureCleansUp: a pod whose token was never
 // recorded can only ever 401 — Provision must fail and remove it.
 func TestProvisionGatedPersistFailureCleansUp(t *testing.T) {
-	m := &mintRecorder{persistErr: errors.New("db down")}
-	sid := domain.ID("sesn_persistfail")
-	p := fakeProvider()
-	markPodsReadyOnCreate(p)
-	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
-	if _, err := p.Provision(context.Background(), spec); err == nil {
-		t.Fatal("provision succeeded despite a token-persist failure")
-	}
-	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("pod with an unpersisted token was left behind (get err = %v)", err)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"retire the uncertain token", nil}, {"keep the pod on store failure", errors.New("store unavailable")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mintRecorder{persistErr: errors.New("commit reply unavailable"), retireErr: tc.err}
+			sid := domain.ID("sesn_persistfail")
+			p := fakeProvider()
+			markPodsReadyOnCreate(p)
+			spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
+			if _, err := p.Provision(t.Context(), spec); !errors.Is(err, m.persistErr) {
+				t.Fatalf("persist error: %v", err)
+			}
+			if !slices.Equal(m.retired, []string{"gtk_unit_test_token"}) {
+				t.Fatal("expected retirement of the specific token passed to Persist")
+			}
+			_, err := p.client.cs.CoreV1().Pods("default").Get(t.Context(), podName(sid), metav1.GetOptions{})
+			if tc.err == nil && !apierrors.IsNotFound(err) || tc.err != nil && err != nil {
+				t.Fatalf("pod after compensating for an uncertain commit: %v", err)
+			}
+		})
 	}
 }
 
@@ -2652,6 +2781,9 @@ func TestProvisionGatedAdoptUnreadyReclaims(t *testing.T) {
 	}
 	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("wedged gated pod was not reclaimed (get err = %v); the session can never recover", err)
+	}
+	if !slices.Equal(m.retired, []string{"gtk_never_persisted"}) {
+		t.Fatal("expected retirement of the still-starting pod's token")
 	}
 }
 

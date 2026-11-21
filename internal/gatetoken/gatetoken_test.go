@@ -141,6 +141,69 @@ func TestRevokeInvalidatesLiveToken(t *testing.T) {
 	}
 }
 
+func TestFailedGateRevocationPreservesItsSuccessor(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx := t.Context()
+	sid, _ := pgtest.NewSession(t, pool, "cloud")
+	prior, current := gatetoken.Mint(), gatetoken.Mint()
+	for _, token := range []string{prior, current} {
+		if err := gatetoken.Ensure(ctx, pool, sid.String(), token); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gatetoken.RevokeIfCurrent(ctx, pool, sid.String(), prior); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gatetoken.Authenticate(ctx, pool, current); err != nil || got != sid.String() {
+		t.Fatalf("successor authentication = %q, %v", got, err)
+	}
+	if err := gatetoken.RevokeIfCurrent(ctx, pool, sid.String(), current); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := gatetoken.Authenticate(ctx, pool, current); err != nil || got != "" {
+		t.Fatalf("retired gate authentication = %q, %v", got, err)
+	}
+}
+
+func TestFailedGateRevocationWaitsForPendingMint(t *testing.T) {
+	pool := pgtest.NewPool(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	sid, _ := pgtest.NewSession(t, pool, "cloud")
+	token := gatetoken.Mint()
+
+	mint, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mint.Rollback(ctx)
+	// Hold Ensure just before its commit is visible to a second connection.
+	if _, err := mint.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR KEY SHARE`, sid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mint.Exec(ctx, `INSERT INTO session_gate_tokens (id, session_id, token_hash)
+		VALUES ('gatetok_pending', $1, $2)`, sid, gatetoken.HashToken(token)); err != nil {
+		t.Fatal(err)
+	}
+	retired := make(chan error, 1)
+	go func() { retired <- gatetoken.RevokeIfCurrent(ctx, pool, sid.String(), token) }()
+	waitForABlockedBackend(t, pool, retired)
+	if err := mint.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-retired:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got, err := gatetoken.Authenticate(ctx, pool, token); err != nil || got != "" {
+		t.Fatalf("authentication after the pending mint committed: %q, %v", got, err)
+	}
+}
+
 func TestEnsureNonexistentSessionErrors(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	// A gate token can only be minted for a real session (the FK); a bad session
@@ -333,15 +396,15 @@ func pgCodeIs(err error, code string) bool {
 // so it answers about this test's blocked backend and not the database's mood;
 // pgtest gives a fresh database per test, so nothing else can be waiting, and
 // the poller's own query is running rather than waiting so it never self-counts.
-// It watches ensured as well, because an Ensure that fails without ever blocking
+// It watches the result as well, because an operation that fails without blocking
 // would otherwise be reported as a timeout with its own error thrown away.
-func waitForABlockedBackend(t *testing.T, pool *pgxpool.Pool, ensured <-chan error) {
+func waitForABlockedBackend(t *testing.T, pool *pgxpool.Pool, result <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		select {
-		case err := <-ensured:
-			t.Fatalf("Ensure returned before it ever blocked: %v", err)
+		case err := <-result:
+			t.Fatalf("database operation returned before it blocked: %v", err)
 		default:
 		}
 		// Each poll is bounded, so a stalled pool acquire or query fails here
@@ -359,7 +422,7 @@ func waitForABlockedBackend(t *testing.T, pool *pgxpool.Pool, ensured <-chan err
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("waited for Ensure to block, saw %d blocked backend(s); the race this test exists for did not happen", blocked)
+			t.Fatalf("waited for a database operation to block, saw %d blocked backends", blocked)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

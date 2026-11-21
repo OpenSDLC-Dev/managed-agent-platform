@@ -3,6 +3,8 @@ package gaterun
 import (
 	"fmt"
 	"net"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 )
 
 // DefaultProxyAddr is the loopback address the gate's egress proxy listens on,
@@ -19,7 +21,7 @@ const DefaultProxyAddr = "127.0.0.1:15080"
 // matches the ACCEPT rule and leaves the namespace unfiltered, so they refuse
 // that combination rather than start a sandbox whose egress policy is silently
 // void (#65, #196).
-const DefaultGateUID = 65532
+const DefaultGateUID = uidguard.GateUID
 
 // CheckLoopbackListenAddr rejects a proxy listen address whose host is not
 // loopback. The gate's forward proxy is unauthenticated — its only protection is

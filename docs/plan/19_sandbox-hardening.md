@@ -232,7 +232,5 @@ configuration:
   one to run stays a deployment choice.
 - A per-environment sizing policy on the wire. No wire field carries one; these
   are deployment knobs, and the `Spec` seam is where one would later attach.
-- `#196` (a sandbox image whose `USER` is already the gate's dropped-to UID)
-  keeps its own tracking issue: `RunAsUser` gives an operator a second lever
-  against it, but the enforcement that issue asks for is a validation, not a
-  default.
+- This plan deferred the image's own `USER` to #196.
+  [Plan 74](./74_gated-sandbox-identity.md) added that runtime validation.

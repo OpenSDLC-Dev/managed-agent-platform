@@ -2,6 +2,7 @@ package sandboxtest
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -15,6 +16,8 @@ import (
 // GateSpec its gated rows provision with, plus the egress targets and the one
 // credential the fixture's stand-in controlplane serves for them.
 type GateFixture struct {
+	// SandboxImage builds a fixture image and makes it available to this backend.
+	SandboxImage func(*testing.T, string) string
 	// Spec is the gate the provisioned sandbox pairs with.
 	Spec *sandbox.GateSpec
 	// AllowedAddr is the host:port — reachable from the gate container — of an
@@ -35,6 +38,55 @@ type GateFixture struct {
 // each other (the refusal asserts are meaningful only once the allowed host is
 // known reachable, since a gate serves deny-all before its first config fetch).
 func gateRows(t *testing.T, newHarness func(t *testing.T) Harness) {
+	t.Run("GatedSandboxImageIdentity", func(t *testing.T) {
+		h := newHarness(t)
+		fx := h.Gate(t)
+		ctx := context.Background()
+		for _, tc := range []struct {
+			user string
+			uid  int
+		}{{"65532", 65532}, {"gatecollision", 65532}, {"sandboxuser", 2048}} {
+			t.Run(tc.user, func(t *testing.T) {
+				tag := domain.NewID("sesn")
+				image := fx.SandboxImage(t, fmt.Sprintf(
+					"FROM %s\nRUN useradd -u 65532 gatecollision && useradd -u 2048 sandboxuser\nLABEL map.fixture=%s\nUSER %s\n", h.Image, tag, tc.user))
+				spec := sandbox.Spec{SessionID: domain.NewID("sesn"), Image: image, Workdir: "/tmp", Gate: fx.Spec,
+					Networking: domain.Networking{Type: domain.NetLimited}}
+				t.Cleanup(func() {
+					if err := h.Provider.Reap(ctx, spec.SessionID); err != nil {
+						t.Errorf("reap identity fixture: %v", err)
+					}
+				})
+				sb, err := h.Provider.Provision(ctx, spec)
+				if tc.uid == 65532 {
+					if sb != nil || err == nil || !strings.Contains(err.Error(), "reserved gate UID") {
+						t.Fatalf("image user %s: handle present = %v, err = %v, want reserved gate UID refusal", tc.user, sb != nil, err)
+					}
+					override := int64(2048)
+					spec.Hardening.RunAsUser = &override
+					sb, err = h.Provider.Provision(ctx, spec)
+				}
+				if err != nil {
+					t.Fatalf("admit safe identity: %v", err)
+				}
+				adopted, err := h.Provider.Provision(ctx, spec)
+				if err != nil {
+					t.Fatalf("adopt: %v", err)
+				}
+				attached, err := h.Provider.Attach(ctx, spec.SessionID)
+				if err != nil {
+					t.Fatalf("attach: %v", err)
+				}
+				for _, handle := range []sandbox.Sandbox{sb, adopted, attached} {
+					res, err := handle.Exec(ctx, sandbox.ExecRequest{Command: "id -u"})
+					if err != nil || res.ExitCode != 0 || strings.TrimSpace(res.Stdout) != "2048" {
+						t.Fatalf("effective uid = %+v, %v, want 2048", res, err)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("GatedLimitedEgressOnlyThroughGate", func(t *testing.T) {
 		h := newHarness(t)
 		fx := h.Gate(t)

@@ -116,6 +116,25 @@ func Revoke(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
 	return err
 }
 
+// RevokeIfCurrent retires the token of one failed gate without affecting a
+// successor issued for the same session.
+func RevokeIfCurrent(ctx context.Context, pool *pgxpool.Pool, sessionID, token string) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Ensure may still be committing after its caller lost the reply. Wait
+	// for its key-share lock, then take a fresh snapshot in the UPDATE.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, revokeSQL+" AND token_hash = $2", sessionID, HashToken(token)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // Authenticate resolves a gate token to the session it is scoped to, or "" if
 // the token is unknown, revoked, or its session has been archived (fail-closed:
 // an archived session's gate must stop being served). There is no wall-clock

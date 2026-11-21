@@ -209,5 +209,6 @@ func (s *GateStub) Minter() sandbox.GateTokenMinter { return stubMinter{token: s
 
 type stubMinter struct{ token string }
 
-func (m stubMinter) Generate() string                                 { return m.token }
-func (m stubMinter) Persist(context.Context, domain.ID, string) error { return nil }
+func (m stubMinter) Generate() string                                         { return m.token }
+func (m stubMinter) Persist(context.Context, domain.ID, string) error         { return nil }
+func (m stubMinter) RevokeIfCurrent(context.Context, domain.ID, string) error { return nil }

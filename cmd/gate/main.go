@@ -31,6 +31,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gate"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/telemetry"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/version"
 )
@@ -132,6 +133,14 @@ func run(ctx context.Context) error {
 
 	// Firewall + privilege drop before anything listens, so the HEALTHCHECK that
 	// gates the sandbox's admission cannot pass until egress is fail-closed.
+	if os.Getenv(uidguard.StageEnv) == "1" {
+		if gateUID != uidguard.GateUID {
+			return errors.New("gated sandbox launcher and configured gate UID disagree")
+		}
+		if err := uidguard.Stage("/usr/local/lib/map/uidguard", uidguard.Dir); err != nil {
+			return err
+		}
+	}
 	if err := gaterun.Setup(ctx, iptablesFirewall{}, privDropper{uid: gateUID, gid: gateGID}, gateUID); err != nil {
 		return err
 	}

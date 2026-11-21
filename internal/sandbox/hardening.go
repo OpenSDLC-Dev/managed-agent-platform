@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 )
 
 // Hardening is the containment a provider applies to a session's sandbox when
@@ -177,6 +178,18 @@ const sessionResourceRoot = "/mnt"
 // workdir, and the dedupe below folds the two.
 const RepositoryRoot = "/workspace"
 
+// EffectiveWorkdir resolves the shared default before either provider creates
+// resources. A gated sandbox must keep its working tree outside the guard mount.
+func (s Spec) EffectiveWorkdir() (string, error) {
+	if s.Workdir == "" {
+		return DefaultWorkdir, nil
+	}
+	if w := gopath.Clean(s.Workdir); s.Gate != nil && (w == uidguard.Dir || strings.HasPrefix(w, uidguard.Dir+"/")) {
+		return "", fmt.Errorf("sandbox: workdir %q overlaps the reserved gate launcher directory %s", s.Workdir, uidguard.Dir)
+	}
+	return s.Workdir, nil
+}
+
 // WritablePaths are the mount points a read-only-rootfs sandbox still needs to
 // write, in the order a backend should mount them. Both backends take the list
 // from here so they cannot drift on it, and it is deduplicated: a deployment
@@ -206,8 +219,8 @@ func WritablePaths(workdir string) []string {
 // not run as the gate's own uid, because the gate's owner-match firewall ACCEPTs
 // exactly that uid — every tool process would leave the namespace unfiltered,
 // with allowed_hosts and vault substitution bypassed and nothing logged. The
-// same hazard reached through the sandbox *image* is #196; this closes the half
-// the platform itself now opens.
+// launcher checks the runtime's effective UID too, including an image-selected
+// user (plan 74).
 func (h Hardening) Validate(gated bool) error {
 	if gated && h.RunAsUser != nil && *h.RunAsUser == gaterun.DefaultGateUID {
 		return fmt.Errorf("sandbox: RunAsUser %d is the egress gate's own uid: "+

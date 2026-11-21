@@ -28,7 +28,7 @@ func hardenedSpec(h sandbox.Hardening) sandbox.Spec {
 // guard that an unconfigured deployment's containers are unchanged — the
 // contract rows can only see a hardened sandbox.
 func TestSandboxConfigUnhardenedIsUnchanged(t *testing.T) {
-	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "", 0)
+	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{}), "/workspace", "", "", 0)
 	if cfg.User != "" {
 		t.Errorf("User = %q, want the image's own", cfg.User)
 	}
@@ -52,7 +52,7 @@ func TestSandboxConfigAppliesHardening(t *testing.T) {
 	cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{
 		PidsLimit: 512, CPUMillis: 2000, MemoryBytes: 1 << 30,
 		CapDrop: []string{"CHOWN"}, ReadOnlyRootfs: true, RunAsUser: &uid,
-	}), "/workspace", "", 2000)
+	}), "/workspace", "", "", 2000)
 
 	h := cfg.HostConfig
 	if h.PidsLimit != 512 {
@@ -105,7 +105,7 @@ func TestSandboxConfigGatedKeepsItsMandatoryDrops(t *testing.T) {
 			[]string{"CHOWN", "NET_RAW", "SETUID", "SETGID"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{CapDrop: tc.configured}), "/workspace", "gate1", 0)
+			cfg := sandboxConfig(hardenedSpec(sandbox.Hardening{CapDrop: tc.configured}), "/workspace", "gate1", "guard1", 0)
 			if !slices.Equal(cfg.HostConfig.CapDrop, tc.want) {
 				t.Errorf("CapDrop = %v, want %v", cfg.HostConfig.CapDrop, tc.want)
 			}
