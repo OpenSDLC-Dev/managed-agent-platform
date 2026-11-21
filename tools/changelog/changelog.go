@@ -401,7 +401,11 @@ func assemble(content string, frags []fragment, version, date string) (string, e
 	}
 	out = append(out, "")
 	out = append(out, newRefs...)
-	return strings.Join(out, "\n") + "\n", nil
+	assembled := strings.Join(out, "\n") + "\n"
+	if _, _, _, err := changelogSections(strings.Split(assembled, "\n")); err != nil {
+		return "", fmt.Errorf("assembled changelog: %w", err)
+	}
+	return assembled, nil
 }
 
 // notes returns the body of version's released section, without the

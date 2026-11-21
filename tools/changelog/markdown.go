@@ -22,6 +22,7 @@ func codeLines(lines []string) ([]bool, error) {
 	code := make([]bool, len(lines))
 	var marker byte
 	var width, openedAt, quoteDepth, listIndent, fenceListQuotes int
+	var listIndents []int
 	paragraph := false
 	for i, raw := range lines {
 		limit := -1
@@ -34,6 +35,7 @@ func codeLines(lines []string) ([]bool, error) {
 				return nil, fmt.Errorf("unclosed Markdown fence at line %d", openedAt)
 			}
 			quoteDepth, listIndent, paragraph = depth, 0, false
+			listIndents = listIndents[:0]
 		}
 		indent, trim := markdownIndent(line)
 		if width != 0 {
@@ -56,14 +58,19 @@ func codeLines(lines []string) ([]bool, error) {
 			paragraph = false
 			continue
 		}
-		if indent < listIndent {
-			listIndent = 0
+		for len(listIndents) != 0 && indent < listIndents[len(listIndents)-1] {
+			listIndents = listIndents[:len(listIndents)-1]
+		}
+		listIndent = 0
+		if len(listIndents) != 0 {
+			listIndent = listIndents[len(listIndents)-1]
 		}
 		innerQuotes := 0
-		if item := listContentStart(line); item > 0 {
-			listIndent = item
+		if item := listContentStart(trim); item > 0 && indent <= listIndent+3 {
+			listIndent = indent + item
+			listIndents = append(listIndents, listIndent)
 			var content string
-			content, innerQuotes = quoteBody(line[item:], -1)
+			content, innerQuotes = quoteBody(trim[item:], -1)
 			indent, trim = markdownIndent(content)
 			indent += listIndent
 			paragraph = false
@@ -190,7 +197,7 @@ func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)
 		if !headingRe.MatchString(first) {
 			for end < len(lines) && !code[end] {
 				body, nextDepth := quoteBody(lines[end], -1)
-				if depth != nextDepth || strings.TrimSpace(body) == "" || headingRe.MatchString(body) || listItemRe.MatchString(body) {
+				if depth != nextDepth || strings.TrimSpace(body) == "" || headingRe.MatchString(body) || listItemRe.MatchString(strings.TrimLeft(body, " \t")) {
 					break
 				}
 				end++
@@ -198,18 +205,21 @@ func markdownDestinations(lines []string, code []bool, visit func(int, textSpan)
 		}
 		codeEnds := inlineCodeEnds(strings.Join(lines[start:end], "\n"))
 		offset, cursor := 0, 0
+		definitions := true
 		for i := start; i < end; i++ {
 			line := lines[i]
 			body, _ := quoteBody(line, depth)
+			body = strings.TrimLeft(body, " \t")
 			if item := listContentStart(body); item > 0 {
 				body = body[item:]
 				body, _ = quoteBody(body, -1)
 			}
 			body = strings.TrimLeft(body, " \t")
 			prefix := len(line) - len(body)
-			if ref := refDefTargetRe.FindStringSubmatchIndex(body); ref != nil && cursor <= offset+prefix {
+			if ref := refDefTargetRe.FindStringSubmatchIndex(body); definitions && ref != nil && cursor <= offset+prefix {
 				visit(i, textSpan{prefix + ref[2], prefix + ref[3]})
 			} else {
+				definitions = false
 				cursor = inlineDestinations(line, max(cursor-offset, 0), offset, codeEnds, func(span textSpan) { visit(i, span) })
 			}
 			offset += len(line) + 1

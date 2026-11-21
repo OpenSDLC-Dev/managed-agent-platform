@@ -656,6 +656,7 @@ func TestFragmentChecksLinksOutsideCode(t *testing.T) {
 		{body: example + "- A [link](./docs/RELEASING.md).\n"},
 		{body: "-     [indented example](bare.md)\n"},
 		{body: "- > ```md\n  > [quoted example](bare.md)\n  > ```\n"},
+		{body: "- One display reads\n    [expired]: disabled\n"},
 		{body: example + "- A [link](bare.md).\n", wantErr: "bare.md"},
 		{body: "- A note.\n\n  ```\n", wantErr: "unclosed Markdown fence"},
 	} {
@@ -703,20 +704,7 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 			if want := archivePointer(lines, code, link); joinTrimmed(body) != want {
 				t.Errorf("stub = %q, want %q", joinTrimmed(body), want)
 			}
-			markdownDestinations(lines, code, func(i int, span textSpan) {
-				dest := lines[i][span.start:span.end]
-				if !needsLinkBase(dest) {
-					return
-				}
-				target, err := url.Parse(unescapeLink(dest))
-				if err != nil {
-					t.Errorf("line %d: invalid link %q: %v", i+1, dest, err)
-					return
-				}
-				if _, err := os.Stat(filepath.Join(filepath.Dir(file), filepath.FromSlash(target.Path))); err != nil {
-					t.Errorf("line %d: relative target %q: %v", i+1, dest, err)
-				}
-			})
+			checkArchiveLinks(t, file, lines, code)
 		})
 	}
 	archives, err := filepath.Glob(filepath.Join(root, "docs", "changelog", "*.md"))
@@ -729,6 +717,50 @@ func TestTheShippingArchivesMatchIndex(t *testing.T) {
 			t.Errorf("%s has no changelog stub", file)
 		}
 	}
+}
+
+func checkArchiveLinks(t *testing.T, file string, lines []string, code []bool) {
+	t.Helper()
+	markdownDestinations(lines, code, func(i int, span textSpan) {
+		dest := lines[i][span.start:span.end]
+		if !needsLinkBase(dest) {
+			return
+		}
+		target, err := url.Parse(unescapeLink(dest))
+		if err != nil {
+			t.Errorf("line %d: invalid link %q: %v", i+1, dest, err)
+			return
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(file), filepath.FromSlash(target.Path))); err != nil {
+			t.Errorf("line %d: relative target %q: %v", i+1, dest, err)
+		}
+	})
+}
+
+func TestArchiveLinksResolveMarkdownEscapes(t *testing.T) {
+	root := t.TempDir()
+	const path = "docs/changelog/0.4.0.md"
+	file := filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "Example(1).md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content := "## [0.4.0] - 2026-09-01\n\n" + `- [guide](docs/Example\(1\).md).` + "\n"
+	_, archived, err := archiveSection(content, "0.4.0", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(archived, `](../Example\(1\).md)`) {
+		t.Fatalf("archive did not preserve the escaped target: %q", archived)
+	}
+	lines := strings.Split(archived, "\n")
+	code, err := codeLines(lines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkArchiveLinks(t, file, lines, code)
 }
 
 // A fragment name deleted by an earlier release and reused later must sort by
@@ -1104,6 +1136,7 @@ func TestReleaseAndArchiveKeepMarkdownExamples(t *testing.T) {
 		"- ` [inline](ignored.md) ` and `` `[nested](ignored.md)` ``.\n" +
 		"- `a span that wraps\n  [wrapped](ignored.md)` and [anchor](#top).\n\n" +
 		"- Escaped \\](ignored.md).\n\n" +
+		"- Outer.\n  - Inner.\n\n  Back.\n\n    [nested list link]( docs/HISTORY.md).\n\n" +
 		"[absolute](https://example.com/a](docs/b) and [doc]( docs/HISTORY.md).\n" +
 		"[root](./docs/HISTORY.md) and [reference][ref].\n\n" +
 		"[ref]: ./docs/HISTORY.md \"Reference title\"\n"
