@@ -171,7 +171,7 @@ there is no key to distribute.
 ```bash
 cd deploy/compose
 cp .env.example .env
-docker compose --profile console up --build  # Console: http://localhost:3000
+./compose --profile console up --build  # Console: http://localhost:3000
 ```
 
 Complete password setup in Console with the restricted setup-code file named by the

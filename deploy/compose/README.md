@@ -12,7 +12,7 @@ laptop. It's the compose companion to the [Helm chart](../helm); same binaries
 The **BYOC worker** is intentionally not here — it runs on your own compute,
 outside the platform. Run it separately, pointed at this controlplane and from
 the same release as this stack: a release's `worker` binary, or from source
-`make ripgrep && go run ./cmd/worker`. Without `make ripgrep` first the worker
+`make ripgrep && go run -buildvcs ./cmd/worker`. Without `make ripgrep` first the worker
 still runs, but logs a warning at startup and answers every `grep` call with a
 tool error saying it carries no ripgrep.
 
@@ -22,7 +22,7 @@ From this directory:
 
 ```sh
 cp .env.example .env         # review the local-only development defaults
-docker compose --profile console up --build
+./compose --profile console up --build
 ```
 
 - Control plane API: `http://localhost:8080` (bound to loopback by default; see below).
@@ -47,6 +47,8 @@ cp model-providers.example.json model-providers.json   # then edit base_url + ap
 # in .env: MODEL_PROVIDERS_FILE=model-providers.json
 ```
 
+The `./compose` wrapper passes the checkout's build identifier to Docker. Run it
+when building images so the Console can show which platform commit is running.
 The first `--build` compiles the Go binaries; later `up`s reuse the image. Every
 binary applies database migrations itself on connect (advisory-locked), so there
 is no separate migrate step.
@@ -74,7 +76,7 @@ DEVELOPMENT_MODE=true
 ```
 
 Start with
-`docker compose --profile console up --build`, then open `/setup` at that origin.
+`./compose --profile console up --build`, then open `/setup` at that origin.
 Retrieve the first-admin code from the restricted file that the control-plane log names.
 Use the same host spelling throughout; `localhost` and `127.0.0.1` are different origins.
 
@@ -109,7 +111,7 @@ Compose namespaces what it creates by **project**, and the `name:` at the top of
 so bringing a branch build up next to a running stack means naming it:
 
 ```sh
-docker compose -p mapsecond up --build
+./compose -p mapsecond up --build
 ```
 
 That one flag is the whole of the isolation. The executor's gate network and both
@@ -126,7 +128,7 @@ published API ports are the ones you will hit, and they say so at once, so pass 
 overrides in the shell rather than the file:
 
 ```sh
-CONTROLPLANE_PORT=8081 MODELGATEWAY_PORT=8091 docker compose -p mapsecond up --build
+CONTROLPLANE_PORT=8081 MODELGATEWAY_PORT=8091 ./compose -p mapsecond up --build
 ```
 
 With the `console` profile, also change `CONSOLE_PORT` and the matching public origin.
@@ -259,7 +261,7 @@ same as the sandboxes that join their network namespace.
 
 ```sh
 # in .env: OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4317
-docker compose --profile console --profile observability up --build
+./compose --profile console --profile observability up --build
 ```
 
 Jaeger UI: `http://localhost:16686`.
@@ -275,7 +277,7 @@ and the noise gone, put an OTel Collector at `4317` and let it fan out.
 Use the native OIDC block in `.env.example`, with the Console and IAM profiles:
 
 ```sh
-docker compose --profile console --profile iam up --build
+./compose --profile console --profile iam up --build
 ```
 
 The profile adds Casdoor and its Caddy TLS proxy. Open the Console login page at

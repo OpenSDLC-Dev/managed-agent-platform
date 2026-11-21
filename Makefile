@@ -25,8 +25,10 @@ SHELL := /usr/bin/env bash
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
+VERSION_SYMBOL = github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version
+
 build:
-	go build ./...
+	go build -ldflags "-X $(VERSION_SYMBOL)=$$(./tools/build-version.sh)" ./...
 
 # The BYOC worker is meant to cross-compile; 32-bit-only breakage
 # (e.g. an untyped 64-bit const) is invisible to the host build.
@@ -233,7 +235,7 @@ RELEASE_REGISTRY ?= ghcr.io/opensdlc-dev
 RELEASE_IMAGE_NS  = $(RELEASE_REGISTRY)/managed-agent-platform
 RELEASE_CHART_OCI ?= oci://$(RELEASE_REGISTRY)/charts
 RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
-RELEASE_LDFLAGS   = -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=$(VERSION)"
+RELEASE_LDFLAGS   = -ldflags "-X $(VERSION_SYMBOL)=$(VERSION)"
 
 # Tag sanity, run before anything publishes: the tag's version must be the
 # changelog's newest released section (i.e. the release PR merged first), and

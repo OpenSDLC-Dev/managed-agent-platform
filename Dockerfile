@@ -31,9 +31,8 @@ RUN go mod download
 # which builds only the stages a target needs.
 FROM modules AS gate-build
 COPY . .
-# VERSION is stamped into internal/version.Version by the release pipeline
-# (docs/RELEASING.md); an unarged build reports "dev".
-ARG VERSION=dev
+# The caller resolves VERSION outside the Git-free image context.
+ARG VERSION=unknown
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
@@ -90,7 +89,7 @@ COPY . .
 RUN go run ./tools/ripgrepfetch
 # Build the five server binaries into /out (named controlplane, brain,
 # executor, worker, modelgateway).
-ARG VERSION=dev
+ARG VERSION=unknown
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \

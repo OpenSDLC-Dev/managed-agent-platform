@@ -1,0 +1,7 @@
+#!/bin/sh
+# Resolve Git provenance on the host. Docker receives only the version string.
+set -eu
+cd "$(dirname "$0")"
+PLATFORM_BUILD_VERSION=$(../../tools/build-version.sh)
+export PLATFORM_BUILD_VERSION
+exec docker compose "$@"

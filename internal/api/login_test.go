@@ -278,7 +278,7 @@ func TestNativePasswordRequiresDevelopment(t *testing.T) {
 
 func TestNativePasswordLogin(t *testing.T) {
 	originalVersion := version.Version
-	version.Version = "1.2.3"
+	version.Version = "v1.2.3-dev-abcdef01"
 	t.Cleanup(func() { version.Version = originalVersion })
 
 	s := newNativeServer(t, login.ModePassword)

@@ -440,7 +440,7 @@ prefix="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)
 
 # From the repository root: the build context is the whole module.
 gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
-  --substitutions=_IMAGE_PREFIX="$prefix",_TAG="$tag" .
+  --substitutions=_IMAGE_PREFIX="$prefix",_TAG="$tag",_VERSION="$(./tools/build-version.sh)" .
 
 helm install map deploy/helm/managed-agent-platform \
   --namespace map --create-namespace \
