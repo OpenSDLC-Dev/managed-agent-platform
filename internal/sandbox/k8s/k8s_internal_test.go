@@ -2717,16 +2717,27 @@ func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
 // TestProvisionGatedPersistFailureCleansUp: a pod whose token was never
 // recorded can only ever 401 — Provision must fail and remove it.
 func TestProvisionGatedPersistFailureCleansUp(t *testing.T) {
-	m := &mintRecorder{persistErr: errors.New("db down")}
-	sid := domain.ID("sesn_persistfail")
-	p := fakeProvider()
-	markPodsReadyOnCreate(p)
-	spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
-	if _, err := p.Provision(context.Background(), spec); err == nil {
-		t.Fatal("provision succeeded despite a token-persist failure")
-	}
-	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-		t.Errorf("pod with an unpersisted token was left behind (get err = %v)", err)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{"retire the uncertain token", nil}, {"keep the pod on store failure", errors.New("store unavailable")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mintRecorder{persistErr: errors.New("commit reply unavailable"), retireErr: tc.err}
+			sid := domain.ID("sesn_persistfail")
+			p := fakeProvider()
+			markPodsReadyOnCreate(p)
+			spec := sandbox.Spec{SessionID: sid, Image: "img", Gate: gateSpecFixture(m)}
+			if _, err := p.Provision(t.Context(), spec); !errors.Is(err, m.persistErr) {
+				t.Fatalf("persist error: %v", err)
+			}
+			if !slices.Equal(m.retired, []string{"gtk_unit_test_token"}) {
+				t.Fatal("expected retirement of the specific token passed to Persist")
+			}
+			_, err := p.client.cs.CoreV1().Pods("default").Get(t.Context(), podName(sid), metav1.GetOptions{})
+			if tc.err == nil && !apierrors.IsNotFound(err) || tc.err != nil && err != nil {
+				t.Fatalf("pod after compensating for an uncertain commit: %v", err)
+			}
+		})
 	}
 }
 
@@ -2770,6 +2781,9 @@ func TestProvisionGatedAdoptUnreadyReclaims(t *testing.T) {
 	}
 	if _, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Errorf("wedged gated pod was not reclaimed (get err = %v); the session can never recover", err)
+	}
+	if !slices.Equal(m.retired, []string{"gtk_never_persisted"}) {
+		t.Fatal("expected retirement of the still-starting pod's token")
 	}
 }
 

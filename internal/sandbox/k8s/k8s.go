@@ -261,11 +261,12 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 	}
 	if createErr == nil && gated {
 		if perr := spec.Gate.TokenMinter.Persist(ctx, spec.SessionID, gateToken); perr != nil {
-			// The pod exists but its token was never recorded: its gate can only
-			// ever 401 and terminate. Remove the pod we just created (UID-guarded)
-			// so the next attempt starts clean.
-			p.deleteByUID(name, created.UID)
-			return nil, fmt.Errorf("k8s: persist gate token for %s: %w", name, perr)
+			// A lost commit reply leaves persistence uncertain. Retire this
+			// exact token before dropping the pod that makes it discoverable.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reclaimTimeout)
+			defer cancel()
+			return nil, errors.Join(fmt.Errorf("k8s: persist gate token for %s: %w", name, perr),
+				p.discardFailedGate(cleanupCtx, name, created.UID, spec, gateToken))
 		}
 	}
 	if err := p.waitReady(ctx, name, gated); err != nil {
@@ -560,20 +561,16 @@ func (p *Provider) deleteAndWaitGone(ctx context.Context, name string, uid types
 	}
 }
 
-// deleteByUID removes a pod this call created, on a detached context (the
-// caller may already be cancelled) with a UID precondition so an ABA cannot
-// remove a replacement. Best-effort, like the Docker provider's removeDetached.
-func (p *Provider) deleteByUID(name string, uid types.UID) {
-	if uid == "" {
-		return
+// discardFailedGate retires only the credential of this pod. If the store
+// cannot confirm that, keep the pod visible to a retry and the session reaper.
+func (p *Provider) discardFailedGate(ctx context.Context, name string, uid types.UID, spec sandbox.Spec, token string) error {
+	if uid == "" || token == "" {
+		return fmt.Errorf("k8s: cannot identify the failed gate in pod %s", name)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), reclaimTimeout)
-	defer cancel()
-	zero := int64(0)
-	_ = p.client.cs.CoreV1().Pods(p.client.namespace).Delete(ctx, name, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
-		Preconditions:      &metav1.Preconditions{UID: &uid},
-	})
+	if err := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, token); err != nil {
+		return fmt.Errorf("k8s: revoke failed gate for pod %s: %w", name, err)
+	}
+	return p.deleteAndWaitGone(ctx, name, uid)
 }
 
 // reclaimUnready deletes a pod that could not be brought to readiness — one
@@ -598,19 +595,14 @@ func (p *Provider) reclaimUnready(name string, uid types.UID, spec sandbox.Spec)
 	if err != nil || pod.UID != uid || podReady(pod, spec.Gate != nil) {
 		return nil
 	}
-	if spec.Gate != nil && sandboxTermination(pod) != nil {
-		// RestartPolicyNever makes this sandbox's exit final. Retire only
-		// this pod's token before removing the last session-owned resource.
+	if spec.Gate != nil {
 		for _, c := range pod.Spec.InitContainers {
 			if c.Name != gateContainerName {
 				continue
 			}
 			for _, e := range c.Env {
-				if e.Name == "GATE_TOKEN" && e.Value != "" {
-					if err := spec.Gate.TokenMinter.RevokeIfCurrent(ctx, spec.SessionID, e.Value); err != nil {
-						return fmt.Errorf("k8s: revoke failed gate for pod %s: %w", name, err)
-					}
-					return p.deleteAndWaitGone(ctx, name, uid)
+				if e.Name == "GATE_TOKEN" {
+					return p.discardFailedGate(ctx, name, uid, spec, e.Value)
 				}
 			}
 		}
