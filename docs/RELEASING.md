@@ -26,10 +26,10 @@ checkout and the first eight lowercase digits of its Git commit. A local
 source build on a tagged commit also carries the development suffix.
 
 The Make, Compose and GCP build paths read the tag and commit before packaging
-the source. A plain `go build` can recover them from Go's embedded module
-version and Git revision. Use `go run -buildvcs` to include that metadata
-when running directly. A build reports `unknown` if it lacks the provenance
-to identify both values, including when Go recorded only a prerelease base.
+the source. Run `make build-worker` to build a stamped native `./worker`.
+A build without a stamp, including a plain `go build` or `go run`, reports
+`unknown`. Go's module version can omit reachable release tags or discard
+build metadata from a tag.
 
 ## When to release
 

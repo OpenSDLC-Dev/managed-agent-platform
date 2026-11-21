@@ -485,7 +485,6 @@ A map, not a description — **the code is the reference.** Nearly every package
 below carries more comment than this section ever spent on it, most by three to
 ten times: `internal/api` 192 KB of comment against the 50 KB that was here,
 `internal/executor` 169 KB against 43 KB, `internal/identity` 45 KB against 5 KB.
-Two qualify that. `internal/version` is one variable and falls just under. And
 `internal/store` only clears it by counting the SQL comments under
 `migrations/`, which is right — the schema *is* those files — but they are the
 one substantial body of comment `go doc` will not print for you. Everything else
