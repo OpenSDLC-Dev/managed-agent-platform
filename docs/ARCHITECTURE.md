@@ -485,7 +485,6 @@ A map, not a description — **the code is the reference.** Nearly every package
 below carries more comment than this section ever spent on it, most by three to
 ten times: `internal/api` 192 KB of comment against the 50 KB that was here,
 `internal/executor` 169 KB against 43 KB, `internal/identity` 45 KB against 5 KB.
-Two qualify that. `internal/version` is one variable and falls just under. And
 `internal/store` only clears it by counting the SQL comments under
 `migrations/`, which is right — the schema *is* those files — but they are the
 one substantial body of comment `go doc` will not print for you. Everything else
@@ -564,7 +563,7 @@ Served by `cmd/modelgateway`, which compose runs and the Helm chart runs unless 
 | `telemetry/` | OTel tracing and metrics init, and W3C trace-context propagation. The `span.*` domain events come from the spans started here, so the two views never drift. |
 | `mimetab/` | The pinned extension → MIME table both writers of the files registry consult, so the serving host never decides a wire-visible value. |
 | `sandbox/backend/` · `blob/backend/` · `secrets/backend/` | Where a deployment's backend is *chosen*, one selector per seam, so every binary constructs it from the same config point. Each is a sibling rather than part of its seam because the seam package holds the interface **and** the sentinel errors backends wrap, so it must not import them. |
-| `version/` | The build-time version stamp. A bare variable on purpose: there is no version endpoint, which would be net-new wire surface. |
+| `version/` | The build stamp shared by the binaries. The control plane reports it in authenticated browser session metadata. |
 
 ### Test support, and `cmd/`
 

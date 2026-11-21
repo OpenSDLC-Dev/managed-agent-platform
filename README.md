@@ -119,6 +119,7 @@ warning at startup and whose `grep` reports that they carry no ripgrep.
 
 ```bash
 make build                 # build (go build ./...)
+make build-worker          # write a version-stamped ./worker with the pinned ripgrep
 make ripgrep               # fetch the pinned static ripgrep the executor and worker embed
 make test                  # unit + contract tests (go test -count=1, with coverage profile)
 make vet fmt-check         # lint
@@ -171,7 +172,7 @@ there is no key to distribute.
 ```bash
 cd deploy/compose
 cp .env.example .env
-docker compose --profile console up --build  # Console: http://localhost:3000
+./compose --profile console up --build  # Console: http://localhost:3000
 ```
 
 Complete password setup in Console with the restricted setup-code file named by the

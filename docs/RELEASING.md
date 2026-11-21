@@ -19,6 +19,18 @@ This file is the operative ritual; day-to-day changelog mechanics live in
 - Tags are **annotated**, `vX.Y.Z`, on the release PR's squash-merge commit.
   (`v0.1.0` predates this scheme and is a lightweight tag; it stays as is.)
 
+The signed-in browser session, startup logs and `worker --version` show the same
+build identifier. Release artifacts report `vX.Y.Z`. Source builds report
+`vX.Y.Z-dev-<sha>` with the highest stable release tag reachable from the
+checkout and the first eight lowercase digits of its Git commit. A local
+source build on a tagged commit also carries the development suffix.
+
+The Make, Compose and GCP build paths read the tag and commit before packaging
+the source. Run `make build-worker` to build a stamped native `./worker`.
+A build without a stamp, including a plain `go build` or `go run`, reports
+`unknown`. Go's module version can omit reachable release tags or discard
+build metadata from a tag.
+
 ## When to release
 
 Releases are **plan-archive driven**: cut one when an archived plan (or a batch

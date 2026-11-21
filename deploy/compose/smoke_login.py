@@ -85,6 +85,11 @@ def main():
     session = call(base + "/api/auth/login", credentials)
     if not session["signed_in"] or session["role"] != "admin":
         raise RuntimeError("setup/login did not establish an admin session")
+    expected = subprocess.check_output(["../../tools/build-version.sh"], text=True).strip()
+    worker = subprocess.check_output(["docker", "compose", "exec", "-T", "controlplane", "/worker", "--version"], text=True).strip()
+    platform = call(base + "/api/auth/session").get("platform_version")
+    if expected == "unknown" or worker != expected or platform != expected:
+        raise RuntimeError(f"checkout version {expected!r}, worker {worker!r}, session {platform!r}")
     issued = call(base + "/api/console/organizations/default/workspaces/default/api_keys", {"name": "ci-smoke"}, session["csrf_token"])
     if issued["principal"] != {"type": "user_actor", "user_id": session["id"]}:
         raise RuntimeError("issued key must belong to the signed-in admin")

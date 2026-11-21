@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: OpenSDLC-Dev/managed-agent-console
-          ref: f98c1e538e9f1b4330ffca8c059d8fe4a45ee71f
+          ref: 558712008767f2413cc5cc92e44a790a66f13aa7
           path: console-source
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -1560,6 +1560,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # exercise the same reachable release tag as a local build
           # Nothing in CI pushes, so the token has no reason to outlive this
           # step — checkout v6+ would otherwise leave it in a credentials file
           # wired into the job's git config.
@@ -1629,7 +1630,7 @@ jobs:
         # controlplane covers the shared server stage; gate-image keeps the
         # gate Docker stage regression-guarded (the executor itself stays out
         # of the CI stack, so gates never run here).
-        run: docker compose build controlplane gate-image
+        run: ./compose build controlplane gate-image
       - name: control plane serves and the brain loads its config
         run: |
           docker compose up -d postgres minio controlplane brain modelgateway

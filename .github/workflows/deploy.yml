@@ -247,6 +247,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0 # the source build needs its reachable release tags
           # Nothing here pushes, so the token has no reason to outlive this step —
           # checkout v6+ would otherwise leave it in a credentials file wired into
           # the job's git config, in a job that also holds a cloud impersonation.
@@ -482,11 +483,13 @@ jobs:
           # register a credential helper for a "host" that does not resolve, and
           # the push would then fail as an anonymous pull of a private registry.
           gcloud auth configure-docker "${ARTIFACT_REGISTRY%%/*}" --quiet
+          version="$(./tools/build-version.sh)"
+          test "$version" != unknown
 
           # One build, four tags — so controlplane, brain, executor and
           # modelgateway resolve to a single digest and cannot drift apart
           # between components.
-          docker build \
+          docker build --build-arg VERSION="$version" \
             -t "$ARTIFACT_REGISTRY/controlplane:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/brain:$GITHUB_SHA" \
             -t "$ARTIFACT_REGISTRY/executor:$GITHUB_SHA" \
@@ -496,7 +499,7 @@ jobs:
           # iptables and a dedicated UID that do not belong in the server image.
           # It shares the module-download layer with the build above and
           # compiles only its own binary, fetching no ripgrep.
-          docker build --target gate \
+          docker build --target gate --build-arg VERSION="$version" \
             -t "$ARTIFACT_REGISTRY/gate:$GITHUB_SHA" \
             .
 

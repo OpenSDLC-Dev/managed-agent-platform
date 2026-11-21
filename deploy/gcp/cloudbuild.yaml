@@ -14,7 +14,9 @@
 #
 # Submit from the repository root, so the build context is the whole module:
 #   gcloud builds submit --config deploy/gcp/cloudbuild.yaml \
-#     --substitutions=_IMAGE_PREFIX="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)",_TAG="$(git rev-parse --short HEAD)" .
+#     --substitutions=_IMAGE_PREFIX="$(terraform -chdir=deploy/gcp/environment output -raw artifact_registry)",_TAG="$(git rev-parse --short HEAD)",_VERSION="$(./tools/build-version.sh)" .
+substitutions:
+  _VERSION: unknown
 steps:
   - name: gcr.io/cloud-builders/docker
     id: server
@@ -26,6 +28,8 @@ steps:
     env: ["DOCKER_BUILDKIT=1"]
     args:
       - build
+      - --build-arg
+      - "VERSION=${_VERSION}"
       - -t
       - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
       - -t
@@ -40,7 +44,7 @@ steps:
   - name: gcr.io/cloud-builders/docker
     id: gate
     env: ["DOCKER_BUILDKIT=1"] # same reason as the step above
-    args: ["build", "--target", "gate", "-t", "${_IMAGE_PREFIX}/gate:${_TAG}", "."]
+    args: ["build", "--target", "gate", "--build-arg", "VERSION=${_VERSION}", "-t", "${_IMAGE_PREFIX}/gate:${_TAG}", "."]
 images:
   - "${_IMAGE_PREFIX}/controlplane:${_TAG}"
   - "${_IMAGE_PREFIX}/brain:${_TAG}"

@@ -17,7 +17,7 @@ SHELL := /usr/bin/env bash
 # internally), so refuse it rather than gate on a stale profile.
 .NOTPARALLEL:
 
-.PHONY: build crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
+.PHONY: build build-worker crossbuild vet fmt-check test cover-gate verify eval ripgrep third-party-licenses \
 	changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test evals-alert-test identifiers-test pins-test pipes-test issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
@@ -25,8 +25,14 @@ SHELL := /usr/bin/env bash
 	gcp-require-project gcp-env-tfvars gcp-env-migrate-state gcp-env-init gcp-env-vars-match \
 	gcp-env-stop gcp-env-start gcp-env-status
 
+VERSION_SYMBOL = github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version
+SOURCE_LDFLAGS = -ldflags "-X $(VERSION_SYMBOL)=$$(./tools/build-version.sh)"
+
 build:
-	go build ./...
+	go build $(SOURCE_LDFLAGS) ./...
+
+build-worker: ripgrep
+	go build $(SOURCE_LDFLAGS) -o worker ./cmd/worker
 
 # The BYOC worker is meant to cross-compile; 32-bit-only breakage
 # (e.g. an untyped 64-bit const) is invisible to the host build.
@@ -60,7 +66,7 @@ fmt-check:
 # internal/ripgrep/assets/manifest.json, downloaded into that gitignored
 # directory and checked against the pin before anything embeds them. Every
 # target below that builds or runs something that greps depends on it — test
-# (so the gate searches with the real rg), eval, release-binaries — and the
+# (so the gate searches with the real rg), eval, build-worker, release-binaries — and the
 # Dockerfile's build stage runs the same command. A plain `go build` without it
 # still compiles, into a binary whose grep answers that it carries no ripgrep.
 # Idempotent: an archive already present with the pinned digest is not fetched
@@ -233,7 +239,7 @@ RELEASE_REGISTRY ?= ghcr.io/opensdlc-dev
 RELEASE_IMAGE_NS  = $(RELEASE_REGISTRY)/managed-agent-platform
 RELEASE_CHART_OCI ?= oci://$(RELEASE_REGISTRY)/charts
 RELEASE_PLATFORMS ?= linux/amd64,linux/arm64
-RELEASE_LDFLAGS   = -ldflags "-X github.com/OpenSDLC-Dev/managed-agent-platform/internal/version.Version=$(VERSION)"
+RELEASE_LDFLAGS   = -ldflags "-X $(VERSION_SYMBOL)=$(VERSION)"
 
 # Tag sanity, run before anything publishes: the tag's version must be the
 # changelog's newest released section (i.e. the release PR merged first), and

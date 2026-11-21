@@ -628,7 +628,7 @@ console:
   enabled: true
   publicOrigin: ""
   # Independent multi-architecture published image. Platform image.tag never changes it.
-  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:bb4c9eb683e98cdc268e5539039d6f3a0d7c41ae6c94f1caddf93d7e251797ee
+  image: ghcr.io/opensdlc-dev/managed-agent-console@sha256:52d8f869977e1724204297f8f62252b3ec5f48a6ac2953d969a6897e5050ba65
   resources: {}
 appEdge:
   image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
