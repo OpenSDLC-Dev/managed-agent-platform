@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,11 @@ func TestLinkedVersion(t *testing.T) {
 }
 
 func TestCheckoutBuildVersion(t *testing.T) {
+	// Keep this synthetic module's release tags out of the caller's Go cache.
+	t.Setenv("GOMODCACHE", t.TempDir())
+	t.Setenv("GOTOOLCHAIN", "local")
+	t.Setenv("GOPROXY", "off")
+	t.Setenv("PATH", filepath.Join(runtime.GOROOT(), "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
 	write := func(name string, contents []byte, mode os.FileMode) {
 		t.Helper()
