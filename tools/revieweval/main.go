@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -48,6 +49,11 @@ func main() {
 	subset := flag.String("subset", "all", "subset to evaluate: all, tuning, or eval")
 	limit := flag.Int("limit", 0, "optional cap on number of cases to run")
 	maxDiffBytes := flag.Int("max-diff-bytes", 18000, "maximum diff bytes sent per case in live mode")
+	modelFlag := flag.String("model", "", "override model ID in live mode (defaults to REVIEWEVAL_MODEL / MODEL_ID)")
+	thinkingFlag := flag.String("thinking", "", "optional thinking mode in live mode: adaptive, enabled, or disabled (defaults to REVIEWEVAL_THINKING)")
+	effortFlag := flag.String("effort", "", "optional reasoning effort in live mode: low, medium, high, xhigh, or max (defaults to REVIEWEVAL_EFFORT)")
+	maxTokensFlag := flag.Int("max-tokens", 0, "optional completion token budget in live mode (defaults to REVIEWEVAL_MAX_TOKENS, or 65536 with thinking / 1500 without)")
+	timeoutFlag := flag.Duration("timeout", 0, "optional per-call HTTP timeout in live mode (defaults to REVIEWEVAL_TIMEOUT, or 5m with thinking / 90s without)")
 	outPath := flag.String("out", "", "optional path to write JSON report")
 	flag.Parse()
 
@@ -127,7 +133,30 @@ func main() {
 		return
 	}
 
-	cfg, err := LoadEndpointConfig(root, os.Getenv)
+	overrides := map[string]string{}
+	if *modelFlag != "" {
+		overrides["REVIEWEVAL_MODEL"] = *modelFlag
+	}
+	if *thinkingFlag != "" {
+		overrides["REVIEWEVAL_THINKING"] = *thinkingFlag
+	}
+	if *effortFlag != "" {
+		overrides["REVIEWEVAL_EFFORT"] = *effortFlag
+	}
+	if *maxTokensFlag != 0 {
+		overrides["REVIEWEVAL_MAX_TOKENS"] = strconv.Itoa(*maxTokensFlag)
+	}
+	if *timeoutFlag != 0 {
+		overrides["REVIEWEVAL_TIMEOUT"] = (*timeoutFlag).String()
+	}
+	getenv := func(k string) string {
+		if v, ok := overrides[k]; ok {
+			return v
+		}
+		return os.Getenv(k)
+	}
+
+	cfg, err := LoadEndpointConfig(root, getenv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "revieweval: live mode configuration error: %v\n", err)
 		os.Exit(1)
@@ -168,8 +197,14 @@ func main() {
 	rep.Mode = "live"
 	rep.Subset = *subset
 	rep.Model = cfg.Model
+	rep.Thinking = cfg.Thinking
+	rep.Effort = cfg.Effort
 
-	fmt.Printf("\n=== revieweval summary (%s) ===\n", rep.Model)
+	header := rep.Model
+	if rep.Thinking != "" || rep.Effort != "" {
+		header = fmt.Sprintf("%s, thinking=%s, effort=%s", rep.Model, rep.Thinking, rep.Effort)
+	}
+	fmt.Printf("\n=== revieweval summary (%s) ===\n", header)
 	fmt.Printf("Raw:         recall=%d/%d (%.1f%%)  severity_cal=%.1f%%  control_fp=%d/%d (%.1f%%)\n",
 		rep.Raw.IncidentsCaught, rep.Raw.IncidentsTotal, rep.Raw.IncidentRecall*100,
 		rep.Raw.SeverityCalibration*100,

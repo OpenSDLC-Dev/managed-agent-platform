@@ -60,6 +60,10 @@ new directory and in-repo citations re-pointed in the moving PR (plan
   - Raw stage: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `3/4 (75.0%)`.
   - Post-verify & Final stages: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `2/4 (50.0%)`.
   - Caught five of six real historical incidents (`#1023`, `#1037`, `#1064`, `#1060`, `#1032`) with zero true-positive drops across verification while trimming control false positives (`control-1055`), establishing a quantitative baseline for future prompt and `REVIEW.md` tuning.
+- **Follow-up `tools/revieweval` live baseline (`MiniMax-M3.1-Flash`, Anthropic-compatible endpoint, `thinking=adaptive`, `effort=high`, `max_tokens=65536`, 10 historical cases):**
+  - Raw stage: incident recall `6/6 (100.0%)`, severity calibration `83.3%`, control false-positive rate `0/4 (0.0%)`.
+  - Post-verify & Final stages: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `0/4 (0.0%)` (catching `#1037`, `#1057`, `#1064`, `#1060`, `#1032`; `#1023` caught as `Nit` in Raw and filtered in Post-Verify).
+  - By contrast, `effort=max` spent ~3.5x more thinking characters (`926,996` vs `260,633`), raised control FP to `1/4 (25.0%)`, and dropped `#1060` across verification (`4/6` Final recall).
 
 ## Plan 69 completion and staging cleanup
 

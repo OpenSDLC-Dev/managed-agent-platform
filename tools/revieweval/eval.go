@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -110,6 +111,8 @@ type Report struct {
 	Mode       string                  `json:"mode"`
 	Subset     string                  `json:"subset"`
 	Model      string                  `json:"model,omitempty"`
+	Thinking   string                  `json:"thinking,omitempty"`
+	Effort     string                  `json:"effort,omitempty"`
 	Raw        StageMetrics            `json:"raw"`
 	PostVerify StageMetrics            `json:"post_verify"`
 	Final      StageMetrics            `json:"final"`
@@ -120,10 +123,14 @@ type Report struct {
 // EndpointConfig holds the LLM API configuration for live review runs.
 // String/Format redact APIKey so credentials cannot leak into logs.
 type EndpointConfig struct {
-	Protocol string // "openai" | "anthropic"
-	BaseURL  string
-	APIKey   string
-	Model    string
+	Protocol  string // "openai" | "anthropic"
+	BaseURL   string
+	APIKey    string
+	Model     string
+	Thinking  string        // "" | "adaptive" | "enabled" | "disabled"
+	Effort    string        // "" | "low" | "medium" | "high" | "xhigh" | "max"
+	MaxTokens int           // 0 uses default (1500 without thinking, 65536 with thinking)
+	Timeout   time.Duration // 0 uses default (90s without thinking, 5m with thinking)
 }
 
 func (c EndpointConfig) String() string {
@@ -131,7 +138,87 @@ func (c EndpointConfig) String() string {
 	if c.APIKey != "" {
 		key = "[redacted]"
 	}
-	return fmt.Sprintf("{Protocol:%s BaseURL:%s APIKey:%s Model:%s}", c.Protocol, c.BaseURL, key, c.Model)
+	var extras []string
+	if c.Thinking != "" {
+		extras = append(extras, "Thinking:"+c.Thinking)
+	}
+	if c.Effort != "" {
+		extras = append(extras, "Effort:"+c.Effort)
+	}
+	if c.MaxTokens > 0 {
+		extras = append(extras, fmt.Sprintf("MaxTokens:%d", c.MaxTokens))
+	}
+	if c.Timeout > 0 {
+		extras = append(extras, "Timeout:"+c.Timeout.String())
+	}
+	suffix := ""
+	if len(extras) > 0 {
+		suffix = " " + strings.Join(extras, " ")
+	}
+	return fmt.Sprintf("{Protocol:%s BaseURL:%s APIKey:%s Model:%s%s}", c.Protocol, c.BaseURL, key, c.Model, suffix)
+}
+
+func (c EndpointConfig) thinkingActive() bool {
+	return c.Thinking == "adaptive" || c.Thinking == "enabled" || (c.Thinking == "" && c.Effort != "")
+}
+
+func (c EndpointConfig) effectiveMaxTokens() int {
+	if c.MaxTokens > 0 {
+		return c.MaxTokens
+	}
+	if c.thinkingActive() {
+		return 65536
+	}
+	return 1500
+}
+
+func (c EndpointConfig) effectiveTimeout() time.Duration {
+	if c.Timeout > 0 {
+		return c.Timeout
+	}
+	if c.thinkingActive() {
+		return 5 * time.Minute
+	}
+	return 90 * time.Second
+}
+
+// Validate checks EndpointConfig fields and cross-field constraints.
+func (c EndpointConfig) Validate() error {
+	if c.Protocol != "openai" && c.Protocol != "anthropic" {
+		return fmt.Errorf("unsupported protocol %q (want openai or anthropic)", c.Protocol)
+	}
+	if c.BaseURL == "" {
+		return errors.New("missing REVIEWEVAL_BASE_URL / MODEL_BASE_URL")
+	}
+	if c.APIKey == "" {
+		return errors.New("missing REVIEWEVAL_API_KEY / MODEL_API_KEY")
+	}
+	if c.Model == "" {
+		return errors.New("missing REVIEWEVAL_MODEL / MODEL_ID")
+	}
+	switch c.Thinking {
+	case "", "adaptive", "enabled", "disabled":
+	default:
+		return fmt.Errorf("unsupported thinking mode %q (want adaptive, enabled, or disabled)", c.Thinking)
+	}
+	switch c.Effort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("unsupported effort %q (want low, medium, high, xhigh, or max)", c.Effort)
+	}
+	if c.Thinking == "disabled" && c.Effort != "" {
+		return errors.New("cannot combine thinking=disabled with an effort level")
+	}
+	if c.MaxTokens < 0 {
+		return fmt.Errorf("invalid max_tokens %d (must be >= 0)", c.MaxTokens)
+	}
+	if c.Thinking == "enabled" && c.effectiveMaxTokens() <= 1024 {
+		return fmt.Errorf("thinking=enabled requires max_tokens > 1024 (got %d)", c.effectiveMaxTokens())
+	}
+	if c.Timeout < 0 {
+		return fmt.Errorf("invalid timeout %s (must be >= 0)", c.Timeout)
+	}
+	return nil
 }
 
 func (c EndpointConfig) Format(f fmt.State, verb rune) {
@@ -509,6 +596,22 @@ func LoadEndpointConfig(repoRoot string, getenv func(string) string) (EndpointCo
 		BaseURL:  cleanBaseURL(lookup("REVIEWEVAL_BASE_URL", "MODEL_BASE_URL")),
 		APIKey:   lookup("REVIEWEVAL_API_KEY", "MODEL_API_KEY"),
 		Model:    lookup("REVIEWEVAL_MODEL", "MODEL_ID"),
+		Thinking: strings.ToLower(lookup("REVIEWEVAL_THINKING")),
+		Effort:   strings.ToLower(lookup("REVIEWEVAL_EFFORT")),
+	}
+	if rawMax := lookup("REVIEWEVAL_MAX_TOKENS"); rawMax != "" {
+		n, err := strconv.Atoi(rawMax)
+		if err != nil {
+			return EndpointConfig{}, fmt.Errorf("invalid REVIEWEVAL_MAX_TOKENS %q: %w", rawMax, err)
+		}
+		cfg.MaxTokens = n
+	}
+	if rawTimeout := lookup("REVIEWEVAL_TIMEOUT"); rawTimeout != "" {
+		d, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			return EndpointConfig{}, fmt.Errorf("invalid REVIEWEVAL_TIMEOUT %q: %w", rawTimeout, err)
+		}
+		cfg.Timeout = d
 	}
 	if cfg.Protocol == "" {
 		if strings.Contains(strings.ToLower(cfg.BaseURL), "/anthropic") {
@@ -517,17 +620,8 @@ func LoadEndpointConfig(repoRoot string, getenv func(string) string) (EndpointCo
 			cfg.Protocol = "openai"
 		}
 	}
-	if cfg.Protocol != "openai" && cfg.Protocol != "anthropic" {
-		return EndpointConfig{}, fmt.Errorf("unsupported protocol %q (want openai or anthropic)", cfg.Protocol)
-	}
-	if cfg.BaseURL == "" {
-		return EndpointConfig{}, errors.New("missing REVIEWEVAL_BASE_URL / MODEL_BASE_URL")
-	}
-	if cfg.APIKey == "" {
-		return EndpointConfig{}, errors.New("missing REVIEWEVAL_API_KEY / MODEL_API_KEY")
-	}
-	if cfg.Model == "" {
-		return EndpointConfig{}, errors.New("missing REVIEWEVAL_MODEL / MODEL_ID")
+	if err := cfg.Validate(); err != nil {
+		return EndpointConfig{}, err
 	}
 	return cfg, nil
 }
@@ -622,7 +716,7 @@ type LLMClient struct {
 func (c *LLMClient) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 90 * time.Second}
+		hc = &http.Client{Timeout: c.Cfg.effectiveTimeout()}
 	}
 	switch c.Cfg.Protocol {
 	case "anthropic":
@@ -642,12 +736,36 @@ func (c *LLMClient) redact(s string) string {
 }
 
 func (c *LLMClient) completeAnthropic(ctx context.Context, hc *http.Client, systemPrompt, userPrompt string) (string, error) {
-	body, err := json.Marshal(map[string]any{
+	maxTokens := c.Cfg.effectiveMaxTokens()
+	reqBody := map[string]any{
 		"model":      c.Cfg.Model,
-		"max_tokens": 1500,
+		"max_tokens": maxTokens,
 		"system":     systemPrompt,
 		"messages":   []map[string]string{{"role": "user", "content": userPrompt}},
-	})
+	}
+	thinkingMode := c.Cfg.Thinking
+	if thinkingMode == "" && c.Cfg.Effort != "" {
+		thinkingMode = "adaptive"
+	}
+	switch thinkingMode {
+	case "adaptive":
+		reqBody["thinking"] = map[string]any{"type": "adaptive"}
+	case "disabled":
+		reqBody["thinking"] = map[string]any{"type": "disabled"}
+	case "enabled":
+		budget := maxTokens / 2
+		if budget > 16384 {
+			budget = 16384
+		}
+		if budget < 1024 {
+			budget = 1024
+		}
+		reqBody["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
+	}
+	if c.Cfg.Effort != "" {
+		reqBody["output_config"] = map[string]string{"effort": c.Cfg.Effort}
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err
 	}
@@ -676,7 +794,8 @@ func (c *LLMClient) completeAnthropic(ctx context.Context, hc *http.Client, syst
 		return "", fmt.Errorf("anthropic endpoint status %d: %s", resp.StatusCode, truncateString(c.redact(string(raw)), 300))
 	}
 	var parsed struct {
-		Content []struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
@@ -690,18 +809,31 @@ func (c *LLMClient) completeAnthropic(ctx context.Context, hc *http.Client, syst
 			sb.WriteString(blk.Text)
 		}
 	}
-	return sb.String(), nil
+	text := sb.String()
+	if strings.TrimSpace(text) == "" && parsed.StopReason == "max_tokens" {
+		return "", fmt.Errorf("anthropic response exhausted max_tokens (%d) before emitting text; increase -max-tokens or REVIEWEVAL_MAX_TOKENS", maxTokens)
+	}
+	return text, nil
 }
 
 func (c *LLMClient) completeOpenAI(ctx context.Context, hc *http.Client, systemPrompt, userPrompt string) (string, error) {
-	body, err := json.Marshal(map[string]any{
-		"model":       c.Cfg.Model,
-		"temperature": 0,
+	reqBody := map[string]any{
+		"model": c.Cfg.Model,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPrompt},
 		},
-	})
+	}
+	if !c.Cfg.thinkingActive() {
+		reqBody["temperature"] = 0
+	}
+	if c.Cfg.Effort != "" {
+		reqBody["reasoning_effort"] = c.Cfg.Effort
+	}
+	if c.Cfg.MaxTokens > 0 {
+		reqBody["max_completion_tokens"] = c.Cfg.MaxTokens
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err
 	}
@@ -780,34 +912,48 @@ func validateFindings(arr []Finding) ([]Finding, error) {
 	return out, nil
 }
 
-// ParseFindingsJSON extracts a non-null JSON array (or {"findings": [...]}) of
-// Findings from an LLM response, rejecting null and unsupported severities.
-func ParseFindingsJSON(raw string) ([]Finding, error) {
-	s := strings.TrimSpace(raw)
-	if idx := strings.Index(s, "```"); idx >= 0 {
-		rest := s[idx+3:]
-		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-			rest = rest[nl+1:]
-		}
-		if end := strings.Index(rest, "```"); end >= 0 {
-			s = strings.TrimSpace(rest[:end])
-		}
-	}
+func parseFindingsCandidate(s string) ([]Finding, bool, error) {
 	var arr []Finding
 	if err := json.Unmarshal([]byte(s), &arr); err == nil {
-		return validateFindings(arr)
+		out, vErr := validateFindings(arr)
+		return out, true, vErr
 	}
 	var obj struct {
 		Findings []Finding `json:"findings"`
 	}
 	if err := json.Unmarshal([]byte(s), &obj); err == nil {
 		if obj.Findings == nil {
-			return nil, errors.New("findings object field is null or missing")
+			return nil, true, errors.New("findings object field is null or missing")
 		}
-		return validateFindings(obj.Findings)
+		out, vErr := validateFindings(obj.Findings)
+		return out, true, vErr
+	}
+	return nil, false, nil
+}
+
+// ParseFindingsJSON extracts a non-null JSON array (or {"findings": [...]}) of
+// Findings from an LLM response, rejecting null and unsupported severities.
+func ParseFindingsJSON(raw string) ([]Finding, error) {
+	s := strings.TrimSpace(raw)
+	if out, matched, err := parseFindingsCandidate(s); matched {
+		return out, err
+	}
+	if idx := strings.Index(s, "```"); idx >= 0 {
+		rest := s[idx+3:]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[nl+1:]
+		}
+		if end := strings.Index(rest, "```"); end >= 0 {
+			fenced := strings.TrimSpace(rest[:end])
+			if out, matched, err := parseFindingsCandidate(fenced); matched {
+				return out, err
+			}
+			s = fenced
+		}
 	}
 	start, end := strings.IndexByte(s, '['), strings.LastIndexByte(s, ']')
 	if start >= 0 && end > start {
+		var arr []Finding
 		if err := json.Unmarshal([]byte(s[start:end+1]), &arr); err == nil {
 			return validateFindings(arr)
 		}
