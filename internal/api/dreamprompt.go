@@ -216,20 +216,22 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
 	// rewrote a memory whose subject had ended as news of the end (#1002). The
 	// successor names what it replaced, so the ended name and date stay
 	// greppable once the memory that held them goes. It never lands in that
-	// memory: a live run retitled the ended memory as its own successor and
-	// listed it for removal, which would have removed the new fact with it.
+	// memory: live runs retitled the ended memory as its own successor and
+	// listed it for removal, which would have removed the new fact with it
+	// (#1002, #1084).
+	const updateBeforeCreate = `Update before create: look for an existing memory before adding one,
+   never reusing or retitling a memory you %s.`
 	const onSuspicion = `Nothing else is %[1]s on suspicion: change or %[2]s a memory only where a
    transcript positively contradicts it. What the memory is about, the thing
    its title or first line names, decides which. Where that thing still stands
    and a fact about it changed, change the memory. Where a transcript ends the
-   thing itself — shut down, withdrawn, discontinued — %[3]s. What
-   still holds moves out of it first, to the memory it belongs to: an existing
-   one where there is one (rule 1), a new one where there is not, and never
-   the memory you %[2]s. That is what took the thing's place, if anything
-   did, naming what it replaced and when, and anything the transcript left
-   standing.`
+   thing itself — shut down, withdrawn, discontinued — do not update or
+   retitle that file in place. First write what took its place (if anything
+   did, naming what it replaced and when) and anything still standing into a
+   separate memory: an existing memory about that subject (rule 1), or a new
+   file if none exists, never the file you %[2]s. Then %[3]s.`
 	rules := []string{
-		`Update before create: look for an existing memory before adding one.`,
+		fmt.Sprintf(updateBeforeCreate, "remove"),
 		`Two memories that state the same thing are one memory. Fold them into
    whichever file states it better, carry over anything only the other held,
    and remove the file left behind. Consolidating a duplicate is the one
@@ -248,6 +250,7 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    before you saw it; do not reconstruct it, and do not carry it forward.`,
 	}
 	if inPlace {
+		rules[0] = fmt.Sprintf(updateBeforeCreate, "retire")
 		rules[1] = `Two memories that state the same thing are one memory. Fold them into
    whichever file states it better, carry over anything only the other held,
    and retire the file left behind under rule 4. Consolidating a duplicate is
@@ -261,7 +264,9 @@ func dreamMergeRules(inPlace bool, storeMount string) string {
    supersedes it — or, where none does, why it was retired — and listed under
    a *to remove* heading in %[1]sreport.md and in a trailing "## To remove"
    section of %[2]s/MEMORY.md. The caller, who chose to consolidate in place,
-   removes the tombstones through the memories API.`, dreamScratchDir, storeMount))
+   removes the tombstones through the memories API. Because every file listed
+   under "## To remove" will be deleted, a retired file holds only that
+   one-line tombstone — never live or replacement facts.`, dreamScratchDir, storeMount))
 	}
 	numbered := make([]string, len(rules))
 	for i, rule := range rules {
@@ -338,13 +343,16 @@ read it yourself. Write nothing else in this stage.`,
 		duplicates := `Every duplicate is resolved in this stage,
 one file surviving it, and so is every contradiction a digest carries. A
 memory about something a transcript ends is removed, not kept as a memory
-that reports the end.`
+that reports the end or retitled to hold its replacement: write any
+replacement in a separate file first, then remove the ended file.`
 		if inPlace {
 			duplicates = `Every duplicate is resolved in this stage, one
 file holding the statement afterwards and the other left as a tombstone
 (merge rule 4), and so is every contradiction a digest carries. A memory
-about something a transcript ends is retired as a tombstone too, not kept
-as a memory that reports the end.`
+about something a transcript ends is retired as a one-line tombstone too,
+not kept as a memory that reports the end or retitled to hold its
+replacement: write any replacement in a separate file first, then overwrite
+the ended file with only the one-line tombstone.`
 		}
 		fmt.Fprintf(&b, `Stage 3 of 4: merge. Check %[1]sdigests/ first: it holds one digest per
 batch, and the batches are %[3]s Rebuild a missing digest by reading that
@@ -363,10 +371,15 @@ the index and the report to stage 4.`,
 		reported := `created, updated and removed, the`
 		if inPlace {
 			// One form for the listing, because the caller reads it to know
-			// what to remove, and so does the in-place eval (#1002).
+			// what to remove, and so does the in-place eval (#1002). The audit
+			// also catches a retired file that merge retitled or filled with
+			// its replacement and then listed for removal (#1084).
 			tombstones = `
-A memory still about something a transcript ends is retired now, under
-merge rule 4, once what still holds has moved out of it.
+A memory whose original subject a transcript ended — even if retitled — is
+retired now under merge rule 4, after writing any replacement or surviving
+facts into a separate memory. Before listing any file under "## To remove",
+verify it holds only a one-line tombstone and no live or replacement fact
+missing from the kept memories — the caller will delete every listed file.
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing section, so the caller can find what to
 remove: a "## To remove" heading, then one "- /<path>" line per tombstone,

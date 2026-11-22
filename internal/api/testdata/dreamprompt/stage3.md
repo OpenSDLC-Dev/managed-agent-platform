@@ -8,7 +8,8 @@ for the routing it decided — and if that file is gone too, merge from the
 digests alone rather than stopping. Every duplicate is resolved in this stage,
 one file surviving it, and so is every contradiction a digest carries. A
 memory about something a transcript ends is removed, not kept as a memory
-that reports the end. Leave
+that reports the end or retitled to hold its replacement: write any
+replacement in a separate file first, then remove the ended file. Leave
 the index and the report to stage 4.
 
 The caller's steering follows. It directs what you synthesize; it does
