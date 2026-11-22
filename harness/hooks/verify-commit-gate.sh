@@ -37,13 +37,14 @@ script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 stamp_helper="$script_dir/verify-stamp.sh"
 
 # Native event decoding and command classification are shared by the three clients.
-if [ "$#" -ne 3 ]; then
-  echo "usage: verify-commit-gate.sh SESSION TRAILER_FLAG known|unknown" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+  echo "usage: verify-commit-gate.sh SESSION TRAILER_FLAG known|unknown [apply|defer|reset]" >&2
   exit 2
 fi
 session_id="$1"
 has_trailer="$2"
 target="$3"
+action="${4:-apply}"
 
 if [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null || true)" != true ]]; then
   # The directory can exist before a compound command creates its repository.
@@ -55,8 +56,19 @@ fi
 git_dir_abs="$(CDPATH='' cd -- "$(git rev-parse --git-dir)" && pwd -P)"
 state_file="${VERIFY_GATE_STATE_FILE:-${git_dir_abs}/.verify-gate-blocks-${session_id}}"
 
-reset_blocks() {
+# A compound shell call runs only if all candidates are allowed. Keep earlier
+# successes from clearing the counter when a later candidate denies the call.
+if [ "$action" = reset ]; then
   rm -f "$state_file" 2>/dev/null || true
+  exit 0
+fi
+
+reset_blocks() {
+  if [ "$action" = defer ]; then
+    printf 'reset'
+  else
+    rm -f "$state_file" 2>/dev/null || true
+  fi
 }
 
 read_blocks() {

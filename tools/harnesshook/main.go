@@ -136,6 +136,14 @@ func evidenceOnly(root, role string) (bool, error) {
 	return err == nil, err
 }
 
+func gateCommand(cwd, policy, session, trailer, known, action string) *exec.Cmd {
+	// Git provides the POSIX shell on Windows. Paths and metadata are separate argv entries.
+	cmd := exec.Command("git", "-c", "alias.map-gate=!bash", "map-gate", policy, session, trailer, known, action)
+	cmd.Dir = cwd
+	cmd.Env = gitworktree.Environment()
+	return cmd
+}
+
 func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) error {
 	if host == "codex" && e.role != "" {
 		restricted, err := evidenceOnly(sourceRoot, e.role)
@@ -162,7 +170,13 @@ func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) 
 		session = session[:64]
 	}
 	policy := filepath.ToSlash(filepath.Join(sourceRoot, "harness", "hooks", "verify-commit-gate.sh"))
-	for _, target := range commits(e.command, e.dir) {
+	targets := commits(e.command, e.dir)
+	action := "apply"
+	if len(targets) > 1 {
+		action = "defer"
+	}
+	var resets []string
+	for _, target := range targets {
 		cwd := target.dir
 		known := "known"
 		if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
@@ -175,14 +189,10 @@ func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) 
 		if target.trailer {
 			trailer = "1"
 		}
-		// Git supplies the project's POSIX shell on Windows. Pass all paths and
-		// metadata as argv, including when the checkout has a space or apostrophe.
-		cmd := exec.Command("git", "-c", "alias.map-gate=!bash", "map-gate", policy, session, trailer, known)
-		cmd.Dir = cwd
-		cmd.Env = gitworktree.Environment()
+		cmd := gateCommand(cwd, policy, session, trailer, known, action)
 		var log bytes.Buffer
 		cmd.Stderr = &log
-		err := cmd.Run()
+		output, err := cmd.Output()
 		if err != nil {
 			var exited *exec.ExitError
 			if errors.As(err, &exited) && exited.ExitCode() == 2 {
@@ -190,8 +200,16 @@ func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) 
 			}
 			return fmt.Errorf("verification policy in %s: %w: %s", cwd, err, strings.TrimSpace(log.String()))
 		}
+		if string(output) == "reset" {
+			resets = append(resets, cwd)
+		}
 		if _, err := io.Copy(diagnostic, &log); err != nil {
 			return err
+		}
+	}
+	for _, cwd := range resets {
+		if err := gateCommand(cwd, policy, session, "0", "known", "reset").Run(); err != nil {
+			return fmt.Errorf("reset verification retry counter in %s: %w", cwd, err)
 		}
 	}
 	return nil

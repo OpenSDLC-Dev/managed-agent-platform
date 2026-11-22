@@ -17,6 +17,7 @@ type commit struct {
 type shellSegment struct {
 	argv         []string
 	scope        byte
+	conditional  bool
 	stdinTrailer bool
 }
 
@@ -61,6 +62,7 @@ func shellSegments(command string) []shellSegment {
 	haveWord := false
 	quotedWord := false
 	stdinTrailer := false
+	conditional := false
 	finishWord := func() {
 		if haveWord {
 			argv = append(argv, word.String())
@@ -72,13 +74,17 @@ func shellSegments(command string) []shellSegment {
 	finishSegment := func() {
 		finishWord()
 		if len(argv) > 0 {
-			segments = append(segments, shellSegment{argv: argv, stdinTrailer: stdinTrailer})
+			segments = append(segments, shellSegment{argv: argv, conditional: conditional, stdinTrailer: stdinTrailer})
 			argv = nil
 		}
 		stdinTrailer = false
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
+		if ch == '\\' && quote != '\'' && i+1 < len(command) && command[i+1] == '\n' {
+			i++
+			continue // Bash removes a backslash-newline before tokenization.
+		}
 		if quote == 0 {
 			switch ch {
 			case '<':
@@ -107,7 +113,13 @@ func shellSegments(command string) []shellSegment {
 				segments = append(segments, shellSegment{scope: ch})
 				continue
 			case ';', '|', '&', '\n':
+				hadCommand := haveWord || len(argv) != 0
 				finishSegment()
+				if ch == '|' || ch == '&' {
+					conditional = true
+				} else if hadCommand {
+					conditional = false
+				}
 				continue
 			case '#':
 				if !haveWord {
@@ -149,6 +161,9 @@ var messageTrailer = regexp.MustCompile("(?im)^Verified-By:[[:blank:]]*[^[:space
 // Only argument-free flags can precede it in a cluster (such as -am).
 var shortValue = regexp.MustCompile(`(?s)^-[aiposeqnzvb]*([mFCct])(.*)$`)
 var trailerValue = regexp.MustCompile("(?i)^Verified-By:[[:blank:]]*[^[:space:]]")
+
+// Git's explicit --trailer option also accepts key=value and serializes it as key: value.
+var optionTrailer = regexp.MustCompile("(?i)^Verified-By[:=][[:blank:]]*[^[:space:]]")
 var assignment = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z_0-9]*=`)
 
 func hasTrailer(argv []string, stdinTrailer bool) bool {
@@ -175,7 +190,7 @@ func hasTrailer(argv []string, stdinTrailer bool) bool {
 		}
 		switch flag {
 		case "--trailer":
-			if trailerValue.MatchString(val) {
+			if optionTrailer.MatchString(val) {
 				return true
 			}
 		case "-m", "--message":
@@ -262,7 +277,9 @@ func shellCommits(command, base string, created *[]string) []commit {
 		argv := args[1:]
 		switch name {
 		case "cd", "chdir", "set-location", "pushd", "push-location":
-			if len(argv) > 0 {
+			// A short-circuited directory change may never run. Its result
+			// cannot identify the worktree for a later independent command.
+			if !segment.conditional && len(argv) > 0 {
 				base = resolveDir(base, argv[len(argv)-1])
 			} else {
 				base = ""
@@ -281,12 +298,15 @@ func shellCommits(command, base string, created *[]string) []commit {
 			for len(argv) > 0 && strings.HasPrefix(argv[0], "-") {
 				arg := argv[0]
 				argv = argv[1:]
-				if value, ok := strings.CutPrefix(arg, "-C"); ok {
-					if value == "" && len(argv) > 0 {
-						value, argv = argv[0], argv[1:]
-					}
-					dir = resolveDir(dir, value)
+				if arg == "-C" && len(argv) > 0 {
+					dir = resolveDir(dir, argv[0])
+					argv = argv[1:]
 					continue
+				}
+				if strings.HasPrefix(arg, "-C") {
+					// Git accepts only a separate -C operand.
+					argv = nil
+					break
 				}
 				opt, _, joined := strings.Cut(arg, "=")
 				switch opt {

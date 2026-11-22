@@ -174,7 +174,11 @@ class IssueTriageGuardTests(unittest.TestCase):
         # Running from a subdirectory (even one containing a decoy
         # harness/hooks/issue-triage-read.sh) must be rejected so the relative
         # command path always resolves to the validated repo-root reader.
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmpdir:
+            fixture = Path(tmpdir) / "harness/hooks/issue-triage-read.sh"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("#!/bin/sh\nexit 0\n")
+            fixture.chmod(0o755)
             res = run_guard(payload_for("harness/hooks/issue-triage-read.sh git-log"), cwd=tmpdir)
             self.assertEqual(res.returncode, 2)
             self.assertIn("repository root", res.stderr)

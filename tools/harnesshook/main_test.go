@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -80,8 +81,8 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{`git -C "one space" commit --trailer "Verified-By: none"`, []commit{{nested, true}}},
 		{`Set-Location -LiteralPath "one space"; git.exe commit -m ok`, []commit{{nested, false}}},
 		{`git -C "one space" commit -m first && git commit -m second`, []commit{{nested, false}, {root, false}}},
-		{`git -C"one space" commit -m first && git commit -m second`, []commit{{nested, false}, {root, false}}},
-		{`git -C=other commit -m first`, []commit{{filepath.Join(root, "=other"), false}}},
+		{`git -C"one space" commit -m first && git commit -m second`, []commit{{root, false}}},
+		{`git -C=other commit -m first`, nil},
 		{`GIT_INDEX_FILE=foreign git commit -m sample; git commit -m next`, []commit{{"", false}, {root, false}}},
 		{`GIT_DIR=other/.git git -C "one space" commit --trailer "Verified-By: manual"`, []commit{{"", true}}},
 		{`git --work-tree /elsewhere -C "one space" commit -m ok`, []commit{{"", false}}},
@@ -99,6 +100,11 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{`(cd "one space" && git status); git commit -m root`, []commit{{root, false}}},
 		{`(cd "one space" && (git commit -m child)); git commit -m root`, []commit{{nested, false}, {root, false}}},
 		{`echo "(cd somewhere)"; git commit -m root`, []commit{{root, false}}},
+		{"git commit -m change \\\n --trailer 'Verified-By=manual check'", []commit{{root, true}}},
+		{"git com\\\nmit -m change", []commit{{root, false}}},
+		{"git 'com\\\nmit' -m change", nil},
+		{`test -d optional && cd "one space"; git commit -m change`, []commit{{"", false}}},
+		{`cd "one space" && git commit -m change`, []commit{{nested, false}}},
 	}
 	for _, tc := range tests {
 		got := commits(tc.command, root)
@@ -115,7 +121,7 @@ func TestCommitMessageOptionForms(t *testing.T) {
 			t.Errorf("missed trailer for %q", args)
 		}
 	}
-	for _, args := range [][]string{{"--", "-m", message}, {"-F" + message}, {"-Smy-key", message}} {
+	for _, args := range [][]string{{"--", "-m", message}, {"-F" + message}, {"-Smy-key", message}, {"--trailer", "Verified-By= "}, {"-m", "Verified-By=manual"}} {
 		if hasTrailer(args, false) {
 			t.Errorf("treated non-message argument as a trailer: %q", args)
 		}
@@ -171,15 +177,44 @@ func TestHookProtocol(t *testing.T) {
 	}
 }
 
-func TestEmptyCommandDirectoryCannotBorrowWorkingTreeStamp(t *testing.T) {
-	var out, diagnostic bytes.Buffer
-	t.Setenv("VERIFY_GATE_MODE", "enforce")
-	t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(t.TempDir(), "blocks"))
-	if err := handle("codex", event{tool: "Bash", command: "git commit -m test"}, filepath.Join(mustGetwd(t), "../.."), &out, &diagnostic); err != nil {
+// A standalone repository with real stamp scripts keeps policy state out of the caller's checkout.
+func gateCheckout(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	hooks := filepath.Join(root, "harness", "hooks")
+	if err := os.MkdirAll(hooks, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "deny") {
-		t.Fatalf("missing target was allowed: %s %s", &out, &diagnostic)
+	for _, name := range []string{"verify-stamp.sh", "verify-commit-gate.sh"} {
+		data, err := os.ReadFile(filepath.Join(mustGetwd(t), "../..", "harness", "hooks", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hooks, name), data, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if output, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("create worktree: %v: %s", err, output)
+	}
+	return root
+}
+
+func TestEmptyCommandDirectoryCannotBorrowWorkingTreeStamp(t *testing.T) {
+	root := gateCheckout(t)
+	t.Setenv("VERIFY_GATE_MODE", "enforce")
+	t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(t.TempDir(), "blocks"))
+	if output, err := exec.Command("git", "-C", root, "-c", "alias.stamp=!bash harness/hooks/verify-stamp.sh", "stamp", "--write", "test").CombinedOutput(); err != nil {
+		t.Fatalf("stamp: %v: %s", err, output)
+	}
+	for _, tc := range []struct{ dir, reason string }{{root, ""}, {"", "did not identify the commit worktree"}} {
+		var out, diagnostic bytes.Buffer
+		if err := handle("codex", event{tool: "Bash", command: "git commit -m test", dir: tc.dir}, root, &out, &diagnostic); err != nil {
+			t.Fatal(err)
+		}
+		if (tc.reason == "" && out.Len() != 0) || !strings.Contains(out.String(), tc.reason) {
+			t.Fatalf("dir %q: decision %s, log %s", tc.dir, &out, &diagnostic)
+		}
 	}
 }
 
@@ -188,19 +223,38 @@ func TestFutureCommitDirectoryUsesGateModeAndTrailer(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(root, "blocks"))
 	for _, tc := range []struct {
-		mode, command, want string
+		mode, command, decision, log string
 	}{
-		{"observe", "git -C future commit -m wip", "observe"},
-		{"enforce", "git -C future commit -m wip", "deny"},
-		{"enforce", "git -C future commit -m wip --trailer 'Verified-By: explicit'", ""},
+		{"observe", "git -C future commit -m wip", "", "observe"},
+		{"enforce", "git -C future commit -m wip", "deny", ""},
+		{"enforce", "git -C future commit -m wip --trailer 'Verified-By: explicit'", "", ""},
 	} {
 		t.Setenv("VERIFY_GATE_MODE", tc.mode)
 		var out, log bytes.Buffer
 		if err := handle("claude", event{tool: "Bash", command: tc.command, dir: root}, sourceRoot, &out, &log); err != nil {
 			t.Fatal(err)
 		}
-		if s := out.String() + log.String(); (tc.want == "" && s != "") || !strings.Contains(s, tc.want) {
-			t.Errorf("%s %s: %q", tc.mode, tc.command, s)
+		for _, got := range [][2]string{{tc.decision, out.String()}, {tc.log, log.String()}} {
+			if (got[0] == "" && got[1] != "") || !strings.Contains(got[1], got[0]) {
+				t.Errorf("%s %s: decision %q, log %q", tc.mode, tc.command, &out, &log)
+			}
+		}
+	}
+}
+
+func TestCompoundCallCountsConsecutiveDenials(t *testing.T) {
+	root := gateCheckout(t)
+	t.Setenv("VERIFY_GATE_MODE", "enforce")
+	t.Setenv("VERIFY_GATE_MAX_BLOCKS", "2")
+	t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(t.TempDir(), "blocks"))
+	call := event{tool: "Bash", dir: root, command: "git commit -m first --trailer 'Verified-By: checked'; git commit -m second"}
+	for index, reason := range []string{"block 1/2", "block 2/2", "", "block 1/2"} {
+		var out, log bytes.Buffer
+		if err := handle("claude", call, root, &out, &log); err != nil {
+			t.Fatal(err)
+		}
+		if (reason == "" && (out.Len() != 0 || !strings.Contains(log.String(), "escape valve"))) || !strings.Contains(out.String(), reason) {
+			t.Fatalf("attempt %d: decision %s, log %s", index+1, &out, &log)
 		}
 	}
 }
