@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: archived
 ---
 
 # Portable project agent harness

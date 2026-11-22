@@ -4,8 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-Plan 76 — portable project harness for Claude Code, Codex and Antigravity CLI.
+None.
 
 ## Tasks
 
-- Verify generated adapters, three real clients and the existing platform gates.
+None.

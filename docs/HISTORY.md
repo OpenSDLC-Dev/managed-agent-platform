@@ -48,6 +48,12 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 76 — Three-client harness acceptance
+
+Windows Claude Code, Codex CLI and Linux Antigravity CLI each loaded a project skill and dispatched a named reviewer against an isolated loopback endpoint. The parent and child requests exposed the same model and reasoning settings. In a plain Claude launch from a subdirectory, the guide loaded but the root startup hook did not fire. Supplying the absolute settings path delivered its receipt. Antigravity refused an unstamped commit and permitted a real commit in the separately stamped worktree.
+
+A ten-case MiniMax-M3 historical replay retained five of six incidents after verification. Three of four controls were flagged, up from two in the published baseline. The held-out cases selected the same checklist items at the merge base and on this branch. The PR records the live results, independent verdicts and R16 disposition. [Acceptance evidence](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1088)
+
 ## Plan 75 — Verification and testing hardening
 
 [Plan 75](./plan/75_verification-hardening.md) delivered eight sequential hardening slices across test latency, property/fuzz coverage, race detection, diff-triggered review rules, offline full-topology E2E, verification commit gating, and reviewer meta-evaluation (PRs #1075, #1077, #1078, #1079, #1080, #1081, #1082, and slice 8's archival PR).
