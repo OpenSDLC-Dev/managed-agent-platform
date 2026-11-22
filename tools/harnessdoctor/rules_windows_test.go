@@ -27,7 +27,7 @@ func TestWindowsMixedLongAndShortRulePaths(t *testing.T) {
 	}
 	short := syscall.UTF16ToString(buf)
 	if strings.EqualFold(short, long) {
-		t.Skip("this volume does not expose a short alias for the fixture")
+		t.Skip("this volume does not expose a short alias for the fixture") // hygiene:allow 8.3 alias creation is a Windows volume setting
 	}
 	for _, paths := range [][2]string{{short, long}, {long, short}} {
 		proposed := filepath.Join(paths[1], "src", "planned", "io.go")
