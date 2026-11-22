@@ -23,11 +23,13 @@ Catch compilation, cross-platform, vet, formatting, and unit regressions before 
 make build crossbuild vet fmt-check test-fast
 ```
 
-When touching workflows, docs, or `.claude/` config, also run the script guards:
+Run the script guards for workflow, documentation, or harness changes.
 
 ```bash
 make identifiers-test pins-test pipes-test
 ```
+
+For changes to `AGENTS.md`, `harness/`, any host adapter (`.claude/`, `.codex/`, `.agents/`), `tools/harnessdoctor/`, or `tools/harnesshook/`, run `make harness-doctor-test`. It checks the generated files and tests the doctor and hook policies.
 
 ## 2. Targeted contract suites
 
@@ -95,7 +97,7 @@ Use when changing public `/v1/*` wire shapes, headers, SSE streams, or worker en
 
 ## 4. Full merge gate and commit stamping
 
-Running `make test-fast`, `make test-race`, or `make verify` automatically writes a worktree-fingerprinted verification stamp (`.git/.verify-stamp`) via `harness/hooks/verify-stamp.sh`. The PreToolUse Bash hook `harness/hooks/verify-commit-gate.sh` (registered by the three host adapters, defaulting to `VERIFY_GATE_MODE=observe`; set `VERIFY_GATE_MODE=enforce` to block unstamped commits with a 2-block escape valve, or `off` to disable) checks that stamp or an explicit `Verified-By: <method|none>` commit trailer on every `git commit`.
+When `make test-fast`, `make test-race`, or `make verify` passes, it writes a fingerprinted stamp for the current worktree. Run `harness/hooks/verify-stamp.sh --stamp-path` to locate it. Claude Code, Codex and Antigravity send `git commit` through their `PreToolUse` adapters to `harness/hooks/verify-commit-gate.sh`. The gate accepts a fresh matching stamp or a `Verified-By: <method|none>` trailer. `VERIFY_GATE_MODE` defaults to `observe`. Use `enforce` to block unverified commits with the existing two-block escape valve, or `off` to disable the gate.
 
 Before opening or updating a PR, run the full gate (`make verify`) or verify the exact CI run covers every required job (`ci`, `coverage`, `race`, `helm`, `terraform`, `compose`, `native-console`).
 

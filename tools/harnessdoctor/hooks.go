@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"reflect"
 	"regexp"
 	"slices"
@@ -44,10 +43,16 @@ func mergeRegistry(host string, source, existing []byte) ([]byte, error) {
 	}
 	if host == "claude" {
 		env, _ := have["env"].(map[string]any)
-		for _, key := range []string{"CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL"} {
-			if _, pinned := env[key]; pinned {
+		for _, key := range []string{"CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_EFFORT"} {
+			value, present := env[key]
+			if present && value != "" && !(key == "CLAUDE_CODE_SUBAGENT_MODEL" && value == "inherit") {
 				return nil, fmt.Errorf("env.%s overrides inheritance; remove the project override", key)
 			}
+		}
+		// FORCE can activate a subagent model supplied by another configuration scope.
+		switch strings.ToLower(fmt.Sprint(env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"])) {
+		case "1", "true", "yes", "on":
+			return nil, errors.New("env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE forces the child model; remove the project override")
 		}
 	}
 	if host == "claude" && have["disableAllHooks"] == true {
@@ -213,6 +218,13 @@ func matchesPreTool(host, matcher string) bool {
 }
 
 func validateRegistry(host string, doc map[string]any, canonical bool) error {
+	if host == "codex" {
+		for key := range doc {
+			if key != "hooks" {
+				return fmt.Errorf("unregistered top-level key %q in dedicated Codex hook registry; inspect it before sync", key)
+			}
+		}
+	}
 	starts, gates := 0, 0
 	check := func(event, matcher string, handlers any) error {
 		list, ok := handlers.([]any)
@@ -310,53 +322,6 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 	}
 	if canonical && gates != 1 {
 		return fmt.Errorf("expected one PreToolUse command covering %s policy tools; found %d", host, gates)
-	}
-	return nil
-}
-
-// Custom Codex roles inherit project [agents] defaults ahead of the current
-// session. Check that part of optional project config without modifying it.
-func checkCodexConfig(root string) error {
-	const name = ".codex/config.toml"
-	data, err := regularFile(root, name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	table := ""
-	keys := regexp.MustCompile(`^(?:agents\.(?:(?:[\w-]+\.)?(?:model|model_reasoning_effort)|default_subagent_(?:model|reasoning_effort)))$`)
-	disabledInline := regexp.MustCompile(`(?:^|[,{])\s*["\x27]?(?:codex_)?hooks["\x27]?\s*=\s*false\b`)
-	inlineEvent := regexp.MustCompile(`(?:^|[,{])\s*["\x27]?[A-Z][A-Za-z]+["\x27]?\s*=`)
-	inline := regexp.MustCompile(`\b(default_subagent_(?:model|reasoning_effort)|model|model_reasoning_effort)["']?\s*=`)
-	normalize := strings.NewReplacer(" ", "", "\t", "", "'", "", "\"", "")
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[") {
-			header, _, _ := strings.Cut(line, "#")
-			table = normalize.Replace(strings.Trim(strings.TrimSpace(header), "[]"))
-			continue
-		}
-		key, val, ok := strings.Cut(line, "=")
-		if !ok || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key = normalize.Replace(key)
-		if table != "" {
-			key = table + "." + key
-		}
-		value := strings.TrimSpace(val)
-		scalar, _, _ := strings.Cut(value, "#")
-		if ((key == "features.hooks" || key == "features.codex_hooks") && strings.TrimSpace(scalar) == "false") || (key == "features" && disabledInline.MatchString(value)) {
-			return fmt.Errorf("%s: project configuration disables hooks; enable the SessionStart and PreToolUse policies", name)
-		}
-		if (strings.HasPrefix(key, "hooks.") && key != "hooks.state" && !strings.HasPrefix(key, "hooks.state.")) || (key == "hooks" && strings.HasPrefix(value, "{") && inlineEvent.MatchString(value)) {
-			return fmt.Errorf("%s: unregistered inline project hook %s; register the project handler in harness/hooks/codex.json before syncing", name, key)
-		}
-		if keys.MatchString(key) || ((key == "agents" || strings.HasPrefix(key, "agents.")) && strings.HasPrefix(value, "{") && inline.MatchString(value)) {
-			return fmt.Errorf("%s: %s overrides the development model or reasoning effort; remove the project subagent override", name, key)
-		}
 	}
 	return nil
 }
