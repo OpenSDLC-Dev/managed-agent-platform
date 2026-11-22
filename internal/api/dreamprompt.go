@@ -193,14 +193,14 @@ every line resolves. %[4]sreport.md %[12]s
 }
 
 // dreamMergeRules is the numbered list in the system prompt's merge section.
-// The two runs share six rules word for word, and the list is assembled
-// rather than written out twice so no rule can be improved in one variant and
-// left stale in the other. What an in-place run changes is only where a rule
-// named a removal: with no shell the file tools create and change and nothing
-// removes (§4.3), so the two rules that licensed a removal now license a
-// tombstone, and the tombstone is a rule of its own rather than a clause
-// hidden inside rule 2 — it governs both of them, and stage 4's index and
-// report with them.
+// The two runs share five rules word for word and two parameterized templates,
+// and the list is assembled rather than written out twice so no rule can be
+// improved in one variant and left stale in the other. What an in-place run
+// changes is only where a rule named a removal: with no shell the file tools
+// create and change and nothing removes (§4.3), so the rules that licensed or
+// excluded a removal now name a retirement, and the tombstone is a rule of its
+// own rather than a clause hidden inside rule 2 — it governs both of them, and
+// stage 4's index and report with them.
 //
 // It is inserted at 4: after the two rules that retire a memory and before
 // "nothing else is retired on suspicion", so that every rule under it already
@@ -378,8 +378,9 @@ the index and the report to stage 4.`,
 A memory whose original subject a transcript ended — even if retitled — is
 retired now under merge rule 4, after writing any replacement or surviving
 facts into a separate memory. Before listing any file under "## To remove",
-verify it holds only a one-line tombstone and no live or replacement fact
-missing from the kept memories — the caller will delete every listed file.
+verify that it holds only its one-line tombstone and that every replacement
+or surviving fact appears in a kept memory — the caller will delete every
+listed file.
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing section, so the caller can find what to
 remove: a "## To remove" heading, then one "- /<path>" line per tombstone,

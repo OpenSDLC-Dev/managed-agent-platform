@@ -8,8 +8,9 @@ content — so that every memory has a line and every line resolves.
 A memory whose original subject a transcript ended — even if retitled — is
 retired now under merge rule 4, after writing any replacement or surviving
 facts into a separate memory. Before listing any file under "## To remove",
-verify it holds only a one-line tombstone and no live or replacement fact
-missing from the kept memories — the caller will delete every listed file.
+verify that it holds only its one-line tombstone and that every replacement
+or surviving fact appears in a kept memory — the caller will delete every
+listed file.
 A tombstone is a memory like any other and keeps its line; the tombstones
 are listed again in a trailing section, so the caller can find what to
 remove: a "## To remove" heading, then one "- /<path>" line per tombstone,

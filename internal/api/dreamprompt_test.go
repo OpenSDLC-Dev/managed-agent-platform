@@ -672,7 +672,7 @@ func TestDreamInPlaceStagesListTheTombstones(t *testing.T) {
 				// the audit catches a memory merge left about an ended thing,
 				// even if retitled to hold its replacement (#1002, #1084)
 				"whose original subject a transcript ended — even if retitled — is\nretired now under merge rule 4",
-				"verify it holds only a one-line tombstone and no live or replacement fact",
+				"verify that it holds only its one-line tombstone and that every replacement\nor surviving fact appears in a kept memory",
 				"listed again in a trailing section",
 				"*to remove* heading",
 				// the listing's one form, which the caller and the eval read
