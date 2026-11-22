@@ -331,3 +331,34 @@ func TestSynchronousClaudeHandlers(t *testing.T) {
 		}
 	}
 }
+
+func TestRecoverSettingsAfterStagedDeletion(t *testing.T) {
+	root := fixture(t)
+	call(t, root, 0, "sync")
+	const name = ".claude/settings.json"
+	original := read(t, root, name)
+	gitTest(t, root, "add", name)
+	gitTest(t, root, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "shared settings")
+	gitTest(t, root, "rm", "--", name)
+	call(t, root, 0, "sync")
+	if read(t, root, name) != original {
+		t.Fatal("lost independently maintained Claude settings from HEAD")
+	}
+}
+
+func TestSyncPreservesEmptySettingsArrays(t *testing.T) {
+	root := fixture(t)
+	const file = ".claude/settings.json"
+	put(t, root, file, `{"permissions":{"allow":[],"deny":["Read(./.env)"]},"other":{"list":[]}}`)
+	call(t, root, 0, "sync")
+	var settings struct {
+		Permissions struct{ Allow, Deny []string }
+		Other       struct{ List []string }
+	}
+	if err := json.Unmarshal([]byte(read(t, root, file)), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.Permissions.Allow == nil || settings.Other.List == nil || len(settings.Permissions.Deny) != 1 {
+		t.Fatal("sync changed independent arrays", settings)
+	}
+}

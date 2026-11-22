@@ -81,16 +81,33 @@ func regularFile(root, name string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func indexedSettings(root, name string) ([]byte, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "--", name)
-	cmd.Env = gitEnv()
-	listed, err := cmd.Output()
+// Prefer the index so a maintainer's staged settings survive a working-file
+// deletion. After a staged deletion the current worktree's HEAD is the source.
+func recordedSettings(root, name string) ([]byte, error) {
+	git := func(args ...string) ([]byte, error) {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = gitEnv()
+		return cmd.Output()
+	}
+	listed, err := git("ls-files", "--", name)
+	if err != nil {
+		return nil, err
+	}
+	if len(listed) != 0 {
+		return git("show", ":"+name)
+	}
+	if _, err := git("rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return nil, nil // A newly initialized fixture or repository has no HEAD.
+		}
+		return nil, err
+	}
+	listed, err = git("ls-tree", "-z", "--name-only", "HEAD", "--", name)
 	if err != nil || len(listed) == 0 {
 		return nil, err
 	}
-	cmd = exec.Command("git", "-C", root, "show", ":"+name)
-	cmd.Env = gitEnv()
-	return cmd.Output()
+	return git("show", "HEAD:"+name)
 }
 
 func walkFiles(root, dir string) ([]string, error) {
@@ -262,9 +279,9 @@ func compare(root, host string, files map[string]output) (changes []change, conf
 		}
 		// Deleting the whole Claude settings file also removes its independent
 		// permission and plugin settings. Restore those from this worktree's
-		// staged settings when the shared file is tracked.
+		// recorded settings when the shared file is tracked.
 		if old == nil && client == "claude" {
-			old, err = indexedSettings(root, path)
+			old, err = recordedSettings(root, path)
 			if err != nil {
 				conflicts = append(conflicts, fmt.Sprintf("%s: cannot recover staged project settings: %v", path, err))
 				continue

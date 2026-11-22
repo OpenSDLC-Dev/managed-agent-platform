@@ -131,7 +131,7 @@ func decodeJSON(dec *json.Decoder) (any, error) {
 		_, err = dec.Token()
 		return m, err
 	case json.Delim('['):
-		var a []any
+		a := []any{}
 		for dec.More() {
 			v, err := decodeJSON(dec)
 			if err != nil {
