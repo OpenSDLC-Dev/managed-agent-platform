@@ -571,6 +571,17 @@ func cleanBaseURL(raw string) string {
 // LoadEndpointConfig resolves the LLM endpoint from REVIEWEVAL_* env vars,
 // falling back to MODEL_* env vars and then repoRoot/.env.
 func LoadEndpointConfig(repoRoot string, getenv func(string) string) (EndpointConfig, error) {
+	cfg, err := loadEndpointConfigRaw(repoRoot, getenv)
+	if err != nil {
+		return EndpointConfig{}, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return EndpointConfig{}, err
+	}
+	return cfg, nil
+}
+
+func loadEndpointConfigRaw(repoRoot string, getenv func(string) string) (EndpointConfig, error) {
 	dotenv := map[string]string{}
 	if repoRoot != "" {
 		if m, err := ParseDotEnv(filepath.Join(repoRoot, ".env")); err == nil {
@@ -619,9 +630,6 @@ func LoadEndpointConfig(repoRoot string, getenv func(string) string) (EndpointCo
 		} else {
 			cfg.Protocol = "openai"
 		}
-	}
-	if err := cfg.Validate(); err != nil {
-		return EndpointConfig{}, err
 	}
 	return cfg, nil
 }
@@ -862,7 +870,8 @@ func (c *LLMClient) completeOpenAI(ctx context.Context, hc *http.Client, systemP
 	}
 	var parsed struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -873,7 +882,11 @@ func (c *LLMClient) completeOpenAI(ctx context.Context, hc *http.Client, systemP
 	if len(parsed.Choices) == 0 {
 		return "", errors.New("openai response contained no choices")
 	}
-	return parsed.Choices[0].Message.Content, nil
+	content := parsed.Choices[0].Message.Content
+	if strings.TrimSpace(content) == "" && parsed.Choices[0].FinishReason == "length" {
+		return "", errors.New("openai response exhausted max_completion_tokens before emitting text; increase -max-tokens or REVIEWEVAL_MAX_TOKENS")
+	}
+	return content, nil
 }
 
 func truncateString(s string, max int) string {
@@ -943,12 +956,17 @@ func ParseFindingsJSON(raw string) ([]Finding, error) {
 		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
 			rest = rest[nl+1:]
 		}
-		if end := strings.Index(rest, "```"); end >= 0 {
+		// Try the outermost closing fence first so embedded triple backticks
+		// inside a JSON evidence string do not truncate the fenced payload,
+		// then fall back to the first closing fence if prose follows the block.
+		for _, end := range []int{strings.LastIndex(rest, "```"), strings.Index(rest, "```")} {
+			if end < 0 {
+				continue
+			}
 			fenced := strings.TrimSpace(rest[:end])
 			if out, matched, err := parseFindingsCandidate(fenced); matched {
 				return out, err
 			}
-			s = fenced
 		}
 	}
 	start, end := strings.IndexByte(s, '['), strings.LastIndexByte(s, ']')

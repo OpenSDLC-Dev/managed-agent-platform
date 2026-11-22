@@ -221,6 +221,19 @@ func TestParseFindingsJSONRejectsNullAndInvalidSeverity(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].RuleID != "R02" {
 		t.Fatalf("ParseFindingsJSON(embedded code fence) = %v, %v", got, err)
 	}
+	// Outer fenced JSON whose evidence string also embeds triple backticks must
+	// match the outermost closing fence instead of truncating at the inner fence.
+	fencedWithInnerFence := "```json\n" + withFence + "\n```"
+	got, err = ParseFindingsJSON(fencedWithInnerFence)
+	if err != nil || len(got) != 1 || got[0].RuleID != "R02" {
+		t.Fatalf("ParseFindingsJSON(fenced + embedded code fence) = %v, %v", got, err)
+	}
+	// An earlier prose code block before the JSON array must not clobber the fallback.
+	proseBeforeJSON := "Context:\n```go\nvar x = 1\n```\n" + withFence
+	got, err = ParseFindingsJSON(proseBeforeJSON)
+	if err != nil || len(got) != 1 || got[0].RuleID != "R02" {
+		t.Fatalf("ParseFindingsJSON(prose fence before JSON) = %v, %v", got, err)
+	}
 }
 
 func TestEndpointConfigDotEnvAndRedaction(t *testing.T) {
@@ -356,6 +369,23 @@ func TestEndpointConfigThinkingAndEffortValidation(t *testing.T) {
 			t.Errorf("invalid[%d] (%s): expected error, got nil", i, bad)
 		}
 	}
+
+	if _, err := LoadEndpointConfig(tmp, func(k string) string {
+		if k == "REVIEWEVAL_MAX_TOKENS" {
+			return "not-a-number"
+		}
+		return ""
+	}); err == nil {
+		t.Error("expected error for non-integer REVIEWEVAL_MAX_TOKENS")
+	}
+	if _, err := LoadEndpointConfig(tmp, func(k string) string {
+		if k == "REVIEWEVAL_TIMEOUT" {
+			return "not-a-duration"
+		}
+		return ""
+	}); err == nil {
+		t.Error("expected error for invalid REVIEWEVAL_TIMEOUT")
+	}
 }
 
 func TestCompleteSendsThinkingAndEffortAndHandlesMaxTokensTruncation(t *testing.T) {
@@ -461,6 +491,67 @@ func TestCompleteSendsThinkingAndEffortAndHandlesMaxTokensTruncation(t *testing.
 		}
 		if gotBody["max_completion_tokens"] != float64(32768) {
 			t.Errorf("max_completion_tokens = %v, want 32768", gotBody["max_completion_tokens"])
+		}
+	})
+
+	t.Run("anthropic thinking enabled and disabled and implicit adaptive", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			thinking   string
+			effort     string
+			maxTokens  int
+			wantType   string
+			wantBudget float64
+		}{
+			{"enabled", "enabled", "", 16384, "enabled", 8192},
+			{"disabled", "disabled", "", 0, "disabled", 0},
+			{"implicit adaptive", "", "high", 0, "adaptive", 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var gotBody map[string]any
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewDecoder(r.Body).Decode(&gotBody)
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"content": []map[string]string{{"type": "text", "text": `[]`}}})
+				}))
+				t.Cleanup(srv.Close)
+
+				client := &LLMClient{Cfg: EndpointConfig{
+					Protocol:  "anthropic",
+					BaseURL:   srv.URL,
+					APIKey:    "k",
+					Model:     "m",
+					Thinking:  tc.thinking,
+					Effort:    tc.effort,
+					MaxTokens: tc.maxTokens,
+				}}
+				if _, err := client.Complete(context.Background(), "sys", "usr"); err != nil {
+					t.Fatalf("Complete: %v", err)
+				}
+				thinking, _ := gotBody["thinking"].(map[string]any)
+				if thinking["type"] != tc.wantType {
+					t.Errorf("thinking.type = %v, want %q", thinking["type"], tc.wantType)
+				}
+				if tc.wantBudget > 0 && thinking["budget_tokens"] != tc.wantBudget {
+					t.Errorf("thinking.budget_tokens = %v, want %v", thinking["budget_tokens"], tc.wantBudget)
+				}
+			})
+		}
+	})
+
+	t.Run("openai length empty content error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{"finish_reason": "length", "message": map[string]string{"content": ""}}},
+			})
+		}))
+		t.Cleanup(srv.Close)
+
+		client := &LLMClient{Cfg: EndpointConfig{Protocol: "openai", BaseURL: srv.URL, APIKey: "k", Model: "m", Effort: "high"}}
+		_, err := client.Complete(context.Background(), "sys", "usr")
+		if err == nil || !strings.Contains(err.Error(), "max_completion_tokens") {
+			t.Fatalf("expected actionable max_completion_tokens error, got %v", err)
 		}
 	})
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -133,30 +132,31 @@ func main() {
 		return
 	}
 
-	overrides := map[string]string{}
-	if *modelFlag != "" {
-		overrides["REVIEWEVAL_MODEL"] = *modelFlag
-	}
-	if *thinkingFlag != "" {
-		overrides["REVIEWEVAL_THINKING"] = *thinkingFlag
-	}
-	if *effortFlag != "" {
-		overrides["REVIEWEVAL_EFFORT"] = *effortFlag
-	}
-	if *maxTokensFlag != 0 {
-		overrides["REVIEWEVAL_MAX_TOKENS"] = strconv.Itoa(*maxTokensFlag)
-	}
-	if *timeoutFlag != 0 {
-		overrides["REVIEWEVAL_TIMEOUT"] = (*timeoutFlag).String()
-	}
-	getenv := func(k string) string {
-		if v, ok := overrides[k]; ok {
-			return v
-		}
-		return os.Getenv(k)
-	}
+	visited := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 
-	cfg, err := LoadEndpointConfig(root, getenv)
+	cfg, err := loadEndpointConfigRaw(root, os.Getenv)
+	if err == nil {
+		if visited["model"] {
+			cfg.Model = strings.TrimSpace(*modelFlag)
+		}
+		if visited["thinking"] {
+			cfg.Thinking = strings.ToLower(strings.TrimSpace(*thinkingFlag))
+			if cfg.Thinking == "disabled" && !visited["effort"] {
+				cfg.Effort = ""
+			}
+		}
+		if visited["effort"] {
+			cfg.Effort = strings.ToLower(strings.TrimSpace(*effortFlag))
+		}
+		if visited["max-tokens"] {
+			cfg.MaxTokens = *maxTokensFlag
+		}
+		if visited["timeout"] {
+			cfg.Timeout = *timeoutFlag
+		}
+		err = cfg.Validate()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "revieweval: live mode configuration error: %v\n", err)
 		os.Exit(1)
@@ -200,11 +200,14 @@ func main() {
 	rep.Thinking = cfg.Thinking
 	rep.Effort = cfg.Effort
 
-	header := rep.Model
-	if rep.Thinking != "" || rep.Effort != "" {
-		header = fmt.Sprintf("%s, thinking=%s, effort=%s", rep.Model, rep.Thinking, rep.Effort)
+	headerParts := []string{rep.Model}
+	if rep.Thinking != "" {
+		headerParts = append(headerParts, "thinking="+rep.Thinking)
 	}
-	fmt.Printf("\n=== revieweval summary (%s) ===\n", header)
+	if rep.Effort != "" {
+		headerParts = append(headerParts, "effort="+rep.Effort)
+	}
+	fmt.Printf("\n=== revieweval summary (%s) ===\n", strings.Join(headerParts, ", "))
 	fmt.Printf("Raw:         recall=%d/%d (%.1f%%)  severity_cal=%.1f%%  control_fp=%d/%d (%.1f%%)\n",
 		rep.Raw.IncidentsCaught, rep.Raw.IncidentsTotal, rep.Raw.IncidentRecall*100,
 		rep.Raw.SeverityCalibration*100,
