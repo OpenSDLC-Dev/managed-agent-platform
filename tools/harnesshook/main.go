@@ -99,6 +99,11 @@ func decision(host, deny string, out io.Writer) error {
 var unsafeSession = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
 
 func evidenceOnly(root, role string) (bool, error) {
+	// These two roles have an unconditional read-only contract, including
+	// while a session is reporting a missing or malformed catalog entry.
+	if role == "reviewer" || role == "issue-triage" {
+		return true, nil
+	}
 	var catalog struct {
 		Agents []struct {
 			Name         string `json:"name"`
@@ -118,7 +123,17 @@ func evidenceOnly(root, role string) (bool, error) {
 			return agent.EvidenceOnly, nil
 		}
 	}
-	return false, nil
+	// Codex may still discover a project role whose canonical entry was
+	// removed. Keep that adapter read-only until the reported drift is fixed.
+	filename := role + ".toml"
+	if !filepath.IsLocal(filename) || strings.ContainsAny(filename, `/\`) {
+		return false, nil
+	}
+	_, err = os.Lstat(filepath.Join(root, ".codex", "agents", filename))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil // A separately configured host role.
+	}
+	return err == nil, err
 }
 
 func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) error {

@@ -46,6 +46,24 @@ func TestNativeInputsAndRoleBoundaries(t *testing.T) {
 			}
 		}
 	}
+	// A registered adapter can outlive its catalog entry until sync is repaired.
+	dir := filepath.Join(root, ".codex", "agents")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orphan.toml"), []byte("name = 'orphan'\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "harness", "manifest.json"), []byte(`{"agents":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for role, restricted := range map[string]bool{"orphan": true, "reviewer": true, "issue-triage": true, "independent": false} {
+		var out bytes.Buffer
+		if err := handle("codex", event{role: role, tool: "list_tools"}, root, &out, &bytes.Buffer{}); err != nil ||
+			strings.Contains(out.String(), `"permissionDecision":"deny"`) != restricted {
+			t.Fatalf("%s: %s, %v", role, &out, err)
+		}
+	}
 }
 
 func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
@@ -74,6 +92,9 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{`git worktree add -b topic "one space" HEAD && git -C "one space" commit -m first`, []commit{{"", false}}},
 		{`sh -c 'git init "one space"' && git -C "one space/subdir" commit -m first`, []commit{{"", false}}},
 		{`git init other && git -C "one space" commit -m unrelated`, []commit{{nested, false}}},
+		{`git clone origin "one space" && git -C "one space" commit -m first`, []commit{{"", false}}},
+		{`git clone origin "one space" && git commit -m unrelated`, []commit{{root, false}}},
+		{`git clone ../other/source.git && git -C source commit -m first`, []commit{{"", false}}},
 		{`git commit -m first && echo "Verified-By: other"`, []commit{{root, false}}},
 		{`(cd "one space" && git status); git commit -m root`, []commit{{root, false}}},
 		{`(cd "one space" && (git commit -m child)); git commit -m root`, []commit{{nested, false}, {root, false}}},

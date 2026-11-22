@@ -198,6 +198,13 @@ func commits(command, base string) []commit {
 // will initialize later cannot use the stamp of its current parent checkout.
 func worktreeCreation(argv []string, dir string) (string, bool) {
 	switch {
+	case len(argv) > 0 && argv[0] == "clone":
+		if len(argv) == 3 && !strings.HasPrefix(argv[1], "-") && !strings.HasPrefix(argv[2], "-") {
+			return resolveDir(dir, argv[2]), true
+		}
+		// Git can derive the destination from a URL or accept options with
+		// their own path arguments. Wait for the clone before trusting a stamp.
+		return "", true
 	case len(argv) > 0 && argv[0] == "init":
 		argv = argv[1:]
 	case len(argv) > 1 && argv[0] == "worktree" && argv[1] == "add":

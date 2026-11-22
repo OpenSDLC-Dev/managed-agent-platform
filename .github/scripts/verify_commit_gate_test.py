@@ -178,6 +178,12 @@ class VerifyCommitGateTests(unittest.TestCase):
             # A target outside Git may become a worktree by another command before commit.
             result = run_gate(Path(tmp, "outside"), "git commit -m first", mode="enforce")
             self.assertEqual(result.returncode, 2)
+            child = repo / "child"
+            clone = f'git clone "{repo}" "{child}"'
+            in_clone = run_gate(repo, clone + f' && git -C "{child}" commit -m first', mode="enforce")
+            self.assertEqual(in_clone.returncode, 2)
+            in_parent = run_gate(repo, clone + ' && git commit -m verified', mode="enforce")
+            self.assertEqual(in_parent.returncode, 0, in_parent.stderr)
 
     def test_non_commit_commands_always_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
