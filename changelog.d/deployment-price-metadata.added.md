@@ -1,0 +1,1 @@
+- **Model gateway deployment pricing** — Admins can record a three-letter currency code and a short note about when the four fixed token rates apply. The deployment list and detail return both fields. Existing rates keep an unspecified currency until an admin sets it. Use one currency for deployments whose costs will be totaled together.

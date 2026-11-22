@@ -2,6 +2,7 @@ package admin
 
 import (
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
@@ -23,6 +24,8 @@ type deploymentView struct {
 	DisplayName   string             `json:"display_name"`
 	Capabilities  store.Capabilities `json:"capabilities"`
 	Prices        pricesJSON         `json:"prices"`
+	PriceCurrency string             `json:"price_currency"`
+	PriceNote     string             `json:"price_note"`
 	Enabled       bool               `json:"enabled"`
 	CreatedAt     time.Time          `json:"created_at"`
 	UpdatedAt     time.Time          `json:"updated_at"`
@@ -31,8 +34,8 @@ type deploymentView struct {
 func viewDeployment(d store.Deployment) deploymentView {
 	return deploymentView{Type: "deployment", ID: d.ID, ProviderID: d.ProviderID, UpstreamModel: d.UpstreamModel,
 		Kind: d.Kind, DisplayName: d.DisplayName, Capabilities: d.Capabilities,
-		Prices:  pricesJSON{Input: d.Prices.Input, Output: d.Prices.Output, CacheWrite: d.Prices.CacheWrite, CacheRead: d.Prices.CacheRead},
-		Enabled: d.Enabled, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
+		Prices:        pricesJSON{Input: d.Prices.Input, Output: d.Prices.Output, CacheWrite: d.Prices.CacheWrite, CacheRead: d.Prices.CacheRead},
+		PriceCurrency: d.PriceCurrency, PriceNote: d.PriceNote, Enabled: d.Enabled, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt}
 }
 
 func checkKind(k store.Kind) error {
@@ -80,6 +83,15 @@ func checkPrices(p pricesJSON) (store.Prices, error) {
 	return store.Prices{Input: p.Input, Output: p.Output, CacheWrite: p.CacheWrite, CacheRead: p.CacheRead}, nil
 }
 
+var currencyCode = regexp.MustCompile("^[A-Z]{3}$")
+
+func checkPriceMetadata(currency, note string) error {
+	if currency != "" && !currencyCode.MatchString(currency) {
+		return invalid("price_currency must be empty or three uppercase ASCII letters")
+	}
+	return checkOptionalName("price_note", note)
+}
+
 func (h *handler) createDeployment(r *http.Request) (any, error) {
 	var req struct {
 		ProviderID    string             `json:"provider_id"`
@@ -88,6 +100,8 @@ func (h *handler) createDeployment(r *http.Request) (any, error) {
 		DisplayName   string             `json:"display_name"`
 		Capabilities  store.Capabilities `json:"capabilities"`
 		Prices        pricesJSON         `json:"prices"`
+		PriceCurrency string             `json:"price_currency"`
+		PriceNote     string             `json:"price_note"`
 		Enabled       *bool              `json:"enabled"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -108,13 +122,17 @@ func (h *handler) createDeployment(r *http.Request) (any, error) {
 	if err := checkCapabilities(req.Capabilities); err != nil {
 		return nil, err
 	}
+	if err := checkPriceMetadata(req.PriceCurrency, req.PriceNote); err != nil {
+		return nil, err
+	}
 	prices, err := checkPrices(req.Prices)
 	if err != nil {
 		return nil, err
 	}
 	d, err := h.cfg.Store.CreateDeployment(r.Context(), store.Deployment{
 		ProviderID: req.ProviderID, UpstreamModel: req.UpstreamModel, Kind: req.Kind, DisplayName: req.DisplayName,
-		Capabilities: req.Capabilities, Prices: prices, Enabled: req.Enabled == nil || *req.Enabled,
+		Capabilities: req.Capabilities, Prices: prices, PriceCurrency: req.PriceCurrency, PriceNote: req.PriceNote,
+		Enabled: req.Enabled == nil || *req.Enabled,
 	})
 	if err != nil {
 		return nil, err
@@ -145,15 +163,16 @@ func (h *handler) getDeployment(r *http.Request) (any, error) {
 // updateDeployment replaces capabilities and prices whole when named.
 func (h *handler) updateDeployment(r *http.Request) (any, error) {
 	req, err := decodePatch(r, atCreation("provider_id", "upstream_model", "kind"),
-		[]string{"display_name", "capabilities", "prices", "enabled"})
+		[]string{"display_name", "capabilities", "prices", "price_currency", "price_note", "enabled"})
 	if err != nil {
 		return nil, err
 	}
 	var (
-		name    string
-		caps    store.Capabilities
-		pj      pricesJSON
-		enabled bool
+		name           string
+		caps           store.Capabilities
+		pj             pricesJSON
+		currency, note string
+		enabled        bool
 	)
 	hasName, err := req.field("display_name", &name)
 	if err != nil {
@@ -177,6 +196,17 @@ func (h *handler) updateDeployment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	hasCurrency, err := req.field("price_currency", &currency)
+	if err != nil {
+		return nil, err
+	}
+	hasNote, err := req.field("price_note", &note)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPriceMetadata(currency, note); err != nil {
+		return nil, err
+	}
 	hasEnabled, err := req.field("enabled", &enabled)
 	if err != nil {
 		return nil, err
@@ -190,6 +220,12 @@ func (h *handler) updateDeployment(r *http.Request) (any, error) {
 		}
 		if hasPrices {
 			d.Prices = prices
+		}
+		if hasCurrency {
+			d.PriceCurrency = currency
+		}
+		if hasNote {
+			d.PriceNote = note
 		}
 		if hasEnabled {
 			d.Enabled = enabled

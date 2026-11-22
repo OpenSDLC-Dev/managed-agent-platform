@@ -9,12 +9,12 @@ import (
 )
 
 const deploymentCols = `id, provider_id, upstream_model, kind, display_name, capabilities,
-	price_input, price_output, price_cache_write, price_cache_read, enabled, created_at, updated_at`
+	price_input, price_output, price_cache_write, price_cache_read, price_currency, price_note, enabled, created_at, updated_at`
 
 func scanDeployment(row pgx.Row) (Deployment, error) {
 	var d Deployment
 	err := row.Scan(&d.ID, &d.ProviderID, &d.UpstreamModel, &d.Kind, &d.DisplayName, &d.Capabilities,
-		&d.Prices.Input, &d.Prices.Output, &d.Prices.CacheWrite, &d.Prices.CacheRead, &d.Enabled, &d.CreatedAt, &d.UpdatedAt)
+		&d.Prices.Input, &d.Prices.Output, &d.Prices.CacheWrite, &d.Prices.CacheRead, &d.PriceCurrency, &d.PriceNote, &d.Enabled, &d.CreatedAt, &d.UpdatedAt)
 	return d, err
 }
 
@@ -35,10 +35,10 @@ func (s *Store) CreateDeployment(ctx context.Context, d Deployment) (Deployment,
 		var err error
 		out, err = scanDeployment(tx.QueryRow(ctx,
 			`INSERT INTO modelgateway.deployments (id, provider_id, upstream_model, kind, display_name, capabilities,
-			   price_input, price_output, price_cache_write, price_cache_read, enabled)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING `+deploymentCols,
+			   price_input, price_output, price_cache_write, price_cache_read, price_currency, price_note, enabled)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING `+deploymentCols,
 			newID("gwdep"), d.ProviderID, d.UpstreamModel, d.Kind, d.DisplayName, d.Capabilities,
-			d.Prices.Input, d.Prices.Output, d.Prices.CacheWrite, d.Prices.CacheRead, d.Enabled))
+			d.Prices.Input, d.Prices.Output, d.Prices.CacheWrite, d.Prices.CacheRead, d.PriceCurrency, d.PriceNote, d.Enabled))
 		return err
 	})
 	return out, err
@@ -76,7 +76,7 @@ func listDeployments(ctx context.Context, q querier) ([]Deployment, error) {
 }
 
 // UpdateDeployment applies fn to the deployment and writes back its display
-// name, capabilities, prices and enabled flag.
+// name, capabilities, pricing and enabled flag.
 func (s *Store) UpdateDeployment(ctx context.Context, id string, fn func(*Deployment) error) (Deployment, error) {
 	var out Deployment
 	err := s.write(ctx, func(tx pgx.Tx) error {
@@ -93,10 +93,11 @@ func (s *Store) UpdateDeployment(ctx context.Context, id string, fn func(*Deploy
 		}
 		out, err = scanDeployment(tx.QueryRow(ctx,
 			`UPDATE modelgateway.deployments SET display_name = $2, capabilities = $3,
-			   price_input = $4, price_output = $5, price_cache_write = $6, price_cache_read = $7, enabled = $8, updated_at = now()
+			   price_input = $4, price_output = $5, price_cache_write = $6, price_cache_read = $7,
+			   price_currency = $8, price_note = $9, enabled = $10, updated_at = now()
 			 WHERE id = $1 RETURNING `+deploymentCols,
 			id, next.DisplayName, next.Capabilities,
-			next.Prices.Input, next.Prices.Output, next.Prices.CacheWrite, next.Prices.CacheRead, next.Enabled))
+			next.Prices.Input, next.Prices.Output, next.Prices.CacheWrite, next.Prices.CacheRead, next.PriceCurrency, next.PriceNote, next.Enabled))
 		return err
 	})
 	return out, err
