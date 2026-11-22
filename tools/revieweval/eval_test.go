@@ -360,6 +360,9 @@ func TestEndpointConfigThinkingAndEffortValidation(t *testing.T) {
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "bogus"},
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", Effort: "ultra"},
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "disabled", Effort: "high"},
+		{Protocol: "openai", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "enabled"},
+		{Protocol: "openai", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "adaptive"},
+		{Protocol: "openai", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "disabled"},
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", Thinking: "enabled", MaxTokens: 1024},
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", MaxTokens: -1},
 		{Protocol: "anthropic", BaseURL: "https://example.com", APIKey: "k", Model: "m", Timeout: -time.Second},
@@ -385,6 +388,29 @@ func TestEndpointConfigThinkingAndEffortValidation(t *testing.T) {
 		return ""
 	}); err == nil {
 		t.Error("expected error for invalid REVIEWEVAL_TIMEOUT")
+	}
+
+	// Explicit override values supplied via getenv take precedence over malformed
+	// inherited .env values before numeric/duration parsing runs.
+	badDotEnv := dotenv + "REVIEWEVAL_MAX_TOKENS=bogus\nREVIEWEVAL_TIMEOUT=bad\n"
+	if err := os.WriteFile(filepath.Join(tmp, ".env"), []byte(badDotEnv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overrideCfg, err := LoadEndpointConfig(tmp, func(k string) string {
+		switch k {
+		case "REVIEWEVAL_MAX_TOKENS":
+			return "16384"
+		case "REVIEWEVAL_TIMEOUT":
+			return "2m"
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatalf("expected explicit overrides to supersede malformed .env values: %v", err)
+	}
+	if overrideCfg.MaxTokens != 16384 || overrideCfg.Timeout != 2*time.Minute {
+		t.Fatalf("unexpected override config: %s", overrideCfg)
 	}
 }
 

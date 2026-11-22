@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -135,7 +136,19 @@ func main() {
 	visited := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 
-	cfg, err := loadEndpointConfigRaw(root, os.Getenv)
+	// Inject visited numeric/duration flags before parsing so valid CLI flags
+	// override a malformed REVIEWEVAL_MAX_TOKENS / REVIEWEVAL_TIMEOUT in env/.env.
+	getenv := func(k string) string {
+		if k == "REVIEWEVAL_MAX_TOKENS" && visited["max-tokens"] {
+			return strconv.Itoa(*maxTokensFlag)
+		}
+		if k == "REVIEWEVAL_TIMEOUT" && visited["timeout"] {
+			return (*timeoutFlag).String()
+		}
+		return os.Getenv(k)
+	}
+
+	cfg, err := loadEndpointConfigRaw(root, getenv)
 	if err == nil {
 		if visited["model"] {
 			cfg.Model = strings.TrimSpace(*modelFlag)
@@ -148,12 +161,6 @@ func main() {
 		}
 		if visited["effort"] {
 			cfg.Effort = strings.ToLower(strings.TrimSpace(*effortFlag))
-		}
-		if visited["max-tokens"] {
-			cfg.MaxTokens = *maxTokensFlag
-		}
-		if visited["timeout"] {
-			cfg.Timeout = *timeoutFlag
 		}
 		err = cfg.Validate()
 	}

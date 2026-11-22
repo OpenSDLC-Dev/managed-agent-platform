@@ -209,6 +209,9 @@ func (c EndpointConfig) Validate() error {
 	if c.Thinking == "disabled" && c.Effort != "" {
 		return errors.New("cannot combine thinking=disabled with an effort level")
 	}
+	if c.Protocol == "openai" && c.Thinking != "" && c.Effort == "" {
+		return fmt.Errorf("openai protocol does not support thinking=%s without an explicit effort level; set -effort / REVIEWEVAL_EFFORT instead", c.Thinking)
+	}
 	if c.MaxTokens < 0 {
 		return fmt.Errorf("invalid max_tokens %d (must be >= 0)", c.MaxTokens)
 	}
