@@ -68,12 +68,12 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 func TestCommitMessageOptionForms(t *testing.T) {
 	message := "fix\n\nVerified-By: manual check"
 	for _, args := range [][]string{{"-am", message}, {"-m" + message}, {"-qsm" + message}, {"--message=" + message}} {
-		if !hasTrailer(args) {
+		if !hasTrailer(args, false) {
 			t.Errorf("missed trailer for %q", args)
 		}
 	}
 	for _, args := range [][]string{{"--", "-m", message}, {"-F" + message}, {"-Smy-key", message}} {
-		if hasTrailer(args) {
+		if hasTrailer(args, false) {
 			t.Errorf("treated non-message argument as a trailer: %q", args)
 		}
 	}
@@ -87,9 +87,15 @@ func TestLiteralCommitMessageOnStdin(t *testing.T) {
 		targets []commit
 	}{
 		{"git commit -F -" + text, []commit{{root, true}}},
+		{"git commit -F - 0" + strings.TrimSpace(text), []commit{{root, true}}},
+		{"git commit -F - 3" + strings.TrimSpace(text), []commit{{root, false}}},
+		{"git commit -F - <" + strings.TrimSpace(text), []commit{{root, false}}},
 		{"git commit --file=-" + text + "git commit -m next", []commit{{root, true}, {root, false}}},
 		{"cat" + text + "git commit -F -", []commit{{root, false}}},
 		{"git commit -m subject" + text, []commit{{root, false}}},
+		{"git commit -m -F-" + text, []commit{{root, false}}},
+		{"git commit --message --file=-" + text, []commit{{root, false}}},
+		{"git commit -F - -F other-file" + text, []commit{{root, false}}},
 		{"git commit -F - <<'MSG'\nno trailer\nMSG\n", []commit{{root, false}}},
 	} {
 		if got := commits(tc.command, root); !reflect.DeepEqual(got, tc.targets) {

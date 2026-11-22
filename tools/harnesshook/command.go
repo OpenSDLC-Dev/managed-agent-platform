@@ -76,8 +76,19 @@ func shellSegments(command string) []shellSegment {
 		if quote == 0 {
 			switch ch {
 			case '<':
+				// Only the first '<' in a redirection can introduce a here-document.
+				if i != 0 && command[i-1] == '<' {
+					break
+				}
 				if consumed, verified := literalInput(command[i:]); consumed != 0 {
-					stdinTrailer = verified
+					// A decimal immediately before << can redirect another descriptor.
+					// Credit only an unambiguous stdin binding, implicit or explicit.
+					explicitStdin := haveWord && word.String() == "0"
+					stdinTrailer = verified && (!haveWord || explicitStdin)
+					if explicitStdin {
+						word.Reset()
+						haveWord = false
+					}
 					finishSegment()
 					i += consumed - 1
 					continue
@@ -126,50 +137,48 @@ func shellSegments(command string) []shellSegment {
 
 var messageTrailer = regexp.MustCompile("(?im)^Verified-By:[[:blank:]]*[^[:space:]]")
 
-// In commit's short-option syntax -m owns the rest of the argument. The
-// preceding flags here take no value (for example -am or -qsm).
-var shortMessage = regexp.MustCompile(`(?s)^-[aiposeqnzvb]*m(.*)$`)
+// A short option that takes an argument consumes the rest of the token.
+// Only argument-free flags can precede it in a cluster (such as -am).
+var shortValue = regexp.MustCompile(`(?s)^-[aiposeqnzvb]*([mFCct])(.*)$`)
 var trailerValue = regexp.MustCompile("(?i)^Verified-By:[[:blank:]]*[^[:space:]]")
 var assignment = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z_0-9]*=`)
 
-func hasTrailer(argv []string) bool {
+func hasTrailer(argv []string, stdinTrailer bool) bool {
+	fromStdin := false
 	for i := 0; i < len(argv); i++ {
 		if argv[i] == "--" {
 			break // The remaining arguments are pathspecs.
 		}
 		flag, val, joined := strings.Cut(argv[i], "=")
-		if short := shortMessage.FindStringSubmatch(argv[i]); short != nil {
-			flag, val = "--message", short[1]
+		if short := shortValue.FindStringSubmatch(argv[i]); short != nil {
+			flag, val = "-"+short[1], short[2]
 			joined = val != ""
 		}
-		if !joined && (flag == "--trailer" || flag == "--message") && i+1 < len(argv) {
-			i++
-			val = argv[i]
+		switch flag {
+		case "-m", "--message", "-F", "--file", "--trailer", "-c", "-C", "-t",
+			"--reuse-message", "--reedit-message", "--template", "--author", "--date",
+			"--fixup", "--squash", "--pathspec-from-file":
+			if !joined && i+1 < len(argv) {
+				i++
+				val = argv[i]
+			}
+		default:
+			continue
 		}
-		if flag == "--trailer" && trailerValue.MatchString(val) {
-			return true
-		}
-		if flag == "--message" && messageTrailer.MatchString(val) {
-			return true
-		}
-	}
-	return false
-}
-
-func messageFromStdin(argv []string) bool {
-	for i, arg := range argv {
-		switch arg {
-		case "--":
-			return false
-		case "-F-", "--file=-":
-			return true
-		case "-F", "--file":
-			if i+1 < len(argv) && argv[i+1] == "-" {
+		switch flag {
+		case "--trailer":
+			if trailerValue.MatchString(val) {
 				return true
 			}
+		case "-m", "--message":
+			if messageTrailer.MatchString(val) {
+				return true
+			}
+		case "-F", "--file":
+			fromStdin = val == "-"
 		}
 	}
-	return false
+	return stdinTrailer && fromStdin
 }
 
 func commits(command, base string) []commit {
@@ -232,7 +241,7 @@ func commits(command, base string) []commit {
 				}
 			}
 			if len(argv) > 0 && argv[0] == "commit" {
-				result = append(result, commit{dir, hasTrailer(argv[1:]) || segment.stdinTrailer && messageFromStdin(argv[1:])})
+				result = append(result, commit{dir, hasTrailer(argv[1:], segment.stdinTrailer)})
 			}
 		}
 	}
