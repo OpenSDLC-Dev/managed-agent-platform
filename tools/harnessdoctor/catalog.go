@@ -274,6 +274,12 @@ func skillHeader(name string, data []byte) error {
 
 func render(root, host string, m manifest) (map[string]output, error) {
 	result := map[string]output{}
+	// These runtime dependencies are shared by all three PreToolUse adapters.
+	for _, path := range []string{"tools/harnesshook/main.go", "harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"} {
+		if _, err := regularFile(root, path); err != nil {
+			return nil, err
+		}
+	}
 	for _, name := range m.Skills {
 		prefix := "harness/skills/" + name
 		files, err := walkFiles(root, prefix)

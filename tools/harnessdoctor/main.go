@@ -48,10 +48,19 @@ func run(cwd string, args []string, out io.Writer) int {
 		var matches []string
 		matches, err = matchingRules(root, cwd, args[1:], m)
 		if err == nil {
+			var rules strings.Builder
 			for _, name := range matches {
-				fmt.Fprintln(out, name)
+				body, readErr := regularFile(root, name)
+				if readErr != nil {
+					err = readErr
+					break
+				}
+				fmt.Fprintf(&rules, "%s\n%s\n", name, strings.TrimRight(string(body), "\r\n"))
 			}
-			return 0
+			if err == nil {
+				fmt.Fprint(out, rules.String())
+				return 0
+			}
 		}
 	}
 	if err == nil {

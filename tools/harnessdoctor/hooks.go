@@ -8,6 +8,8 @@ import (
 	"io"
 	"reflect"
 	"regexp"
+	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -179,10 +181,31 @@ func registeredShape(actual, expected any, field string) bool {
 	}
 }
 
+// Native discovery must reach the worktree checks even when a source and
+// its generated adapter drift together. Git shell aliases execute at the root.
+func callsGo(command, target string) bool {
+	alias, invocation, ok := strings.Cut(strings.TrimPrefix(command, `git -c "alias.`), `=!`)
+	return ok && alias != "" && invocation == target+`" `+alias && strings.HasPrefix(command, `git -c "alias.`)
+}
+
+func matchesPreTool(host, matcher string) bool {
+	if slices.Contains([]string{"", "*", ".*", "^.*$"}, matcher) {
+		return true
+	}
+	if host == "codex" {
+		// The role guard must see every tool, including tools added by a plugin.
+		return false
+	}
+	if host == "antigravity" {
+		return matcher == "run_command"
+	}
+	expr, err := regexp.Compile("^(?:" + matcher + ")$")
+	return err == nil && expr.MatchString("Bash") && expr.MatchString("PowerShell")
+}
+
 func validateRegistry(host string, doc map[string]any, canonical bool) error {
-	starts := 0
-	target := regexp.MustCompile(`go run \./tools/harnessdoctor session-start ` + regexp.QuoteMeta(host) + `(?:["'\s]|$)`)
-	check := func(event string, handlers any) error {
+	starts, gates := 0, 0
+	check := func(event, matcher string, handlers any) error {
 		list, ok := handlers.([]any)
 		if !ok || len(list) == 0 {
 			return fmt.Errorf("invalid %s handler list", event)
@@ -196,8 +219,11 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			if h["type"] != "command" || command == "" {
 				return fmt.Errorf("unregistered or malformed %s command; inspect it before sync", event)
 			}
-			if event == "SessionStart" && target.MatchString(command) {
+			if event == "SessionStart" && callsGo(command, "go run ./tools/harnessdoctor session-start "+host) {
 				starts++
+			}
+			if event == "PreToolUse" && callsGo(command, "go run ./tools/harnesshook "+host) && matchesPreTool(host, matcher) {
+				gates++
 			}
 		}
 		return nil
@@ -212,7 +238,7 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 				continue
 			}
 			if host == "antigravity" && event == "SessionStart" {
-				if err := check(event, value); err != nil {
+				if err := check(event, "", value); err != nil {
 					return err
 				}
 				continue
@@ -238,7 +264,8 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 						}
 					}
 				}
-				if err := check(event, g["hooks"]); err != nil {
+				matcher, _ := g["matcher"].(string)
+				if err := check(event, matcher, g["hooks"]); err != nil {
 					return err
 				}
 			}
@@ -266,6 +293,9 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 	}
 	if canonical && starts != 1 {
 		return fmt.Errorf("expected one SessionStart command for %s; found %d", host, starts)
+	}
+	if canonical && gates != 1 {
+		return fmt.Errorf("expected one PreToolUse command covering %s policy tools; found %d", host, gates)
 	}
 	return nil
 }

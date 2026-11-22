@@ -52,16 +52,15 @@ func fixture(t *testing.T) string {
 		"harness/agents/reviewer.md":              "Read the supplied evidence.\n",
 		"harness/skills/example/SKILL.md":         "---\nname: example\ndescription: Use this workflow for its evidence.\n---\n\nRead the reference.\n",
 		"harness/skills/example/assets/input.bin": "\x00\x91\n\x02",
+		"tools/harnesshook/main.go":               "package main\n",
+		"harness/hooks/verify-commit-gate.sh":     "#!/bin/sh\n",
+		"harness/hooks/verify-stamp.sh":           "#!/bin/sh\n",
 		".claude/settings.json":                   `{"permissions":{"deny":["Read(./.env)"]},"custom":{"n":1}}`,
 	} {
 		put(t, root, path, data)
 	}
 	for _, client := range []string{"claude", "codex", "antigravity"} {
-		command := `{"type":"command","command":"go run ./tools/harnessdoctor session-start ` + client + `"}`
-		data := `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[` + command + `]}]}}`
-		if client == "antigravity" {
-			data = `{"harness-doctor":{"SessionStart":[` + command + `]}}`
-		}
+		data := read(t, filepath.Join("..", ".."), "harness/hooks/"+client+".json")
 		put(t, root, "harness/hooks/"+client+".json", data)
 	}
 	return root
@@ -99,9 +98,9 @@ func TestDoctorWorkflow(t *testing.T) {
 		t.Fatal(got)
 	}
 	nested := filepath.Join(root, "harness", "rules")
-	paths := strings.Fields(call(t, nested, 0, "rules", `..\..\src\io_test.go`, "../../src/nested/io.go"))
-	if strings.Join(paths, ",") != "harness/rules/source.md,harness/rules/storage.md" {
-		t.Fatal(paths)
+	rules := call(t, nested, 0, "rules", `..\..\src\io_test.go`, "../../src/nested/io.go")
+	if strings.TrimSpace(rules) != "harness/rules/source.md\nSource rule.\nharness/rules/storage.md\nStorage rule." {
+		t.Fatal(rules)
 	}
 	if got := call(t, nested, 1, "rules", "../../../outside"); !strings.Contains(got, "outside") {
 		t.Fatal(got)
@@ -196,7 +195,7 @@ func TestMiswiredSessionHookAndMissingSourceReference(t *testing.T) {
 	call(t, root, 0, "sync")
 	name := "harness/hooks/codex.json"
 	baseline := read(t, root, name)
-	put(t, root, name, strings.Replace(baseline, `"startup"`, `"resume"`, 1))
+	put(t, root, name, strings.Replace(baseline, `"startup|fork"`, `"resume"`, 1))
 	if result := call(t, root, 1, "check"); !strings.Contains(result, "excludes new sessions") {
 		t.Fatal(result)
 	}
@@ -247,5 +246,47 @@ func TestLinkedWorktreeAndExecutableAttachment(t *testing.T) {
 	call(t, nested, 0, "check")
 	if _, err := os.Stat(filepath.Join(base, ".agents")); !os.IsNotExist(err) {
 		t.Fatal("doctor wrote into the main checkout", err)
+	}
+}
+
+func TestRequiredPreToolUsePolicy(t *testing.T) {
+	for _, host := range hosts {
+		t.Run(host, func(t *testing.T) {
+			root := fixture(t)
+			call(t, root, 0, "sync")
+			source := "harness/hooks/" + host + ".json"
+			original := read(t, root, source)
+			wrongEvent := strings.Replace(original, "PreToolUse", "PostToolUse", 1)
+			var wrongTool string
+			switch host {
+			case "claude":
+				wrongTool = strings.Replace(original, "Bash|PowerShell", "Read", 1)
+			case "antigravity":
+				wrongTool = strings.Replace(original, "run_command", "read_file", 1)
+			case "codex":
+				prefix, group, _ := strings.Cut(original, `"PreToolUse"`)
+				wrongTool = prefix + `"PreToolUse"` + strings.Replace(group, `"hooks":`, `"matcher":"Read", "hooks":`, 1)
+			}
+			for _, broken := range []string{wrongEvent, wrongTool} {
+				put(t, root, source, broken)
+				put(t, root, registryPaths[host], broken)
+				if got := call(t, root, 1, "check"); !strings.Contains(got, source) || !strings.Contains(got, "PreToolUse") {
+					t.Fatal(got)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeHookDependencies(t *testing.T) {
+	for _, name := range []string{"tools/harnesshook/main.go", "harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"} {
+		root := fixture(t)
+		call(t, root, 0, "sync")
+		if err := os.Remove(filepath.Join(root, filepath.FromSlash(name))); err != nil {
+			t.Fatal(err)
+		}
+		if got := filepath.ToSlash(call(t, root, 1, "check")); !strings.Contains(got, name) {
+			t.Fatal(got)
+		}
 	}
 }

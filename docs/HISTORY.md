@@ -3,8 +3,7 @@
 What a changelog structurally cannot hold: acceptance-run records, review-hardening
 records with their evidence, decisions evaluated and rejected, and archived plans'
 progress summaries. A change's **narrative** is written once, in
-[CHANGELOG.md](../CHANGELOG.md) — never duplicated here (the one-writer rule; AGENTS.md →
-"Iteration workflow"). The as-built system description is
+[CHANGELOG.md](../CHANGELOG.md) — never duplicated here (the one-writer rule; [contributor guide](../AGENTS.md#review-and-delivery)). The as-built system description is
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 Provenance: this file began 2026-07-16 as the verbatim completed-work archive moved out
