@@ -501,9 +501,8 @@ func TestTheMetricsCountWhatTheLedgerRecords(t *testing.T) {
 	e.alias("broken", target(e.deployment(pd, "m"), 0))
 	key := e.key()
 	e.start()
-	if _, err := e.s.UpdateDeployment(e.ctx, d.ID, func(d *store.Deployment) error {
-		d.Prices = store.Prices{Input: priced(6), Output: priced(30), CacheWrite: priced(7.5), CacheRead: priced(0.6)}
-		return nil
+	if _, err := e.s.UpdateDeployment(e.ctx, d.ID, store.DeploymentPatch{
+		Prices: &store.Prices{Input: priced(6), Output: priced(30), CacheWrite: priced(7.5), CacheRead: priced(0.6)},
 	}); err != nil {
 		t.Fatal(err)
 	}

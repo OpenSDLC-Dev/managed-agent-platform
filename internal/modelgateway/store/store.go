@@ -124,6 +124,8 @@ type Deployment struct {
 	DisplayName   string
 	Capabilities  Capabilities
 	Prices        Prices
+	PriceCurrency string // Empty when the operator has not specified a currency.
+	PriceNote     string // Conditions for this fixed set of rates.
 	Enabled       bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

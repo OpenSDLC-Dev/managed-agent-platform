@@ -282,10 +282,9 @@ func TestDeployments(t *testing.T) {
 	wantErr(t, err, store.ErrInvalid, "gwprov_missing")
 
 	out := 1.1
-	up, err := s.UpdateDeployment(ctx, d.ID, func(d *store.Deployment) error {
-		d.DisplayName, d.Prices.Output, d.Enabled = "renamed", &out, false
-		d.UpstreamModel, d.Kind, d.ProviderID = "other", store.KindEmbedding, "gwprov_x"
-		return nil
+	name, enabled := "renamed", false
+	up, err := s.UpdateDeployment(ctx, d.ID, store.DeploymentPatch{
+		DisplayName: &name, Enabled: &enabled, Prices: &store.Prices{Input: &in, Output: &out},
 	})
 	if err != nil || up.DisplayName != "renamed" || *up.Prices.Output != 1.1 || up.Enabled ||
 		up.UpstreamModel != "deepseek-v4-pro" || up.Kind != store.KindChat || up.ProviderID != p.ID {
@@ -413,7 +412,8 @@ func TestEveryWriteNotifies(t *testing.T) {
 	_ = s.DeleteCredential(ctx, p.ID, c.ID)
 	expect("credential writes", 3)
 	d := mkDeployment(t, s, p.ID, store.KindChat)
-	_, _ = s.UpdateDeployment(ctx, d.ID, func(d *store.Deployment) error { d.Enabled = false; return nil })
+	enabled := false
+	_, _ = s.UpdateDeployment(ctx, d.ID, store.DeploymentPatch{Enabled: &enabled})
 	expect("deployment writes", 2)
 	_, _ = s.CreateAlias(ctx, store.Alias{Name: "a", Targets: []store.Target{{DeploymentID: d.ID, Weight: 1}}})
 	_, _ = s.UpdateAlias(ctx, "a", func(a *store.Alias) error { a.DisplayName = "x"; return nil })

@@ -9,12 +9,12 @@ import (
 )
 
 const deploymentCols = `id, provider_id, upstream_model, kind, display_name, capabilities,
-	price_input, price_output, price_cache_write, price_cache_read, enabled, created_at, updated_at`
+	price_input, price_output, price_cache_write, price_cache_read, price_currency, price_note, enabled, created_at, updated_at`
 
 func scanDeployment(row pgx.Row) (Deployment, error) {
 	var d Deployment
 	err := row.Scan(&d.ID, &d.ProviderID, &d.UpstreamModel, &d.Kind, &d.DisplayName, &d.Capabilities,
-		&d.Prices.Input, &d.Prices.Output, &d.Prices.CacheWrite, &d.Prices.CacheRead, &d.Enabled, &d.CreatedAt, &d.UpdatedAt)
+		&d.Prices.Input, &d.Prices.Output, &d.Prices.CacheWrite, &d.Prices.CacheRead, &d.PriceCurrency, &d.PriceNote, &d.Enabled, &d.CreatedAt, &d.UpdatedAt)
 	return d, err
 }
 
@@ -35,10 +35,10 @@ func (s *Store) CreateDeployment(ctx context.Context, d Deployment) (Deployment,
 		var err error
 		out, err = scanDeployment(tx.QueryRow(ctx,
 			`INSERT INTO modelgateway.deployments (id, provider_id, upstream_model, kind, display_name, capabilities,
-			   price_input, price_output, price_cache_write, price_cache_read, enabled)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING `+deploymentCols,
+			   price_input, price_output, price_cache_write, price_cache_read, price_currency, price_note, enabled)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING `+deploymentCols,
 			newID("gwdep"), d.ProviderID, d.UpstreamModel, d.Kind, d.DisplayName, d.Capabilities,
-			d.Prices.Input, d.Prices.Output, d.Prices.CacheWrite, d.Prices.CacheRead, d.Enabled))
+			d.Prices.Input, d.Prices.Output, d.Prices.CacheWrite, d.Prices.CacheRead, d.PriceCurrency, d.PriceNote, d.Enabled))
 		return err
 	})
 	return out, err
@@ -75,28 +75,34 @@ func listDeployments(ctx context.Context, q querier) ([]Deployment, error) {
 	return out, rows.Err()
 }
 
-// UpdateDeployment applies fn to the deployment and writes back its display
-// name, capabilities, prices and enabled flag.
-func (s *Store) UpdateDeployment(ctx context.Context, id string, fn func(*Deployment) error) (Deployment, error) {
+// DeploymentPatch replaces only the fields the caller supplies. A present
+// Prices replaces all four rates, including any the caller clears.
+type DeploymentPatch struct {
+	DisplayName   *string
+	Capabilities  *Capabilities
+	Prices        *Prices
+	PriceCurrency *string
+	PriceNote     *string
+	Enabled       *bool
+}
+
+func (s *Store) UpdateDeployment(ctx context.Context, id string, patch DeploymentPatch) (Deployment, error) {
 	var out Deployment
 	err := s.write(ctx, func(tx pgx.Tx) error {
-		d, err := scanDeployment(tx.QueryRow(ctx, `SELECT `+deploymentCols+` FROM modelgateway.deployments WHERE id = $1 FOR UPDATE`, id))
+		stmt := `UPDATE modelgateway.deployments SET display_name = coalesce($2, display_name),
+			capabilities = coalesce($3, capabilities), price_currency = coalesce($4, price_currency),
+			price_note = coalesce($5, price_note), enabled = coalesce($6, enabled), updated_at = now()`
+		args := []any{id, patch.DisplayName, patch.Capabilities, patch.PriceCurrency, patch.PriceNote, patch.Enabled}
+		// Unspecified NUMERIC prices must not pass through the API's float64 values.
+		if rates := patch.Prices; rates != nil {
+			stmt += `, price_input = $7, price_output = $8, price_cache_write = $9, price_cache_read = $10`
+			args = append(args, rates.Input, rates.Output, rates.CacheWrite, rates.CacheRead)
+		}
+		var err error
+		out, err = scanDeployment(tx.QueryRow(ctx, stmt+` WHERE id = $1 RETURNING `+deploymentCols, args...))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return deploymentNotFound(id)
 		}
-		if err != nil {
-			return err
-		}
-		next := d
-		if err := fn(&next); err != nil {
-			return err
-		}
-		out, err = scanDeployment(tx.QueryRow(ctx,
-			`UPDATE modelgateway.deployments SET display_name = $2, capabilities = $3,
-			   price_input = $4, price_output = $5, price_cache_write = $6, price_cache_read = $7, enabled = $8, updated_at = now()
-			 WHERE id = $1 RETURNING `+deploymentCols,
-			id, next.DisplayName, next.Capabilities,
-			next.Prices.Input, next.Prices.Output, next.Prices.CacheWrite, next.Prices.CacheRead, next.Enabled))
 		return err
 	})
 	return out, err
