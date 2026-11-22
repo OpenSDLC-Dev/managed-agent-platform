@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -210,6 +212,53 @@ func callsGo(command, alias, target string) bool {
 	return command == `git -c "alias.`+alias+"=!"+target+`" `+alias
 }
 
+// Codex deserializes the entire registry before it discovers any handler.
+// Apply its command field types to auxiliary hooks as well as the required two.
+func codexCommandFields(event string, h map[string]any) error {
+	if _, camel := h["commandWindows"]; camel {
+		if _, snake := h["command_windows"]; snake {
+			return fmt.Errorf("%s: commandWindows and command_windows declare the same Codex field twice", event)
+		}
+	}
+	for _, key := range []string{"commandWindows", "command_windows", "statusMessage"} {
+		if value := h[key]; value != nil {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("%s: %s must be a string or null", event, key)
+			}
+		}
+	}
+	if value, present := h["async"]; present {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s: async must be a boolean", event)
+		}
+	}
+	for _, key := range []string{"timeout", "additionalContextLimit"} {
+		value := h[key]
+		if value == nil {
+			continue
+		}
+		bits := 64 // timeout is a Rust u64; the context limit is a usize.
+		if key == "additionalContextLimit" {
+			bits = strconv.IntSize
+		}
+		number, _ := value.(json.Number)
+		n, err := strconv.ParseUint(number.String(), 10, bits)
+		if err != nil {
+			return fmt.Errorf("%s: %s must be an unsigned %d-bit integer or null", event, key, bits)
+		}
+		if n > math.MaxInt64 {
+			// Codex hashes the normalized handler as TOML, whose integers are
+			// signed. SessionEnd timeouts are clamped before hashing; only the
+			// events below keep their additional-context limit in the identity.
+			contextEvents := []string{"PreToolUse", "PostToolUse", "SessionStart", "UserPromptSubmit", "SubagentStart"}
+			if key == "timeout" && event != "SessionEnd" || key == "additionalContextLimit" && slices.Contains(contextEvents, event) {
+				return fmt.Errorf("%s: %s must fit in a signed 64-bit TOML integer for Codex to register the hook", event, key)
+			}
+		}
+	}
+	return nil
+}
+
 func requiredHookOptions(host, event string, h map[string]any) error {
 	for _, field := range []string{"async", "asyncRewake"} {
 		if value, present := h[field]; present {
@@ -222,13 +271,6 @@ func requiredHookOptions(host, event string, h map[string]any) error {
 		}
 	}
 	if host == "codex" {
-		// Codex accepts both spellings for the same optional field. A null
-		// value falls back to the portable command, and two spellings conflict.
-		if _, camel := h["commandWindows"]; camel {
-			if _, snake := h["command_windows"]; snake {
-				return fmt.Errorf("%s: commandWindows and command_windows declare the same Codex field twice", event)
-			}
-		}
 		for _, key := range []string{"commandWindows", "command_windows"} {
 			if value := h[key]; value != nil && value != h["command"] {
 				return fmt.Errorf("%s: %s must run the registered command on Windows", event, key)
@@ -275,6 +317,11 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			command, _ := h["command"].(string)
 			if h["type"] != "command" || command == "" {
 				return fmt.Errorf("unregistered or malformed %s command; inspect it before sync", event)
+			}
+			if host == "codex" {
+				if err := codexCommandFields(event, h); err != nil {
+					return err
+				}
 			}
 			startup := event == "SessionStart" && callsGo(command, "map-doctor", "go run ./tools/harnessdoctor session-start "+host)
 			preTool := event == "PreToolUse" && callsGo(command, "map-pretool", "go run ./tools/harnesshook "+host)
