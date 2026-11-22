@@ -65,6 +65,20 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 	}
 }
 
+func TestCommitMessageOptionForms(t *testing.T) {
+	message := "fix\n\nVerified-By: manual check"
+	for _, args := range [][]string{{"-am", message}, {"-m" + message}, {"-qsm" + message}, {"--message=" + message}} {
+		if !hasTrailer(args) {
+			t.Errorf("missed trailer for %q", args)
+		}
+	}
+	for _, args := range [][]string{{"--", "-m", message}, {"-F" + message}, {"-Smy-key", message}} {
+		if hasTrailer(args) {
+			t.Errorf("treated non-message argument as a trailer: %q", args)
+		}
+	}
+}
+
 func TestHookProtocol(t *testing.T) {
 	for _, host := range []string{"claude", "codex", "antigravity"} {
 		var out bytes.Buffer

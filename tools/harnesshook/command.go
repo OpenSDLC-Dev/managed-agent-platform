@@ -84,20 +84,31 @@ func shellSegments(command string) []shellSegment {
 }
 
 var messageTrailer = regexp.MustCompile("(?im)^Verified-By:[[:blank:]]*[^[:space:]]")
+
+// In commit's short-option syntax -m owns the rest of the argument. The
+// preceding flags here take no value (for example -am or -qsm).
+var shortMessage = regexp.MustCompile(`(?s)^-[aiposeqnzvb]*m(.*)$`)
 var trailerValue = regexp.MustCompile("(?i)^Verified-By:[[:blank:]]*[^[:space:]]")
 var assignment = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z_0-9]*=`)
 
 func hasTrailer(argv []string) bool {
 	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--" {
+			break // The remaining arguments are pathspecs.
+		}
 		flag, val, joined := strings.Cut(argv[i], "=")
-		if !joined && (flag == "--trailer" || flag == "-m" || flag == "--message") && i+1 < len(argv) {
+		if short := shortMessage.FindStringSubmatch(argv[i]); short != nil {
+			flag, val = "--message", short[1]
+			joined = val != ""
+		}
+		if !joined && (flag == "--trailer" || flag == "--message") && i+1 < len(argv) {
 			i++
 			val = argv[i]
 		}
 		if flag == "--trailer" && trailerValue.MatchString(val) {
 			return true
 		}
-		if (flag == "-m" || flag == "--message") && messageTrailer.MatchString(val) {
+		if flag == "--message" && messageTrailer.MatchString(val) {
 			return true
 		}
 	}
