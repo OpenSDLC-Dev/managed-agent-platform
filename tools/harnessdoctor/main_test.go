@@ -46,7 +46,8 @@ func fixture(t *testing.T) string {
 	gitTest(t, root, "init", "-q")
 	for path, data := range map[string]string{
 		"AGENTS.md":                               "# Project\nRun `go run ./tools/harnessdoctor check`. Review, sync, and check again.",
-		"harness/manifest.json":                   `{"skills":["example"],"rules":[{"name":"storage","paths":["src/**/io*.go"]},{"name":"source","paths":["src/**"]}],"agents":[{"name":"reviewer","description":"Review the diff.","claudeTools":["Read"],"antigravityTools":["read_file"],"codexEvidenceOnly":true},{"name":"verifier","description":"Run independent checks.","claudeTools":["Read","Bash"],"antigravityTools":["read_file","run_command"]}]}`,
+		"harness/manifest.json":                   `{"skills":["example"],"rules":[{"name":"storage","paths":["src/**/io*.go"]},{"name":"source","paths":["src/**"]}],"agents":[{"name":"issue-triage","description":"Triage an issue.","claudeTools":["Read"],"antigravityTools":["read_file"],"codexEvidenceOnly":true},{"name":"reviewer","description":"Review the diff.","claudeTools":["Read"],"antigravityTools":["read_file"],"codexEvidenceOnly":true},{"name":"verifier","description":"Run independent checks.","claudeTools":["Read","Bash"],"antigravityTools":["read_file","run_command"]}]}`,
+		"harness/agents/issue-triage.md":          "Use the supplied evidence.\n",
 		"harness/agents/verifier.md":              "Run the checks independently.\n",
 		"harness/rules/source.md":                 "Source rule.\n",
 		"harness/rules/storage.md":                "Storage rule.\n",

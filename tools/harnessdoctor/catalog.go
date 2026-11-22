@@ -104,8 +104,10 @@ func loadManifest(root string) (manifest, error) {
 		}
 		agents = append(agents, a.Name+".md")
 	}
-	if !slices.Contains(agents, "verifier.md") {
-		return m, fmt.Errorf("%s: register the verifier required by the review workflow", name)
+	for _, role := range []string{"issue-triage", "reviewer", "verifier"} {
+		if !slices.Contains(agents, role+".md") {
+			return m, fmt.Errorf("%s: register the %s role required by the platform workflow", name, role)
+		}
 	}
 	for _, dir := range []struct {
 		name  string
@@ -178,40 +180,66 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(b.String())
 }
 
-// Git and the client can name a directory through symlinks or Windows short
-// paths. A planned file may not exist yet, so resolve its existing parent.
-func rulePath(name string) (string, error) {
+// Return an existing directory for Git and the remaining suffix, which may
+// include planned directories and files. Follow a file symlink to its target.
+func ruleDirectory(name string) (string, string, error) {
 	full, err := filepath.EvalSymlinks(name)
-	if err == nil || !os.IsNotExist(err) || filepath.Dir(name) == name {
-		return full, err
+	if err == nil {
+		info, err := os.Stat(full)
+		if err != nil {
+			return "", "", err
+		}
+		if info.IsDir() {
+			return full, "", nil
+		}
+		return filepath.Dir(full), filepath.Base(full), nil
 	}
-	parent, err := rulePath(filepath.Dir(name))
-	if err != nil {
-		return "", err
+	if !os.IsNotExist(err) || filepath.Dir(name) == name {
+		return "", "", err
 	}
-	return filepath.Join(parent, filepath.Base(name)), nil
+	dir, tail, err := ruleDirectory(filepath.Dir(name))
+	return dir, filepath.Join(tail, filepath.Base(name)), err
 }
 
 func matchingRules(root, cwd string, args []string, m manifest) ([]string, error) {
-	root, err := rulePath(root)
+	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return nil, err
 	}
+	prefixes := map[string]string{}
 	names := make([]string, 0, len(args))
 	for _, arg := range args {
 		name := filepath.FromSlash(strings.ReplaceAll(arg, `\`, "/"))
 		if !filepath.IsAbs(name) {
 			name = filepath.Join(cwd, name)
 		}
-		name, err = rulePath(name)
+		dir, tail, err := ruleDirectory(name)
 		if err != nil {
 			return nil, err
 		}
-		rel, err := filepath.Rel(root, name)
-		if err != nil || !filepath.IsLocal(rel) {
-			return nil, fmt.Errorf("path outside current worktree: %s", arg)
+		prefix, known := prefixes[dir]
+		if !known {
+			// Git for Windows resolves directory junctions that EvalSymlinks
+			// can keep in their original spelling. Compare worktree roots, not
+			// common Git directories shared by sibling linked checkouts.
+			tree, err := gitWorktreePath(dir, "--show-toplevel")
+			if err != nil {
+				return nil, fmt.Errorf("path outside current worktree: %s (%w)", arg, err)
+			}
+			other, err := os.Stat(tree)
+			if err != nil {
+				return nil, err
+			}
+			if !os.SameFile(rootInfo, other) {
+				return nil, fmt.Errorf("path outside current worktree: %s", arg)
+			}
+			prefix, err = gitWorktreePath(dir, "--show-prefix")
+			if err != nil {
+				return nil, err
+			}
+			prefixes[dir] = prefix
 		}
-		names = append(names, filepath.ToSlash(rel))
+		names = append(names, filepath.ToSlash(filepath.Join(prefix, tail)))
 	}
 	var result []string
 	for _, r := range m.Rules {

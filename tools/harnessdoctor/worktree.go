@@ -23,14 +23,22 @@ func gitEnv() []string {
 	return gitworktree.Environment()
 }
 
-func worktree(cwd string) (string, error) {
-	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel")
+func gitWorktreePath(cwd, option string) (string, error) {
+	cmd := exec.Command("git", "-C", cwd, "rev-parse", option)
 	cmd.Env = gitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve Git worktree for %s: %w", cwd, err)
 	}
-	root := filepath.Clean(strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r"))
+	return strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r"), nil
+}
+
+func worktree(cwd string) (string, error) {
+	dir, err := gitWorktreePath(cwd, "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Clean(dir)
 	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return "", err

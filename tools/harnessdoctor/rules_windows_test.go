@@ -1,11 +1,59 @@
 package main
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+func TestWindowsJunctionToLinkedWorktree(t *testing.T) {
+	original := fixture(t)
+	put(t, original, "src/internal/io.go", "fixture\n")
+	gitTest(t, original, "add", ".")
+	gitTest(t, original, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "seed linked checkout")
+	parent := t.TempDir()
+	linked := filepath.Join(parent, "linked checkout")
+	gitTest(t, original, "worktree", "add", "--quiet", "--detach", linked)
+	makeJunction := func(dir, link, target string) {
+		t.Helper()
+		cmd := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target)
+		cmd.Dir = dir
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create fixture junction: %v: %s", err, b)
+		}
+	}
+	makeJunction(parent, "entry", filepath.Join("linked checkout", "src", "internal"))
+	alias := filepath.Join(parent, "entry")
+	for _, file := range []string{"io.go", "io-planned.go", filepath.Join("new", "io.go")} {
+		if got := call(t, alias, 0, "rules", file); !strings.Contains(got, "Source rule.") || !strings.Contains(got, "Storage rule.") {
+			t.Fatal(got)
+		}
+	}
+	// A second repository has the same relative paths. Also check the main
+	// checkout which shares the linked worktree's Git object database.
+	foreign := filepath.Join(parent, "foreign")
+	put(t, foreign, "src/internal/io.go", "foreign\n")
+	gitTest(t, foreign, "init", "-q")
+	makeJunction(linked, "foreign-entry", filepath.Join("..", "foreign", "src", "internal"))
+	for _, file := range []string{
+		filepath.Join(linked, "foreign-entry", "io.go"),
+		filepath.Join(linked, "foreign-entry", "new", "io.go"),
+		filepath.Join(original, "src", "internal", "io.go"),
+	} {
+		if got := call(t, alias, 1, "rules", file); !strings.Contains(got, "outside current worktree") {
+			t.Fatal(got)
+		}
+	}
+	if err := os.Remove(filepath.Join(linked, "foreign-entry")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestWindowsMixedLongAndShortRulePaths(t *testing.T) {
 	root := fixture(t)

@@ -11,24 +11,28 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/internal/toml"
 )
 
-func TestSessionRequiresVerifier(t *testing.T) {
-	root := fixture(t)
-	const catalog = "harness/manifest.json"
-	var m manifest
-	if err := json.Unmarshal([]byte(read(t, root, catalog)), &m); err != nil {
-		t.Fatal(err)
-	}
-	m.Agents = slices.DeleteFunc(m.Agents, func(a agent) bool { return a.Name == "verifier" })
-	data, err := json.Marshal(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	put(t, root, catalog, string(data))
-	if err := os.Remove(filepath.Join(root, "harness", "agents", "verifier.md")); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if got := call(t, root, 1, "sync"); !strings.Contains(got, catalog) || !strings.Contains(got, "verifier") {
-		t.Fatal(got)
+func TestSessionRequiresWorkflowRoles(t *testing.T) {
+	for _, role := range []string{"issue-triage", "reviewer", "verifier"} {
+		t.Run(role, func(t *testing.T) {
+			root := fixture(t)
+			const catalog = "harness/manifest.json"
+			var m manifest
+			if err := json.Unmarshal([]byte(read(t, root, catalog)), &m); err != nil {
+				t.Fatal(err)
+			}
+			m.Agents = slices.DeleteFunc(m.Agents, func(a agent) bool { return a.Name == role })
+			data, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			put(t, root, catalog, string(data))
+			if err := os.Remove(filepath.Join(root, "harness", "agents", role+".md")); err != nil {
+				t.Fatal(err)
+			}
+			if got := call(t, root, 1, "sync"); !strings.Contains(got, catalog) || !strings.Contains(got, role) {
+				t.Fatal(got)
+			}
+		})
 	}
 }
 
