@@ -95,7 +95,7 @@ Use when changing public `/v1/*` wire shapes, headers, SSE streams, or worker en
 
 ## 4. Full merge gate and commit stamping
 
-Running `make test-fast`, `make test-race`, or `make verify` automatically writes a worktree-fingerprinted verification stamp (`.git/.verify-stamp`) via `.claude/hooks/verify-stamp.sh`. The PreToolUse Bash hook `.claude/hooks/verify-commit-gate.sh` (configured in `.claude/settings.json`, defaulting to `VERIFY_GATE_MODE=observe`; set `VERIFY_GATE_MODE=enforce` to block unstamped commits with a 2-block escape valve, or `off` to disable) checks that stamp or an explicit `Verified-By: <method|none>` commit trailer on every `git commit`.
+Running `make test-fast`, `make test-race`, or `make verify` automatically writes a worktree-fingerprinted verification stamp (`.git/.verify-stamp`) via `harness/hooks/verify-stamp.sh`. The PreToolUse Bash hook `harness/hooks/verify-commit-gate.sh` (registered by the three host adapters, defaulting to `VERIFY_GATE_MODE=observe`; set `VERIFY_GATE_MODE=enforce` to block unstamped commits with a 2-block escape valve, or `off` to disable) checks that stamp or an explicit `Verified-By: <method|none>` commit trailer on every `git commit`.
 
 Before opening or updating a PR, run the full gate (`make verify`) or verify the exact CI run covers every required job (`ci`, `coverage`, `race`, `helm`, `terraform`, `compose`, `native-console`).
 

@@ -28,6 +28,12 @@ BACKTICK_RE = re.compile(r"`([^`]+)`")
 
 GATE_PATHS = (
     ".claude/",
+    ".codex/",
+    ".agents/",
+    "harness/",
+    "tools/harnessdoctor/",
+    "tools/harnesshook/",
+    "AGENTS.md",
     "REVIEW.md",
     "Makefile",
     ".github/workflows/ci.yml",
@@ -144,6 +150,11 @@ def self_test() -> None:
         "Makefile",
         ".claude/agents/verifier.md",
     ]
+    harness_files = [
+        "AGENTS.md", ".codex/hooks.json", ".agents/rules/wire.md",
+        "harness/skills/verify/SKILL.md", "tools/harnessdoctor/main.go", "tools/harnesshook/main.go",
+    ]
+    assert gate_modifications(harness_files) == harness_files
     print("detector self-test: ok")
 
 

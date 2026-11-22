@@ -96,7 +96,7 @@ rule rather than reconstruct it from the slices.
    spec path exists in the SDK v1.66.0, the CLI v1.26.1, the fetched spec or the public docs;
    the docs model a project *as* a workspace ("Use workspaces to separate different
    projects"). Carrying it in the predicate costs one term in one helper and keeps
-   CLAUDE.md principle 5's sentence true.
+   AGENTS.md principle 5's sentence true.
 3. **Tenancy is credential-borne. `/v1` gains no org or workspace path segment, ever.**
    `docs/plan/31_console-sso-rbac.md:166-172` establishes from the SDK that no reference
    management path or request header carries an organization id — the org travels only as the
@@ -189,7 +189,7 @@ issue; none is a blocker under decision 1.
 - **Upstream prompt-cache isolation.** The workspaces doc's own note: "Prompt caches are also
   isolated per workspace on the Claude API … On Amazon Bedrock and Google Cloud, prompt caches
   are isolated per organization" (fetched 2026-09-03). A self-hosted deployment resolves one
-  provider per `model` string with no tenant dimension (CLAUDE.md principle 4), so tenants
+  provider per `model` string with no tenant dimension (AGENTS.md principle 4), so tenants
   share whatever cache the upstream keeps. Nothing in this plan changes that.
 - **Tenant data deletion.** Archive is not deletion (§6.9).
 - **Per-tenant retention policy.** The memory-version retention sweep
@@ -1528,7 +1528,7 @@ archived_at timestamptz, UNIQUE (org_id, id))` plus `INSERT … VALUES ('default
 `0013:43-46` and `0022:39-42` are now historical text, because a merged migration is immutable.
 · `domain.PrefixWorkspace = "wrkspc"`, joining the private family at
 `internal/domain/id.go:42-63` with the same reasoning, **out of `knownPrefixes`** (`:95`) — so
-CLAUDE.md's prefix line and `internal/domain/docs_test.go` are untouched. · `ctxKeyScope` +
+AGENTS.md's prefix line and `internal/domain/docs_test.go` are untouched. · `ctxKeyScope` +
 `scopeFrom` · the five choke points of §6.1 · `internal/domain/session.go:43-49` `Scope`'s doc
 rewritten (the `NOTE` at `:47-49` and all three `json:"-"` tags at `:51-53` stay — no scope
 field becomes wire-visible) · `IDENTITY_CLAIM_WORKSPACES`, `IDENTITY_WORKSPACE_MAP`, the
@@ -1904,7 +1904,7 @@ slice** — all six places: the package comment of `internal/store/store.go` (it
 yet enforce" sentence and its inheritance sentence), the `Scope` comment in
 `internal/domain/session.go`, two places in `docs/ARCHITECTURE.md` (the `store/` row's
 "reserves the multi-tenant columns it does not yet enforce" and the "(reserved,
-single-tenant defaults in v1)" parenthetical), and `CLAUDE.md` principle 5's parenthetical.
+single-tenant defaults in v1)" parenthetical), and `AGENTS.md` principle 5's parenthetical.
 They are still true here: §7.5's enumerated by-id reads on `vaults`, `vault_credentials`,
 `skills` and `files` are unscoped until that slice closes them, and a doc asserting enforcement
 one slice early is the overclaim the verifier's docs rung exists to catch. Slice 5 flips all
@@ -2192,7 +2192,7 @@ passes both.)
 `docs/HISTORY.md` receives the progress summary and the acceptance record · README.md:76 — the
 multi-tenant bullet leaves "Deferred past v1 — seams reserved, not implemented" and its
 capability joins what runs today · **AGENTS.md needs no tenancy edit**: it carries no tenancy
-claim at all across its 12 lines and defers to CLAUDE.md · `docs/self-hosted-security.md` — the
+claim at all across its 12 lines and defers to AGENTS.md · `docs/self-hosted-security.md` — the
 literal `organizations/default` console runbook paths (`:765`, `:773`, `:777`, `:779` for
 environment tokens; `:1092`, `:1099`, `:1103`, `:1106` for management keys — three curls each), plus
 the now workspace-bounded "anyone holding the management `x-api-key` can mint worker keys"
@@ -2292,7 +2292,7 @@ authoritative when nothing validates it, and re-activating org later would re-sw
 statement. Carrying all three costs one term in one helper; §6.4's write floor carries the pair
 for the same reason, so "additive later" is a property the database holds, not a hope.
 *Rejected:* dropping `project_id` from 14 tables — a larger, irreversible migration that
-destroys a seam CLAUDE.md blesses.
+destroys a seam AGENTS.md blesses.
 
 **D3 — One key, one workspace** (decision 5). *Rejected:* a super-scope credential — every
 predicate becomes conditional (`OR caller_is_super`), and a conditional predicate is the branch

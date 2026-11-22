@@ -100,7 +100,7 @@ import (
 // Role is a platform authority level for an authenticated human.
 //
 // Deliberately not in internal/domain: that package holds Anthropic-native types
-// matching the wire schema (CLAUDE.md principle 1), and the three-role model is a
+// matching the wire schema (AGENTS.md principle 1), and the three-role model is a
 // declared divergence that never appears on a /v1 path or in a /v1 body.
 type Role string
 

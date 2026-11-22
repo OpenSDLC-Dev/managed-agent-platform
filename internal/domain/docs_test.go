@@ -13,7 +13,7 @@ import (
 // prefixToken matches one prefix as the documents write it: a backticked
 // lowercase word ending in an underscore, e.g. `sesn_`. The trailing underscore
 // is what separates a prefix from every other backticked identifier on the same
-// line, and a pinned line is dense with them: CLAUDE.md carries `knownPrefixes`
+// line, and a pinned line is dense with them: docs/ARCHITECTURE.md carries `knownPrefixes`
 // and `internal/domain/id.go` beside the prefixes themselves, and none of those
 // is one.
 var prefixToken = regexp.MustCompile("`([a-z]+)_`")
@@ -39,7 +39,7 @@ var prefixToken = regexp.MustCompile("`([a-z]+)_`")
 // pinned. A document that stops enumerating the set loses its entry here rather
 // than keeping an anchor nothing satisfies — which is what became of
 // ARCHITECTURE.md's own entry when plan 34 slice 3 replaced its per-file tables,
-// the id.go row among them, with a map. CLAUDE.md is the enumeration now.
+// the id.go row among them, with a map. docs/ARCHITECTURE.md is the enumeration now.
 //
 // One document is enough to catch the drift. The list below carries a tripwire
 // for the case where it stops being one: an empty list makes the loop a no-op
@@ -61,7 +61,7 @@ func TestDocsEnumerateTheWirePrefixSet(t *testing.T) {
 	slices.Sort(want)
 
 	docs := []struct{ path, anchor string }{
-		{"CLAUDE.md", "**ID prefixes**:"},
+		{"docs/ARCHITECTURE.md", "**ID prefixes**:"},
 	}
 	if len(docs) == 0 {
 		t.Fatal("no document is pinned to knownPrefixes: the last entry was removed rather " +
@@ -137,7 +137,7 @@ func orNone(s []string) string {
 
 // repoRoot finds the checkout root — the directory holding go.mod — so the
 // check reads the documents of the tree it was compiled from (a worktree's own
-// CLAUDE.md, not the main checkout's) with no working directory, network or
+// docs/ARCHITECTURE.md, not the main checkout's) with no working directory, network or
 // fixture needed.
 //
 // It starts from this file's compile-time path and walks up. Under -trimpath
@@ -313,7 +313,7 @@ func TestSteeringDocsDoNotPinTheSDKVersion(t *testing.T) {
 		dated bool
 	}{
 		{
-			path:   ".claude/agents/verifier.md",
+			path:   "harness/agents/verifier.md",
 			anchor: "Judge against the SDK version `go.mod` pins — read it there",
 		},
 		{

@@ -1,7 +1,7 @@
 # ARCHITECTURE.md — the platform as built
 
 The as-built architecture reference: how the platform actually works, component by
-component. Related documents divide the labor: **[CLAUDE.md](../CLAUDE.md)** carries the
+component. Related documents divide the labor: **[AGENTS.md](../AGENTS.md)** carries the
 behavioral guardrails (the non-negotiable design principles and wire-compatibility rules,
 in compressed form — this file is their descriptive depth);
 **[docs/DIVERGENCES.md](./DIVERGENCES.md)** is the single registry of deliberate wire
@@ -411,7 +411,7 @@ configured the idle tier is disarmed rather than lossy.
 ## Wire-compatibility model
 
 The public REST API mirrors Anthropic's Claude Managed Agents resource model — paths,
-JSON fields, ID prefixes (`agent_` `env_` `sesn_` `sevt_` `work_` …),
+JSON fields, ID prefixes,
 pagination and error envelopes, and the `{domain}.{action}` event taxonomy (SSE deltas
 use `content_delta`, not the Messages API's `content_block_delta`). The typed schema in
 the pinned `anthropic-sdk-go` checkout is the ground truth; client behavior comes from
@@ -419,6 +419,8 @@ the `ant` CLI source (see [REFERENCE_PROJECTS.md](./REFERENCE_PROJECTS.md)). Whe
 deliberately diverge — or infer behavior the references don't pin down —
 [DIVERGENCES.md](./DIVERGENCES.md) is the single registry; the verifier resolves
 wire-compat findings against it.
+
+**ID prefixes**: `agent_` `env_` `sesn_` (accept a `session_` alias on input too — a lenient parse of ours, unobserved on the reference) `sevt_` `work_` `vlt_` `vcrd_` `sesrsc_` `depl_` `drun_` `file_` `skill_` `skver_` (accept the legacy `skillver_` spelling on input too) `outc_` `sthr_` `memstore_` `mem_` `memver_` `drm_` — `knownPrefixes` in `internal/domain/id.go` is the list, and a test fails this line if it drifts from it.
 
 Interactive CLI OAuth (plan 72) uses a same-origin browser consent page and
 a control-plane token endpoint. A PostgreSQL grant identifies the human

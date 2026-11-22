@@ -805,7 +805,7 @@ func withRequestID(next http.Handler) http.Handler {
 }
 
 // withTracing continues the caller's W3C trace context and opens one server
-// span per request (CLAUDE.md: every cross-process call propagates OTel
+// span per request (AGENTS.md: every cross-process call propagates OTel
 // context). With no tracer provider installed this is a no-op passthrough.
 func withTracing(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

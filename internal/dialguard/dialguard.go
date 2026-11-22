@@ -25,7 +25,7 @@
 // is admitted here — deliberately, for the reason the next paragraph gives. #601
 // carries the policy question that leaves open.
 // And RFC 1918 private ranges are deliberately allowed: this platform's premise
-// is on-prem / in-VPC operation (CLAUDE.md), where MCP servers and token
+// is on-prem / in-VPC operation (AGENTS.md), where MCP servers and token
 // endpoints legitimately live on the operator's own private network — the
 // address-based guard is therefore not the network policy, only the floor
 // beneath it (an agent's egress policy is enforced separately, and refusing

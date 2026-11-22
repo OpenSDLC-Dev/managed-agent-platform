@@ -34,7 +34,7 @@ const errorTypeModel = "model_error"
 // instruments describe, so the names and attributes are the convention's rather
 // than ours. They are recorded here, beside the span and the span.* wire events,
 // so all three views of one turn come from the same instrumentation point
-// (CLAUDE.md principle 3) and cannot drift.
+// (AGENTS.md principle 3) and cannot drift.
 //
 // The meter is resolved per turn rather than cached at package scope: a model
 // turn costs a network round trip, which dwarfs this, and a cached instrument

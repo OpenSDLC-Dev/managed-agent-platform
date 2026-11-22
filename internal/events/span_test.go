@@ -17,7 +17,7 @@ import (
 )
 
 // The span.* wire events and the OTel span must come from the same
-// instrumentation point (CLAUDE.md principle 3): one StartModelRequest/End
+// instrumentation point (AGENTS.md principle 3): one StartModelRequest/End
 // pair yields exactly one exported OTel span AND the start/end event pair,
 // linked by model_request_start_id.
 func TestModelRequestSameSourceEmission(t *testing.T) {

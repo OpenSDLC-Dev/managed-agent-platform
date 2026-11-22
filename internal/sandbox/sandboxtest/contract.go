@@ -1,5 +1,5 @@
 // Package sandboxtest is the contract suite every sandbox.Provider must pass
-// (CLAUDE.md: backend variability lives behind an interface with one shared
+// (AGENTS.md: backend variability lives behind an interface with one shared
 // suite). It is test support; production code must never import it.
 //
 // The suite asserts observable behavior only — what a tool would see — never a

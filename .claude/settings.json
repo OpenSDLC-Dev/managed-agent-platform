@@ -30,13 +30,24 @@
     ]
   },
   "hooks": {
-    "PreToolUse": [
+    "SessionStart": [
       {
-        "matcher": "Bash",
+        "matcher": "startup|clear",
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/verify-commit-gate.sh"
+            "command": "git -c \"alias.map-doctor=!go run ./tools/harnessdoctor session-start claude\" map-doctor"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -c \"alias.map-pretool=!go run ./tools/harnesshook claude\" map-pretool"
           }
         ]
       }

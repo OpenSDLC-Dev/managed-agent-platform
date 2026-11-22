@@ -37,7 +37,7 @@ orchestration, permission flow) — never a wire-schema source; never copy code 
 Provenance caveat: unlike the others it is not a git checkout — it is a local source
 snapshot with no git remote; the URL above is the upstream project it corresponds to, not
 where the snapshot was cloned from.
-`adk-go` is a source of **ideas only**, governed by CLAUDE.md design principle 2 — never a
+`adk-go` is a source of **ideas only**, governed by AGENTS.md design principle 2 — never a
 foundation; where it conflicts with the Anthropic model, it loses by rule.
 `deepseek-harness` (a TypeScript monorepo) and `openai/codex` (a Rust workspace under
 `codex-rs/`) are **harness design references**, like `claude-code-source` — agent loop,

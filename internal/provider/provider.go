@@ -1,6 +1,6 @@
 // Package provider abstracts model backends behind Anthropic Messages
 // semantics. A provider instance is constructed purely from configuration
-// (protocol / model / base_url / api_key — CLAUDE.md principle 4): the
+// (protocol / model / base_url / api_key — AGENTS.md principle 4): the
 // anthropic protocol adapter works against ANY endpoint speaking Anthropic
 // Messages — a gateway, a proxy, or a self-hosted model — never just
 // api.anthropic.com. The registry resolves an agent's model string to a

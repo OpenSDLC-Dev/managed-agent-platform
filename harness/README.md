@@ -1,0 +1,11 @@
+# Project harness
+
+Edit `manifest.json`, rule and role bodies, full skill directories and the three hook declarations here. `.agents/skills/` serves Codex and Antigravity. Claude reads its generated skill copy. Role tool names, role documents and hook protocols differ across clients. The product's own repository-skill loader has a separate wire contract.
+
+Run `go run ./tools/harnessdoctor check` from the repository root to validate every adapter. `check --host claude|codex|antigravity` selects the current client. `sync` rebuilds registered adapters. Inspect unknown entries or malformed settings before syncing. `rules <path> ...` returns every applicable rule document. `session-start <host>` emits a native hook receipt for the worktree. Hooks use Git's worktree root and also work from subdirectories.
+
+A fresh trusted session should receive root instructions and a separate doctor receipt. If an ancestor's Claude instructions or a personal `CLAUDE.local.md` shadows the guide, read the root `AGENTS.md`. Keep hook trust in the normal client configuration. Test changes to startup registration in a fresh session.
+
+The shared commit gate receives shell events from all three hosts. The verification stamp, expiry, partial staging check and observation/enforcement modes live in `hooks/`. An ordinary Antigravity tool call delegates to native permissions with empty stdout. A denial uses that client's JSON decision. The issue-triage role uses the structured reader in guarded Claude Bash. In other clients the caller supplies that evidence. The Antigravity CLI role reads exact paths supplied by the caller. Codex evidence-only roles reject local write, shell and delegation tools in the project hook.
+
+For loader acceptance run the real clients in temporary profiles against a loopback test provider. Check the startup event independently of text in the guide. Invoke a skill and a named reviewer, observe a native read, and open a fresh session after introducing drift in a scratch checkout. Check model inheritance against host metadata when a real review is counted.

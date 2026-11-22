@@ -13,7 +13,7 @@
 #              with an escape valve after VERIFY_GATE_MAX_BLOCKS (default 2)
 #              consecutive blocks so an agent never wedges permanently.
 #
-# Stdin is the Claude Code PreToolUse JSON payload.
+# tools/harnesshook supplies validated session, trailer and worktree metadata.
 set -euo pipefail
 LC_ALL=C
 export LC_ALL
@@ -36,122 +36,14 @@ max_blocks="${VERIFY_GATE_MAX_BLOCKS:-2}"
 script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
 stamp_helper="$script_dir/verify-stamp.sh"
 
-payload="$(cat)"
-if [ -z "$payload" ]; then
-  exit 0
+# Native event decoding and command classification are shared by the three clients.
+if [ "$#" -ne 3 ]; then
+  echo "usage: verify-commit-gate.sh SESSION TRAILER_FLAG known|unknown" >&2
+  exit 2
 fi
-
-# Parse PreToolUse payload and classify whether tool_input.command actually
-# invokes `git ... commit`, plus whether it carries an explicit `Verified-By:`
-# trailer. Uses python3 when available; falls back cleanly to exit 0 if no
-# working python is available (never wedge environments without python).
-py=""
-for candidate in python3 python; do
-  if printf '{}' | "$candidate" -c 'import json, sys; json.load(sys.stdin)' 2>/dev/null; then
-    py="$candidate"
-    break
-  fi
-done
-
-if [ -z "$py" ]; then
-  exit 0
-fi
-
-analysis="$(
-  printf '%s' "$payload" | "$py" -c '
-import json, re, shlex, sys
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    print("SKIP")
-    sys.exit(0)
-
-if not isinstance(data, dict):
-    print("SKIP")
-    sys.exit(0)
-
-ti = data.get("tool_input")
-if not isinstance(ti, dict):
-    print("SKIP")
-    sys.exit(0)
-
-cmd = ti.get("command", "")
-if not isinstance(cmd, str) or not cmd.strip():
-    print("SKIP")
-    sys.exit(0)
-
-session_id = data.get("session_id", "default")
-if not isinstance(session_id, str) or not session_id:
-    session_id = "default"
-session_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", session_id)[:64]
-
-# Split command into shell segments on &&, ||, ;, |, &, or newlines and check
-# whether any segment executes `git ... commit` (not inside echo/grep/comments).
-def is_git_commit(command: str) -> bool:
-    try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
-        lex.whitespace = " \t\r"
-        lex.whitespace_split = True
-        lex.commenters = "#"
-        tokens = list(lex)
-    except ValueError:
-        # Unclosed quotes/heredocs: fall back to line-aware regex check.
-        return bool(re.search(r"(^|[;&|\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git(?:\s+-[A-Za-z](?:\s+\S+)?|\s+--[a-z-]+(?:=\S+)?)*\s+commit(\s|$)", command))
-
-    seps = {"&&", "||", ";", "|", "&", "\n"}
-    segments = []
-    cur = []
-    for tok in tokens:
-        if tok in seps:
-            if cur:
-                segments.append(cur)
-                cur = []
-        else:
-            cur.append(tok)
-    if cur:
-        segments.append(cur)
-
-    # Options to `git` before the subcommand that take a separate argument.
-    takes_arg = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
-    for seg in segments:
-        i = 0
-        # Skip leading env assignments like FOO=bar
-        while i < len(seg) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]):
-            i += 1
-        if i >= len(seg):
-            continue
-        prog = seg[i].rsplit("/", 1)[-1]
-        if prog != "git":
-            continue
-        i += 1
-        while i < len(seg) and seg[i].startswith("-"):
-            opt = seg[i]
-            i += 1
-            if opt in takes_arg and i < len(seg):
-                i += 1
-        if i < len(seg) and seg[i] == "commit":
-            return True
-    return False
-
-if not is_git_commit(cmd):
-    print("SKIP")
-    sys.exit(0)
-
-has_trailer = bool(re.search(r"(?im)(?:^|\n|--trailer(?:=|\s+)[\"'\'']?)Verified-By:\s*\S+", cmd))
-print(f"COMMIT\t{session_id}\t{1 if has_trailer else 0}")
-'
-)"
-
-case "$analysis" in
-  SKIP|"")
-    exit 0
-    ;;
-esac
-
-IFS="$(printf '\t')" read -r _tag session_id has_trailer <<EOF
-$analysis
-EOF
+session_id="$1"
+has_trailer="$2"
+target="$3"
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 0
@@ -192,7 +84,9 @@ stamp_file="$("$stamp_helper" --stamp-path)"
 reason="no verification stamp found"
 verified=0
 
-if [ -f "$stamp_file" ]; then
+if [ "$target" = unknown ]; then
+  reason="the client did not identify the commit worktree"
+elif [ -f "$stamp_file" ]; then
   stamp_ts=""
   stamp_method=""
   stamp_fp=""

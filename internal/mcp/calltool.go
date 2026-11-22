@@ -28,7 +28,7 @@ type CallResult struct {
 }
 
 // Content is one block of a tool call's answer, in a shape this package owns
-// rather than the SDK's content interface (CLAUDE.md design principle 1).
+// rather than the SDK's content interface (AGENTS.md design principle 1).
 //
 // One flat struct covers all five block types a tool result may carry, and no
 // field is nonsense for the type that leaves it empty: text fills Text, image

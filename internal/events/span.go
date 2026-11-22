@@ -30,7 +30,7 @@ type Backend struct {
 
 // StartModelRequest emits the span.model_request_start event and opens the
 // matching OTel client span from one instrumentation point, so the wire
-// events and the OTel trace can never drift (CLAUDE.md principle 3). Finish
+// events and the OTel trace can never drift (AGENTS.md principle 3). Finish
 // records the turn's metrics from the same point, for the same reason. The
 // returned context carries the span for downstream propagation.
 func (l *Log) StartModelRequest(ctx context.Context, sessionID domain.ID, backend Backend) (context.Context, *ModelRequest, error) {
@@ -167,7 +167,7 @@ func (m *ModelRequest) StartSeq() int64 { return m.startSeq }
 // turn's output, so an uncommitted turn leaves no half-told span on the log.
 // Finish then closes the OTel side; both halves live on ModelRequest so the
 // wire event and the OTel span still come from one instrumentation point
-// (CLAUDE.md principle 3).
+// (AGENTS.md principle 3).
 //
 // usage is what the wire event reports; a failing turn passes the zero value,
 // because the schema wants a model_usage object whether or not a model ever
@@ -214,7 +214,7 @@ func (m *ModelRequest) Finish(ctx context.Context, isError bool, commitErr error
 }
 
 // StartOutcomeEvaluation opens the OTel span for one grading cycle from the
-// same instrumentation point that owns its wire events (CLAUDE.md principle
+// same instrumentation point that owns its wire events (AGENTS.md principle
 // 3). Unlike StartModelRequest it appends no start event itself: the
 // span.outcome_evaluation_start committed in the settlement transaction that
 // scheduled this cycle (the two-phase design keeps the model call outside

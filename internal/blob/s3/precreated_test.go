@@ -203,7 +203,7 @@ func TestPrecreatedBucketDoesNotCreateTheBucket(t *testing.T) {
 
 // TestContractWithPrecreatedBucket runs the shared suite in the new mode: the
 // mode changes what construction asks of the endpoint, and nothing about what
-// the store then does (CLAUDE.md: every backend passes the same suite).
+// the store then does (AGENTS.md: every backend passes the same suite).
 func TestContractWithPrecreatedBucket(t *testing.T) {
 	blobtest.Run(t, func(t *testing.T) blob.Store {
 		t.Helper()

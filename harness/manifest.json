@@ -1,0 +1,84 @@
+{
+  "skills": [
+    "verify",
+    "run-reviews"
+  ],
+  "rules": [
+    {
+      "name": "wire",
+      "paths": [
+        "internal/api/**",
+        "internal/domain/**",
+        "docs/DIVERGENCES.md"
+      ]
+    },
+    {
+      "name": "migrations",
+      "paths": [
+        "internal/store/migrations/**"
+      ]
+    },
+    {
+      "name": "harness",
+      "paths": [
+        "AGENTS.md",
+        "REVIEW.md",
+        "Makefile",
+        "harness/**",
+        ".claude/**",
+        ".codex/**",
+        ".agents/**",
+        "tools/harnessdoctor/**",
+        "tools/harnesshook/**",
+        ".github/workflows/ci.yml",
+        ".github/scripts/review_checklist_test.py",
+        ".github/scripts/verify_commit_gate_test.py",
+        ".github/scripts/issue_triage_test.py"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "name": "issue-triage",
+      "description": "Decide whether starting this platform issue needs a plan. Return a read-only, evidence-backed JSON judgment.",
+      "claudeTools": [
+        "Bash",
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "antigravityTools": [
+        "read_file"
+      ],
+      "claudeBashGuard": true,
+      "codexEvidenceOnly": true
+    },
+    {
+      "name": "reviewer",
+      "description": "Review a committed platform diff independently against the trusted reliability checklist and report actionable findings.",
+      "claudeTools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "antigravityTools": [
+        "read_file"
+      ],
+      "codexEvidenceOnly": true
+    },
+    {
+      "name": "verifier",
+      "description": "Independently run the platform verification ladder and issue an evidence-backed verdict before a nontrivial change is declared done.",
+      "claudeTools": [
+        "Bash",
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "antigravityTools": [
+        "read_file",
+        "run_command"
+      ]
+    }
+  ]
+}

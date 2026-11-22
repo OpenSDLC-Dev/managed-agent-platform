@@ -25,6 +25,8 @@ jobs:
           go-version-file: go.mod
       # The gate commands live in the Makefile — the single executable source
       # (the verifier runs the same targets via `make verify`).
+      - name: Check project agent adapters and native hook contracts
+        run: make harness-doctor-test
       - run: make build
       - run: make crossbuild
       - run: make vet
@@ -38,7 +40,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           changed="$(git diff --no-renames --name-only "$BASE_SHA" HEAD)"
-          gate_hits="$(printf '%s\n' "$changed" | grep -E '^(\.claude/|REVIEW\.md$|Makefile$|\.github/workflows/ci\.yml$|\.github/scripts/test_hygiene_baseline\.json$)' || true)"
+          gate_hits="$(printf '%s\n' "$changed" | grep -E '^(\.(claude|codex|agents)/|harness/|tools/harness(doctor|hook)/|AGENTS\.md$|REVIEW\.md$|Makefile$|\.github/workflows/ci\.yml$|\.github/scripts/test_hygiene_baseline\.json$)' || true)"
           if [ -n "$gate_hits" ]; then
             {
               echo "### Gate-modification audit"

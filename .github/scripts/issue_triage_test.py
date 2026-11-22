@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-GUARD = ROOT / ".claude/hooks/issue-triage-bash-guard.sh"
-READER = ROOT / ".claude/hooks/issue-triage-read.sh"
+GUARD = ROOT / "harness/hooks/issue-triage-bash-guard.sh"
+READER = ROOT / "harness/hooks/issue-triage-read.sh"
 
 
 def run_guard(payload, *, env=None, cwd=ROOT):
@@ -50,18 +50,18 @@ class IssueTriageGuardTests(unittest.TestCase):
 
     def test_allowed_structured_commands(self):
         allowed = [
-            ".claude/hooks/issue-triage-read.sh issue-view 1052",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 --comments",
-            ".claude/hooks/issue-triage-read.sh issue-list",
-            ".claude/hooks/issue-triage-read.sh issue-list --state open --limit 25 --label security --label area/vault",
-            ".claude/hooks/issue-triage-read.sh pr-view 1054",
-            ".claude/hooks/issue-triage-read.sh pr-view 1054 --comments",
-            ".claude/hooks/issue-triage-read.sh git-log",
-            ".claude/hooks/issue-triage-read.sh git-log -n 10 --oneline",
-            ".claude/hooks/issue-triage-read.sh git-log -n 5 --stat HEAD~5..HEAD -- internal/gate docs/plan",
-            ".claude/hooks/issue-triage-read.sh git-show HEAD",
-            ".claude/hooks/issue-triage-read.sh git-show --stat --no-patch HEAD~1 -- internal/api/server.go",
-            ".claude/hooks/issue-triage-read.sh git-show HEAD:README.md",
+            "harness/hooks/issue-triage-read.sh issue-view 1052",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 --comments",
+            "harness/hooks/issue-triage-read.sh issue-list",
+            "harness/hooks/issue-triage-read.sh issue-list --state open --limit 25 --label security --label area/vault",
+            "harness/hooks/issue-triage-read.sh pr-view 1054",
+            "harness/hooks/issue-triage-read.sh pr-view 1054 --comments",
+            "harness/hooks/issue-triage-read.sh git-log",
+            "harness/hooks/issue-triage-read.sh git-log -n 10 --oneline",
+            "harness/hooks/issue-triage-read.sh git-log -n 5 --stat HEAD~5..HEAD -- internal/gate docs/plan",
+            "harness/hooks/issue-triage-read.sh git-show HEAD",
+            "harness/hooks/issue-triage-read.sh git-show --stat --no-patch HEAD~1 -- internal/api/server.go",
+            "harness/hooks/issue-triage-read.sh git-show HEAD:README.md",
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             no_py_env = self._no_python_env(tmpdir)
@@ -84,62 +84,62 @@ class IssueTriageGuardTests(unittest.TestCase):
             "cat /etc/passwd",
             # Empty / missing subcommand / leading whitespace
             "",
-            ".claude/hooks/issue-triage-read.sh",
-            " .claude/hooks/issue-triage-read.sh git-log",
+            "harness/hooks/issue-triage-read.sh",
+            " harness/hooks/issue-triage-read.sh git-log",
             # Shell quoting / backslash / metacharacter bypasses
-            '.claude/hooks/issue-triage-read.sh git-log --out""put=/tmp/pwn',
-            r".claude/hooks/issue-triage-read.sh git-log --out\put=/tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-log '--output=/tmp/pwn'",
-            ".claude/hooks/issue-triage-read.sh git-log --output=/tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-log --output /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-show --output /tmp/pwn HEAD",
-            ".claude/hooks/issue-triage-read.sh git-log --ext-diff",
-            ".claude/hooks/issue-triage-read.sh git-show --ext-diff HEAD",
-            ".claude/hooks/issue-triage-read.sh git-show --textconv HEAD",
-            ".claude/hooks/issue-triage-read.sh git-log -c core.pager=sh",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 --web",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 -w",
-            ".claude/hooks/issue-triage-read.sh issue-list --web",
-            ".claude/hooks/issue-triage-read.sh issue-list --jq .",
-            ".claude/hooks/issue-triage-read.sh issue-list --template x",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052; touch /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 && id",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 | cat",
-            ".claude/hooks/issue-triage-read.sh issue-view $(id)",
-            ".claude/hooks/issue-triage-read.sh issue-view `id`",
-            ".claude/hooks/issue-triage-read.sh issue-view 1052 > /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-log\ntouch /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-log\n",
-            ".claude/hooks/issue-triage-read.sh git-log\x00; touch /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh\x00 git-log",
-            ".claude/hooks/issue-triage-read.sh git-log\rtouch /tmp/pwn",
-            ".claude/hooks/issue-triage-read.sh git-log\t--oneline",
-            ".claude/hooks/issue-triage-read.sh git-log *",
-            ".claude/hooks/issue-triage-read.sh git-log ~root",
-            ".claude/hooks/issue-triage-read.sh git-log ^HEAD",
-            ".claude/hooks/issue-triage-read.sh git-log café",
-            "FOO=bar .claude/hooks/issue-triage-read.sh git-log",
+            'harness/hooks/issue-triage-read.sh git-log --out""put=/tmp/pwn',
+            r"harness/hooks/issue-triage-read.sh git-log --out\put=/tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-log '--output=/tmp/pwn'",
+            "harness/hooks/issue-triage-read.sh git-log --output=/tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-log --output /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-show --output /tmp/pwn HEAD",
+            "harness/hooks/issue-triage-read.sh git-log --ext-diff",
+            "harness/hooks/issue-triage-read.sh git-show --ext-diff HEAD",
+            "harness/hooks/issue-triage-read.sh git-show --textconv HEAD",
+            "harness/hooks/issue-triage-read.sh git-log -c core.pager=sh",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 --web",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 -w",
+            "harness/hooks/issue-triage-read.sh issue-list --web",
+            "harness/hooks/issue-triage-read.sh issue-list --jq .",
+            "harness/hooks/issue-triage-read.sh issue-list --template x",
+            "harness/hooks/issue-triage-read.sh issue-view 1052; touch /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 && id",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 | cat",
+            "harness/hooks/issue-triage-read.sh issue-view $(id)",
+            "harness/hooks/issue-triage-read.sh issue-view `id`",
+            "harness/hooks/issue-triage-read.sh issue-view 1052 > /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-log\ntouch /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-log\n",
+            "harness/hooks/issue-triage-read.sh git-log\x00; touch /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh\x00 git-log",
+            "harness/hooks/issue-triage-read.sh git-log\rtouch /tmp/pwn",
+            "harness/hooks/issue-triage-read.sh git-log\t--oneline",
+            "harness/hooks/issue-triage-read.sh git-log *",
+            "harness/hooks/issue-triage-read.sh git-log ~root",
+            "harness/hooks/issue-triage-read.sh git-log ^HEAD",
+            "harness/hooks/issue-triage-read.sh git-log café",
+            "FOO=bar harness/hooks/issue-triage-read.sh git-log",
             # Argument validation edge cases
-            ".claude/hooks/issue-triage-read.sh issue-view abc",
-            ".claude/hooks/issue-triage-read.sh issue-view 0",
-            ".claude/hooks/issue-triage-read.sh issue-view 000010",
-            ".claude/hooks/issue-triage-read.sh issue-view 99999999999999999999999999999999",
-            ".claude/hooks/issue-triage-read.sh issue-list --state invalid",
-            ".claude/hooks/issue-triage-read.sh issue-list --limit 0",
-            ".claude/hooks/issue-triage-read.sh issue-list --limit 010",
-            ".claude/hooks/issue-triage-read.sh issue-list --limit 101",
-            ".claude/hooks/issue-triage-read.sh issue-list --label -bad",
-            ".claude/hooks/issue-triage-read.sh git-log -n 0",
-            ".claude/hooks/issue-triage-read.sh git-log -n 001",
-            ".claude/hooks/issue-triage-read.sh git-log -n 201",
-            ".claude/hooks/issue-triage-read.sh git-log -n 99999999999999999999999999999999",
-            ".claude/hooks/issue-triage-read.sh git-log -- ../outside",
-            ".claude/hooks/issue-triage-read.sh git-log -- /etc/passwd",
-            ".claude/hooks/issue-triage-read.sh git-log -- -rf",
-            ".claude/hooks/issue-triage-read.sh git-show",
-            ".claude/hooks/issue-triage-read.sh git-show --stat",
-            ".claude/hooks/issue-triage-read.sh --check git-log",
-            ".claude/hooks/issue-triage-read.sh unknown-subcmd",
+            "harness/hooks/issue-triage-read.sh issue-view abc",
+            "harness/hooks/issue-triage-read.sh issue-view 0",
+            "harness/hooks/issue-triage-read.sh issue-view 000010",
+            "harness/hooks/issue-triage-read.sh issue-view 99999999999999999999999999999999",
+            "harness/hooks/issue-triage-read.sh issue-list --state invalid",
+            "harness/hooks/issue-triage-read.sh issue-list --limit 0",
+            "harness/hooks/issue-triage-read.sh issue-list --limit 010",
+            "harness/hooks/issue-triage-read.sh issue-list --limit 101",
+            "harness/hooks/issue-triage-read.sh issue-list --label -bad",
+            "harness/hooks/issue-triage-read.sh git-log -n 0",
+            "harness/hooks/issue-triage-read.sh git-log -n 001",
+            "harness/hooks/issue-triage-read.sh git-log -n 201",
+            "harness/hooks/issue-triage-read.sh git-log -n 99999999999999999999999999999999",
+            "harness/hooks/issue-triage-read.sh git-log -- ../outside",
+            "harness/hooks/issue-triage-read.sh git-log -- /etc/passwd",
+            "harness/hooks/issue-triage-read.sh git-log -- -rf",
+            "harness/hooks/issue-triage-read.sh git-show",
+            "harness/hooks/issue-triage-read.sh git-show --stat",
+            "harness/hooks/issue-triage-read.sh --check git-log",
+            "harness/hooks/issue-triage-read.sh unknown-subcmd",
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             no_py_env = self._no_python_env(tmpdir)
@@ -165,17 +165,17 @@ class IssueTriageGuardTests(unittest.TestCase):
             ]:
                 res = run_guard(bad_payload)
                 self.assertEqual(res.returncode, 2)
-            ambiguous = '{"other":{"command":"x"},"tool_input":{"command":".claude/hooks/issue-triage-read.sh git-log"}}'
+            ambiguous = '{"other":{"command":"x"},"tool_input":{"command":"harness/hooks/issue-triage-read.sh git-log"}}'
             res = run_guard(ambiguous, env=no_py_env)
             self.assertEqual(res.returncode, 2)
             self.assertIn("issue-triage guard:", res.stderr)
 
     def test_subdirectory_cwd_cannot_shadow_reader(self):
         # Running from a subdirectory (even one containing a decoy
-        # .claude/hooks/issue-triage-read.sh) must be rejected so the relative
+        # harness/hooks/issue-triage-read.sh) must be rejected so the relative
         # command path always resolves to the validated repo-root reader.
         with tempfile.TemporaryDirectory() as tmpdir:
-            res = run_guard(payload_for(".claude/hooks/issue-triage-read.sh git-log"), cwd=tmpdir)
+            res = run_guard(payload_for("harness/hooks/issue-triage-read.sh git-log"), cwd=tmpdir)
             self.assertEqual(res.returncode, 2)
             self.assertIn("repository root", res.stderr)
 
