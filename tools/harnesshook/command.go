@@ -12,8 +12,40 @@ type commit struct {
 }
 
 type shellSegment struct {
-	argv  []string
-	scope byte
+	argv         []string
+	scope        byte
+	stdinTrailer bool
+}
+
+// A quoted delimiter makes a here-document literal. Recognize a single
+// trailing input redirection on the command line, so its message stays bound
+// to the command receiving stdin. Other forms cannot certify a trailer.
+var quotedHeredoc = regexp.MustCompile(`^<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_.-]*)'|"([A-Za-z_][A-Za-z0-9_.-]*)")[ \t]*\r?\n`)
+
+func literalInput(s string) (int, bool) {
+	header := quotedHeredoc.FindStringSubmatch(s)
+	if header == nil {
+		return 0, false
+	}
+	delimiter := header[2] + header[3]
+	verified := false
+	for offset := len(header[0]); offset < len(s); {
+		line, tail, newline := strings.Cut(s[offset:], "\n")
+		end := len(s) - len(tail)
+		line = strings.TrimSuffix(line, "\r")
+		if header[1] == "-" {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == delimiter {
+			return end, verified
+		}
+		verified = verified || trailerValue.MatchString(line)
+		if !newline {
+			break
+		}
+		offset = end
+	}
+	return 0, false
 }
 
 // Keep subshell boundaries and quoted newlines without executing shell input.
@@ -23,6 +55,7 @@ func shellSegments(command string) []shellSegment {
 	var word strings.Builder
 	var quote byte
 	haveWord := false
+	stdinTrailer := false
 	finishWord := func() {
 		if haveWord {
 			argv = append(argv, word.String())
@@ -33,14 +66,22 @@ func shellSegments(command string) []shellSegment {
 	finishSegment := func() {
 		finishWord()
 		if len(argv) > 0 {
-			segments = append(segments, shellSegment{argv: argv})
+			segments = append(segments, shellSegment{argv: argv, stdinTrailer: stdinTrailer})
 			argv = nil
 		}
+		stdinTrailer = false
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
 		if quote == 0 {
 			switch ch {
+			case '<':
+				if consumed, verified := literalInput(command[i:]); consumed != 0 {
+					stdinTrailer = verified
+					finishSegment()
+					i += consumed - 1
+					continue
+				}
 			case ' ', '\t', '\r':
 				finishWord()
 				continue
@@ -115,6 +156,22 @@ func hasTrailer(argv []string) bool {
 	return false
 }
 
+func messageFromStdin(argv []string) bool {
+	for i, arg := range argv {
+		switch arg {
+		case "--":
+			return false
+		case "-F-", "--file=-":
+			return true
+		case "-F", "--file":
+			if i+1 < len(argv) && argv[i+1] == "-" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func commits(command, base string) []commit {
 	var result []commit
 	var parents []string
@@ -175,7 +232,7 @@ func commits(command, base string) []commit {
 				}
 			}
 			if len(argv) > 0 && argv[0] == "commit" {
-				result = append(result, commit{dir, hasTrailer(argv[1:])})
+				result = append(result, commit{dir, hasTrailer(argv[1:]) || segment.stdinTrailer && messageFromStdin(argv[1:])})
 			}
 		}
 	}

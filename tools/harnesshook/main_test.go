@@ -79,6 +79,25 @@ func TestCommitMessageOptionForms(t *testing.T) {
 	}
 }
 
+func TestLiteralCommitMessageOnStdin(t *testing.T) {
+	root := t.TempDir()
+	const text = " <<'MSG'\nsubject\n\nVerified-By: manual check\nMSG\n"
+	for _, tc := range []struct {
+		command string
+		targets []commit
+	}{
+		{"git commit -F -" + text, []commit{{root, true}}},
+		{"git commit --file=-" + text + "git commit -m next", []commit{{root, true}, {root, false}}},
+		{"cat" + text + "git commit -F -", []commit{{root, false}}},
+		{"git commit -m subject" + text, []commit{{root, false}}},
+		{"git commit -F - <<'MSG'\nno trailer\nMSG\n", []commit{{root, false}}},
+	} {
+		if got := commits(tc.command, root); !reflect.DeepEqual(got, tc.targets) {
+			t.Errorf("%q: got %v want %v", tc.command, got, tc.targets)
+		}
+	}
+}
+
 func TestHookProtocol(t *testing.T) {
 	for _, host := range []string{"claude", "codex", "antigravity"} {
 		var out bytes.Buffer
