@@ -102,3 +102,25 @@ func TestCodexDedicatedRegistryRejectsExtraRootFields(t *testing.T) {
 		put(t, root, file, previous)
 	}
 }
+
+func TestCodexProjectConfigRequiresValidTOML(t *testing.T) {
+	root := fixture(t)
+	call(t, root, 0, "sync")
+	const name = ".codex/config.toml"
+	for _, text := range []string{
+		"[features]\r\nhooks = flase\r\n",
+		"allowed_permissions = [\"one\" \"two\"]\r\n",
+		`model = "mis\qprint"`,
+		"example = 1\r\nexample = 2\r\n",
+	} {
+		put(t, root, name, text)
+		for _, args := range [][]string{{"check", "--host", "codex"}, {"sync"}} {
+			if got := call(t, root, 1, args...); !strings.Contains(got, name) || read(t, root, name) != text {
+				t.Fatalf("%v: %s", args, got)
+			}
+		}
+		if got := call(t, root, 0, "session-start", "codex"); !strings.Contains(got, "FAIL") || !strings.Contains(got, name) {
+			t.Fatal(got)
+		}
+	}
+}
