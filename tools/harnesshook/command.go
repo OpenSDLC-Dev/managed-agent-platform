@@ -20,6 +20,7 @@ type shellSegment struct {
 // A quoted delimiter makes a here-document literal. Recognize a single
 // trailing input redirection on the command line, so its message stays bound
 // to the command receiving stdin. Other forms cannot certify a trailer.
+var ioNumber = regexp.MustCompile(`^[0-9]+$`)
 var quotedHeredoc = regexp.MustCompile(`^<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_.-]*)'|"([A-Za-z_][A-Za-z0-9_.-]*)")[ \t]*\r?\n`)
 
 func literalInput(s string) (int, bool) {
@@ -55,12 +56,14 @@ func shellSegments(command string) []shellSegment {
 	var word strings.Builder
 	var quote byte
 	haveWord := false
+	quotedWord := false
 	stdinTrailer := false
 	finishWord := func() {
 		if haveWord {
 			argv = append(argv, word.String())
 			word.Reset()
 			haveWord = false
+			quotedWord = false
 		}
 	}
 	finishSegment := func() {
@@ -83,9 +86,9 @@ func shellSegments(command string) []shellSegment {
 				if consumed, verified := literalInput(command[i:]); consumed != 0 {
 					// A decimal immediately before << can redirect another descriptor.
 					// Credit only an unambiguous stdin binding, implicit or explicit.
-					explicitStdin := haveWord && word.String() == "0"
-					stdinTrailer = verified && (!haveWord || explicitStdin)
-					if explicitStdin {
+					descriptor := haveWord && !quotedWord && ioNumber.MatchString(word.String())
+					stdinTrailer = verified && (!descriptor || strings.TrimLeft(word.String(), "0") == "")
+					if descriptor {
 						word.Reset()
 						haveWord = false
 					}
@@ -116,6 +119,7 @@ func shellSegments(command string) []shellSegment {
 		if ch == '\'' || ch == '"' {
 			if quote == 0 {
 				quote = ch
+				quotedWord = true
 				haveWord = true
 				continue
 			}
@@ -126,6 +130,7 @@ func shellSegments(command string) []shellSegment {
 		}
 		if ch == '\\' && quote != '\'' && i+1 < len(command) && strings.ContainsRune(" \t'\"\\", rune(command[i+1])) {
 			i++
+			quotedWord = true
 			ch = command[i]
 		}
 		haveWord = true

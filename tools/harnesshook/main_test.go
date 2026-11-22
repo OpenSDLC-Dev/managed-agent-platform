@@ -87,6 +87,8 @@ func TestLiteralCommitMessageOnStdin(t *testing.T) {
 		targets []commit
 	}{
 		{"git commit -F -" + text, []commit{{root, true}}},
+		{"git commit -F -" + strings.TrimLeft(text, " "), []commit{{root, true}}},
+		{"git commit -F - 00" + strings.TrimSpace(text), []commit{{root, true}}},
 		{"git commit -F - 0" + strings.TrimSpace(text), []commit{{root, true}}},
 		{"git commit -F - 3" + strings.TrimSpace(text), []commit{{root, false}}},
 		{"git commit -F - <" + strings.TrimSpace(text), []commit{{root, false}}},
