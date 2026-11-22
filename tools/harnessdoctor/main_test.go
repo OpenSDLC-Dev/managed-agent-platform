@@ -60,6 +60,12 @@ func fixture(t *testing.T) string {
 	} {
 		put(t, root, path, data)
 	}
+	for _, script := range []string{"harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"} {
+		if err := os.Chmod(filepath.Join(root, filepath.FromSlash(script)), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitTest(t, root, "add", "--chmod=+x", "--", "harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh")
 	for _, client := range []string{"claude", "codex", "antigravity"} {
 		data := read(t, filepath.Join("..", ".."), "harness/hooks/"+client+".json")
 		put(t, root, "harness/hooks/"+client+".json", data)
@@ -381,4 +387,18 @@ func TestProjectHookOverrides(t *testing.T) {
 	}
 	put(t, root, name, "[features]\nhooks = true\n")
 	call(t, root, 0, "check")
+}
+
+func TestRequiredScriptMode(t *testing.T) {
+	root := fixture(t)
+	call(t, root, 0, "sync")
+	const script = "harness/hooks/verify-stamp.sh"
+	if runtime.GOOS == "windows" {
+		gitTest(t, root, "update-index", "--chmod=-x", "--", script)
+	} else if err := os.Chmod(filepath.Join(root, filepath.FromSlash(script)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := call(t, root, 1, "check"); !strings.Contains(got, script+": missing executable permission") {
+		t.Fatal(got)
+	}
 }

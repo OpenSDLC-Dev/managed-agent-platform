@@ -74,7 +74,7 @@ func run(cwd string, args []string, out io.Writer) int {
 		var files map[string]output
 		files, err = render(root, host, m)
 		if err == nil {
-			changes, conflicts, modeFixes := compare(root, host, files)
+			changes, conflicts, modeFixes := compare(root, host, m, files)
 			problems = append(problems, conflicts...)
 			for _, c := range changes {
 				if action == "sync" && len(conflicts) == 0 {

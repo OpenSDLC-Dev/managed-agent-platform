@@ -191,7 +191,7 @@ func readModes(root string) (treeMode, error) {
 		return t, nil
 	}
 	t.executable = map[string]bool{}
-	cmd := exec.Command("git", "-C", root, "ls-files", "--stage", "-z", "--", "harness/skills", ".claude/skills", ".agents/skills")
+	cmd := exec.Command("git", "-C", root, "ls-files", "--stage", "-z", "--", "harness/hooks", "harness/skills", ".claude/skills", ".agents/skills")
 	cmd.Env = gitEnv()
 	b, err := cmd.Output()
 	if err != nil {
@@ -241,10 +241,26 @@ func managedTrees(host string) []string {
 	return trees
 }
 
-func compare(root, host string, files map[string]output) (changes []change, conflicts []string, windowsModeFixes []string) {
+func compare(root, host string, m manifest, files map[string]output) (changes []change, conflicts []string, windowsModeFixes []string) {
 	modes, err := readModes(root)
 	if err != nil {
 		return nil, []string{err.Error()}, nil
+	}
+	scripts := []string{"harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"}
+	if (host == "" || host == "claude") && slices.ContainsFunc(m.Agents, func(a agent) bool { return a.ClaudeBashGuard }) {
+		scripts = append(scripts, "harness/hooks/issue-triage-bash-guard.sh", "harness/hooks/issue-triage-read.sh")
+	}
+	for _, script := range scripts {
+		executable, err := modes.executableAt(root, script)
+		if err != nil {
+			conflicts = append(conflicts, err.Error())
+		} else if !executable {
+			fix := "chmod +x " + script
+			if runtime.GOOS == "windows" {
+				fix = "git update-index --chmod=+x -- " + script
+			}
+			conflicts = append(conflicts, script+": missing executable permission; run "+fix)
+		}
 	}
 	for _, dir := range managedTrees(host) {
 		actual, err := walkFiles(root, dir)
