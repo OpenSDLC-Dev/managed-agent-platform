@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -48,6 +49,11 @@ func main() {
 	subset := flag.String("subset", "all", "subset to evaluate: all, tuning, or eval")
 	limit := flag.Int("limit", 0, "optional cap on number of cases to run")
 	maxDiffBytes := flag.Int("max-diff-bytes", 18000, "maximum diff bytes sent per case in live mode")
+	modelFlag := flag.String("model", "", "override model ID in live mode (defaults to REVIEWEVAL_MODEL / MODEL_ID)")
+	thinkingFlag := flag.String("thinking", "", "optional thinking mode in live mode: adaptive, enabled, or disabled (defaults to REVIEWEVAL_THINKING)")
+	effortFlag := flag.String("effort", "", "optional reasoning effort in live mode: low, medium, high, xhigh, or max (defaults to REVIEWEVAL_EFFORT)")
+	maxTokensFlag := flag.Int("max-tokens", 0, "optional completion token budget in live mode (defaults to REVIEWEVAL_MAX_TOKENS, or 65536 with thinking / 1500 without)")
+	timeoutFlag := flag.Duration("timeout", 0, "optional per-call HTTP timeout in live mode (defaults to REVIEWEVAL_TIMEOUT, or 5m with thinking / 90s without)")
 	outPath := flag.String("out", "", "optional path to write JSON report")
 	flag.Parse()
 
@@ -127,7 +133,37 @@ func main() {
 		return
 	}
 
-	cfg, err := LoadEndpointConfig(root, os.Getenv)
+	visited := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+
+	// Inject visited numeric/duration flags before parsing so valid CLI flags
+	// override a malformed REVIEWEVAL_MAX_TOKENS / REVIEWEVAL_TIMEOUT in env/.env.
+	getenv := func(k string) string {
+		if k == "REVIEWEVAL_MAX_TOKENS" && visited["max-tokens"] {
+			return strconv.Itoa(*maxTokensFlag)
+		}
+		if k == "REVIEWEVAL_TIMEOUT" && visited["timeout"] {
+			return (*timeoutFlag).String()
+		}
+		return os.Getenv(k)
+	}
+
+	cfg, err := loadEndpointConfigRaw(root, getenv)
+	if err == nil {
+		if visited["model"] {
+			cfg.Model = strings.TrimSpace(*modelFlag)
+		}
+		if visited["thinking"] {
+			cfg.Thinking = strings.ToLower(strings.TrimSpace(*thinkingFlag))
+			if cfg.Thinking == "disabled" && !visited["effort"] {
+				cfg.Effort = ""
+			}
+		}
+		if visited["effort"] {
+			cfg.Effort = strings.ToLower(strings.TrimSpace(*effortFlag))
+		}
+		err = cfg.Validate()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "revieweval: live mode configuration error: %v\n", err)
 		os.Exit(1)
@@ -168,8 +204,17 @@ func main() {
 	rep.Mode = "live"
 	rep.Subset = *subset
 	rep.Model = cfg.Model
+	rep.Thinking = cfg.Thinking
+	rep.Effort = cfg.Effort
 
-	fmt.Printf("\n=== revieweval summary (%s) ===\n", rep.Model)
+	headerParts := []string{rep.Model}
+	if rep.Thinking != "" {
+		headerParts = append(headerParts, "thinking="+rep.Thinking)
+	}
+	if rep.Effort != "" {
+		headerParts = append(headerParts, "effort="+rep.Effort)
+	}
+	fmt.Printf("\n=== revieweval summary (%s) ===\n", strings.Join(headerParts, ", "))
 	fmt.Printf("Raw:         recall=%d/%d (%.1f%%)  severity_cal=%.1f%%  control_fp=%d/%d (%.1f%%)\n",
 		rep.Raw.IncidentsCaught, rep.Raw.IncidentsTotal, rep.Raw.IncidentRecall*100,
 		rep.Raw.SeverityCalibration*100,
