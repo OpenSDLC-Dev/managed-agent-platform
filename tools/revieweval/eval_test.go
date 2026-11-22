@@ -459,7 +459,7 @@ func TestCompleteSendsThinkingAndEffortAndHandlesMaxTokensTruncation(t *testing.
 		}
 	})
 
-	t.Run("openai effort omits temperature", func(t *testing.T) {
+	t.Run("openai effort omits temperature and applies default max_completion_tokens", func(t *testing.T) {
 		var gotBody map[string]any
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -473,12 +473,11 @@ func TestCompleteSendsThinkingAndEffortAndHandlesMaxTokensTruncation(t *testing.
 		t.Cleanup(srv.Close)
 
 		client := &LLMClient{Cfg: EndpointConfig{
-			Protocol:  "openai",
-			BaseURL:   srv.URL,
-			APIKey:    "test-key",
-			Model:     "reasoning-model",
-			Effort:    "high",
-			MaxTokens: 32768,
+			Protocol: "openai",
+			BaseURL:  srv.URL,
+			APIKey:   "test-key",
+			Model:    "reasoning-model",
+			Effort:   "high",
 		}}
 		if _, err := client.Complete(context.Background(), "sys", "usr"); err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -489,8 +488,8 @@ func TestCompleteSendsThinkingAndEffortAndHandlesMaxTokensTruncation(t *testing.
 		if gotBody["reasoning_effort"] != "high" {
 			t.Errorf("reasoning_effort = %v, want high", gotBody["reasoning_effort"])
 		}
-		if gotBody["max_completion_tokens"] != float64(32768) {
-			t.Errorf("max_completion_tokens = %v, want 32768", gotBody["max_completion_tokens"])
+		if gotBody["max_completion_tokens"] != float64(65536) {
+			t.Errorf("max_completion_tokens = %v, want 65536", gotBody["max_completion_tokens"])
 		}
 	})
 

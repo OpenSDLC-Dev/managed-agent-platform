@@ -838,8 +838,8 @@ func (c *LLMClient) completeOpenAI(ctx context.Context, hc *http.Client, systemP
 	if c.Cfg.Effort != "" {
 		reqBody["reasoning_effort"] = c.Cfg.Effort
 	}
-	if c.Cfg.MaxTokens > 0 {
-		reqBody["max_completion_tokens"] = c.Cfg.MaxTokens
+	if c.Cfg.MaxTokens > 0 || c.Cfg.thinkingActive() {
+		reqBody["max_completion_tokens"] = c.Cfg.effectiveMaxTokens()
 	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
