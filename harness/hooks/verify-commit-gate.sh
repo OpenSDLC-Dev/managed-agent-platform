@@ -45,8 +45,11 @@ session_id="$1"
 has_trailer="$2"
 target="$3"
 
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  exit 0
+if [[ "$(git rev-parse --is-inside-work-tree 2>/dev/null || true)" != true ]]; then
+  # The directory can exist before a compound command creates its repository.
+  # The project owns the block counter while the target's identity is unknown.
+  cd -- "$script_dir/../.."
+  target=unknown
 fi
 
 git_dir_abs="$(CDPATH='' cd -- "$(git rev-parse --git-dir)" && pwd -P)"

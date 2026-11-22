@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/gitworktree"
@@ -189,6 +190,41 @@ func hasTrailer(argv []string, stdinTrailer bool) bool {
 }
 
 func commits(command, base string) []commit {
+	var created []string
+	return shellCommits(command, base, &created)
+}
+
+// A pre-tool event precedes the whole shell command. A directory which Git
+// will initialize later cannot use the stamp of its current parent checkout.
+func worktreeCreation(argv []string, dir string) (string, bool) {
+	switch {
+	case len(argv) > 0 && argv[0] == "init":
+		argv = argv[1:]
+	case len(argv) > 1 && argv[0] == "worktree" && argv[1] == "add":
+		argv = argv[2:]
+	default:
+		return "", false
+	}
+	for len(argv) > 0 {
+		arg := argv[0]
+		argv = argv[1:]
+		switch {
+		case arg == "--" && len(argv) > 0:
+			return resolveDir(dir, argv[0]), true
+		case !strings.HasPrefix(arg, "-"):
+			return resolveDir(dir, arg), true
+		case slices.Contains([]string{"-b", "-B", "--initial-branch", "--template", "--reason"}, arg) && len(argv) > 0:
+			argv = argv[1:]
+		case strings.Contains(arg, "="), slices.Contains([]string{"-q", "--quiet", "--bare", "-f", "--force", "--detach", "--no-checkout"}, arg):
+		default:
+			// An unfamiliar option may consume a directory argument.
+			return "", true
+		}
+	}
+	return dir, true
+}
+
+func shellCommits(command, base string, created *[]string) []commit {
 	var result []commit
 	var parents []string
 	for _, segment := range shellSegments(command) {
@@ -205,6 +241,7 @@ func commits(command, base string) []commit {
 		}
 		args := segment.argv
 		firstCommit := len(result)
+		firstCreation := len(*created)
 		redirected := false
 		for len(args) > 0 && assignment.MatchString(args[0]) {
 			key, _, _ := strings.Cut(args[0], "=")
@@ -228,7 +265,7 @@ func commits(command, base string) []commit {
 		case "pwsh", "powershell", "bash", "sh", "zsh":
 			for i, a := range argv {
 				if (strings.EqualFold(a, "-command") || a == "-lc" || a == "-c") && i+1 < len(argv) {
-					result = append(result, commits(strings.Join(argv[i+1:], " "), base)...)
+					result = append(result, shellCommits(strings.Join(argv[i+1:], " "), base, created)...)
 					break
 				}
 			}
@@ -253,7 +290,16 @@ func commits(command, base string) []commit {
 					redirected = redirected || opt == "--git-dir" || opt == "--work-tree"
 				}
 			}
-			if len(argv) > 0 && argv[0] == "commit" {
+			if newRoot, ok := worktreeCreation(argv, dir); ok {
+				*created = append(*created, newRoot)
+			} else if len(argv) > 0 && argv[0] == "commit" {
+				for _, future := range *created {
+					rel, err := filepath.Rel(future, dir)
+					if future == "" || (err == nil && filepath.IsLocal(rel)) {
+						dir = ""
+						break
+					}
+				}
 				result = append(result, commit{dir, hasTrailer(argv[1:], segment.stdinTrailer)})
 			}
 		}
@@ -262,6 +308,9 @@ func commits(command, base string) []commit {
 		if redirected {
 			for i := firstCommit; i < len(result); i++ {
 				result[i].dir = ""
+			}
+			for i := firstCreation; i < len(*created); i++ {
+				(*created)[i] = ""
 			}
 		}
 	}

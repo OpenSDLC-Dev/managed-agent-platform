@@ -158,6 +158,27 @@ class VerifyCommitGateTests(unittest.TestCase):
             allowed = run_gate(second, "git commit -m sample", mode="enforce", extra_env=other_checkout)
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_precreated_directory_cannot_use_a_future_repository_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp, "verified")
+            repo.mkdir()
+            init_repo(repo)
+            run_stamp(repo, "--write", "verified parent")
+            for new_root in (repo / "child", Path(tmp, "outside")):
+                new_root.mkdir()
+                command = f'git -C "{new_root}" init && git -C "{new_root}" commit --allow-empty -m first'
+                # Empty directories do not change the parent repository's fingerprint.
+                observe = run_gate(repo, command, session_id="observe-" + new_root.name)
+                self.assertEqual(observe.returncode, 0, observe.stderr)
+                self.assertIn("observe", observe.stderr)
+                enforce = run_gate(repo, command, mode="enforce", session_id="enforce-" + new_root.name)
+                self.assertEqual(enforce.returncode, 2, enforce.stderr)
+                trailer = run_gate(repo, command + ' --trailer "Verified-By: manual"', mode="enforce")
+                self.assertEqual(trailer.returncode, 0, trailer.stderr)
+            # A target outside Git may become a worktree by another command before commit.
+            result = run_gate(Path(tmp, "outside"), "git commit -m first", mode="enforce")
+            self.assertEqual(result.returncode, 2)
+
     def test_non_commit_commands_always_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
