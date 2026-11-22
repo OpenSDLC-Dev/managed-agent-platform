@@ -196,7 +196,8 @@ func registeredShape(actual, expected any, field string) bool {
 		}
 		return true
 	default:
-		if field == "command" || field == "type" {
+		switch field {
+		case "command", "commandWindows", "command_windows", "type":
 			return reflect.DeepEqual(actual, expected)
 		}
 		return reflect.TypeOf(actual) == reflect.TypeOf(expected)
@@ -207,6 +208,34 @@ func registeredShape(actual, expected any, field string) bool {
 // its generated adapter drift together. Git shell aliases execute at the root.
 func callsGo(command, alias, target string) bool {
 	return command == `git -c "alias.`+alias+"=!"+target+`" `+alias
+}
+
+func requiredHookOptions(host, event string, h map[string]any) error {
+	for _, field := range []string{"async", "asyncRewake"} {
+		if value, present := h[field]; present {
+			if field == "asyncRewake" && host == "codex" {
+				return fmt.Errorf("%s: Codex does not support %s; remove the field", event, field)
+			}
+			if value != false {
+				return fmt.Errorf("%s must run synchronously; omit %s or set it to false", event, field)
+			}
+		}
+	}
+	if host == "codex" {
+		// Codex accepts both spellings for the same optional field. A null
+		// value falls back to the portable command, and two spellings conflict.
+		if _, camel := h["commandWindows"]; camel {
+			if _, snake := h["command_windows"]; snake {
+				return fmt.Errorf("%s: commandWindows and command_windows declare the same Codex field twice", event)
+			}
+		}
+		for _, key := range []string{"commandWindows", "command_windows"} {
+			if value := h[key]; value != nil && value != h["command"] {
+				return fmt.Errorf("%s: %s must run the registered command on Windows", event, key)
+			}
+		}
+	}
+	return nil
 }
 
 func matchesPreTool(host, matcher string) bool {
@@ -249,8 +278,10 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			}
 			startup := event == "SessionStart" && callsGo(command, "map-doctor", "go run ./tools/harnessdoctor session-start "+host)
 			preTool := event == "PreToolUse" && callsGo(command, "map-pretool", "go run ./tools/harnesshook "+host)
-			if canonical && (startup || preTool) && (h["async"] == true || h["asyncRewake"] == true) {
-				return fmt.Errorf("%s must run synchronously to deliver its receipt or permission decision", event)
+			if canonical && (startup || preTool) {
+				if err := requiredHookOptions(host, event, h); err != nil {
+					return err
+				}
 			}
 			if startup {
 				starts++

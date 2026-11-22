@@ -103,6 +103,92 @@ func TestCodexDedicatedRegistryRejectsExtraRootFields(t *testing.T) {
 	}
 }
 
+func TestRequiredCodexHookOptions(t *testing.T) {
+	root := fixture(t)
+	const path = "harness/hooks/codex.json"
+	source := read(t, root, path)
+	for _, event := range []string{"SessionStart", "PreToolUse"} {
+		t.Run(event, func(t *testing.T) {
+			for _, tc := range []struct {
+				options map[string]any
+				problem string
+			}{
+				{map[string]any{"commandWindows": "registered"}, ""},
+				{map[string]any{"command_windows": "registered"}, ""},
+				{map[string]any{"commandWindows": nil}, ""},
+				{map[string]any{"command_windows": nil}, ""},
+				{map[string]any{"commandWindows": "echo alternate"}, "commandWindows"},
+				{map[string]any{"command_windows": "echo alternate"}, "command_windows"},
+				{map[string]any{"commandWindows": false}, "commandWindows"},
+				{map[string]any{"commandWindows": "registered", "command_windows": "registered"}, "command_windows"},
+				{map[string]any{"async": false}, ""},
+				{map[string]any{"async": true}, "async"},
+				{map[string]any{"async": "false"}, "async"},
+				{map[string]any{"async": nil}, "async"},
+				{map[string]any{"asyncRewake": true}, "asyncRewake"},
+				{map[string]any{"asyncRewake": false}, "asyncRewake"},
+			} {
+				doc, err := jsonObject([]byte(source))
+				if err != nil {
+					t.Fatal(err)
+				}
+				group := doc["hooks"].(map[string]any)[event].([]any)[0].(map[string]any)
+				handler := group["hooks"].([]any)[0].(map[string]any)
+				for key, value := range tc.options {
+					if value == "registered" {
+						value = handler["command"]
+					}
+					handler[key] = value
+				}
+				err = validateRegistry("codex", doc, true)
+				if (err == nil) != (tc.problem == "") || err != nil && !strings.Contains(err.Error(), tc.problem) {
+					t.Errorf("%v: %v, want %q", tc.options, err, tc.problem)
+				}
+			}
+		})
+	}
+}
+
+func TestSyncPreservesUnregisteredWindowsHookCommand(t *testing.T) {
+	root := fixture(t)
+	const source, generated = "harness/hooks/codex.json", ".codex/hooks.json"
+	doc, err := jsonObject([]byte(read(t, root, source)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := doc["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)
+	handler := group["hooks"].([]any)[0].(map[string]any)
+	handler["commandWindows"] = handler["command"]
+	data, _ := formattedJSON(doc)
+	put(t, root, source, string(data))
+	call(t, root, 0, "sync")
+	handler["commandWindows"] = "echo preserve this registration"
+	data, _ = formattedJSON(doc)
+	put(t, root, generated, string(data))
+	if got := call(t, root, 1, "sync"); !strings.Contains(got, generated) || read(t, root, generated) != string(data) {
+		t.Fatal(got)
+	}
+}
+
+func TestAntigravityRequiresBooleanEnabled(t *testing.T) {
+	root := fixture(t)
+	doc, err := jsonObject([]byte(read(t, root, "harness/hooks/antigravity.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := doc["verify-before-commit"].(map[string]any)
+	for _, invalid := range []any{"false", "true", nil, false} {
+		group["enabled"] = invalid
+		if err := validateRegistry("antigravity", doc, true); err == nil {
+			t.Fatalf("accepted invalid canonical enabled: %#v", invalid)
+		}
+	}
+	group["enabled"] = true
+	if err := validateRegistry("antigravity", doc, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCodexProjectConfigRequiresValidTOML(t *testing.T) {
 	root := fixture(t)
 	call(t, root, 0, "sync")
