@@ -15,7 +15,9 @@ func TestNativeInputsAndRoleBoundaries(t *testing.T) {
 		{"claude", `{"tool_name":"Bash","cwd":"/src","tool_input":{"command":"git status"}}`, "Bash", "git status", "/src", ""},
 		{"codex", `{"agent_type":"issue-triage","tool_name":"apply_patch","cwd":"/work","tool_input":{"command":"text"}}`, "apply_patch", "text", "/work", "issue-triage"},
 		{"codex", `{"tool_name":"Bash","cwd":"/src","tool_input":{"command":"git status","workdir":"nested"}}`, "Bash", "git status", filepath.Join("/src", "nested"), ""},
-		{"antigravity", `{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit","Cwd":"/work"}},"conversationId":"abc"}`, "run_command", "git commit", "/work", ""},
+		{"antigravity", `{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit","Cwd":"/work"}},"conversationId":"abc"}`, "run_command", "git commit", "", ""},
+		{"antigravity", `{"cwd":"/work","toolCall":{"name":"run_command","args":{"CommandLine":"git commit"}}}`, "run_command", "git commit", "/work", ""},
+		{"antigravity", `{"cwd":"/work","toolCall":{"name":"run_command","args":{"CommandLine":"git commit","Cwd":"nested"}}}`, "run_command", "git commit", "/work", ""},
 	}
 	for _, c := range cases {
 		var in input
@@ -27,10 +29,18 @@ func TestNativeInputsAndRoleBoundaries(t *testing.T) {
 			t.Errorf("%s: %#v", c.host, got)
 		}
 	}
-	for _, role := range []string{"issue-triage", "reviewer"} {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "harness"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	const roles = `{"agents":[{"name":"custom-reader","codexEvidenceOnly":true},{"name":"reviewer","codexEvidenceOnly":true},{"name":"issue-triage","codexEvidenceOnly":true},{"name":"verifier"}]}`
+	if err := os.WriteFile(filepath.Join(root, "harness", "manifest.json"), []byte(roles), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"issue-triage", "reviewer", "custom-reader"} {
 		for _, tool := range []string{"apply_patch", "Bash", "spawn_agent", "mcp__service__update", "exec_command"} {
 			var out bytes.Buffer
-			err := handle("codex", event{role: role, tool: tool}, ".", &out, &bytes.Buffer{})
+			err := handle("codex", event{role: role, tool: tool}, root, &out, &bytes.Buffer{})
 			if err != nil || !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 				t.Fatalf("%s/%s decision %s, %v", role, tool, &out, err)
 			}
@@ -52,6 +62,13 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{`git -C "one space" commit --trailer "Verified-By: none"`, []commit{{nested, true}}},
 		{`Set-Location -LiteralPath "one space"; git.exe commit -m ok`, []commit{{nested, false}}},
 		{`git -C "one space" commit -m first && git commit -m second`, []commit{{nested, false}, {root, false}}},
+		{`git -C"one space" commit -m first && git commit -m second`, []commit{{nested, false}, {root, false}}},
+		{`git -C=other commit -m first`, []commit{{filepath.Join(root, "=other"), false}}},
+		{`GIT_INDEX_FILE=foreign git commit -m sample; git commit -m next`, []commit{{"", false}, {root, false}}},
+		{`GIT_DIR=other/.git git -C "one space" commit --trailer "Verified-By: manual"`, []commit{{"", true}}},
+		{`git --work-tree /elsewhere -C "one space" commit -m ok`, []commit{{"", false}}},
+		{`GIT_WORK_TREE=foreign sh -c 'git commit -m sample'`, []commit{{"", false}}},
+		{`LANG=C git commit -m sample`, []commit{{root, false}}},
 		{`git commit -m first && echo "Verified-By: other"`, []commit{{root, false}}},
 		{`(cd "one space" && git status); git commit -m root`, []commit{{root, false}}},
 		{`(cd "one space" && (git commit -m child)); git commit -m root`, []commit{{nested, false}, {root, false}}},
@@ -137,6 +154,28 @@ func TestEmptyCommandDirectoryCannotBorrowWorkingTreeStamp(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "deny") {
 		t.Fatalf("missing target was allowed: %s %s", &out, &diagnostic)
+	}
+}
+
+func TestFutureCommitDirectoryUsesGateModeAndTrailer(t *testing.T) {
+	sourceRoot := filepath.Join(mustGetwd(t), "../..")
+	root := t.TempDir()
+	t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(root, "blocks"))
+	for _, tc := range []struct {
+		mode, command, want string
+	}{
+		{"observe", "git -C future commit -m wip", "observe"},
+		{"enforce", "git -C future commit -m wip", "deny"},
+		{"enforce", "git -C future commit -m wip --trailer 'Verified-By: explicit'", ""},
+	} {
+		t.Setenv("VERIFY_GATE_MODE", tc.mode)
+		var out, log bytes.Buffer
+		if err := handle("claude", event{tool: "Bash", command: tc.command, dir: root}, sourceRoot, &out, &log); err != nil {
+			t.Fatal(err)
+		}
+		if s := out.String() + log.String(); (tc.want == "" && s != "") || !strings.Contains(s, tc.want) {
+			t.Errorf("%s %s: %q", tc.mode, tc.command, s)
+		}
 	}
 }
 

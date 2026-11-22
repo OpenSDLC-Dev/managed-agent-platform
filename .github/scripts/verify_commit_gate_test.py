@@ -122,8 +122,8 @@ class VerifyCommitGateTests(unittest.TestCase):
                         # Session opens in first. The command explicitly targets another checkout.
                         command = f'git -C "{target}" commit -m sample'
                         if host == "antigravity":
-                            payload = {"toolCall": {"name": "run_command", "args": {
-                                "CommandLine": command, "Cwd": str(first)}}, "conversationId": "target"}
+                            payload = {"cwd": str(first), "toolCall": {"name": "run_command", "args": {
+                                "CommandLine": command}}, "conversationId": "target"}
                         else:
                             payload = {"tool_name": "Bash", "tool_input": {"command": command},
                                        "cwd": str(first), "session_id": "target"}
@@ -140,6 +140,23 @@ class VerifyCommitGateTests(unittest.TestCase):
                         self.assertEqual(denial["hookSpecificOutput"]["permissionDecision"], "deny")
                     run_stamp(second, "--write", "test")
                     self.assertEqual(call(second), "")
+
+    def test_commit_target_ignores_inherited_git_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp, "first"), Path(tmp, "second")
+            first.mkdir()
+            second.mkdir()
+            init_repo(first)
+            init_repo(second)
+            run_stamp(first, "--write", "verified first only")
+            other_checkout = {"GIT_DIR": str(first / ".git"), "GIT_WORK_TREE": str(first),
+                              "GIT_INDEX_FILE": str(first / ".git/index")}
+            denied = run_gate(second, "git commit -m sample", mode="enforce", extra_env=other_checkout)
+            self.assertEqual(denied.returncode, 2)
+            self.assertIn("no verification stamp", denied.stderr)
+            run_stamp(second, "--write", "verified second")
+            allowed = run_gate(second, "git commit -m sample", mode="enforce", extra_env=other_checkout)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
     def test_non_commit_commands_always_pass(self):
         with tempfile.TemporaryDirectory() as tmp:

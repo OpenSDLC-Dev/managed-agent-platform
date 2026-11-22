@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/gitworktree"
 )
 
 type commit struct {
@@ -202,7 +204,11 @@ func commits(command, base string) []commit {
 			continue
 		}
 		args := segment.argv
+		firstCommit := len(result)
+		redirected := false
 		for len(args) > 0 && assignment.MatchString(args[0]) {
+			key, _, _ := strings.Cut(args[0], "=")
+			redirected = redirected || gitworktree.LocationVariable(key)
 			args = args[1:]
 		}
 		if len(args) == 0 {
@@ -229,24 +235,33 @@ func commits(command, base string) []commit {
 		case "git":
 			dir := base
 			for len(argv) > 0 && strings.HasPrefix(argv[0], "-") {
-				opt, val, joined := strings.Cut(argv[0], "=")
+				arg := argv[0]
 				argv = argv[1:]
+				if value, ok := strings.CutPrefix(arg, "-C"); ok {
+					if value == "" && len(argv) > 0 {
+						value, argv = argv[0], argv[1:]
+					}
+					dir = resolveDir(dir, value)
+					continue
+				}
+				opt, _, joined := strings.Cut(arg, "=")
 				switch opt {
-				case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env":
+				case "-c", "--git-dir", "--work-tree", "--namespace", "--config-env":
 					if !joined && len(argv) > 0 {
-						val = argv[0]
 						argv = argv[1:]
 					}
-					if opt == "-C" {
-						dir = resolveDir(dir, val)
-					}
-					if opt == "--git-dir" || opt == "--work-tree" {
-						dir = ""
-					}
+					redirected = redirected || opt == "--git-dir" || opt == "--work-tree"
 				}
 			}
 			if len(argv) > 0 && argv[0] == "commit" {
 				result = append(result, commit{dir, hasTrailer(argv[1:], segment.stdinTrailer)})
+			}
+		}
+		// An explicit repository or index can override even an absolute -C in
+		// this command (and in any shell it starts). A trailer can still apply.
+		if redirected {
+			for i := firstCommit; i < len(result); i++ {
+				result[i].dir = ""
 			}
 		}
 	}

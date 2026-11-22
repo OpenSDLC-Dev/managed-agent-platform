@@ -13,21 +13,14 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/gitworktree"
 )
 
 // The hook runs in the invoking worktree, even when a parent process exports
 // environment for its own checkout or Git index.
 func gitEnv() []string {
-	var env []string
-	for _, entry := range os.Environ() {
-		k, _, _ := strings.Cut(entry, "=")
-		switch strings.ToUpper(k) {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES":
-			continue
-		}
-		env = append(env, entry)
-	}
-	return env
+	return gitworktree.Environment()
 }
 
 func worktree(cwd string) (string, error) {
