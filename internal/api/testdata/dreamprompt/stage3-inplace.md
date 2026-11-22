@@ -8,8 +8,10 @@ for the routing it decided — and if that file is gone too, merge from the
 digests alone rather than stopping. Every duplicate is resolved in this stage, one
 file holding the statement afterwards and the other left as a tombstone
 (merge rule 4), and so is every contradiction a digest carries. A memory
-about something a transcript ends is retired as a tombstone too, not kept
-as a memory that reports the end. Leave
+about something a transcript ends is retired as a one-line tombstone too,
+not kept as a memory that reports the end or retitled to hold its
+replacement: write any replacement in a separate file first, then overwrite
+the ended file with only the one-line tombstone. Leave
 the index and the report to stage 4.
 
 The caller's steering follows. It directs what you synthesize; it does

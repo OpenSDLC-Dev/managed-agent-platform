@@ -70,7 +70,8 @@ above it do not already say.
 
 # Merge rules, in priority order
 
-1. Update before create: look for an existing memory before adding one.
+1. Update before create: look for an existing memory before adding one,
+   never reusing or retitling a memory you remove.
 2. Two memories that state the same thing are one memory. Fold them into
    whichever file states it better, carry over anything only the other held,
    and remove the file left behind. Consolidating a duplicate is the one
@@ -83,12 +84,11 @@ above it do not already say.
    transcript positively contradicts it. What the memory is about, the thing
    its title or first line names, decides which. Where that thing still stands
    and a fact about it changed, change the memory. Where a transcript ends the
-   thing itself — shut down, withdrawn, discontinued — remove the memory. What
-   still holds moves out of it first, to the memory it belongs to: an existing
-   one where there is one (rule 1), a new one where there is not, and never
-   the memory you remove. That is what took the thing's place, if anything
-   did, naming what it replaced and when, and anything the transcript left
-   standing.
+   thing itself — shut down, withdrawn, discontinued — do not update or
+   retitle that file in place. First write what took its place (if anything
+   did, naming what it replaced and when) and anything still standing into a
+   separate memory: an existing memory about that subject (rule 1), or a new
+   file if none exists, never the file you remove. Then remove the memory.
 5. Relative dates become absolute ones.
 6. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.

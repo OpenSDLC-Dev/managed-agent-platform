@@ -74,7 +74,8 @@ above it do not already say.
 
 # Merge rules, in priority order
 
-1. Update before create: look for an existing memory before adding one.
+1. Update before create: look for an existing memory before adding one,
+   never reusing or retitling a memory you retire.
 2. Two memories that state the same thing are one memory. Fold them into
    whichever file states it better, carry over anything only the other held,
    and retire the file left behind under rule 4. Consolidating a duplicate is
@@ -89,17 +90,18 @@ above it do not already say.
    supersedes it — or, where none does, why it was retired — and listed under
    a *to remove* heading in dream/report.md and in a trailing "## To remove"
    section of /mnt/memory/team-notes/MEMORY.md. The caller, who chose to consolidate in place,
-   removes the tombstones through the memories API.
+   removes the tombstones through the memories API. Because every file listed
+   under "## To remove" will be deleted, a retired file holds only that
+   one-line tombstone — never live or replacement facts.
 5. Nothing else is retired on suspicion: change or retire a memory only where a
    transcript positively contradicts it. What the memory is about, the thing
    its title or first line names, decides which. Where that thing still stands
    and a fact about it changed, change the memory. Where a transcript ends the
-   thing itself — shut down, withdrawn, discontinued — retire the memory under rule 4. What
-   still holds moves out of it first, to the memory it belongs to: an existing
-   one where there is one (rule 1), a new one where there is not, and never
-   the memory you retire. That is what took the thing's place, if anything
-   did, naming what it replaced and when, and anything the transcript left
-   standing.
+   thing itself — shut down, withdrawn, discontinued — do not update or
+   retitle that file in place. First write what took its place (if anything
+   did, naming what it replaced and when) and anything still standing into a
+   separate memory: an existing memory about that subject (rule 1), or a new
+   file if none exists, never the file you retire. Then retire the memory under rule 4.
 6. Relative dates become absolute ones.
 7. The user's own wording and any greppable string — a name, a path, a command
    — survives compression; prose is what you compress.
