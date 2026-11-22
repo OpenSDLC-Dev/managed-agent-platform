@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"reflect"
 	"regexp"
 	"slices"
@@ -40,6 +41,14 @@ func mergeRegistry(host string, source, existing []byte) ([]byte, error) {
 	}
 	if err = validateRegistry(host, have, false); err != nil {
 		return nil, err
+	}
+	if host == "claude" {
+		env, _ := have["env"].(map[string]any)
+		for _, key := range []string{"CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL"} {
+			if _, pinned := env[key]; pinned {
+				return nil, fmt.Errorf("env.%s overrides inheritance; remove the project override", key)
+			}
+		}
 	}
 	if host == "claude" && have["disableAllHooks"] == true {
 		return nil, errors.New("disableAllHooks prevents SessionStart; review this project setting")
@@ -219,10 +228,15 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			if h["type"] != "command" || command == "" {
 				return fmt.Errorf("unregistered or malformed %s command; inspect it before sync", event)
 			}
-			if event == "SessionStart" && callsGo(command, "go run ./tools/harnessdoctor session-start "+host) {
+			startup := event == "SessionStart" && callsGo(command, "go run ./tools/harnessdoctor session-start "+host)
+			preTool := event == "PreToolUse" && callsGo(command, "go run ./tools/harnesshook "+host)
+			if canonical && host == "claude" && (startup || preTool) && (h["async"] == true || h["asyncRewake"] == true) {
+				return fmt.Errorf("%s must run synchronously to deliver its receipt or permission decision", event)
+			}
+			if startup {
 				starts++
 			}
-			if event == "PreToolUse" && callsGo(command, "go run ./tools/harnesshook "+host) && matchesPreTool(host, matcher) {
+			if preTool && matchesPreTool(host, matcher) {
 				gates++
 			}
 		}
@@ -259,7 +273,7 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 					}
 					if canonical && event == "SessionStart" && pattern != "*" && pattern != "" {
 						expr, err := regexp.Compile(pattern)
-						if err != nil || !expr.MatchString("startup") {
+						if err != nil || !expr.MatchString("startup") || !expr.MatchString("fork") || host == "claude" && !expr.MatchString("clear") {
 							return fmt.Errorf("%s matcher %q excludes new sessions", event, pattern)
 						}
 					}
@@ -296,6 +310,44 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 	}
 	if canonical && gates != 1 {
 		return fmt.Errorf("expected one PreToolUse command covering %s policy tools; found %d", host, gates)
+	}
+	return nil
+}
+
+// Custom Codex roles inherit project [agents] defaults ahead of the current
+// session. Check that part of optional project config without modifying it.
+func checkCodexDefaults(root string) error {
+	const name = ".codex/config.toml"
+	data, err := regularFile(root, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	table := ""
+	keys := regexp.MustCompile(`^(?:agents\.(?:(?:[\w-]+\.)?(?:model|model_reasoning_effort)|default_subagent_(?:model|reasoning_effort)))$`)
+	inline := regexp.MustCompile(`\b(default_subagent_(?:model|reasoning_effort)|model|model_reasoning_effort)["']?\s*=`)
+	normalize := strings.NewReplacer(" ", "", "\t", "", "'", "", "\"", "")
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			header, _, _ := strings.Cut(line, "#")
+			table = normalize.Replace(strings.Trim(strings.TrimSpace(header), "[]"))
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key = normalize.Replace(key)
+		if table != "" {
+			key = table + "." + key
+		}
+		value := strings.TrimSpace(val)
+		if keys.MatchString(key) || ((key == "agents" || strings.HasPrefix(key, "agents.")) && strings.HasPrefix(value, "{") && inline.MatchString(value)) {
+			return fmt.Errorf("%s: %s overrides the development model or reasoning effort; remove the project subagent override", name, key)
+		}
 	}
 	return nil
 }

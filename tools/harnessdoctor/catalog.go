@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -172,12 +173,37 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(b.String())
 }
 
+// Git or the client may supply a Windows short path on either side of a
+// comparison. A planned file can be absent, so expand its existing parent.
+func rulePath(name string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return name, nil
+	}
+	full, err := filepath.EvalSymlinks(name)
+	if err == nil || !os.IsNotExist(err) || filepath.Dir(name) == name {
+		return full, err
+	}
+	parent, err := rulePath(filepath.Dir(name))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, filepath.Base(name)), nil
+}
+
 func matchingRules(root, cwd string, args []string, m manifest) ([]string, error) {
+	root, err := rulePath(root)
+	if err != nil {
+		return nil, err
+	}
 	names := make([]string, 0, len(args))
 	for _, arg := range args {
 		name := filepath.FromSlash(strings.ReplaceAll(arg, `\`, "/"))
 		if !filepath.IsAbs(name) {
 			name = filepath.Join(cwd, name)
+		}
+		name, err = rulePath(name)
+		if err != nil {
+			return nil, err
 		}
 		rel, err := filepath.Rel(root, name)
 		if err != nil || !filepath.IsLocal(rel) {

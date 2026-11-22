@@ -2,7 +2,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|clear",
+        "matcher": "startup|clear|fork",
         "hooks": [
           {
             "type": "command",

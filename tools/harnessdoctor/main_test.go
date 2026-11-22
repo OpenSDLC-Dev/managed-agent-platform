@@ -290,3 +290,43 @@ func TestRuntimeHookDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectRoleDefaults(t *testing.T) {
+	root := fixture(t)
+	call(t, root, 0, "sync")
+	const config = ".codex/config.toml"
+	for _, setting := range []string{
+		"[agents]\ndefault_subagent_model = 'weak'",
+		"agents = { default_subagent_reasoning_effort = 'low' }",
+		"agents.reviewer.model_reasoning_effort = 'low'",
+	} {
+		put(t, root, config, setting)
+		if got := call(t, root, 1, "check", "--host", "codex"); !strings.Contains(got, config) {
+			t.Fatal(got)
+		}
+		call(t, root, 0, "check", "--host", "claude")
+	}
+	put(t, root, config, "model = 'developer'\n[agents]\nmax_threads = 4\n# model = 'comment'\n")
+	call(t, root, 0, "check")
+	name := ".claude/settings.json"
+	settings := strings.Replace(read(t, root, name), "{", `{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"pinned"},`, 1)
+	put(t, root, name, settings)
+	if result := call(t, root, 1, "sync"); !strings.Contains(result, "CLAUDE_CODE_SUBAGENT_MODEL") || read(t, root, name) != settings {
+		t.Fatal(result)
+	}
+}
+
+func TestSynchronousClaudeHandlers(t *testing.T) {
+	root := fixture(t)
+	name := "harness/hooks/claude.json"
+	source := read(t, root, name)
+	for _, event := range []string{"SessionStart", "PreToolUse"} {
+		before, after, _ := strings.Cut(source, event)
+		for _, field := range []string{"async", "asyncRewake"} {
+			put(t, root, name, before+event+strings.Replace(after, `"type": "command"`, `"`+field+`": true, "type": "command"`, 1))
+			if got := call(t, root, 1, "check"); !strings.Contains(got, "synchronously") {
+				t.Fatal(got)
+			}
+		}
+	}
+}

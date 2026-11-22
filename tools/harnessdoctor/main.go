@@ -66,6 +66,9 @@ func run(cwd string, args []string, out io.Writer) int {
 	if err == nil {
 		err = checkGuide(root)
 	}
+	if err == nil && (host == "" || host == "codex") {
+		err = checkCodexDefaults(root)
+	}
 	var problems []string
 	if err == nil {
 		var files map[string]output

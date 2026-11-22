@@ -2,7 +2,7 @@
 
 ## At session start
 
-Read [STATE.md](./STATE.md) for active work. Check that this session received a **SessionStart hook** receipt containing `harness-doctor: OK` for this worktree. If it is missing, run `go run ./tools/harnessdoctor check` from the repository root and inspect project hook trust, instruction precedence and the active worktree. A manual check verifies the files. A fresh session's hook event verifies installation.
+Read [STATE.md](./STATE.md) for active work. Check that this session received a **SessionStart hook** receipt containing `harness-doctor: OK` for this worktree. If it is missing, run `go run ./tools/harnessdoctor check` from the repository root and inspect project hook trust, instruction precedence and the active worktree. A manual check verifies the files. A fresh session's hook event verifies installation. Start Claude Code at the Git worktree root so it loads this project's shared settings.
 
 If the receipt reports drift, inspect the named paths. Edit the source under `harness/` and run `go run ./tools/harnessdoctor sync` followed by `check` in a writable task. In a read-only session, report the affected capability. Preserve unknown hooks and local settings. Start a fresh session after changing a registration.
 
