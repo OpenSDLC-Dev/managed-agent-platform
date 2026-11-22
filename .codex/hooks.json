@@ -18,7 +18,7 @@
             "type": "command"
           }
         ],
-        "matcher": "startup|fork"
+        "matcher": "startup|clear|fork"
       }
     ]
   }

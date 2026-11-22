@@ -67,7 +67,7 @@ func run(cwd string, args []string, out io.Writer) int {
 		err = checkGuide(root)
 	}
 	if err == nil && (host == "" || host == "codex") {
-		err = checkCodexDefaults(root)
+		err = checkCodexConfig(root)
 	}
 	var problems []string
 	if err == nil {

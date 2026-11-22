@@ -196,7 +196,7 @@ func TestMiswiredSessionHookAndMissingSourceReference(t *testing.T) {
 	call(t, root, 0, "sync")
 	name := "harness/hooks/codex.json"
 	baseline := read(t, root, name)
-	put(t, root, name, strings.Replace(baseline, `"startup|fork"`, `"resume"`, 1))
+	put(t, root, name, strings.Replace(baseline, `"startup|clear|fork"`, `"resume"`, 1))
 	if result := call(t, root, 1, "check"); !strings.Contains(result, "excludes new sessions") {
 		t.Fatal(result)
 	}
@@ -361,4 +361,24 @@ func TestSyncPreservesEmptySettingsArrays(t *testing.T) {
 	if settings.Permissions.Allow == nil || settings.Other.List == nil || len(settings.Permissions.Deny) != 1 {
 		t.Fatal("sync changed independent arrays", settings)
 	}
+}
+
+func TestProjectHookOverrides(t *testing.T) {
+	root := fixture(t)
+	call(t, root, 0, "sync")
+	const name = ".codex/config.toml"
+	for _, value := range []string{
+		"[features]\nhooks = false # intentionally disabled",
+		"features.codex_hooks = false",
+		"features = { hooks = false }",
+		"[[hooks.SessionStart]]\nmatcher = 'startup'",
+		"hooks = { SessionStart = [] }",
+	} {
+		put(t, root, name, value)
+		if got := call(t, root, 1, "sync"); !strings.Contains(got, name) || read(t, root, name) != value {
+			t.Fatal(got)
+		}
+	}
+	put(t, root, name, "[features]\nhooks = true\n")
+	call(t, root, 0, "check")
 }

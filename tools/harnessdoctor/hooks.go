@@ -230,7 +230,7 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			}
 			startup := event == "SessionStart" && callsGo(command, "go run ./tools/harnessdoctor session-start "+host)
 			preTool := event == "PreToolUse" && callsGo(command, "go run ./tools/harnesshook "+host)
-			if canonical && host == "claude" && (startup || preTool) && (h["async"] == true || h["asyncRewake"] == true) {
+			if canonical && (startup || preTool) && (h["async"] == true || h["asyncRewake"] == true) {
 				return fmt.Errorf("%s must run synchronously to deliver its receipt or permission decision", event)
 			}
 			if startup {
@@ -273,7 +273,7 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 					}
 					if canonical && event == "SessionStart" && pattern != "*" && pattern != "" {
 						expr, err := regexp.Compile(pattern)
-						if err != nil || !expr.MatchString("startup") || !expr.MatchString("fork") || host == "claude" && !expr.MatchString("clear") {
+						if err != nil || !expr.MatchString("startup") || !expr.MatchString("fork") || !expr.MatchString("clear") {
 							return fmt.Errorf("%s matcher %q excludes new sessions", event, pattern)
 						}
 					}
@@ -316,7 +316,7 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 
 // Custom Codex roles inherit project [agents] defaults ahead of the current
 // session. Check that part of optional project config without modifying it.
-func checkCodexDefaults(root string) error {
+func checkCodexConfig(root string) error {
 	const name = ".codex/config.toml"
 	data, err := regularFile(root, name)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -327,6 +327,8 @@ func checkCodexDefaults(root string) error {
 	}
 	table := ""
 	keys := regexp.MustCompile(`^(?:agents\.(?:(?:[\w-]+\.)?(?:model|model_reasoning_effort)|default_subagent_(?:model|reasoning_effort)))$`)
+	disabledInline := regexp.MustCompile(`(?:^|[,{])\s*["\x27]?(?:codex_)?hooks["\x27]?\s*=\s*false\b`)
+	inlineEvent := regexp.MustCompile(`(?:^|[,{])\s*["\x27]?[A-Z][A-Za-z]+["\x27]?\s*=`)
 	inline := regexp.MustCompile(`\b(default_subagent_(?:model|reasoning_effort)|model|model_reasoning_effort)["']?\s*=`)
 	normalize := strings.NewReplacer(" ", "", "\t", "", "'", "", "\"", "")
 	for _, line := range strings.Split(string(data), "\n") {
@@ -345,6 +347,13 @@ func checkCodexDefaults(root string) error {
 			key = table + "." + key
 		}
 		value := strings.TrimSpace(val)
+		scalar, _, _ := strings.Cut(value, "#")
+		if ((key == "features.hooks" || key == "features.codex_hooks") && strings.TrimSpace(scalar) == "false") || (key == "features" && disabledInline.MatchString(value)) {
+			return fmt.Errorf("%s: project configuration disables hooks; enable the SessionStart and PreToolUse policies", name)
+		}
+		if (strings.HasPrefix(key, "hooks.") && key != "hooks.state" && !strings.HasPrefix(key, "hooks.state.")) || (key == "hooks" && strings.HasPrefix(value, "{") && inlineEvent.MatchString(value)) {
+			return fmt.Errorf("%s: unregistered inline project hook %s; register the project handler in harness/hooks/codex.json before syncing", name, key)
+		}
 		if keys.MatchString(key) || ((key == "agents" || strings.HasPrefix(key, "agents.")) && strings.HasPrefix(value, "{") && inline.MatchString(value)) {
 			return fmt.Errorf("%s: %s overrides the development model or reasoning effort; remove the project subagent override", name, key)
 		}

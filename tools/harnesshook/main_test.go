@@ -53,6 +53,9 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{`Set-Location -LiteralPath "one space"; git.exe commit -m ok`, []commit{{nested, false}}},
 		{`git -C "one space" commit -m first && git commit -m second`, []commit{{nested, false}, {root, false}}},
 		{`git commit -m first && echo "Verified-By: other"`, []commit{{root, false}}},
+		{`(cd "one space" && git status); git commit -m root`, []commit{{root, false}}},
+		{`(cd "one space" && (git commit -m child)); git commit -m root`, []commit{{nested, false}, {root, false}}},
+		{`echo "(cd somewhere)"; git commit -m root`, []commit{{root, false}}},
 	}
 	for _, tc := range tests {
 		got := commits(tc.command, root)

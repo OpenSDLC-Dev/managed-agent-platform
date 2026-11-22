@@ -11,10 +11,14 @@ type commit struct {
 	trailer bool
 }
 
-// shellSegments splits literal arguments for inspection. It never expands or
-// executes command text. Keep message newlines inside quotes for commit trailers.
-func shellSegments(command string) [][]string {
-	var segments [][]string
+type shellSegment struct {
+	argv  []string
+	scope byte
+}
+
+// Keep subshell boundaries and quoted newlines without executing shell input.
+func shellSegments(command string) []shellSegment {
+	var segments []shellSegment
 	var argv []string
 	var word strings.Builder
 	var quote byte
@@ -29,7 +33,7 @@ func shellSegments(command string) [][]string {
 	finishSegment := func() {
 		finishWord()
 		if len(argv) > 0 {
-			segments = append(segments, argv)
+			segments = append(segments, shellSegment{argv: argv})
 			argv = nil
 		}
 	}
@@ -40,7 +44,11 @@ func shellSegments(command string) [][]string {
 			case ' ', '\t', '\r':
 				finishWord()
 				continue
-			case ';', '|', '&', '\n', '(', ')':
+			case '(', ')':
+				finishSegment()
+				segments = append(segments, shellSegment{scope: ch})
+				continue
+			case ';', '|', '&', '\n':
 				finishSegment()
 				continue
 			case '#':
@@ -98,7 +106,20 @@ func hasTrailer(argv []string) bool {
 
 func commits(command, base string) []commit {
 	var result []commit
-	for _, args := range shellSegments(command) {
+	var parents []string
+	for _, segment := range shellSegments(command) {
+		switch segment.scope {
+		case '(':
+			parents = append(parents, base)
+			continue
+		case ')':
+			if len(parents) > 0 {
+				base = parents[len(parents)-1]
+				parents = parents[:len(parents)-1]
+			}
+			continue
+		}
+		args := segment.argv
 		for len(args) > 0 && assignment.MatchString(args[0]) {
 			args = args[1:]
 		}
