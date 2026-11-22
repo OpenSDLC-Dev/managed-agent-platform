@@ -52,6 +52,7 @@ func fixture(t *testing.T) string {
 		"harness/agents/reviewer.md":              "Read the supplied evidence.\n",
 		"harness/skills/example/SKILL.md":         "---\nname: example\ndescription: Use this workflow for its evidence.\n---\n\nRead the reference.\n",
 		"harness/skills/example/assets/input.bin": "\x00\x91\n\x02",
+		"tools/harnesshook/command.go":            "package main\n",
 		"tools/harnesshook/main.go":               "package main\n",
 		"harness/hooks/verify-commit-gate.sh":     "#!/bin/sh\n",
 		"harness/hooks/verify-stamp.sh":           "#!/bin/sh\n",
@@ -279,7 +280,7 @@ func TestRequiredPreToolUsePolicy(t *testing.T) {
 }
 
 func TestRuntimeHookDependencies(t *testing.T) {
-	for _, name := range []string{"tools/harnesshook/main.go", "harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"} {
+	for _, name := range []string{"tools/harnesshook/main.go", "tools/harnesshook/command.go", "harness/hooks/verify-commit-gate.sh", "harness/hooks/verify-stamp.sh"} {
 		root := fixture(t)
 		call(t, root, 0, "sync")
 		if err := os.Remove(filepath.Join(root, filepath.FromSlash(name))); err != nil {
