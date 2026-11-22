@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/internal/toml"
 )
 
 type manifest struct {
@@ -102,6 +104,9 @@ func loadManifest(root string) (manifest, error) {
 		}
 		agents = append(agents, a.Name+".md")
 	}
+	if !slices.Contains(agents, "verifier.md") {
+		return m, fmt.Errorf("%s: register the verifier required by the review workflow", name)
+	}
 	for _, dir := range []struct {
 		name  string
 		files []string
@@ -173,12 +178,9 @@ func compileGlob(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(b.String())
 }
 
-// Git or the client may supply a Windows short path on either side of a
-// comparison. A planned file can be absent, so expand its existing parent.
+// Git and the client can name a directory through symlinks or Windows short
+// paths. A planned file may not exist yet, so resolve its existing parent.
 func rulePath(name string) (string, error) {
-	if runtime.GOOS != "windows" {
-		return name, nil
-	}
 	full, err := filepath.EvalSymlinks(name)
 	if err == nil || !os.IsNotExist(err) || filepath.Dir(name) == name {
 		return full, err
@@ -229,8 +231,7 @@ func matchingRules(root, cwd string, args []string, m manifest) ([]string, error
 }
 
 func literal(value any) string {
-	// All callers supply strings or lists of strings. JSON string escapes are also
-	// valid in YAML double-quoted scalars and TOML basic strings.
+	// JSON strings and lists are valid YAML frontmatter values.
 	b, _ := json.Marshal(value)
 	return string(b)
 }
@@ -240,13 +241,22 @@ type output struct {
 	source string // A copied skill attachment takes its executable bit from the source.
 }
 
-func roleText(a agent, host, body string) string {
+func roleText(a agent, host, body string) (string, error) {
 	if host == "codex" {
-		text := "name = " + literal(a.Name) + "\ndescription = " + literal(a.Description) + "\ndeveloper_instructions = " + literal(body) + "\n"
+		definition := struct {
+			Name         string `toml:"name"`
+			Description  string `toml:"description"`
+			Instructions string `toml:"developer_instructions"`
+		}{a.Name, a.Description, body}
+		encoded, err := toml.Marshal(definition)
+		if err != nil {
+			return "", err
+		}
+		text := string(encoded)
 		if a.CodexEvidenceOnly {
 			text += "\n[features]\nshell_tool = false\napps = false\nplugins = false\nrequest_permissions_tool = false\n"
 		}
-		return text
+		return text, nil
 	}
 	meta := "---\nname: " + a.Name + "\ndescription: " + literal(a.Description) + "\nmodel: inherit\n"
 	if host == "claude" {
@@ -257,7 +267,7 @@ func roleText(a agent, host, body string) string {
 	} else {
 		meta += "tools: " + literal(a.AntigravityTools) + "\nmainAgent: false\nsubagent: true\n"
 	}
-	return meta + "---\n\n" + body
+	return meta + "---\n\n" + body, nil
 }
 
 func cleanText(root, name string) (string, error) {
@@ -283,9 +293,23 @@ func skillHeader(name string, data []byte) error {
 	fields := map[string]string{}
 	for _, line := range strings.Split(head, "\n") {
 		key, value, ok := strings.Cut(line, ":")
-		if ok && strings.TrimSpace(key) == key {
-			fields[key] = strings.Trim(strings.TrimSpace(value), `"'`)
+		if !ok || len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+			continue
 		}
+		key = strings.TrimSpace(key)
+		if strings.HasPrefix(key, "\"") {
+			decoded, err := strconv.Unquote(key)
+			if err != nil {
+				return fmt.Errorf("invalid quoted skill frontmatter key %q", key)
+			}
+			key = decoded
+		} else if len(key) >= 2 && key[0] == '\'' && key[len(key)-1] == '\'' {
+			key = strings.ReplaceAll(key[1:len(key)-1], "''", "'")
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return fmt.Errorf("duplicate skill frontmatter key %q", key)
+		}
+		fields[key] = strings.Trim(strings.TrimSpace(value), `"'`)
 	}
 	if fields["name"] != name || fields["description"] == "" {
 		return fmt.Errorf("expected skill name %q and a description", name)
@@ -353,14 +377,7 @@ func render(root, host string, m manifest) (map[string]output, error) {
 			result[".claude/"+name] = output{data: []byte("---\npaths: " + literal(r.Paths) + "\n---\n\n" + body)}
 		}
 		if host == "" || host == "antigravity" {
-			paths := make([]string, 0, len(r.Paths))
-			for _, p := range r.Paths {
-				if !strings.HasPrefix(p, "**/") {
-					p = "**/" + p
-				}
-				paths = append(paths, p)
-			}
-			result[".agents/"+name] = output{data: []byte("---\ntrigger: glob\nglobs: " + literal(strings.Join(paths, ",")) + "\n---\n\n" + body)}
+			result[".agents/"+name] = output{data: []byte("---\ntrigger: glob\nglobs: " + literal(strings.Join(r.Paths, ",")) + "\n---\n\n" + body)}
 		}
 	}
 	for _, a := range m.Agents {
@@ -387,7 +404,11 @@ func render(root, host string, m manifest) (map[string]output, error) {
 				continue
 			}
 			path := map[string]string{"claude": ".claude/" + name + ".md", "antigravity": ".agents/" + name + ".md", "codex": ".codex/" + name + ".toml"}[client]
-			result[path] = output{data: []byte(roleText(a, client, body))}
+			text, err := roleText(a, client, body)
+			if err != nil {
+				return nil, fmt.Errorf("%s: cannot encode %s role: %w", path, a.Name, err)
+			}
+			result[path] = output{data: []byte(text)}
 		}
 	}
 	return result, nil

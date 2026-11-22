@@ -42,6 +42,23 @@ func checkCodexConfig(root string, roles []agent) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
+	features, _ := config["features"].(map[string]any)
+	agents, _ := config["agents"].(map[string]any)
+	// Codex checks enabled V2 before either agents.enabled or its V1 feature.
+	v2 := features["multi_agent_v2"]
+	if table, ok := v2.(map[string]any); ok {
+		v2 = table["enabled"]
+	}
+	if v2 != true {
+		for _, key := range []struct {
+			name  string
+			value any
+		}{{"features.multi_agent", features["multi_agent"]}, {"agents.enabled", agents["enabled"]}} {
+			if key.value == false {
+				return fmt.Errorf("%s: %s disables required subagents; enable the project subagent backend", name, key.name)
+			}
+		}
+	}
 	return nil
 }
 

@@ -24,21 +24,33 @@ func gitEnv() []string {
 }
 
 func worktree(cwd string) (string, error) {
-	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--show-prefix")
+	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel")
 	cmd.Env = gitEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve Git worktree for %s: %w", cwd, err)
 	}
-	// Git for Windows expands 8.3 components in --show-toplevel, while Go can
-	// receive a short TEMP path as its cwd. Keep the caller's spelling across
-	// root resolution and relative-path matching.
-	root, err := filepath.Abs(cwd)
+	root := filepath.Clean(strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r"))
+	rootInfo, err := os.Stat(root)
 	if err != nil {
 		return "", err
 	}
-	for range strings.Count(strings.TrimRight(string(out), "\r\n"), "/") {
-		root = filepath.Dir(root)
+	// Preserve a Windows short name or a link to the repository itself if
+	// the caller has an ancestor naming the same directory Git identified.
+	ancestor, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
+	}
+	for {
+		info, err := os.Stat(ancestor)
+		if err == nil && os.SameFile(rootInfo, info) {
+			return ancestor, nil
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
+		}
+		ancestor = parent
 	}
 	return root, nil
 }
@@ -270,6 +282,9 @@ func compare(root, host string, m manifest, files map[string]output) (changes []
 			}
 		}
 	}
+	// Merge every registry against its actual worktree bytes, even if it has
+	// to recover the merge base for a missing settings file from the Git index.
+	preimages := map[string][]byte{}
 	for _, client := range hosts {
 		if host != "" && host != client {
 			continue
@@ -286,6 +301,7 @@ func compare(root, host string, m manifest, files map[string]output) (changes []
 			conflicts = append(conflicts, err.Error())
 			continue
 		}
+		preimages[path] = old
 		// Deleting the whole Claude settings file also removes its independent
 		// permission and plugin settings. Restore those from this worktree's
 		// recorded settings when the shared file is tracked.
@@ -313,6 +329,10 @@ func compare(root, host string, m manifest, files map[string]output) (changes []
 		missing := errors.Is(err, fs.ErrNotExist)
 		if err != nil && !missing {
 			conflicts = append(conflicts, err.Error())
+			continue
+		}
+		if before, registry := preimages[name]; registry && !samePreimage(before, old) {
+			conflicts = append(conflicts, name+" changed during sync; rerun check")
 			continue
 		}
 		mode := fs.FileMode(0644)
@@ -371,6 +391,10 @@ func compare(root, host string, m manifest, files map[string]output) (changes []
 	return changes, conflicts, windowsModeFixes
 }
 
+func samePreimage(before, current []byte) bool {
+	return (before == nil) == (current == nil) && bytes.Equal(before, current)
+}
+
 func (c change) apply(root string) error {
 	path, err := safePath(root, c.name)
 	if err != nil {
@@ -380,7 +404,7 @@ func (c change) apply(root string) error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if (err == nil) != (c.before != nil) || !bytes.Equal(current, c.before) {
+	if !samePreimage(c.before, current) {
 		return fmt.Errorf("%s changed during sync; rerun check", c.name)
 	}
 	dir := filepath.Dir(path)

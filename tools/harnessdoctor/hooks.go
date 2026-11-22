@@ -169,20 +169,28 @@ func registeredShape(actual, expected any, field string) bool {
 		return true
 	case []any:
 		b, ok := expected.([]any)
-		if !ok {
+		if !ok || len(a) > len(b) {
 			return false
 		}
-		used := make([]bool, len(b))
-		for _, v := range a {
-			found := false
-			for i, w := range b {
-				if !used[i] && registeredShape(v, w, field) {
-					used[i] = true
-					found = true
-					break
+		// A partial handler can match either slot when one carries extra
+		// settings. Let an existing assignment move to another matching slot.
+		owners := make(map[int]int)
+		var assign func(int, []bool) bool
+		assign = func(index int, visited []bool) bool {
+			for slot, candidate := range b {
+				if visited[slot] || !registeredShape(a[index], candidate, field) {
+					continue
+				}
+				visited[slot] = true
+				if previous, taken := owners[slot]; !taken || assign(previous, visited) {
+					owners[slot] = index
+					return true
 				}
 			}
-			if !found {
+			return false
+		}
+		for index := range a {
+			if !assign(index, make([]bool, len(b))) {
 				return false
 			}
 		}
@@ -197,9 +205,8 @@ func registeredShape(actual, expected any, field string) bool {
 
 // Native discovery must reach the worktree checks even when a source and
 // its generated adapter drift together. Git shell aliases execute at the root.
-func callsGo(command, target string) bool {
-	alias, invocation, ok := strings.Cut(strings.TrimPrefix(command, `git -c "alias.`), `=!`)
-	return ok && alias != "" && invocation == target+`" `+alias && strings.HasPrefix(command, `git -c "alias.`)
+func callsGo(command, alias, target string) bool {
+	return command == `git -c "alias.`+alias+"=!"+target+`" `+alias
 }
 
 func matchesPreTool(host, matcher string) bool {
@@ -218,10 +225,10 @@ func matchesPreTool(host, matcher string) bool {
 }
 
 func validateRegistry(host string, doc map[string]any, canonical bool) error {
-	if host == "codex" {
+	if host == "codex" || (host == "claude" && canonical) {
 		for key := range doc {
 			if key != "hooks" {
-				return fmt.Errorf("unregistered top-level key %q in dedicated Codex hook registry; inspect it before sync", key)
+				return fmt.Errorf("unregistered top-level key %q in %s hook registry; inspect it before sync", key, host)
 			}
 		}
 	}
@@ -240,8 +247,8 @@ func validateRegistry(host string, doc map[string]any, canonical bool) error {
 			if h["type"] != "command" || command == "" {
 				return fmt.Errorf("unregistered or malformed %s command; inspect it before sync", event)
 			}
-			startup := event == "SessionStart" && callsGo(command, "go run ./tools/harnessdoctor session-start "+host)
-			preTool := event == "PreToolUse" && callsGo(command, "go run ./tools/harnesshook "+host)
+			startup := event == "SessionStart" && callsGo(command, "map-doctor", "go run ./tools/harnessdoctor session-start "+host)
+			preTool := event == "PreToolUse" && callsGo(command, "map-pretool", "go run ./tools/harnesshook "+host)
 			if canonical && (startup || preTool) && (h["async"] == true || h["asyncRewake"] == true) {
 				return fmt.Errorf("%s must run synchronously to deliver its receipt or permission decision", event)
 			}
