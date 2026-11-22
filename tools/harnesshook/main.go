@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/gitworktree"
@@ -144,6 +145,19 @@ func gateCommand(cwd, policy, session, trailer, known, action string) *exec.Cmd 
 	return cmd
 }
 
+// Git directories distinguish linked worktrees and identify different cwd
+// spellings inside the same checkout without comparing path strings.
+func commitWorktree(dir string) os.FileInfo {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--absolute-git-dir")
+	cmd.Env = gitworktree.Environment()
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	info, _ := os.Stat(strings.TrimSuffix(strings.TrimSuffix(string(output), "\n"), "\r"))
+	return info
+}
+
 func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) error {
 	if host == "codex" && e.role != "" {
 		restricted, err := evidenceOnly(sourceRoot, e.role)
@@ -176,6 +190,8 @@ func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) 
 		action = "defer"
 	}
 	var resets []string
+	var preceding []os.FileInfo
+	unknownPredecessor := false
 	for _, target := range targets {
 		cwd := target.dir
 		known := "known"
@@ -184,6 +200,23 @@ func handle(host string, e event, sourceRoot string, out, diagnostic io.Writer) 
 			// unknown-target and trailer policy from an existing checkout.
 			cwd = sourceRoot
 			known = "unknown"
+		}
+		if len(targets) > 1 {
+			// The hook runs once before the shell. A first commit changes HEAD,
+			// so its verification stamp cannot also certify a later commit.
+			var id os.FileInfo
+			if known == "known" {
+				id = commitWorktree(cwd)
+			}
+			if id == nil {
+				known = "unknown"
+				unknownPredecessor = true
+			} else {
+				if unknownPredecessor || slices.ContainsFunc(preceding, func(other os.FileInfo) bool { return os.SameFile(id, other) }) {
+					known = "changed"
+				}
+				preceding = append(preceding, id)
+			}
 		}
 		trailer := "0"
 		if target.trailer {

@@ -10,6 +10,6 @@ The shared commit gate receives shell events from all three hosts. The verificat
 
 If a nested launch misses its receipt, check for inherited `GIT_DIR` or `GIT_WORK_TREE` pointing at another checkout. Clear those overrides and relaunch from the intended worktree root so Git can locate the doctor.
 
-When a shell call creates or clones a repository or adds a worktree and then commits inside it, the commit hook runs before the new checkout exists. Use an explicit `Verified-By` trailer or run verification in the new checkout before requesting the commit separately.
+When a shell call creates or clones a repository or adds a worktree and then commits inside it, the commit hook runs before the new checkout exists. Use an explicit `Verified-By` trailer or run verification in the new checkout before requesting the commit separately. In enforce mode, a later commit to the same worktree needs its own trailer because an earlier commit changes HEAD. Commits against separately identified, verified worktrees can use their own stamps.
 
 For loader acceptance run the real clients in temporary profiles against a loopback test provider. Check the startup event independently of text in the guide. Invoke a skill and a named reviewer, observe a native read, and open a fresh session after introducing drift in a scratch checkout. Check model inheritance against host metadata when a real review is counted.

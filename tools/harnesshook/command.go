@@ -17,7 +17,8 @@ type commit struct {
 type shellSegment struct {
 	argv         []string
 	scope        byte
-	conditional  bool
+	before       string
+	isolated     bool
 	stdinTrailer bool
 }
 
@@ -62,7 +63,7 @@ func shellSegments(command string) []shellSegment {
 	haveWord := false
 	quotedWord := false
 	stdinTrailer := false
-	conditional := false
+	before := ""
 	finishWord := func() {
 		if haveWord {
 			argv = append(argv, word.String())
@@ -74,8 +75,9 @@ func shellSegments(command string) []shellSegment {
 	finishSegment := func() {
 		finishWord()
 		if len(argv) > 0 {
-			segments = append(segments, shellSegment{argv: argv, conditional: conditional, stdinTrailer: stdinTrailer})
+			segments = append(segments, shellSegment{argv: argv, before: before, isolated: before == "|", stdinTrailer: stdinTrailer})
 			argv = nil
+			before = ""
 		}
 		stdinTrailer = false
 	}
@@ -110,15 +112,22 @@ func shellSegments(command string) []shellSegment {
 				continue
 			case '(', ')':
 				finishSegment()
-				segments = append(segments, shellSegment{scope: ch})
+				segments = append(segments, shellSegment{scope: ch, before: before})
+				before = ""
 				continue
 			case ';', '|', '&', '\n':
-				hadCommand := haveWord || len(argv) != 0
+				count := len(segments)
 				finishSegment()
-				if ch == '|' || ch == '&' {
-					conditional = true
-				} else if hadCommand {
-					conditional = false
+				op := string(ch)
+				if (ch == '|' || ch == '&') && i+1 < len(command) && command[i+1] == ch {
+					op = command[i : i+2]
+					i++
+				}
+				if len(segments) > count && (op == "|" || op == "&") {
+					segments[len(segments)-1].isolated = true
+				}
+				if ch != '\n' || len(segments) > count {
+					before = op
 				}
 				continue
 			case '#':
@@ -246,17 +255,55 @@ func worktreeCreation(argv []string, dir string) (string, bool) {
 	return dir, true
 }
 
+// Conditional lists can leave the caller in different directories on success
+// and failure. An unknown directory requires a trailer or a separate check.
+type shellDirs struct{ success, failure, next string }
+
+func commonDir(a, b string) string {
+	if a == b {
+		return a
+	}
+	return ""
+}
+
+func (d shellDirs) input(op string) string {
+	switch op {
+	case "&&":
+		return d.success
+	case "||":
+		return d.failure
+	default:
+		return d.next
+	}
+}
+
+func (d shellDirs) after(op string, current shellDirs) shellDirs {
+	switch op {
+	case "&&":
+		current.failure = commonDir(d.failure, current.failure)
+		current.next = commonDir(d.failure, current.next)
+	case "||":
+		current.success = commonDir(d.success, current.success)
+		current.next = commonDir(d.success, current.next)
+	}
+	return current
+}
+
 func shellCommits(command, base string, created *[]string) []commit {
 	var result []commit
-	var parents []string
+	dirs := shellDirs{base, base, base}
+	var parents []shellDirs
 	for _, segment := range shellSegments(command) {
+		base := dirs.input(segment.before)
+		next := shellDirs{base, base, base}
 		switch segment.scope {
 		case '(':
-			parents = append(parents, base)
+			parents = append(parents, dirs)
+			dirs = next
 			continue
 		case ')':
 			if len(parents) > 0 {
-				base = parents[len(parents)-1]
+				dirs = parents[len(parents)-1]
 				parents = parents[:len(parents)-1]
 			}
 			continue
@@ -277,15 +324,17 @@ func shellCommits(command, base string, created *[]string) []commit {
 		argv := args[1:]
 		switch name {
 		case "cd", "chdir", "set-location", "pushd", "push-location":
-			// A short-circuited directory change may never run. Its result
-			// cannot identify the worktree for a later independent command.
-			if !segment.conditional && len(argv) > 0 {
-				base = resolveDir(base, argv[len(argv)-1])
-			} else {
-				base = ""
+			if !segment.isolated {
+				target := ""
+				if len(argv) > 0 {
+					target = resolveDir(base, argv[len(argv)-1])
+				}
+				next = shellDirs{target, base, target}
 			}
 		case "popd", "pop-location":
-			base = ""
+			if !segment.isolated {
+				next = shellDirs{"", base, ""}
+			}
 		case "pwsh", "powershell", "bash", "sh", "zsh":
 			for i, a := range argv {
 				if (strings.EqualFold(a, "-command") || a == "-lc" || a == "-c") && i+1 < len(argv) {
@@ -330,6 +379,7 @@ func shellCommits(command, base string, created *[]string) []commit {
 				result = append(result, commit{dir, hasTrailer(argv[1:], segment.stdinTrailer)})
 			}
 		}
+		dirs = dirs.after(segment.before, next)
 		// An explicit repository or index can override even an absolute -C in
 		// this command (and in any shell it starts). A trailer can still apply.
 		if redirected {

@@ -105,6 +105,12 @@ func TestCommandsAreScopedToTheirWorktree(t *testing.T) {
 		{"git 'com\\\nmit' -m change", nil},
 		{`test -d optional && cd "one space"; git commit -m change`, []commit{{"", false}}},
 		{`cd "one space" && git commit -m change`, []commit{{nested, false}}},
+		{`test -d optional && cd "one space" && git commit -m change`, []commit{{nested, false}}},
+		{`test -d optional && cd "one space" && git commit -m child; git commit -m next`, []commit{{nested, false}, {"", false}}},
+		{`cd "one space" | cat; git commit -m root`, []commit{{root, false}}},
+		{`true | cd "one space"; git commit -m root`, []commit{{root, false}}},
+		{`cd "one space" & git commit -m root`, []commit{{root, false}}},
+		{`cd "one space" || git commit -m fallback`, []commit{{root, false}}},
 	}
 	for _, tc := range tests {
 		got := commits(tc.command, root)
@@ -214,6 +220,34 @@ func TestEmptyCommandDirectoryCannotBorrowWorkingTreeStamp(t *testing.T) {
 		}
 		if (tc.reason == "" && out.Len() != 0) || !strings.Contains(out.String(), tc.reason) {
 			t.Fatalf("dir %q: decision %s, log %s", tc.dir, &out, &diagnostic)
+		}
+	}
+}
+
+func TestEachCommitNeedsEvidenceForItsOwnHead(t *testing.T) {
+	root := gateCheckout(t)
+	other := gateCheckout(t)
+	t.Setenv("VERIFY_GATE_MODE", "enforce")
+	for _, dir := range []string{root, other} {
+		if output, err := exec.Command("git", "-C", dir, "-c", "alias.stamp=!bash harness/hooks/verify-stamp.sh", "stamp", "--write", "test").CombinedOutput(); err != nil {
+			t.Fatalf("stamp: %v: %s", err, output)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ command, reason string }{
+		{"git commit --allow-empty -m first && git -C sub commit --allow-empty -m next", "earlier commit"},
+		{"git commit --allow-empty -m first && git commit --allow-empty -m next --trailer 'Verified-By: checked'", ""},
+		{"git commit --allow-empty -m first && git -C '" + filepath.ToSlash(other) + "' commit --allow-empty -m independent", ""},
+	} {
+		t.Setenv("VERIFY_GATE_STATE_FILE", filepath.Join(t.TempDir(), "blocks"))
+		var out, log bytes.Buffer
+		if err := handle("claude", event{tool: "Bash", command: tc.command, dir: root}, root, &out, &log); err != nil {
+			t.Fatal(err)
+		}
+		if (tc.reason == "" && out.Len() != 0) || !strings.Contains(out.String(), tc.reason) {
+			t.Fatalf("%s: %s %s", tc.command, &out, &log)
 		}
 	}
 }

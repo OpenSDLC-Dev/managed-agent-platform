@@ -38,7 +38,7 @@ stamp_helper="$script_dir/verify-stamp.sh"
 
 # Native event decoding and command classification are shared by the three clients.
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-  echo "usage: verify-commit-gate.sh SESSION TRAILER_FLAG known|unknown [apply|defer|reset]" >&2
+  echo "usage: verify-commit-gate.sh SESSION TRAILER_FLAG known|unknown|changed [apply|defer|reset]" >&2
   exit 2
 fi
 session_id="$1"
@@ -101,6 +101,8 @@ verified=0
 
 if [ "$target" = unknown ]; then
   reason="the client did not identify the commit worktree"
+elif [ "$target" = changed ]; then
+  reason="an earlier commit in this shell call can invalidate this worktree stamp"
 elif [ -f "$stamp_file" ]; then
   stamp_ts=""
   stamp_method=""
