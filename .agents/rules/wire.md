@@ -1,6 +1,6 @@
 ---
 trigger: glob
-globs: "**/internal/api/**,**/internal/domain/**,**/docs/DIVERGENCES.md"
+globs: "internal/api/**,internal/domain/**,docs/DIVERGENCES.md"
 ---
 
 Before changing a public contract, resolve the field, enum, event ordering or framing against the reference sources in `docs/REFERENCE_PROJECTS.md`. Use the SDK version in `go.mod`. Use `ant` recordings for behavior the SDK types cannot settle. Record deliberate divergences and unconfirmed inferences in `docs/DIVERGENCES.md` in the same PR. Keep `internal/domain` stdlib-only and Anthropic-native.
