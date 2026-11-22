@@ -1,0 +1,23 @@
+{
+  "harness-doctor": {
+    "SessionStart": [
+      {
+        "command": "git -c \"alias.map-doctor=!go run ./tools/harnessdoctor session-start antigravity\" map-doctor",
+        "type": "command"
+      }
+    ]
+  },
+  "verify-before-commit": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "git -c \"alias.map-pretool=!go run ./tools/harnesshook antigravity\" map-pretool",
+            "type": "command"
+          }
+        ],
+        "matcher": "run_command"
+      }
+    ]
+  }
+}

@@ -65,7 +65,7 @@ func generateContent(t *testing.T, flatten bool, content string) any {
 }
 
 // TestFlattenSearchResults covers the route opt-in Config.FlattenSearchResults
-// (#565): off, it is a no-op (CLAUDE.md principle 4, near-zero-conversion);
+// (#565): off, it is a no-op (AGENTS.md principle 4, near-zero-conversion);
 // on, it rewrites search_result blocks inside tool_result content to text via
 // the rendering shared with provider/openai (provider.SearchResultText),
 // leaving everything else — sibling blocks, string-form content, a

@@ -18,7 +18,7 @@ import (
 )
 
 // Config is everything needed to reach one bucket, supplied by deployment
-// configuration (config-driven per CLAUDE.md principle 4 — no default
+// configuration (config-driven per AGENTS.md principle 4 — no default
 // endpoint exists).
 type Config struct {
 	Endpoint  string // host:port, no scheme

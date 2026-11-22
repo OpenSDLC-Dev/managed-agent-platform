@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -c \"alias.map-doctor=!go run ./tools/harnessdoctor session-start claude\" map-doctor"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -c \"alias.map-pretool=!go run ./tools/harnesshook claude\" map-pretool"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -26,7 +26,7 @@
 //
 // The SDK is a dependency of this package alone. Its types do not appear in the
 // wrapper's surface — the platform's domain model is Anthropic-native
-// (CLAUDE.md design principle 1), and an MCP tool reaches the rest of the
+// (AGENTS.md design principle 1), and an MCP tool reaches the rest of the
 // system as the platform's own [Tool], not as an SDK struct.
 package mcp
 
@@ -602,7 +602,7 @@ func (c *Conn) listPage(ctx context.Context, cursor string) (res *sdk.ListToolsR
 // itself — the listing and the call.
 //
 // It carries W3C trace context, so a trace that starts in the brain reaches the
-// MCP server's own spans rather than stopping at this process's edge (CLAUDE.md
+// MCP server's own spans rather than stopping at this process's edge (AGENTS.md
 // design principle 3). Not every request on the wire, and the difference is the
 // SDK's: it builds the handshake itself (`server/discover`, and a legacy
 // negotiation's `initialize` and `notifications/initialized`) with no hook for a

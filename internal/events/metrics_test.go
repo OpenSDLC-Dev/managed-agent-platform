@@ -66,7 +66,7 @@ func attrValue(set []metricdata.HistogramDataPoint[int64], i int, key string) st
 }
 
 // A model turn's duration and token usage ride the same instrumentation point
-// as its span and its span.* wire events (CLAUDE.md principle 3), so the three
+// as its span and its span.* wire events (AGENTS.md principle 3), so the three
 // views of one turn cannot disagree. The names are OTel's GenAI semantic
 // conventions rather than ours: a turn IS a client call to a GenAI provider,
 // which is exactly what those instruments describe.

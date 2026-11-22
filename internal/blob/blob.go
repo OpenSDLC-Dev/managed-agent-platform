@@ -1,5 +1,5 @@
 // Package blob is the platform's object-storage seam: opaque bytes at string
-// keys, behind the one interface every backend must satisfy (CLAUDE.md:
+// keys, behind the one interface every backend must satisfy (AGENTS.md:
 // backend variability lives behind an interface with one shared contract
 // suite — internal/blob/blobtest). The first consumer is the skills registry
 // (docs/plan/06_skills.md), which stores canonical skill-version archives at

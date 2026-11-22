@@ -1,5 +1,5 @@
 # The single executable source of the merge gate. CI invokes these targets and
-# the verifier runs `make verify`; prose (CLAUDE.md, AGENTS.md, README.md)
+# the verifier runs `make verify`; prose (AGENTS.md, README.md)
 # names targets instead of duplicating commands. Mirrors
 # .github/workflows/ci.yml — a new check lands in both, in the same PR.
 
@@ -18,7 +18,7 @@ SHELL := /usr/bin/env bash
 .NOTPARALLEL:
 
 .PHONY: build build-worker crossbuild vet fmt-check test test-fast test-race fuzz cover-gate verify eval ripgrep third-party-licenses \
-	changelog changelog-notes changelog-archive \
+	harness-doctor harness-doctor-test changelog changelog-notes changelog-archive \
 	release-tag-check release-images release-chart-check release-chart release-binaries \
 	openbao-init-test cd-outcome-test parked-test retry-test notifier-issues-test issue-labels-test evals-alert-test identifiers-test pins-test pipes-test test-hygiene-test review-checklist-test verify-commit-gate-test revieweval-dry-run issue-triage-guard-test tf-corpus-check registry-check sdk-bump-report \
 	gcp-fmt gcp-validate gcp-split-check gcp-kms-role-check gcp-lint gcp-bootstrap-test gcp-dbinit-test gcp-mode2-secret-test gcp-native-edge-test gcp-split-check-test gcp-power-test gcp-tfvars-test gcp-env-targets-test gcp-foundation-apply gcp-bootstrap gcp-env-apply gcp-db-init gcp-env-destroy gcp-env-rebuild \
@@ -131,7 +131,7 @@ test-fast:
 		| awk '{print $$1}')"; \
 	set -x; \
 	go test -count=1 $$pkgs; \
-	./.claude/hooks/verify-stamp.sh --write "make test-fast"
+	./harness/hooks/verify-stamp.sh --write "make test-fast"
 
 # Race detector over the high-concurrency core packages (plan 75 slice 4).
 # Requires Docker (for pgtest in events/queue/brain) and no Kubernetes cluster.
@@ -144,7 +144,7 @@ test-race:
 		./internal/modelgateway/upstream ./internal/provider ./internal/cron ./internal/domain \
 		./internal/identity ./internal/oauthrefresh ./internal/skills ./internal/transcript \
 		./internal/webtool/... ./internal/events ./internal/queue ./internal/brain
-	./.claude/hooks/verify-stamp.sh --write "make test-race"
+	./harness/hooks/verify-stamp.sh --write "make test-race"
 
 # Short fuzzing pass over every Fuzz* target in the repository (plan 75 slice 3).
 # Outside `verify` on purpose: `make test` replays every seed corpus, while
@@ -180,8 +180,14 @@ cover-gate:
 	       exit !(pct >= 90.0) \
 	     }' coverage.out
 
-verify: build crossbuild vet fmt-check test cover-gate
-	./.claude/hooks/verify-stamp.sh --write "make verify"
+harness-doctor:
+	go run ./tools/harnessdoctor check
+
+harness-doctor-test: harness-doctor
+	go test -count=1 ./tools/harnessdoctor ./tools/harnesshook
+
+verify: harness-doctor build crossbuild vet fmt-check test cover-gate
+	./harness/hooks/verify-stamp.sh --write "make verify"
 
 # The live end-to-end eval suite: whole sessions through the public API against
 # the .env endpoint and real Docker sandboxes. NOT part of `verify` — it spends
@@ -470,7 +476,7 @@ review-checklist-test:
 	python3 .github/scripts/review_checklist_test.py
 
 # Regression suite for the verification stamping helper and PreToolUse commit
-# gate hook (.claude/hooks/verify-{stamp,commit-gate}.sh, plan 75 slice 7).
+# gate hook (harness/hooks/verify-{stamp,commit-gate}.sh, plan 75 slice 7).
 verify-commit-gate-test:
 	python3 .github/scripts/verify_commit_gate_test.py
 
@@ -482,7 +488,7 @@ revieweval-dry-run:
 	go run ./tools/revieweval -dry-run
 
 # The issue-triage subagent's structured read-only wrapper and PreToolUse Bash
-# guard (.claude/hooks/issue-triage-{read,bash-guard}.sh, #1052).
+# guard (harness/hooks/issue-triage-{read,bash-guard}.sh, #1052).
 issue-triage-guard-test:
 	python3 .github/scripts/issue_triage_test.py
 

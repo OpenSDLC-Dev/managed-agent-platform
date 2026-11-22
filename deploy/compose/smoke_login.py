@@ -37,8 +37,12 @@ def setup_path(logs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--key-file", type=Path, required=True)
+    parser.add_argument("--controlplane-port", type=int, default=8080)
+    parser.add_argument("--gateway-port", type=int, default=8090)
     args = parser.parse_args()
-    base, gateway, origin = "http://localhost:8080", "http://localhost:8090", "http://localhost:3000"
+    base = f"http://localhost:{args.controlplane_port}"
+    gateway = f"http://localhost:{args.gateway_port}"
+    origin = "http://localhost:3000"
     jar = http.cookiejar.CookieJar()
     browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 

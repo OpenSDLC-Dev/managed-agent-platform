@@ -2,7 +2,7 @@
 # PreToolUse guard for the issue-triage subagent (.claude/agents/issue-triage.md).
 # The agent is judgment-only and read-only; its frontmatter cannot express a Bash
 # command allowlist (the tools field takes bare names only), so this hook restricts
-# Bash to the structured read-only wrapper (.claude/hooks/issue-triage-read.sh)
+# Bash to the structured read-only wrapper (harness/hooks/issue-triage-read.sh)
 # with zero shell metacharacters, quotes, escapes, globs, or expansions, and
 # validates the exact post-split tokens via `issue-triage-read.sh --check` (#1052).
 # Stdin is the PreToolUse JSON payload; tool_input.command is the Bash command.
@@ -106,8 +106,8 @@ set -- $cmd
 # repository root so the relative path executed by Bash is guaranteed to be
 # the exact validated reader beside this hook (not a shadowed copy in a
 # subdirectory).
-if [ $# -lt 2 ] || [ "$1" != ".claude/hooks/issue-triage-read.sh" ]; then
-  echo "issue-triage guard: only '.claude/hooks/issue-triage-read.sh <subcommand> ...' is allowed (read-only triage)" >&2
+if [ $# -lt 2 ] || [ "$1" != "harness/hooks/issue-triage-read.sh" ]; then
+  echo "issue-triage guard: only 'harness/hooks/issue-triage-read.sh <subcommand> ...' is allowed (read-only triage)" >&2
   exit 2
 fi
 if [ "$(pwd -P)" != "$repo_root" ]; then

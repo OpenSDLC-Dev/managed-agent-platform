@@ -1,5 +1,5 @@
 // Package providertest is the shared contract suite every provider.Provider
-// adapter must pass (CLAUDE.md: backend variability lives behind an interface
+// adapter must pass (AGENTS.md: backend variability lives behind an interface
 // with one shared suite, as internal/sandbox/sandboxtest and internal/blob/
 // blobtest already do for their backends). It asserts the protocol-agnostic
 // invariants of the Provider/Stream contract — what every adapter owes its

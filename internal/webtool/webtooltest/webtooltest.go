@@ -1,5 +1,5 @@
 // Package webtooltest is test support for the webtool seam: the shared
-// contract suite every Searcher/Fetcher backend must pass (CLAUDE.md: backend
+// contract suite every Searcher/Fetcher backend must pass (AGENTS.md: backend
 // variability lives behind an interface with one shared suite, as
 // providertest, sandboxtest and blobtest do for theirs), and the opt-in gate
 // for the live tier that calls the real backends.

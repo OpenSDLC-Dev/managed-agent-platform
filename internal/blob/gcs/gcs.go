@@ -20,7 +20,7 @@ import (
 
 // Config names the bucket. Authentication is Application Default Credentials —
 // Workload Identity on GKE — so no credential appears here, and neither does an
-// endpoint: the client resolves Google's own (CLAUDE.md principle 4 is about
+// endpoint: the client resolves Google's own (AGENTS.md principle 4 is about
 // not hard-coding a *provider's* endpoint into a protocol adapter, and this
 // adapter speaks to exactly one provider).
 type Config struct {

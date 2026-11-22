@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// routeFile is one entry of the model_providers config file (CLAUDE.md
+// routeFile is one entry of the model_providers config file (AGENTS.md
 // principle 4: providers are constructed from configuration). `model` is the
 // agent-facing model string ("*" = default route); `upstream_model` is what
 // the endpoint receives (empty = pass the agent's string through). Exactly

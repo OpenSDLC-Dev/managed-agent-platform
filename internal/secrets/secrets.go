@@ -1,7 +1,7 @@
 // Package secrets is the platform's encryption seam for vault credential
 // material (docs/plan/12_vaults-credentials.md, D1): reversible encryption of
 // small secret values behind the one interface every backend must satisfy
-// (CLAUDE.md: backend variability lives behind an interface with one shared
+// (AGENTS.md: backend variability lives behind an interface with one shared
 // contract suite — internal/secrets/secretstest). Postgres stays the canonical
 // store — callers persist the ciphertext and key id next to the resource row;
 // this package only transforms bytes. The production backend is OpenBao's

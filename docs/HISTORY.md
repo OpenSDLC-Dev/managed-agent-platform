@@ -3,8 +3,7 @@
 What a changelog structurally cannot hold: acceptance-run records, review-hardening
 records with their evidence, decisions evaluated and rejected, and archived plans'
 progress summaries. A change's **narrative** is written once, in
-[CHANGELOG.md](../CHANGELOG.md) — never duplicated here (the one-writer rule; CLAUDE.md →
-"Iteration workflow"). The as-built system description is
+[CHANGELOG.md](../CHANGELOG.md) — never duplicated here (the one-writer rule; [contributor guide](../AGENTS.md#review-and-delivery)). The as-built system description is
 [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 Provenance: this file began 2026-07-16 as the verbatim completed-work archive moved out
@@ -48,6 +47,12 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 | 9 | Kubernetes sandbox provider + Helm chart (with OTLP endpoint values) | ✅ Done (K8s `sandbox.Provider` on the shared contract suite via kind, `SANDBOX_BACKEND` selection, Helm chart, compose stack) |
 
 ---
+
+## Plan 76 — Three-client harness acceptance
+
+Windows Claude Code, Codex CLI and Linux Antigravity CLI each loaded a project skill and dispatched a named reviewer against an isolated loopback endpoint. The parent and child requests exposed the same model and reasoning settings. In a plain Claude launch from a subdirectory, the guide loaded but the root startup hook did not fire. Supplying the absolute settings path delivered its receipt. Antigravity refused an unstamped commit and permitted a real commit in the separately stamped worktree.
+
+A ten-case MiniMax-M3 historical replay retained five of six incidents after verification. Three of four controls were flagged, up from two in the published baseline. The held-out cases selected the same checklist items at the merge base and on this branch. The PR records the live results, independent verdicts and R16 disposition. [Acceptance evidence](https://github.com/OpenSDLC-Dev/managed-agent-platform/pull/1088)
 
 ## Plan 75 — Verification and testing hardening
 

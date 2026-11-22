@@ -27,7 +27,7 @@ Each item has a diff-readable trigger, a concrete check, and the incident or PR 
 ### R01 — Migration immutability and rollback safety
 - **Trigger:** `internal/store/migrations/`
 - **Check:** Confirm no previously merged migration file was edited or renamed; new DDL lives in a new higher-numbered file; no statement forbidden inside a single transaction (`CREATE INDEX CONCURRENTLY`) is present; verify older binaries still run cleanly or document the deploy ordering.
-- **Incident:** Plan 69 slice 7b (`docs/HISTORY.md`), `CLAUDE.md` migration invariant.
+- **Incident:** Plan 69 slice 7b (`docs/HISTORY.md`), `AGENTS.md` migration invariant.
 
 ### R02 — Lock-vs-timestamp semantics (`now()` vs `clock_timestamp()`)
 - **Trigger:** `internal/store/`, `internal/api/`, `internal/events/`, `internal/queue/`
@@ -52,7 +52,7 @@ Each item has a diff-readable trigger, a concrete check, and the incident or PR 
 ### R06 — `internal/domain` stdlib-only containment
 - **Trigger:** `internal/domain/`
 - **Check:** Confirm `internal/domain` imports only the Go standard library — no `adk-go`, `genai`, MCP SDK, `go-jose`, or provider SDK types.
-- **Incident:** `CLAUDE.md` non-negotiable design principles 1 & 2.
+- **Incident:** `AGENTS.md` non-negotiable design principles 1 & 2.
 
 ### R07 — Egress policy withdrawal, destination binding, and host validation
 - **Trigger:** `internal/egress/`, `internal/gate/`, `internal/gaterun/`, `internal/vaultresolve/`, `internal/dialguard/`
@@ -100,7 +100,7 @@ Each item has a diff-readable trigger, a concrete check, and the incident or PR 
 - **Incident:** `#346`, `#486`, `#843`, Plan 75 slices 1 & 4.
 
 ### R16 — Verification gate and review rule self-modification audit
-- **Trigger:** `.claude/`, `REVIEW.md`, `Makefile`, `.github/workflows/ci.yml`, `.github/scripts/test_hygiene_baseline.json`
+- **Trigger:** `AGENTS.md`, `harness/`, `.claude/`, `.codex/`, `.agents/`, `tools/harnessdoctor/`, `tools/harnesshook/`, `REVIEW.md`, `Makefile`, `.github/workflows/ci.yml`, `.github/scripts/test_hygiene_baseline.json`
 - **Check:** When a PR modifies verification rules, coverage exclusions, hygiene baselines, or CI gates, confirm no check was silently weakened or bypassed without explicit rationale and maintainer sign-off.
 - **Incident:** Plan 75 slice 5 (guarding the verifiers).
 

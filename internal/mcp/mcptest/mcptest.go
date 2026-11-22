@@ -1,7 +1,7 @@
 // Package mcptest serves in-process MCP servers to tests in other packages.
 //
 // It exists so that the official go-sdk stays a dependency of internal/mcp and
-// its own test support alone (CLAUDE.md): a package whose tests need something
+// its own test support alone (AGENTS.md): a package whose tests need something
 // to speak MCP to imports this rather than building a server out of SDK types
 // itself. The servers are real ones built from that SDK and served over real
 // HTTP by httptest — not hand-rolled fakes, which would encode this platform's
@@ -40,7 +40,7 @@ type Tool struct {
 }
 
 // Block is one content block a fixture tool answers with, in this package's own
-// shape so the go-sdk stays inside internal/mcp (CLAUDE.md). It mirrors what the
+// shape so the go-sdk stays inside internal/mcp (AGENTS.md). It mirrors what the
 // protocol admits in a tool result: Type is "text", "image", "audio",
 // "resource" or "resource_link", and each type fills only the fields that mean
 // something for it.

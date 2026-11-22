@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Worktree verification stamp helper for .claude/hooks/verify-commit-gate.sh
+# Worktree verification stamp helper for harness/hooks/verify-commit-gate.sh
 # (plan 75 slice 7).
 #
 # Computes a staging-invariant content fingerprint of the current git worktree

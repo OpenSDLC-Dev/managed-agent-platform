@@ -6,7 +6,7 @@
 # shell re-parsing (#1052).
 #
 # Usage:
-#   .claude/hooks/issue-triage-read.sh [--check] <subcommand> [args...]
+#   harness/hooks/issue-triage-read.sh [--check] <subcommand> [args...]
 #
 # Subcommands:
 #   issue-view <number> [--comments]

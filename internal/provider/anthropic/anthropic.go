@@ -27,7 +27,7 @@ import (
 // New constructs the adapter from configuration alone.
 func New(cfg provider.Config) (provider.Provider, error) {
 	if cfg.BaseURL == "" {
-		// Deliberate: no silent fallback to api.anthropic.com (CLAUDE.md
+		// Deliberate: no silent fallback to api.anthropic.com (AGENTS.md
 		// principle 4) — pointing at an endpoint is a conscious choice.
 		return nil, fmt.Errorf("anthropic provider requires a base_url")
 	}

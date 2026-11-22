@@ -215,8 +215,8 @@ visible absence, not an absent paragraph. Semantics: `BLOCKED` = wanted to obser
 couldn't (environment, access) — with the reason; `SKIP` = rung not applicable to this
 diff — with the reason; neither is a pass, and any rung `FAIL`, or a `BLOCKED` on a rung
 the change touches, keeps the work not-done (unchanged from today's rule). This is the
-failure mode the rate-limited-CodeRabbit incident taught. CLAUDE.md step 5 gains half a
-line: the PR description embeds the JSON block verbatim.
+failure mode the rate-limited-CodeRabbit incident taught. The proposed change to the delivery instructions in AGENTS.md
+requires the PR description to embed the JSON block verbatim.
 
 **Red-run evidence by default.** Rung 2's scratch-copy mutation proof goes from
 discretionary to default for the diff's own guards: for every test the diff adds or

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for .claude/hooks/verify-stamp.sh and verify-commit-gate.sh (plan 75 slice 7)."""
+"""Regression tests for harness/hooks/verify-stamp.sh and verify-commit-gate.sh (plan 75 slice 7)."""
 import json
 import os
 import stat
@@ -10,14 +10,23 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-GATE = ROOT / ".claude/hooks/verify-commit-gate.sh"
-STAMP = ROOT / ".claude/hooks/verify-stamp.sh"
+GATE = ROOT / "harness/hooks/verify-commit-gate.sh"
+STAMP = ROOT / "harness/hooks/verify-stamp.sh"
 SETTINGS = ROOT / ".claude/settings.json"
 
 
-def payload_for(cmd: str, session_id: str = "test-session") -> str:
+def setUpModule():
+    global hook_binary
+    tmp = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(tmp.cleanup)
+    hook_binary = str(Path(tmp.name, "harnesshook"))
+    subprocess.run(["go", "build", "-o", hook_binary, "./tools/harnesshook"], cwd=ROOT, check=True)
+
+
+def payload_for(repo: Path, cmd: str, session_id: str = "test-session") -> str:
     return json.dumps({
         "tool_name": "Bash",
+        "cwd": str(repo),
         "session_id": session_id,
         "tool_input": {"command": cmd},
     })
@@ -52,14 +61,21 @@ def run_gate(repo: Path, cmd: str, *, mode: str = "observe", extra_env=None, ses
     env = {**os.environ, "VERIFY_GATE_MODE": mode}
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(
-        [str(GATE)],
-        input=payload_for(cmd, session_id=session_id),
-        text=True,
-        capture_output=True,
-        cwd=repo,
-        env=env,
+    return native_gate(repo, cmd, session_id, env)
+
+
+def native_gate(repo, cmd, session_id, env):
+    result = subprocess.run(
+        [hook_binary, "claude"], input=payload_for(repo, cmd, session_id),
+        text=True, capture_output=True, cwd=ROOT, env=env, check=True,
     )
+    # Decode the native decision. A real hook process exits zero for a JSON deny.
+    if result.stdout:
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+        if decision["hookEventName"] != "PreToolUse" or decision["permissionDecision"] != "deny":
+            raise AssertionError(decision)
+        return subprocess.CompletedProcess(result.args, 2, result.stdout, decision["permissionDecisionReason"])
+    return result
 
 
 def run_stamp(repo: Path, *args: str):
@@ -83,13 +99,91 @@ class VerifyCommitGateTests(unittest.TestCase):
         commands = [
             h.get("command", "")
             for entry in pre_hooks
-            if entry.get("matcher") == "Bash"
+            if "Bash" in entry.get("matcher", "").split("|")
             for h in entry.get("hooks", [])
         ]
         self.assertTrue(
-            any("verify-commit-gate.sh" in c for c in commands),
-            f"verify-commit-gate.sh not wired in .claude/settings.json PreToolUse Bash hooks: {commands}",
+            any("go run ./tools/harnesshook claude" in c for c in commands),
+            f"native commit gate not wired in .claude/settings.json PreToolUse Bash hooks: {commands}",
         )
+
+    def test_native_adapters_use_the_commit_target_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            first, second = parent / "first", parent / "second checkout"
+            first.mkdir()
+            second.mkdir()
+            init_repo(first)
+            init_repo(second)
+            run_stamp(first, "--write", "test")
+            for host in ("claude", "codex", "antigravity"):
+                with self.subTest(host=host):
+                    def call(target):
+                        # Session opens in first. The command explicitly targets another checkout.
+                        command = f'git -C "{target}" commit -m sample'
+                        if host == "antigravity":
+                            payload = {"cwd": str(first), "toolCall": {"name": "run_command", "args": {
+                                "CommandLine": command}}, "conversationId": "target"}
+                        else:
+                            payload = {"tool_name": "Bash", "tool_input": {"command": command},
+                                       "cwd": str(first), "session_id": "target"}
+                        return subprocess.run(
+                            [hook_binary, host], cwd=ROOT, env={**os.environ, "VERIFY_GATE_MODE": "enforce"},
+                            input=json.dumps(payload), text=True, capture_output=True, check=True,
+                        ).stdout
+                    stamp = Path(run_stamp(second, "--stamp-path").stdout.strip())
+                    stamp.unlink(missing_ok=True)
+                    denial = json.loads(call(second))
+                    if host == "antigravity":
+                        self.assertEqual(denial["decision"], "deny")
+                    else:
+                        self.assertEqual(denial["hookSpecificOutput"]["permissionDecision"], "deny")
+                    run_stamp(second, "--write", "test")
+                    self.assertEqual(call(second), "")
+
+    def test_commit_target_ignores_inherited_git_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second = Path(tmp, "first"), Path(tmp, "second")
+            first.mkdir()
+            second.mkdir()
+            init_repo(first)
+            init_repo(second)
+            run_stamp(first, "--write", "verified first only")
+            other_checkout = {"GIT_DIR": str(first / ".git"), "GIT_WORK_TREE": str(first),
+                              "GIT_INDEX_FILE": str(first / ".git/index")}
+            denied = run_gate(second, "git commit -m sample", mode="enforce", extra_env=other_checkout)
+            self.assertEqual(denied.returncode, 2)
+            self.assertIn("no verification stamp", denied.stderr)
+            run_stamp(second, "--write", "verified second")
+            allowed = run_gate(second, "git commit -m sample", mode="enforce", extra_env=other_checkout)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_precreated_directory_cannot_use_a_future_repository_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp, "verified")
+            repo.mkdir()
+            init_repo(repo)
+            run_stamp(repo, "--write", "verified parent")
+            for new_root in (repo / "child", Path(tmp, "outside")):
+                new_root.mkdir()
+                command = f'git -C "{new_root}" init && git -C "{new_root}" commit --allow-empty -m first'
+                # Empty directories do not change the parent repository's fingerprint.
+                observe = run_gate(repo, command, session_id="observe-" + new_root.name)
+                self.assertEqual(observe.returncode, 0, observe.stderr)
+                self.assertIn("observe", observe.stderr)
+                enforce = run_gate(repo, command, mode="enforce", session_id="enforce-" + new_root.name)
+                self.assertEqual(enforce.returncode, 2, enforce.stderr)
+                trailer = run_gate(repo, command + ' --trailer "Verified-By: manual"', mode="enforce")
+                self.assertEqual(trailer.returncode, 0, trailer.stderr)
+            # A target outside Git may become a worktree by another command before commit.
+            result = run_gate(Path(tmp, "outside"), "git commit -m first", mode="enforce")
+            self.assertEqual(result.returncode, 2)
+            child = repo / "child"
+            clone = f'git clone "{repo}" "{child}"'
+            in_clone = run_gate(repo, clone + f' && git -C "{child}" commit -m first', mode="enforce")
+            self.assertEqual(in_clone.returncode, 2)
+            in_parent = run_gate(repo, clone + ' && git commit -m verified', mode="enforce")
+            self.assertEqual(in_parent.returncode, 0, in_parent.stderr)
 
     def test_non_commit_commands_always_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,14 +218,7 @@ class VerifyCommitGateTests(unittest.TestCase):
 
             # Default mode (env unset) behaves as observe.
             env = {k: v for k, v in os.environ.items() if k != "VERIFY_GATE_MODE"}
-            default_res = subprocess.run(
-                [str(GATE)],
-                input=payload_for('git commit -m "wip"'),
-                text=True,
-                capture_output=True,
-                cwd=repo,
-                env=env,
-            )
+            default_res = native_gate(repo, 'git commit -m "wip"', "test-session", env)
             self.assertEqual(default_res.returncode, 0)
             self.assertIn("[observe]", default_res.stderr)
 

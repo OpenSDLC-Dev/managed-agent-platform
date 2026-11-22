@@ -36,7 +36,7 @@ func newStore(t *testing.T) blob.Store {
 }
 
 // TestContract runs the shared blob.Store suite — the definition of done for
-// any backend (CLAUDE.md testing conventions).
+// any backend (AGENTS.md testing conventions).
 func TestContract(t *testing.T) {
 	blobtest.Run(t, newStore)
 }

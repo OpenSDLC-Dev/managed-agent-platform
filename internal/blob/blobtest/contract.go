@@ -10,7 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 )
 
-// Run exercises the blob.Store contract (CLAUDE.md: every backend passes the
+// Run exercises the blob.Store contract (AGENTS.md: every backend passes the
 // same shared suite). newStore is called once per subtest so a backend can
 // isolate its own fixtures — for the S3 backend, a fresh bucket per subtest.
 // The suite asserts observable behavior only, never a backend's internals.

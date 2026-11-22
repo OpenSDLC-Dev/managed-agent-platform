@@ -112,7 +112,7 @@ ALLOWED_ADDRESSES = frozenset({"8.8.8.8", "1.1.1.1"})
 # directory that holds markdown would be the unmaintainable list this file
 # declines to keep elsewhere — and they are not complete, nor claimed to be.
 REQUIRED_DOCUMENTS = (
-    "CLAUDE.md",
+    "AGENTS.md",
     "STATE.md",
     "docs/HISTORY.md",
     "changelog.d/README.md",

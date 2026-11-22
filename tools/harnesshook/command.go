@@ -1,0 +1,395 @@
+package main
+
+import (
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/tools/harnessdoctor/gitworktree"
+)
+
+type commit struct {
+	dir     string
+	trailer bool
+}
+
+type shellSegment struct {
+	argv         []string
+	scope        byte
+	before       string
+	isolated     bool
+	stdinTrailer bool
+}
+
+// A quoted delimiter makes a here-document literal. Recognize a single
+// trailing input redirection on the command line, so its message stays bound
+// to the command receiving stdin. Other forms cannot certify a trailer.
+var ioNumber = regexp.MustCompile(`^[0-9]+$`)
+var quotedHeredoc = regexp.MustCompile(`^<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_.-]*)'|"([A-Za-z_][A-Za-z0-9_.-]*)")[ \t]*\r?\n`)
+
+func literalInput(s string) (int, bool) {
+	header := quotedHeredoc.FindStringSubmatch(s)
+	if header == nil {
+		return 0, false
+	}
+	delimiter := header[2] + header[3]
+	verified := false
+	for offset := len(header[0]); offset < len(s); {
+		line, tail, newline := strings.Cut(s[offset:], "\n")
+		end := len(s) - len(tail)
+		line = strings.TrimSuffix(line, "\r")
+		if header[1] == "-" {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == delimiter {
+			return end, verified
+		}
+		verified = verified || trailerValue.MatchString(line)
+		if !newline {
+			break
+		}
+		offset = end
+	}
+	return 0, false
+}
+
+// Keep subshell boundaries and quoted newlines without executing shell input.
+func shellSegments(command string) []shellSegment {
+	var segments []shellSegment
+	var argv []string
+	var word strings.Builder
+	var quote byte
+	haveWord := false
+	quotedWord := false
+	stdinTrailer := false
+	before := ""
+	finishWord := func() {
+		if haveWord {
+			argv = append(argv, word.String())
+			word.Reset()
+			haveWord = false
+			quotedWord = false
+		}
+	}
+	finishSegment := func() {
+		finishWord()
+		if len(argv) > 0 {
+			segments = append(segments, shellSegment{argv: argv, before: before, isolated: before == "|", stdinTrailer: stdinTrailer})
+			argv = nil
+			before = ""
+		}
+		stdinTrailer = false
+	}
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if ch == '\\' && quote != '\'' && i+1 < len(command) && command[i+1] == '\n' {
+			i++
+			continue // Bash removes a backslash-newline before tokenization.
+		}
+		if quote == 0 {
+			switch ch {
+			case '<':
+				// Only the first '<' in a redirection can introduce a here-document.
+				if i != 0 && command[i-1] == '<' {
+					break
+				}
+				if consumed, verified := literalInput(command[i:]); consumed != 0 {
+					// A decimal immediately before << can redirect another descriptor.
+					// Credit only an unambiguous stdin binding, implicit or explicit.
+					descriptor := haveWord && !quotedWord && ioNumber.MatchString(word.String())
+					stdinTrailer = verified && (!descriptor || strings.TrimLeft(word.String(), "0") == "")
+					if descriptor {
+						word.Reset()
+						haveWord = false
+					}
+					finishSegment()
+					i += consumed - 1
+					continue
+				}
+			case ' ', '\t', '\r':
+				finishWord()
+				continue
+			case '(', ')':
+				finishSegment()
+				segments = append(segments, shellSegment{scope: ch, before: before})
+				before = ""
+				continue
+			case ';', '|', '&', '\n':
+				count := len(segments)
+				finishSegment()
+				op := string(ch)
+				if (ch == '|' || ch == '&') && i+1 < len(command) && command[i+1] == ch {
+					op = command[i : i+2]
+					i++
+				}
+				if len(segments) > count && (op == "|" || op == "&") {
+					segments[len(segments)-1].isolated = true
+				}
+				if ch != '\n' || len(segments) > count {
+					before = op
+				}
+				continue
+			case '#':
+				if !haveWord {
+					for i < len(command) && command[i] != '\n' {
+						i++
+					}
+					finishSegment()
+					continue
+				}
+			}
+		}
+		if ch == '\'' || ch == '"' {
+			if quote == 0 {
+				quote = ch
+				quotedWord = true
+				haveWord = true
+				continue
+			}
+			if quote == ch {
+				quote = 0
+				continue
+			}
+		}
+		if ch == '\\' && quote != '\'' && i+1 < len(command) && strings.ContainsRune(" \t'\"\\", rune(command[i+1])) {
+			i++
+			quotedWord = true
+			ch = command[i]
+		}
+		haveWord = true
+		word.WriteByte(ch)
+	}
+	finishSegment()
+	return segments
+}
+
+var messageTrailer = regexp.MustCompile("(?im)^Verified-By:[[:blank:]]*[^[:space:]]")
+
+// A short option that takes an argument consumes the rest of the token.
+// Only argument-free flags can precede it in a cluster (such as -am).
+var shortValue = regexp.MustCompile(`(?s)^-[aiposeqnzvb]*([mFCct])(.*)$`)
+var trailerValue = regexp.MustCompile("(?i)^Verified-By:[[:blank:]]*[^[:space:]]")
+
+// Git's explicit --trailer option also accepts key=value and serializes it as key: value.
+var optionTrailer = regexp.MustCompile("(?i)^Verified-By[:=][[:blank:]]*[^[:space:]]")
+var assignment = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z_0-9]*=`)
+
+func hasTrailer(argv []string, stdinTrailer bool) bool {
+	fromStdin := false
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--" {
+			break // The remaining arguments are pathspecs.
+		}
+		flag, val, joined := strings.Cut(argv[i], "=")
+		if short := shortValue.FindStringSubmatch(argv[i]); short != nil {
+			flag, val = "-"+short[1], short[2]
+			joined = val != ""
+		}
+		switch flag {
+		case "-m", "--message", "-F", "--file", "--trailer", "-c", "-C", "-t",
+			"--reuse-message", "--reedit-message", "--template", "--author", "--date",
+			"--fixup", "--squash", "--pathspec-from-file":
+			if !joined && i+1 < len(argv) {
+				i++
+				val = argv[i]
+			}
+		default:
+			continue
+		}
+		switch flag {
+		case "--trailer":
+			if optionTrailer.MatchString(val) {
+				return true
+			}
+		case "-m", "--message":
+			if messageTrailer.MatchString(val) {
+				return true
+			}
+		case "-F", "--file":
+			fromStdin = val == "-"
+		}
+	}
+	return stdinTrailer && fromStdin
+}
+
+func commits(command, base string) []commit {
+	var created []string
+	return shellCommits(command, base, &created)
+}
+
+// A pre-tool event precedes the whole shell command. A directory which Git
+// will initialize later cannot use the stamp of its current parent checkout.
+func worktreeCreation(argv []string, dir string) (string, bool) {
+	switch {
+	case len(argv) > 0 && argv[0] == "clone":
+		if len(argv) == 3 && !strings.HasPrefix(argv[1], "-") && !strings.HasPrefix(argv[2], "-") {
+			return resolveDir(dir, argv[2]), true
+		}
+		// Git can derive the destination from a URL or accept options with
+		// their own path arguments. Wait for the clone before trusting a stamp.
+		return "", true
+	case len(argv) > 0 && argv[0] == "init":
+		argv = argv[1:]
+	case len(argv) > 1 && argv[0] == "worktree" && argv[1] == "add":
+		argv = argv[2:]
+	default:
+		return "", false
+	}
+	for len(argv) > 0 {
+		arg := argv[0]
+		argv = argv[1:]
+		switch {
+		case arg == "--" && len(argv) > 0:
+			return resolveDir(dir, argv[0]), true
+		case !strings.HasPrefix(arg, "-"):
+			return resolveDir(dir, arg), true
+		case slices.Contains([]string{"-b", "-B", "--initial-branch", "--template", "--reason"}, arg) && len(argv) > 0:
+			argv = argv[1:]
+		case strings.Contains(arg, "="), slices.Contains([]string{"-q", "--quiet", "--bare", "-f", "--force", "--detach", "--no-checkout"}, arg):
+		default:
+			// An unfamiliar option may consume a directory argument.
+			return "", true
+		}
+	}
+	return dir, true
+}
+
+// Conditional lists can leave the caller in different directories on success
+// and failure. An unknown directory requires a trailer or a separate check.
+type shellDirs struct{ success, failure, next string }
+
+func commonDir(a, b string) string {
+	if a == b {
+		return a
+	}
+	return ""
+}
+
+func (d shellDirs) input(op string) string {
+	switch op {
+	case "&&":
+		return d.success
+	case "||":
+		return d.failure
+	default:
+		return d.next
+	}
+}
+
+func (d shellDirs) after(op string, current shellDirs) shellDirs {
+	switch op {
+	case "&&":
+		current.failure = commonDir(d.failure, current.failure)
+		current.next = commonDir(d.failure, current.next)
+	case "||":
+		current.success = commonDir(d.success, current.success)
+		current.next = commonDir(d.success, current.next)
+	}
+	return current
+}
+
+func shellCommits(command, base string, created *[]string) []commit {
+	var result []commit
+	dirs := shellDirs{base, base, base}
+	var parents []shellDirs
+	for _, segment := range shellSegments(command) {
+		base := dirs.input(segment.before)
+		next := shellDirs{base, base, base}
+		switch segment.scope {
+		case '(':
+			parents = append(parents, dirs)
+			dirs = next
+			continue
+		case ')':
+			if len(parents) > 0 {
+				dirs = parents[len(parents)-1]
+				parents = parents[:len(parents)-1]
+			}
+			continue
+		}
+		args := segment.argv
+		firstCommit := len(result)
+		firstCreation := len(*created)
+		redirected := false
+		for len(args) > 0 && assignment.MatchString(args[0]) {
+			key, _, _ := strings.Cut(args[0], "=")
+			redirected = redirected || gitworktree.LocationVariable(key)
+			args = args[1:]
+		}
+		if len(args) == 0 {
+			continue
+		}
+		name := strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(args[0], "\\", "/"))), ".exe")
+		argv := args[1:]
+		switch name {
+		case "cd", "chdir", "set-location", "pushd", "push-location":
+			if !segment.isolated {
+				target := ""
+				if len(argv) > 0 {
+					target = resolveDir(base, argv[len(argv)-1])
+				}
+				next = shellDirs{target, base, target}
+			}
+		case "popd", "pop-location":
+			if !segment.isolated {
+				next = shellDirs{"", base, ""}
+			}
+		case "pwsh", "powershell", "bash", "sh", "zsh":
+			for i, a := range argv {
+				if (strings.EqualFold(a, "-command") || a == "-lc" || a == "-c") && i+1 < len(argv) {
+					result = append(result, shellCommits(strings.Join(argv[i+1:], " "), base, created)...)
+					break
+				}
+			}
+		case "git":
+			dir := base
+			for len(argv) > 0 && strings.HasPrefix(argv[0], "-") {
+				arg := argv[0]
+				argv = argv[1:]
+				if arg == "-C" && len(argv) > 0 {
+					dir = resolveDir(dir, argv[0])
+					argv = argv[1:]
+					continue
+				}
+				if strings.HasPrefix(arg, "-C") {
+					// Git accepts only a separate -C operand.
+					argv = nil
+					break
+				}
+				opt, _, joined := strings.Cut(arg, "=")
+				switch opt {
+				case "-c", "--git-dir", "--work-tree", "--namespace", "--config-env":
+					if !joined && len(argv) > 0 {
+						argv = argv[1:]
+					}
+					redirected = redirected || opt == "--git-dir" || opt == "--work-tree"
+				}
+			}
+			if newRoot, ok := worktreeCreation(argv, dir); ok {
+				*created = append(*created, newRoot)
+			} else if len(argv) > 0 && argv[0] == "commit" {
+				for _, future := range *created {
+					rel, err := filepath.Rel(future, dir)
+					if future == "" || (err == nil && filepath.IsLocal(rel)) {
+						dir = ""
+						break
+					}
+				}
+				result = append(result, commit{dir, hasTrailer(argv[1:], segment.stdinTrailer)})
+			}
+		}
+		dirs = dirs.after(segment.before, next)
+		// An explicit repository or index can override even an absolute -C in
+		// this command (and in any shell it starts). A trailer can still apply.
+		if redirected {
+			for i := firstCommit; i < len(result); i++ {
+				result[i].dir = ""
+			}
+			for i := firstCreation; i < len(*created); i++ {
+				(*created)[i] = ""
+			}
+		}
+	}
+	return result
+}
