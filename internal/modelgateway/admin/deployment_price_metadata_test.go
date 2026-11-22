@@ -56,3 +56,32 @@ func TestDeploymentPriceMetadata(t *testing.T) {
 	}
 	check(e.ok(e.admin("GET", path, nil), "after rejected changes"), "", "")
 }
+
+func TestDeploymentPriceNotePreservesExactRates(t *testing.T) {
+	e := newEnv(t, false)
+	id := e.deployment(e.provider("deepseek", deepseekBoth), "chat")
+	path := "/admin/v1/deployments/" + id
+	const exact = "10.1234567890123456789"
+	_, err := e.pool.Exec(t.Context(), `UPDATE modelgateway.deployments SET
+		price_input = $2::text::numeric, price_output = $2::text::numeric,
+		price_cache_write = $2::text::numeric, price_cache_read = $2::text::numeric WHERE id = $1`, id, exact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.ok(e.admin("POST", path, map[string]any{"price_note": "新费率说明"}), "edit terms")
+	var input, output, write, read string
+	err = e.pool.QueryRow(t.Context(), `SELECT price_input::text, price_output::text,
+		price_cache_write::text, price_cache_read::text FROM modelgateway.deployments WHERE id = $1`,
+		id).Scan(&input, &output, &write, &read)
+	if err != nil || input != exact || output != exact || write != exact || read != exact {
+		t.Fatalf("stored rates after editing terms = %q/%q/%q/%q, %v", input, output, write, read, err)
+	}
+	e.ok(e.admin("POST", path, map[string]any{"prices": map[string]any{"input": 2.5}}), "replace rates")
+	var replaced bool
+	err = e.pool.QueryRow(t.Context(), `SELECT price_input = 2.5 AND price_output IS NULL
+		AND price_cache_write IS NULL AND price_cache_read IS NULL AND price_note = '新费率说明'
+		FROM modelgateway.deployments WHERE id = $1`, id).Scan(&replaced)
+	if err != nil || !replaced {
+		t.Fatalf("explicit price replacement = %v, %v", replaced, err)
+	}
+}

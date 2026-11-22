@@ -211,27 +211,26 @@ func (h *handler) updateDeployment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	d, err := h.cfg.Store.UpdateDeployment(r.Context(), r.PathValue("id"), func(d *store.Deployment) error {
-		if hasName {
-			d.DisplayName = name
-		}
-		if hasCaps {
-			d.Capabilities = caps
-		}
-		if hasPrices {
-			d.Prices = prices
-		}
-		if hasCurrency {
-			d.PriceCurrency = currency
-		}
-		if hasNote {
-			d.PriceNote = note
-		}
-		if hasEnabled {
-			d.Enabled = enabled
-		}
-		return nil
-	})
+	var update store.DeploymentPatch
+	if hasName {
+		update.DisplayName = &name
+	}
+	if hasCaps {
+		update.Capabilities = &caps
+	}
+	if hasPrices {
+		update.Prices = &prices
+	}
+	if hasCurrency {
+		update.PriceCurrency = &currency
+	}
+	if hasNote {
+		update.PriceNote = &note
+	}
+	if hasEnabled {
+		update.Enabled = &enabled
+	}
+	d, err := h.cfg.Store.UpdateDeployment(r.Context(), r.PathValue("id"), update)
 	if err != nil {
 		return nil, err
 	}
