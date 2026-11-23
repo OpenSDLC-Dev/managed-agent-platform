@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -505,6 +507,268 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 		}
 		if string(got) != "head-tail" {
 			t.Errorf("prefixedConn = %q, want %q", got, "head-tail")
+		}
+	})
+
+	t.Run("wedged HTTP proxy CONNECT fails with ErrStalled and honors cancellation", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		unblock := make(chan struct{})
+		var wg sync.WaitGroup
+		t.Cleanup(func() {
+			close(unblock)
+			_ = ln.Close()
+			wg.Wait()
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				wg.Add(1)
+				go func(c net.Conn) {
+					defer wg.Done()
+					defer c.Close()
+					// Read the CONNECT request line/headers, then stay silent forever.
+					_, _ = http.ReadRequest(bufio.NewReader(c))
+					<-unblock
+				}(conn)
+			}
+		}()
+
+		proxyURL, err := url.Parse("http://" + ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := &rest.Config{
+			Host:  "http://127.0.0.1:1",
+			Proxy: http.ProxyURL(proxyURL),
+		}
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl := &client{
+			cs:           cs,
+			rest:         cfg,
+			namespace:    "default",
+			stallTimeout: budget,
+			pingPeriod:   30 * time.Millisecond,
+		}
+		pd := &pod{client: cl, name: "sb-proxy", workdir: "/workspace"}
+
+		start := time.Now()
+		_, err = pd.Exec(context.Background(), sandbox.ExecRequest{Command: "echo hi"})
+		if !errors.Is(err, sandbox.ErrStalled) {
+			t.Fatalf("wedged proxy CONNECT err = %v, want sandbox.ErrStalled", err)
+		}
+		if elapsed := time.Since(start); elapsed < budget || elapsed > 3*time.Second {
+			t.Errorf("wedged proxy CONNECT elapsed = %s, want >= %s and < 3s", elapsed, budget)
+		}
+
+		// Caller cancellation must also interrupt a wedged proxy CONNECT promptly.
+		cl.stallTimeout = 10 * time.Second
+		cctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, err = pd.ReadFile(cctx, "/workspace/a.txt")
+		if errors.Is(err, sandbox.ErrStalled) {
+			t.Fatalf("caller cancel on wedged proxy CONNECT misclassified as ErrStalled: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("caller cancel on wedged proxy CONNECT err = %v, want context.DeadlineExceeded", err)
+		}
+	})
+
+	t.Run("working HTTP proxy CONNECT preserves successful SPDY exec", func(t *testing.T) {
+		backendSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			acceptSPDYExec(t, w, r, 5*time.Second, func(s *spdyStreams, _ httpstream.Connection) {
+				_, _ = s.stdout.Write([]byte("via-proxy\n"))
+				s.finish(t, 0)
+			})
+		}))
+		t.Cleanup(backendSrv.Close)
+
+		// Minimal HTTP CONNECT tunnel proxy forwarding to backendSrv.
+		proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		t.Cleanup(func() {
+			_ = proxyLn.Close()
+			wg.Wait()
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				clientConn, err := proxyLn.Accept()
+				if err != nil {
+					return
+				}
+				wg.Add(1)
+				go func(cc net.Conn) {
+					defer wg.Done()
+					defer cc.Close()
+					br := bufio.NewReader(cc)
+					req, err := http.ReadRequest(br)
+					if err != nil || req.Method != http.MethodConnect {
+						return
+					}
+					up, err := net.Dial("tcp", req.Host)
+					if err != nil {
+						return
+					}
+					defer up.Close()
+					_, _ = io.WriteString(cc, "HTTP/1.1 200 Connection Established\r\n\r\n")
+					done := make(chan struct{})
+					go func() {
+						_, _ = io.Copy(up, br)
+						close(done)
+					}()
+					_, _ = io.Copy(cc, up)
+					<-done
+				}(clientConn)
+			}
+		}()
+
+		proxyURL, err := url.Parse("http://" + proxyLn.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := &rest.Config{
+			Host:  backendSrv.URL,
+			Proxy: http.ProxyURL(proxyURL),
+		}
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl := &client{
+			cs:           cs,
+			rest:         cfg,
+			namespace:    "default",
+			stallTimeout: budget,
+			pingPeriod:   5 * time.Second,
+		}
+		var stdout, stderr bytes.Buffer
+		res, err := cl.execStream(context.Background(), "sb-proxy-ok", containerName, []string{"echo", "via-proxy"}, nil, &stdout, &stderr, true)
+		if err != nil {
+			t.Fatalf("execStream through HTTP proxy: %v", err)
+		}
+		if res.code != 0 {
+			t.Errorf("exit code = %d, want 0", res.code)
+		}
+		if stdout.String() != "via-proxy\n" {
+			t.Errorf("Stdout = %q, want %q", stdout.String(), "via-proxy\n")
+		}
+	})
+
+	t.Run("trickling HTTP 101 upgrade headers refresh deadline and outlive budget", func(t *testing.T) {
+		// Trickle HTTP 101 headers in small pieces spaced budget/3 apart (total
+		// > 1.5*budget), then establish a real SPDY/3.1 exec connection.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		t.Cleanup(func() {
+			_ = ln.Close()
+			wg.Wait()
+		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			br := bufio.NewReader(conn)
+			if _, err := http.ReadRequest(br); err != nil {
+				return
+			}
+			chunks := []string{
+				"HTTP/1.1 101 Switching Protocols\r\n",
+				"Connection: Upgrade\r\n",
+				"Upgrade: SPDY/3.1\r\n",
+				"X-Stream-Protocol-Version: v4.channel.k8s.io\r\n",
+				"X-Trickle-1: ok\r\n",
+				"\r\n",
+			}
+			for i, ch := range chunks {
+				if _, err := io.WriteString(conn, ch); err != nil {
+					return
+				}
+				if i < len(chunks)-1 {
+					<-time.After(budget / 3)
+				}
+			}
+			// Hand the live upgraded connection to a real SPDY server connection.
+			streamCh := make(chan httpstream.Stream, 8)
+			sc, err := httpstreamspdy.NewServerConnectionWithPings(conn, func(s httpstream.Stream, reply <-chan struct{}) error {
+				go func() {
+					<-reply
+					streamCh <- s
+				}()
+				return nil
+			}, 5*time.Second)
+			if err != nil {
+				return
+			}
+			defer sc.Close()
+			var errStream, stdout httpstream.Stream
+			for errStream == nil || stdout == nil {
+				select {
+				case s := <-streamCh:
+					switch s.Headers().Get(corev1.StreamType) {
+					case corev1.StreamTypeError:
+						errStream = s
+					case corev1.StreamTypeStdout:
+						stdout = s
+					}
+				case <-sc.CloseChan():
+					return
+				}
+			}
+			_, _ = stdout.Write([]byte("trickled-ok\n"))
+			_ = stdout.Close()
+			_, _ = errStream.Write([]byte(`{"status":"Success"}`))
+			_ = errStream.Close()
+			<-sc.CloseChan()
+		}()
+
+		cfg := &rest.Config{Host: "http://" + ln.Addr().String()}
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl := &client{
+			cs:           cs,
+			rest:         cfg,
+			namespace:    "default",
+			stallTimeout: budget,
+			pingPeriod:   5 * time.Second,
+		}
+		start := time.Now()
+		var stdout bytes.Buffer
+		res, err := cl.execStream(context.Background(), "sb-trickle", containerName, []string{"echo", "trickled-ok"}, nil, &stdout, nil, true)
+		if err != nil {
+			t.Fatalf("trickling 101 execStream: %v", err)
+		}
+		if res.code != 0 {
+			t.Errorf("exit code = %d, want 0", res.code)
+		}
+		if stdout.String() != "trickled-ok\n" {
+			t.Errorf("Stdout = %q, want %q", stdout.String(), "trickled-ok\n")
+		}
+		if elapsed := time.Since(start); elapsed < budget {
+			t.Errorf("trickling 101 finished in %s, want >= %s to prove upgrade outlived budget", elapsed, budget)
 		}
 	})
 }

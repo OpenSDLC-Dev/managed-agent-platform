@@ -1,7 +1,6 @@
 package sandbox_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -204,6 +203,8 @@ func TestGuardRoundTripperBoundsWedgedAndMovingHTTP(t *testing.T) {
 
 	t.Run("streaming upload and download outlive budget", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Hold response headers until the entire streaming upload finishes,
+			// so the upload alone must outlive budget via request-body progress.
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -223,8 +224,20 @@ func TestGuardRoundTripperBoundsWedgedAndMovingHTTP(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 
+		pr, pw := io.Pipe()
+		t.Cleanup(func() { _ = pw.Close() })
+		go func() {
+			defer pw.Close()
+			for i := 0; i < 6; i++ {
+				if _, err := pw.Write([]byte("x")); err != nil {
+					return
+				}
+				<-time.After(budget / 3)
+			}
+		}()
+
 		client := &http.Client{Transport: sandbox.GuardRoundTripper(srv.Client().Transport, budget)}
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, bytes.NewReader([]byte("x")))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, pr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -239,6 +252,46 @@ func TestGuardRoundTripperBoundsWedgedAndMovingHTTP(t *testing.T) {
 		}
 		if string(got) != strings.Repeat("x", 6) {
 			t.Errorf("got %q, want 6 x's", got)
+		}
+	})
+
+	t.Run("request body cancel remains armed after response headers arrive", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		t.Cleanup(func() { _ = pw.Close() })
+
+		uploadDone := make(chan error, 1)
+		rt := sandbox.GuardRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			// Simulate Go net/http receiving response headers while a background
+			// writeLoop is still blocked reading req.Body.
+			go func() {
+				_, err := io.ReadAll(req.Body)
+				uploadDone <- err
+			}()
+			respPR, respPW := io.Pipe()
+			t.Cleanup(func() { _ = respPW.Close() })
+			return &http.Response{StatusCode: http.StatusOK, Body: respPR}, nil
+		}), 80*time.Millisecond)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.invalid", pr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		defer resp.Body.Close()
+
+		// Once the silence budget expires, the guard cancels gctx, which must
+		// still close req.Body and unblock the background upload reader even
+		// though RoundTrip already returned response headers.
+		select {
+		case err := <-uploadDone:
+			if err == nil {
+				t.Errorf("uploadDone = nil, want closed-pipe error after stall trip")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("background req.Body reader stayed blocked after response headers arrived and guard tripped")
 		}
 	})
 

@@ -161,7 +161,13 @@ current-context: c
 			if err != nil {
 				t.Fatalf("New(%s) = %v", tc.name, err)
 			}
-			_, err = p.Owned(context.Background())
+			// Bound Owned with an outer deadline well above the 150ms configured
+			// budget and well below the 5m default, so losing the StallTimeout
+			// forwarding fails promptly with context.DeadlineExceeded instead of
+			// waiting 5m and still returning ErrStalled.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err = p.Owned(ctx)
 			if !errors.Is(err, sandbox.ErrStalled) {
 				t.Fatalf("Owned on wedged %s endpoint = %v, want sandbox.ErrStalled", tc.name, err)
 			}

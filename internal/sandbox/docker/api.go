@@ -122,11 +122,10 @@ func (c *apiClient) requestGuarded(ctx context.Context, method, path string, q u
 	// for writeLoop to leave req.Body.Read before returning, so a stalled
 	// io.PipeReader (WriteFileStream) would otherwise deadlock Do even after
 	// StallGuard cancels gctx.
+	var rb io.ReadCloser
 	if req.Body != nil && req.Body != http.NoBody {
-		rb := sandbox.ProgressReadCloser(req.Body, guard)
+		rb = sandbox.ProgressReadCloserWithCancel(gctx, req.Body, guard)
 		req.Body = rb
-		stopBody := context.AfterFunc(gctx, func() { _ = rb.Close() })
-		defer stopBody()
 	}
 	if req.GetBody != nil {
 		orig := req.GetBody
@@ -135,7 +134,7 @@ func (c *apiClient) requestGuarded(ctx context.Context, method, path string, q u
 			if err != nil {
 				return nil, err
 			}
-			return sandbox.ProgressReadCloser(rc, guard), nil
+			return sandbox.ProgressReadCloserWithCancel(gctx, rc, guard), nil
 		}
 	}
 	if contentType != "" {
@@ -143,6 +142,9 @@ func (c *apiClient) requestGuarded(ctx context.Context, method, path string, q u
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if rb != nil {
+			_ = rb.Close()
+		}
 		guard.Stop()
 		return nil, fmt.Errorf("docker: %s %s: %w", method, path, guard.Cause(err))
 	}

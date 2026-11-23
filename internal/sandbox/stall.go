@@ -88,9 +88,18 @@ func NewStallGuard(ctx context.Context, d time.Duration) (context.Context, *Stal
 // Budget returns the effective silence budget this guard enforces.
 func (g *StallGuard) Budget() time.Duration { return g.d }
 
-// Progress records a sign of life on the transport. Lock-free because every
-// Read/Write delivering bytes calls it.
-func (g *StallGuard) Progress() { g.last.Store(int64(time.Since(g.start))) }
+// Progress records a sign of life on the transport. Lock-free and monotonic so
+// concurrent Read/Write goroutines cannot let an older sample overwrite a newer
+// progress timestamp.
+func (g *StallGuard) Progress() {
+	now := int64(time.Since(g.start))
+	for {
+		prev := g.last.Load()
+		if now <= prev || g.last.CompareAndSwap(prev, now) {
+			return
+		}
+	}
+}
 
 // Disarm stops the silence watcher without cancelling the guarded context,
 // returning true if it disarmed before the guard tripped and false if the guard
@@ -221,11 +230,41 @@ func ProgressReadCloser(rc io.ReadCloser, g *StallGuard) io.ReadCloser {
 	return &progressReadCloser{ReadCloser: rc, guard: g}
 }
 
+// ProgressReadCloserWithCancel wraps rc like ProgressReadCloser and also closes
+// rc if ctx cancels before Close runs. The cancellation callback stays armed
+// until rc.Close runs rather than unregistering when response headers arrive,
+// because net/http permits full-duplex response-before-upload-completion.
+func ProgressReadCloserWithCancel(ctx context.Context, rc io.ReadCloser, g *StallGuard) io.ReadCloser {
+	if rc == nil || g == nil {
+		return rc
+	}
+	r := &progressReadCloser{ReadCloser: rc, guard: g}
+	if ctx != nil {
+		r.bindCancel(ctx)
+	}
+	return r
+}
+
 type progressReadCloser struct {
 	io.ReadCloser
 	guard     *StallGuard
 	closeOnce sync.Once
 	closeErr  error
+	cancelMu  sync.Mutex
+	closed    bool
+	stop      func() bool
+}
+
+func (r *progressReadCloser) bindCancel(ctx context.Context) {
+	stop := context.AfterFunc(ctx, func() { _ = r.Close() })
+	r.cancelMu.Lock()
+	if r.closed {
+		r.cancelMu.Unlock()
+		stop()
+		return
+	}
+	r.stop = stop
+	r.cancelMu.Unlock()
 }
 
 func (r *progressReadCloser) Read(p []byte) (int, error) {
@@ -237,7 +276,17 @@ func (r *progressReadCloser) Read(p []byte) (int, error) {
 }
 
 func (r *progressReadCloser) Close() error {
-	r.closeOnce.Do(func() { r.closeErr = r.ReadCloser.Close() })
+	r.closeOnce.Do(func() {
+		r.closeErr = r.ReadCloser.Close()
+		r.cancelMu.Lock()
+		r.closed = true
+		stop := r.stop
+		r.stop = nil
+		r.cancelMu.Unlock()
+		if stop != nil {
+			stop()
+		}
+	})
 	return r.closeErr
 }
 
@@ -260,11 +309,10 @@ type stallRoundTripper struct {
 func (s *stallRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	gctx, guard := NewStallGuard(req.Context(), s.d)
 	r := req.Clone(gctx)
+	var rb io.ReadCloser
 	if r.Body != nil && r.Body != http.NoBody {
-		rb := ProgressReadCloser(r.Body, guard)
+		rb = ProgressReadCloserWithCancel(gctx, r.Body, guard)
 		r.Body = rb
-		stopBody := context.AfterFunc(gctx, func() { _ = rb.Close() })
-		defer stopBody()
 	}
 	if r.GetBody != nil {
 		orig := r.GetBody
@@ -273,11 +321,14 @@ func (s *stallRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 			if err != nil {
 				return nil, err
 			}
-			return ProgressReadCloser(rc, guard), nil
+			return ProgressReadCloserWithCancel(gctx, rc, guard), nil
 		}
 	}
 	resp, err := s.rt.RoundTrip(r)
 	if err != nil {
+		if rb != nil {
+			_ = rb.Close()
+		}
 		guard.Stop()
 		return nil, guard.Cause(err)
 	}

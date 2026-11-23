@@ -20,6 +20,8 @@ package k8s
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
@@ -259,6 +262,8 @@ func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sand
 	}
 	rt := &guardedSPDY{
 		inner:       inner,
+		tlsConfig:   tlsConfig,
+		proxier:     proxy,
 		parentCtx:   parentCtx,
 		guard:       guard,
 		pingPeriod:  pingPeriod,
@@ -275,35 +280,37 @@ func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sand
 	return exec, rt.releasePending, nil
 }
 
-// guardedSPDY wraps client-go's SPDY upgrade round-tripper to close both halves
-// of #395:
-//  1. During the HTTP 101 handshake, upstream SpdyRoundTripper.RoundTrip reads
-//     the response off a raw net.Conn with no deadline and no context wiring.
-//     RoundTrip here sets a real net.Conn deadline and wires context.AfterFunc
-//     so both the stall budget and caller cancellation unblock http.ReadResponse.
-//  2. After 101 succeeds, NewConnection clears the raw deadline and wraps the
-//     SPDY httpstream.Connection and each httpstream.Stream so real stdin/
+// guardedSPDY wraps Kubernetes SPDY upgrades to close both halves of #395:
+//  1. Across the entire pre-101 handshake (HTTP proxy CONNECT if configured,
+//     TLS handshake, upgrade request write, HTTP 101 response read, and any
+//     non-101 error body), a handshakeConn wraps the underlying net.Conn with a
+//     sliding byte-level silence deadline and a context.AfterFunc cancellation
+//     trigger, refreshing both the socket deadline and StallGuard.Progress as
+//     bytes arrive.
+//  2. After 101 succeeds, NewConnection disarms handshakeConn (clearing the raw
+//     deadline and detaching progress tracking from raw TCP reads) and wraps
+//     the SPDY httpstream.Connection and each httpstream.Stream so real stdin/
 //     stdout/stderr/error bytes reset the StallGuard while SPDY's 5s keepalive
 //     Ping/Pong frames (handled below the stream layer) do not.
 type guardedSPDY struct {
 	inner       *httpstreamspdy.SpdyRoundTripper
+	tlsConfig   *tls.Config
+	proxier     func(*http.Request) (*url.URL, error)
 	parentCtx   context.Context
 	guard       *sandbox.StallGuard
 	pingPeriod  time.Duration
 	boundStream bool
 
-	ctx        context.Context
-	conn       net.Conn
-	rawConn    net.Conn
-	deadlineMu *sync.Mutex
-	upgraded   *bool
-	stopCancel func() bool
+	ctx     context.Context
+	conn    net.Conn
+	rawConn net.Conn
+	hc      *handshakeConn
 }
 
 func (g *guardedSPDY) releasePending() {
-	if g.stopCancel != nil {
-		g.stopCancel()
-		g.stopCancel = nil
+	if g.hc != nil {
+		_ = g.hc.disarm()
+		g.hc = nil
 	}
 	if g.rawConn != nil {
 		_ = g.rawConn.Close()
@@ -321,29 +328,16 @@ func (g *guardedSPDY) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.Header.Add(httpstream.HeaderConnection, httpstream.HeaderUpgrade)
 	req.Header.Add(httpstream.HeaderUpgrade, httpstreamspdy.HeaderSpdy31)
 
-	conn, err := g.inner.Dial(req)
+	conn, hc, err := g.dialUpgrade(req)
 	if err != nil {
-		return nil, err
+		return nil, g.classifyHandshakeErr(err)
 	}
-	if err := conn.SetDeadline(time.Now().Add(g.guard.Budget())); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	var mu sync.Mutex
-	upgraded := false
-	stopCancel := context.AfterFunc(req.Context(), func() {
-		mu.Lock()
-		if !upgraded {
-			_ = conn.SetDeadline(time.Now())
-		}
-		mu.Unlock()
-	})
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
-		stopCancel()
-		conn.Close()
+		_ = hc.disarm()
+		_ = conn.Close()
 		return nil, g.classifyHandshakeErr(err)
 	}
 	var upgradeConn net.Conn = conn
@@ -354,10 +348,157 @@ func (g *guardedSPDY) RoundTrip(req *http.Request) (*http.Response, error) {
 	g.ctx = req.Context()
 	g.conn = upgradeConn
 	g.rawConn = conn
-	g.deadlineMu = &mu
-	g.upgraded = &upgraded
-	g.stopCancel = stopCancel
+	g.hc = hc
 	return resp, nil
+}
+
+func (g *guardedSPDY) dialUpgrade(req *http.Request) (net.Conn, *handshakeConn, error) {
+	if err := req.Context().Err(); err != nil {
+		return nil, nil, err
+	}
+	proxyURL, err := g.proxier(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if proxyURL != nil && proxyURL.Scheme == "socks5" {
+		conn, err := g.inner.Dial(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		hc, err := newHandshakeConn(req.Context(), conn, g.guard)
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+		return hc, hc, nil
+	}
+
+	var (
+		conn net.Conn
+		hc   *handshakeConn
+	)
+	if proxyURL != nil {
+		switch proxyURL.Scheme {
+		case "http", "https", "":
+			conn, hc, err = g.dialHTTPProxy(req, proxyURL)
+		default:
+			return nil, nil, fmt.Errorf("proxy URL scheme not supported: %s", proxyURL.Scheme)
+		}
+	} else {
+		conn, hc, err = g.dialTarget(req.Context(), req.URL)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := req.Write(conn); err != nil {
+		_ = hc.disarm()
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	return conn, hc, nil
+}
+
+func (g *guardedSPDY) dialTarget(ctx context.Context, u *url.URL) (net.Conn, *handshakeConn, error) {
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	raw, err := dialer.DialContext(ctx, "tcp", canonicalAddr(u))
+	if err != nil {
+		return nil, nil, err
+	}
+	hc, err := newHandshakeConn(ctx, raw, g.guard)
+	if err != nil {
+		_ = raw.Close()
+		return nil, nil, err
+	}
+	if u.Scheme == "https" {
+		tc := tls.Client(hc, tlsConfigForHost(g.tlsConfig, u.Hostname()))
+		if err := tc.HandshakeContext(ctx); err != nil {
+			_ = hc.disarm()
+			_ = tc.Close()
+			return nil, nil, err
+		}
+		return tc, hc, nil
+	}
+	return hc, hc, nil
+}
+
+// dialHTTPProxy opens a CONNECT tunnel through proxyURL with handshakeConn
+// already armed on the proxy socket so a silent or half-open proxy cannot wedge
+// past StallGuard or caller cancellation.
+func (g *guardedSPDY) dialHTTPProxy(req *http.Request, proxyURL *url.URL) (net.Conn, *handshakeConn, error) {
+	ctx := req.Context()
+	proxyConn, hc, err := g.dialTarget(ctx, proxyURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	targetHost := canonicalAddr(req.URL)
+	connectReq := http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: targetHost},
+		Host:   targetHost,
+		Header: make(http.Header),
+	}
+	if proxyURL.User != nil {
+		user := proxyURL.User.Username()
+		pass, _ := proxyURL.User.Password()
+		connectReq.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
+	}
+	if err := connectReq.Write(proxyConn); err != nil {
+		_ = hc.disarm()
+		_ = proxyConn.Close()
+		return nil, nil, err
+	}
+	br := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(br, &connectReq)
+	if err != nil {
+		_ = hc.disarm()
+		_ = proxyConn.Close()
+		return nil, nil, err
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_ = hc.disarm()
+		_ = proxyConn.Close()
+		return nil, nil, fmt.Errorf("CONNECT request to %s returned response: %s", proxyURL.Redacted(), resp.Status)
+	}
+	tunnelConn := proxyConn
+	if n := br.Buffered(); n > 0 {
+		peek, _ := br.Peek(n)
+		tunnelConn = &prefixedConn{Conn: proxyConn, buf: append([]byte(nil), peek...)}
+	}
+	if req.URL.Scheme == "https" {
+		tc := tls.Client(tunnelConn, tlsConfigForHost(g.tlsConfig, req.URL.Hostname()))
+		if err := tc.HandshakeContext(ctx); err != nil {
+			_ = hc.disarm()
+			_ = tc.Close()
+			return nil, nil, err
+		}
+		return tc, hc, nil
+	}
+	return tunnelConn, hc, nil
+}
+
+func canonicalAddr(u *url.URL) string {
+	if u.Port() != "" {
+		return u.Host
+	}
+	port := "80"
+	if u.Scheme == "https" {
+		port = "443"
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
+func tlsConfigForHost(base *tls.Config, host string) *tls.Config {
+	switch {
+	case base == nil:
+		return &tls.Config{ServerName: host}
+	case len(base.ServerName) == 0:
+		c := base.Clone()
+		c.ServerName = host
+		return c
+	default:
+		return base
+	}
 }
 
 func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection, error) {
@@ -381,14 +522,8 @@ func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection,
 		return nil, fmt.Errorf("unable to upgrade connection: %s", upgradeErrorMessage(responseErrorBytes))
 	}
 
-	g.deadlineMu.Lock()
-	*g.upgraded = true
-	err := g.rawConn.SetDeadline(time.Time{})
-	g.deadlineMu.Unlock()
-	if g.stopCancel != nil {
-		g.stopCancel()
-		g.stopCancel = nil
-	}
+	err := g.hc.disarm()
+	g.hc = nil
 	if err != nil {
 		g.releasePending()
 		return nil, err
@@ -413,6 +548,82 @@ func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection,
 		guard:       g.guard,
 		boundStream: g.boundStream,
 	}, nil
+}
+
+// handshakeConn bounds a raw net.Conn during the pre-101 upgrade phase with a
+// sliding silence deadline and context.AfterFunc cancellation. Calling disarm
+// clears the socket deadline and switches Read/Write to a lock-free pass-through
+// so post-101 SPDY keepalive pings never count as progress.
+type handshakeConn struct {
+	net.Conn
+	guard      *sandbox.StallGuard
+	mu         sync.Mutex
+	disarmed   atomic.Bool
+	stopCancel func() bool
+}
+
+func newHandshakeConn(ctx context.Context, conn net.Conn, guard *sandbox.StallGuard) (*handshakeConn, error) {
+	if err := conn.SetDeadline(time.Now().Add(guard.Budget())); err != nil {
+		return nil, err
+	}
+	h := &handshakeConn{Conn: conn, guard: guard}
+	stop := context.AfterFunc(ctx, func() {
+		h.mu.Lock()
+		if !h.disarmed.Load() {
+			_ = h.Conn.SetDeadline(time.Now())
+		}
+		h.mu.Unlock()
+	})
+	h.mu.Lock()
+	if h.disarmed.Load() {
+		h.mu.Unlock()
+		stop()
+	} else {
+		h.stopCancel = stop
+		h.mu.Unlock()
+	}
+	return h, nil
+}
+
+func (h *handshakeConn) refresh() {
+	if h.disarmed.Load() {
+		return
+	}
+	h.mu.Lock()
+	if !h.disarmed.Load() {
+		h.guard.Progress()
+		_ = h.Conn.SetDeadline(time.Now().Add(h.guard.Budget()))
+	}
+	h.mu.Unlock()
+}
+
+func (h *handshakeConn) Read(p []byte) (int, error) {
+	n, err := h.Conn.Read(p)
+	if n > 0 {
+		h.refresh()
+	}
+	return n, err
+}
+
+func (h *handshakeConn) Write(p []byte) (int, error) {
+	n, err := h.Conn.Write(p)
+	if n > 0 {
+		h.refresh()
+	}
+	return n, err
+}
+
+func (h *handshakeConn) disarm() error {
+	h.mu.Lock()
+	h.disarmed.Store(true)
+	err := h.Conn.SetDeadline(time.Time{})
+	stop := h.stopCancel
+	h.stopCancel = nil
+	h.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	return err
 }
 
 // classifyHandshakeErr separates a raw net.Conn deadline firing from caller
