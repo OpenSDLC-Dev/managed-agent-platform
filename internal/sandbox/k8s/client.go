@@ -556,9 +556,11 @@ func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection,
 // so post-101 SPDY keepalive pings never count as progress.
 type handshakeConn struct {
 	net.Conn
+	ctx        context.Context
 	guard      *sandbox.StallGuard
 	mu         sync.Mutex
 	disarmed   atomic.Bool
+	cancelled  bool
 	stopCancel func() bool
 }
 
@@ -566,9 +568,10 @@ func newHandshakeConn(ctx context.Context, conn net.Conn, guard *sandbox.StallGu
 	if err := conn.SetDeadline(time.Now().Add(guard.Budget())); err != nil {
 		return nil, err
 	}
-	h := &handshakeConn{Conn: conn, guard: guard}
+	h := &handshakeConn{Conn: conn, ctx: ctx, guard: guard}
 	stop := context.AfterFunc(ctx, func() {
 		h.mu.Lock()
+		h.cancelled = true
 		if !h.disarmed.Load() {
 			_ = h.Conn.SetDeadline(time.Now())
 		}
@@ -591,8 +594,13 @@ func (h *handshakeConn) refresh() {
 	}
 	h.mu.Lock()
 	if !h.disarmed.Load() {
-		h.guard.Progress()
-		_ = h.Conn.SetDeadline(time.Now().Add(h.guard.Budget()))
+		if h.cancelled || h.ctx.Err() != nil {
+			h.cancelled = true
+			_ = h.Conn.SetDeadline(time.Now())
+		} else {
+			h.guard.Progress()
+			_ = h.Conn.SetDeadline(time.Now().Add(h.guard.Budget()))
+		}
 	}
 	h.mu.Unlock()
 }

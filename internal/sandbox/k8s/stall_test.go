@@ -771,6 +771,50 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 			t.Errorf("trickling 101 finished in %s, want >= %s to prove upgrade outlived budget", elapsed, budget)
 		}
 	})
+
+	t.Run("handshakeConn refresh after ctx cancel does not overwrite deadline", func(t *testing.T) {
+		c1, c2 := netPipe(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		gctx, guard := sandbox.NewStallGuard(ctx, 10*time.Second)
+		defer guard.Stop()
+
+		hc, err := newHandshakeConn(gctx, c1, guard)
+		if err != nil {
+			t.Fatalf("newHandshakeConn: %v", err)
+		}
+		defer hc.disarm()
+
+		// Deliver 1 byte right before cancelling so the first Read returns n>0
+		// while ctx is already cancelled, exercising refresh() after AfterFunc.
+		go func() {
+			_, _ = c2.Write([]byte("x"))
+		}()
+		var buf [1]byte
+		// Wait briefly for peer write, cancel ctx, then read the buffered byte
+		// and verify a subsequent blocking Read returns promptly instead of
+		// waiting 10s.
+		if _, err := hc.Read(buf[:]); err != nil {
+			t.Fatalf("first Read: %v", err)
+		}
+		cancel()
+		// Trigger refresh() directly after cancel (as happens when Read returns
+		// buffered bytes concurrently with AfterFunc) and ensure the next Read
+		// still hits the immediate cancellation deadline rather than +10s.
+		hc.refresh()
+		done := make(chan error, 1)
+		go func() {
+			_, err := hc.Read(buf[:])
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("second Read after cancel = nil, want timeout error")
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("hc.Read blocked >500ms after ctx cancel — refresh() overwrote cancellation deadline")
+		}
+	})
 }
 
 func netPipe(t *testing.T) (net.Conn, net.Conn) {
