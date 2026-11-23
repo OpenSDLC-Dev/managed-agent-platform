@@ -31,6 +31,11 @@
 //	                             healthy run takes makes every reclaim stall at
 //	                             the same place
 //	SANDBOX_BACKEND              "docker" (default) or "k8s"
+//	SANDBOX_STALL_TIMEOUT        per-call sandbox transport silence budget, Go
+//	                             duration (default "5m"); a call moving zero
+//	                             bytes for this long fails with
+//	                             sandbox.ErrStalled (#395). Malformed or
+//	                             non-positive fails startup
 //	DOCKER_HOST                  Docker daemon address for the docker backend
 //	                             (falls back to the well-known socket)
 //	SANDBOX_K8S_KUBECONFIG       kubeconfig path for the k8s backend; empty,
@@ -107,8 +112,14 @@ func run(ctx context.Context) error {
 		return errors.New("ANTHROPIC_ENVIRONMENT_KEY is required")
 	}
 
+	sandboxStallTimeout, err := sandbox.ParseStallTimeout("SANDBOX_STALL_TIMEOUT", os.Getenv("SANDBOX_STALL_TIMEOUT"))
+	if err != nil {
+		return err
+	}
+
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),
+		StallTimeout:        sandboxStallTimeout,
 		DockerHost:          os.Getenv("DOCKER_HOST"),
 		K8sKubeconfig:       os.Getenv("SANDBOX_K8S_KUBECONFIG"),
 		K8sContext:          os.Getenv("SANDBOX_K8S_CONTEXT"),

@@ -48,6 +48,15 @@ new directory and in-repo citations re-pointed in the moving PR (plan
 
 ---
 
+## Plan 77 — Sandbox call silence bound (#395)
+
+[Plan 77](./plan/77_sandbox-call-stall-bound.md) delivered the per-call transport silence bound deferred from plan 33 (D5a), adding `sandbox.StallGuard`, `sandbox.ErrStalled`, `SANDBOX_STALL_TIMEOUT` (default `5m`), bidirectional progress tracking in `internal/sandbox/docker`, raw `net.Conn` HTTP 101 handshake deadlines plus SPDY stream-level progress tracking in `internal/sandbox/k8s`, and shared live and wedged-transport contract suites in `internal/sandbox/sandboxtest`.
+
+- **Rejected alternative (measuring progress on Kubernetes' raw `net.Conn` post-101):** `client-go`'s SPDY client sends keepalive Ping frames every 5 seconds on the underlying socket; tracking raw TCP reads/writes after upgrade would let SPDY Pong traffic hold a wedged exec stream open forever (#318's exact failure shape). Post-101 progress therefore wraps `httpstream.Connection` and `httpstream.Stream` so only real stdin/stdout/stderr/error bytes reset the budget.
+- **Rejected alternative (bounding timed `Exec` streams by `StallTimeout`):** a command with `ExecRequest.Timeout > 0` (such as `bash` up to `toolset.MaxTimeout = 10m`) may legitimately produce zero output for minutes; bounding its stream by a tighter silence default would false-trip healthy commands and reclaim-loop them. Timed `Exec` calls guard all handshakes and control RPCs (`execCreate`, `execStart` headers, SPDY 101 upgrade and stream setup, `execInspect`, `readExit`, `probeAlive`) and call `StallGuard.Disarm()` once the command stream opens so `ExecRequest.Timeout` governs command silence.
+- **Real bug caught during live verification:** on Docker `WriteFileStream` with a stalled source `io.Reader`, cancelling `gctx` left `net/http`'s `persistConn.mapRoundTripError` waiting indefinitely for `writeLoop` to exit `io.PipeReader.Read`; closing `req.Body` via `context.AfterFunc(gctx, ...)` broke the deadlock cleanly.
+- **Mutation verification:** removing the Docker transport guard, removing Kubernetes' raw `net.Conn` HTTP 101 deadline/cancellation wiring, or disarming Kubernetes' post-101 SPDY stream guard each caused the corresponding `sandboxtest.RunTransportStall` rows to fail by hitting their 5s `failWithin` backstop.
+
 ## Plan 76 — Three-client harness acceptance
 
 Windows Claude Code, Codex CLI and Linux Antigravity CLI each loaded a project skill and dispatched a named reviewer against an isolated loopback endpoint. The parent and child requests exposed the same model and reasoning settings. In a plain Claude launch from a subdirectory, the guide loaded but the root startup hook did not fire. Supplying the absolute settings path delivered its receipt. Antigravity refused an unstamped commit and permitted a real commit in the separately stamped worktree.

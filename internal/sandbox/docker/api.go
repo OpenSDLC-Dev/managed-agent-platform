@@ -16,14 +16,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 )
 
 // A hand-rolled slice of the Docker Engine API. The official client pulls in
 // the whole moby module tree for the ten endpoints below; this is the same
 // HTTP, over the same socket, in one file.
 type apiClient struct {
-	http *http.Client
-	base string
+	http         *http.Client
+	base         string
+	stallTimeout time.Duration
 }
 
 // daemonHost resolves the daemon address: the explicit host, else DOCKER_HOST,
@@ -46,7 +49,7 @@ func daemonHost(host string) string {
 // whatever `docker context` the CLI would otherwise follow (#627).
 func DaemonHost() string { return daemonHost("") }
 
-func newAPIClient(host string) (*apiClient, error) {
+func newAPIClient(host string, stallTimeout time.Duration) (*apiClient, error) {
 	host = daemonHost(host)
 	switch {
 	case strings.HasPrefix(host, "unix://"):
@@ -56,11 +59,12 @@ func newAPIClient(host string) (*apiClient, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", path)
 			},
 		}
-		// No client timeout: exec streams for as long as the command runs.
-		// Cancellation is the caller's context.
-		return &apiClient{http: &http.Client{Transport: tr}, base: "http://docker"}, nil
+		// No fixed http.Client.Timeout: streaming endpoints (exec, archive
+		// transfers, image pulls) may run for minutes while bytes move. Every
+		// call runs under a sandbox.StallGuard that bounds silence instead (#395).
+		return &apiClient{http: &http.Client{Transport: tr}, base: "http://docker", stallTimeout: stallTimeout}, nil
 	case strings.HasPrefix(host, "tcp://"):
-		return &apiClient{http: &http.Client{}, base: "http://" + strings.TrimPrefix(host, "tcp://")}, nil
+		return &apiClient{http: &http.Client{}, base: "http://" + strings.TrimPrefix(host, "tcp://"), stallTimeout: stallTimeout}, nil
 	}
 	return nil, fmt.Errorf("docker: unsupported daemon address %q (want unix:// or tcp://)", host)
 }
@@ -94,27 +98,62 @@ func containerGone(err error) bool {
 	return errors.As(err, &ae) && ae.Status == 404 && strings.HasPrefix(ae.Message, "No such container")
 }
 
-// request issues one call. The response is returned open on success (2xx and
-// 304) so streaming endpoints can read it; the caller closes the body.
+// request issues one silence-guarded call. The response is returned open on
+// success (2xx and 304) with its body wrapped so every byte read reports
+// progress and Close stops the guard; the caller closes the body.
 func (c *apiClient) request(ctx context.Context, method, path string, q url.Values, body io.Reader, contentType string) (*http.Response, error) {
+	return c.requestGuarded(ctx, method, path, q, body, contentType, false)
+}
+
+func (c *apiClient) requestGuarded(ctx context.Context, method, path string, q url.Values, body io.Reader, contentType string, disarmAfterHeaders bool) (*http.Response, error) {
 	u := c.base + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, body)
+	gctx, guard := sandbox.NewStallGuard(ctx, c.stallTimeout)
+	req, err := http.NewRequestWithContext(gctx, method, u, body)
 	if err != nil {
+		guard.Stop()
 		return nil, fmt.Errorf("docker: %w", err)
+	}
+	// Wrap after NewRequestWithContext so net/http preserves ContentLength for
+	// known-length readers (*bytes.Reader) while still tracking upload progress.
+	// Also close req.Body if gctx cancels mid-upload: net/http's roundTrip waits
+	// for writeLoop to leave req.Body.Read before returning, so a stalled
+	// io.PipeReader (WriteFileStream) would otherwise deadlock Do even after
+	// StallGuard cancels gctx.
+	if req.Body != nil {
+		rb := sandbox.ProgressReadCloser(req.Body, guard)
+		req.Body = rb
+		stopBody := context.AfterFunc(gctx, func() { _ = rb.Close() })
+		defer stopBody()
+	}
+	if req.GetBody != nil {
+		orig := req.GetBody
+		req.GetBody = func() (io.ReadCloser, error) {
+			rc, err := orig()
+			if err != nil {
+				return nil, err
+			}
+			return sandbox.ProgressReadCloser(rc, guard), nil
+		}
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("docker: %s %s: %w", method, path, err)
+		guard.Stop()
+		return nil, fmt.Errorf("docker: %s %s: %w", method, path, guard.Cause(err))
 	}
+	guard.Progress()
 	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		rc := sandbox.GuardReadCloser(resp.Body, guard)
+		msg, rerr := io.ReadAll(io.LimitReader(rc, 8<<10))
+		_ = rc.Close()
+		if errors.Is(rerr, sandbox.ErrStalled) {
+			return nil, fmt.Errorf("docker: %s %s: %w", method, path, rerr)
+		}
 		var decoded struct {
 			Message string `json:"message"`
 		}
@@ -123,7 +162,31 @@ func (c *apiClient) request(ctx context.Context, method, path string, q url.Valu
 		}
 		return nil, &apiError{Status: resp.StatusCode, Message: strings.TrimSpace(string(msg))}
 	}
+	if disarmAfterHeaders {
+		if !guard.Disarm() {
+			resp.Body.Close()
+			guard.Stop()
+			return nil, fmt.Errorf("docker: %s %s: %w", method, path, guard.Cause(nil))
+		}
+		resp.Body = &stopOnCloseReadCloser{ReadCloser: resp.Body, guard: guard}
+		return resp, nil
+	}
+	resp.Body = sandbox.GuardReadCloser(resp.Body, guard)
 	return resp, nil
+}
+
+// stopOnCloseReadCloser keeps the request's child context alive after the
+// silence watcher is disarmed (for timed Exec calls whose command may be silent
+// up to ExecRequest.Timeout) and releases it on Close.
+type stopOnCloseReadCloser struct {
+	io.ReadCloser
+	guard *sandbox.StallGuard
+}
+
+func (r *stopOnCloseReadCloser) Close() error {
+	err := r.ReadCloser.Close()
+	r.guard.Stop()
+	return err
 }
 
 // postJSON sends a JSON body and decodes the JSON reply into out.
@@ -426,9 +489,13 @@ func (c *apiClient) execCreate(ctx context.Context, id string, cfg execConfig) (
 }
 
 // execStart returns the open multiplexed stream; the caller demuxes and closes.
-func (c *apiClient) execStart(ctx context.Context, execID string) (io.ReadCloser, error) {
+// The HTTP handshake is always silence-guarded; when boundStream is true
+// (untimed Exec), the returned stream stays silence-guarded through EOF, while
+// timed Exec calls disarm the silence watcher once headers arrive because the
+// command may legitimately sit silent up to ExecRequest.Timeout.
+func (c *apiClient) execStart(ctx context.Context, execID string, boundStream bool) (io.ReadCloser, error) {
 	body := bytes.NewReader([]byte(`{"Detach":false,"Tty":false}`))
-	resp, err := c.request(ctx, http.MethodPost, "/exec/"+execID+"/start", nil, body, "application/json")
+	resp, err := c.requestGuarded(ctx, http.MethodPost, "/exec/"+execID+"/start", nil, body, "application/json", !boundStream)
 	if err != nil {
 		return nil, err
 	}

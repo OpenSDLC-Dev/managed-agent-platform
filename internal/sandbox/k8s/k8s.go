@@ -503,10 +503,11 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 		return nil, fmt.Errorf("k8s: root %s in pod %s is unanswerable (an ancestor denies search?)", root, name)
 	}
 	clean := gopath.Clean(root)
+	exportCtx, cancelExport := context.WithCancel(ctx)
 	pr, pw := io.Pipe()
 	go func() {
 		errOut := &cappedBuffer{limit: 4096}
-		res, err := client.exec(ctx, name, containerName,
+		res, err := client.exec(exportCtx, name, containerName,
 			[]string{"tar", "-cf", "-", "-C", gopath.Dir(clean), gopath.Base(clean)}, nil, pw, errOut)
 		if err == nil && res.code != 0 {
 			err = fmt.Errorf("k8s: tar exited %d exporting %s from pod %s: %s",
@@ -514,7 +515,17 @@ func (p *Provider) Export(ctx context.Context, sessionID domain.ID, root string)
 		}
 		pw.CloseWithError(err)
 	}()
-	return pr, nil
+	return &cancelReadCloser{ReadCloser: pr, cancel: cancelExport}, nil
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (r *cancelReadCloser) Close() error {
+	r.cancel()
+	return r.ReadCloser.Close()
 }
 
 // exportProbe answers Export's three-way question about $1: P present, M
@@ -1252,6 +1263,9 @@ func (pd *pod) execErr(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
+	if errors.Is(err, sandbox.ErrStalled) {
+		return err
+	}
 	if apierrors.IsNotFound(err) {
 		return pd.gone()
 	}
@@ -1322,7 +1336,7 @@ func (pd *pod) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecR
 	start := time.Now()
 	done := make(chan error, 1)
 	go func() {
-		_, err := pd.client.exec(runCtx, pd.name, containerName, argv, nil, &stdout, &stderr)
+		_, err := pd.client.execStream(runCtx, pd.name, containerName, argv, nil, &stdout, &stderr, seconds == 0)
 		done <- err
 	}()
 
@@ -1917,8 +1931,12 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 		// case discardBulk detaches its context for — reaches WriteFiles no other
 		// way than here. Shedding is the sandbox user's own `rm`, which is safe
 		// with the script possibly still running: a `mv` whose source has been
-		// unlinked fails and leaves its target as it was (#316).
-		pd.discardBulk(ctx, b)
+		// unlinked fails and leaves its target as it was (#316). Skip when the
+		// transport itself stalled: piling another exec onto a wedged apiserver
+		// only stretches the stall budget.
+		if !errors.Is(err, sandbox.ErrStalled) {
+			pd.discardBulk(ctx, b)
+		}
 		return err
 	}
 	if code == sandbox.ExitBulkExtract {
