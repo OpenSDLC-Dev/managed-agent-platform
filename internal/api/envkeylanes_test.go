@@ -340,6 +340,7 @@ var consoleRoutePaths = map[string]string{
 	"consoleServiceAccountsPath":       "/api/console/organizations/default/service_accounts",
 	"consoleServiceAccountPath":        "/api/console/organizations/default/service_accounts/{service_account_id}",
 	"consoleServiceAccountArchivePath": "/api/console/organizations/default/service_accounts/{service_account_id}/archive",
+	"consoleAgentsOverviewPath":        "/api/console/organizations/default/workspaces/default/agents/overview",
 	"consoleDeploymentInitiatorPath":   "/api/console/organizations/default/deployments/{id}/initiator",
 	"consoleProxyPath":                 "/api/organizations/default/proxy/v1/{resource...}",
 	"consoleProxyRootPath":             "/api/organizations/default/proxy/v1",

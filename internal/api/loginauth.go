@@ -166,7 +166,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			privatePattern = pattern
 		}
 		switch privatePattern {
-		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleDeploymentInitiatorPath, consoleProxyPath, consoleProxyRootPath:
+		case consoleMembersPath, consoleMemberPath, consoleServiceAccountsPath, consoleServiceAccountPath, consoleServiceAccountArchivePath, consoleDeploymentInitiatorPath, consoleAgentsOverviewPath, consoleProxyPath, consoleProxyRootPath:
 			cookieOnly = true
 		}
 		if cookieOnly {

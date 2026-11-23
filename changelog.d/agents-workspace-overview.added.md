@@ -1,0 +1,1 @@
+- **Agents workspace overview** — A native developer or administrator can read 30 UTC days of session counts, error rates, median active times and sorted agent activity, including archived agents. The private report supports agent-level drill-down, compares the previous 30 days and excludes internal agents.

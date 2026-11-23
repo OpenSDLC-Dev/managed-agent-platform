@@ -710,7 +710,7 @@ effective UID before entering the image's startup command or a tool exec.
   exchange and nonce verification. Its discovery, JWKS and token requests inject
   current W3C trace context; shared key refresh detaches cancellation, not values.
   Cookies read live principal authority without
-  applying a mapping. Private routes require actual cookie identity.
+  applying a mapping. Private routes require actual cookie identity. The workspace Agents report reads persisted session transitions and running clocks in a single PostgreSQL snapshot, scoped to the authenticated organization and workspace.
   API-key and Authorization headers cannot select another private credential lane. Member and service-account mutations take the principal table
   lock before rechecking the caller's session and current admin authority.
   Key issuance and updates use a separate developer-or-admin fence in the same
