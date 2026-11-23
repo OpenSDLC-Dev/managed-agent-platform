@@ -208,10 +208,11 @@ func (c *client) execStream(ctx context.Context, pod, container string, argv []s
 	gctx, guard := sandbox.NewStallGuard(ctx, c.stallTimeout)
 	defer guard.Stop()
 
-	executor, err := c.spdyExecutor(ctx, req.URL(), guard, boundStream)
+	executor, release, err := c.spdyExecutor(ctx, req.URL(), guard, boundStream)
 	if err != nil {
 		return streamResult{}, fmt.Errorf("k8s: build executor: %w", err)
 	}
+	defer release()
 	err = executor.StreamWithContext(gctx, remotecommand.StreamOptions{
 		Stdin: stdin, Stdout: stdout, Stderr: stderr,
 	})
@@ -229,16 +230,16 @@ func (c *client) execStream(ctx context.Context, pod, container string, argv []s
 	// caller's context sentinel when the stall guard did not trip.
 	if !errors.Is(err, sandbox.ErrStalled) {
 		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
-			return streamResult{}, fmt.Errorf("%w: %v", cerr, err)
+			return streamResult{}, fmt.Errorf("%w: %w", cerr, err)
 		}
 	}
 	return streamResult{}, err
 }
 
-func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sandbox.StallGuard, boundStream bool) (remotecommand.Executor, error) {
+func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sandbox.StallGuard, boundStream bool) (remotecommand.Executor, func(), error) {
 	tlsConfig, err := rest.TLSConfigFor(c.rest)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	proxy := http.ProxyFromEnvironment
 	if c.rest.Proxy != nil {
@@ -254,7 +255,7 @@ func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sand
 		PingPeriod: pingPeriod,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rt := &guardedSPDY{
 		inner:       inner,
@@ -265,9 +266,13 @@ func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sand
 	}
 	wrapper, err := rest.HTTPWrappersForConfig(c.rest, rt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return remotecommand.NewSPDYExecutorForTransports(wrapper, rt, http.MethodPost, u)
+	exec, err := remotecommand.NewSPDYExecutorForTransports(wrapper, rt, http.MethodPost, u)
+	if err != nil {
+		return nil, nil, err
+	}
+	return exec, rt.releasePending, nil
 }
 
 // guardedSPDY wraps client-go's SPDY upgrade round-tripper to close both halves
@@ -295,7 +300,22 @@ type guardedSPDY struct {
 	stopCancel func() bool
 }
 
+func (g *guardedSPDY) releasePending() {
+	if g.stopCancel != nil {
+		g.stopCancel()
+		g.stopCancel = nil
+	}
+	if g.rawConn != nil {
+		_ = g.rawConn.Close()
+		g.rawConn = nil
+		g.conn = nil
+	}
+}
+
 func (g *guardedSPDY) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Release any un-upgraded connection if http.Client retried or followed a
+	// redirect before NewConnection consumed it.
+	g.releasePending()
 	req = req.Clone(req.Context())
 	req.Header = req.Header.Clone()
 	req.Header.Add(httpstream.HeaderConnection, httpstream.HeaderUpgrade)
@@ -348,8 +368,7 @@ func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection,
 		!strings.Contains(upgradeHeader, strings.ToLower(httpstreamspdy.HeaderSpdy31)) {
 		defer func() {
 			resp.Body.Close()
-			g.stopCancel()
-			g.rawConn.Close()
+			g.releasePending()
 		}()
 		responseErrorBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -366,19 +385,27 @@ func (g *guardedSPDY) NewConnection(resp *http.Response) (httpstream.Connection,
 	*g.upgraded = true
 	err := g.rawConn.SetDeadline(time.Time{})
 	g.deadlineMu.Unlock()
-	g.stopCancel()
+	if g.stopCancel != nil {
+		g.stopCancel()
+		g.stopCancel = nil
+	}
 	if err != nil {
-		g.rawConn.Close()
+		g.releasePending()
 		return nil, err
 	}
 	if cerr := g.ctx.Err(); cerr != nil {
-		g.rawConn.Close()
+		g.releasePending()
 		return nil, g.guard.Cause(cerr)
 	}
 	g.guard.Progress()
 
-	sc, err := httpstreamspdy.NewClientConnectionWithPings(g.conn, g.pingPeriod)
+	conn := g.conn
+	rawConn := g.rawConn
+	g.conn = nil
+	g.rawConn = nil
+	sc, err := httpstreamspdy.NewClientConnectionWithPings(conn, g.pingPeriod)
 	if err != nil {
+		_ = rawConn.Close()
 		return nil, err
 	}
 	return &progressConnection{

@@ -122,7 +122,7 @@ func (c *apiClient) requestGuarded(ctx context.Context, method, path string, q u
 	// for writeLoop to leave req.Body.Read before returning, so a stalled
 	// io.PipeReader (WriteFileStream) would otherwise deadlock Do even after
 	// StallGuard cancels gctx.
-	if req.Body != nil {
+	if req.Body != nil && req.Body != http.NoBody {
 		rb := sandbox.ProgressReadCloser(req.Body, guard)
 		req.Body = rb
 		stopBody := context.AfterFunc(gctx, func() { _ = rb.Close() })

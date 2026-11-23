@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,4 +241,88 @@ func TestGuardRoundTripperBoundsWedgedAndMovingHTTP(t *testing.T) {
 			t.Errorf("got %q, want 6 x's", got)
 		}
 	})
+
+	t.Run("nil response body stops guard without panic", func(t *testing.T) {
+		rt := sandbox.GuardRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusNoContent, Body: nil}, nil
+		}), 50*time.Millisecond)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.invalid", http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		if resp.Body != nil {
+			t.Errorf("resp.Body = %v, want nil", resp.Body)
+		}
+	})
+
+	t.Run("request body close is idempotent under concurrent cancel", func(t *testing.T) {
+		var closes atomic.Int32
+		pr, pw := io.Pipe()
+		t.Cleanup(func() { _ = pw.Close() })
+		body := &countingCloser{ReadCloser: pr, closes: &closes}
+
+		rt := sandbox.GuardRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			_, err := io.ReadAll(req.Body)
+			_ = req.Body.Close()
+			return nil, err
+		}), 40*time.Millisecond)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://example.invalid", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = rt.RoundTrip(req)
+		if !errors.Is(err, sandbox.ErrStalled) {
+			t.Fatalf("err = %v, want ErrStalled", err)
+		}
+		if got := closes.Load(); got != 1 {
+			t.Errorf("underlying body Close count = %d, want 1", got)
+		}
+	})
+}
+
+func TestStallGuardStopAndParentCancelDoNotFalselyTrip(t *testing.T) {
+	// An already-cancelled parent context racing a tiny timer must never flip
+	// the guard to ErrStalled.
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, guard := sandbox.NewStallGuard(ctx, time.Nanosecond)
+		// Wait past the timer firing window without sleeping.
+		<-time.After(time.Millisecond)
+		guard.Stop()
+		if err := guard.Cause(context.Canceled); errors.Is(err, sandbox.ErrStalled) {
+			t.Fatalf("iter %d: already-cancelled parent misclassified as ErrStalled: %v", i, err)
+		}
+	}
+
+	// Calling Stop() before the budget expires must prevent watch() from ever
+	// setting tripped later, even if we pause past the original budget before
+	// calling Cause().
+	for i := 0; i < 50; i++ {
+		_, guard := sandbox.NewStallGuard(context.Background(), 2*time.Millisecond)
+		guard.Stop()
+		<-time.After(5 * time.Millisecond)
+		sentinel := errors.New("real transport error")
+		if err := guard.Cause(sentinel); !errors.Is(err, sentinel) || errors.Is(err, sandbox.ErrStalled) {
+			t.Fatalf("iter %d: Cause after Stop = %v, want %v", i, err, sentinel)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type countingCloser struct {
+	io.ReadCloser
+	closes *atomic.Int32
+}
+
+func (c *countingCloser) Close() error {
+	c.closes.Add(1)
+	return c.ReadCloser.Close()
 }

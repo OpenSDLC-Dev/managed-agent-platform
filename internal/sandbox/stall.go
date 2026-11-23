@@ -109,9 +109,13 @@ func (g *StallGuard) Disarm() bool {
 }
 
 // Stop releases the watcher goroutine and cancels the child context. It is
-// idempotent.
+// idempotent and serialized with the watcher so a call that has already ended
+// cannot later flip to ErrStalled.
 func (g *StallGuard) Stop() {
+	g.mu.Lock()
+	g.disarmed = true
 	g.stopOnce.Do(func() { close(g.stop) })
+	g.mu.Unlock()
 	g.cancel()
 }
 
@@ -121,12 +125,15 @@ func (g *StallGuard) Stop() {
 // Trip is a no-op.
 func (g *StallGuard) Trip() {
 	g.mu.Lock()
-	if !g.disarmed {
+	tripped := !g.disarmed
+	if tripped {
 		g.tripped.Store(true)
 		g.stopOnce.Do(func() { close(g.stop) })
-		g.cancel()
 	}
 	g.mu.Unlock()
+	if tripped {
+		g.cancel()
+	}
 }
 
 // Cause names a stall as ErrStalled and passes every other error through. When
@@ -151,7 +158,7 @@ func (g *StallGuard) watch(ctx context.Context) {
 			return
 		case <-t.C:
 			g.mu.Lock()
-			if g.disarmed {
+			if g.disarmed || ctx.Err() != nil {
 				g.mu.Unlock()
 				return
 			}
@@ -164,8 +171,8 @@ func (g *StallGuard) watch(ctx context.Context) {
 				continue
 			}
 			g.tripped.Store(true)
-			g.cancel()
 			g.mu.Unlock()
+			g.cancel()
 			return
 		}
 	}
@@ -216,7 +223,9 @@ func ProgressReadCloser(rc io.ReadCloser, g *StallGuard) io.ReadCloser {
 
 type progressReadCloser struct {
 	io.ReadCloser
-	guard *StallGuard
+	guard     *StallGuard
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (r *progressReadCloser) Read(p []byte) (int, error) {
@@ -225,6 +234,11 @@ func (r *progressReadCloser) Read(p []byte) (int, error) {
 		r.guard.Progress()
 	}
 	return n, err
+}
+
+func (r *progressReadCloser) Close() error {
+	r.closeOnce.Do(func() { r.closeErr = r.ReadCloser.Close() })
+	return r.closeErr
 }
 
 // GuardRoundTripper wraps rt so every HTTP request and response stream is
@@ -246,7 +260,7 @@ type stallRoundTripper struct {
 func (s *stallRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	gctx, guard := NewStallGuard(req.Context(), s.d)
 	r := req.Clone(gctx)
-	if r.Body != nil {
+	if r.Body != nil && r.Body != http.NoBody {
 		rb := ProgressReadCloser(r.Body, guard)
 		r.Body = rb
 		stopBody := context.AfterFunc(gctx, func() { _ = rb.Close() })
@@ -268,6 +282,10 @@ func (s *stallRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, guard.Cause(err)
 	}
 	guard.Progress()
+	if resp.Body == nil {
+		guard.Stop()
+		return resp, nil
+	}
 	resp.Body = GuardReadCloser(resp.Body, guard)
 	return resp, nil
 }

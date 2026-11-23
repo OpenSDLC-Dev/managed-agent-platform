@@ -1941,11 +1941,15 @@ func (pd *pod) WriteFiles(ctx context.Context, files []sandbox.FileWrite) error 
 	}
 	if code == sandbox.ExitBulkExtract {
 		if pErr := pd.prepareBulk(ctx, b); pErr != nil {
-			pd.discardBulk(ctx, b)
+			if !errors.Is(pErr, sandbox.ErrStalled) {
+				pd.discardBulk(ctx, b)
+			}
 			return pErr
 		}
 		if code, stderr, err = pd.deliverBulk(ctx, b); err != nil {
-			pd.discardBulk(ctx, b)
+			if !errors.Is(err, sandbox.ErrStalled) {
+				pd.discardBulk(ctx, b)
+			}
 			return err
 		}
 		if code == sandbox.ExitBulkExtract {

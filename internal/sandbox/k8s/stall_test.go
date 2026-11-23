@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -367,10 +368,9 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 	t.Run("timed Exec disarms stream silence guard after streams open", func(t *testing.T) {
 		// Simulate a silent timed command running longer than 2×budget, then
 		// finishing cleanly and answering readExit.
-		var calls int
+		var calls atomic.Int32
 		_, pd := startFakeKubeletSPDY(t, budget, 5*time.Second, func(w http.ResponseWriter, r *http.Request) {
-			calls++
-			call := calls
+			call := calls.Add(1)
 			acceptSPDYExec(t, w, r, 5*time.Second, func(s *spdyStreams, conn httpstream.Connection) {
 				if call == 1 {
 					// Stay completely silent for 2.5×budget (longer than stall
