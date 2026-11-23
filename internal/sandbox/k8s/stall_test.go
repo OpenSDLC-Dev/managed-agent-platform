@@ -773,7 +773,7 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 	})
 
 	t.Run("handshakeConn refresh after ctx cancel does not overwrite deadline", func(t *testing.T) {
-		c1, c2 := netPipe(t)
+		c1, _ := netPipe(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		gctx, guard := sandbox.NewStallGuard(ctx, 10*time.Second)
 		defer guard.Stop()
@@ -784,22 +784,16 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 		}
 		defer hc.disarm()
 
-		// Deliver 1 byte right before cancelling so the first Read returns n>0
-		// while ctx is already cancelled, exercising refresh() after AfterFunc.
-		go func() {
-			_, _ = c2.Write([]byte("x"))
-		}()
-		var buf [1]byte
-		// Wait briefly for peer write, cancel ctx, then read the buffered byte
-		// and verify a subsequent blocking Read returns promptly instead of
-		// waiting 10s.
-		if _, err := hc.Read(buf[:]); err != nil {
-			t.Fatalf("first Read: %v", err)
-		}
 		cancel()
-		// Trigger refresh() directly after cancel (as happens when Read returns
-		// buffered bytes concurrently with AfterFunc) and ensure the next Read
-		// still hits the immediate cancellation deadline rather than +10s.
+		// Wait deterministically for AfterFunc to install SetDeadline(time.Now())
+		// by observing an initial Read fail with i/o timeout before invoking
+		// refresh().
+		var buf [1]byte
+		if _, err := hc.Read(buf[:]); err == nil {
+			t.Fatal("initial Read after cancel = nil, want timeout error from AfterFunc")
+		}
+		// Now simulate a concurrent buffered Read/Write calling refresh() after
+		// AfterFunc already fired; it must not extend the deadline by +10s.
 		hc.refresh()
 		done := make(chan error, 1)
 		go func() {
@@ -809,10 +803,10 @@ func TestK8sStallGuardExtraPaths(t *testing.T) {
 		select {
 		case err := <-done:
 			if err == nil {
-				t.Fatal("second Read after cancel = nil, want timeout error")
+				t.Fatal("second Read after cancel+refresh = nil, want timeout error")
 			}
 		case <-time.After(500 * time.Millisecond):
-			t.Fatal("hc.Read blocked >500ms after ctx cancel — refresh() overwrote cancellation deadline")
+			t.Fatal("hc.Read blocked >500ms after AfterFunc + refresh() — refresh() overwrote cancellation deadline")
 		}
 	})
 }
