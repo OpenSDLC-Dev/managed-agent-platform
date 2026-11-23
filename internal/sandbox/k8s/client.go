@@ -222,7 +222,17 @@ func (c *client) execStream(ctx context.Context, pod, container string, argv []s
 	if errors.As(err, &codeErr) {
 		return streamResult{code: codeErr.Code}, nil
 	}
-	return streamResult{}, guard.Cause(err)
+	err = guard.Cause(err)
+	// client-go's spdy.Negotiate formats RoundTrip errors with %v rather than
+	// %w, stripping context.Canceled / context.DeadlineExceeded from the chain
+	// when the caller cancels during the HTTP 101 handshake. Restore the
+	// caller's context sentinel when the stall guard did not trip.
+	if !errors.Is(err, sandbox.ErrStalled) {
+		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+			return streamResult{}, fmt.Errorf("%w: %v", cerr, err)
+		}
+	}
+	return streamResult{}, err
 }
 
 func (c *client) spdyExecutor(parentCtx context.Context, u *url.URL, guard *sandbox.StallGuard, boundStream bool) (remotecommand.Executor, error) {

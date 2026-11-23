@@ -89,6 +89,9 @@ func RunTransportStall(t *testing.T, b TransportStallBackend) {
 		if errors.Is(err, sandbox.ErrStalled) {
 			t.Errorf("caller cancellation misclassified as ErrStalled: %v", err)
 		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("caller cancellation err = %v, want context.DeadlineExceeded", err)
+		}
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Errorf("caller cancellation during handshake took %s — raw connection did not observe context", elapsed)
 		}
