@@ -131,6 +131,8 @@ func TestAgentsWorkspaceOverview(t *testing.T) {
 	if ranked.Total != 14 || len(ranked.Agents) != 10 || ranked.Agents[0].ID != other || len(ranked.ActiveTime) != 8 || ranked.ActiveTime[0].ID != id || len(ranked.Series) != 6 || ranked.Series[0].ID == nil || *ranked.Series[0].ID != id || ranked.Series[5].Name != "Other" || ranked.Series[5].ID != nil || ranked.Series[5].Counts[29] != 8 {
 		t.Fatalf("ranked report=%+v", ranked)
 	}
-	expectManagement(t, s, "GET", agentsOverviewPath+"?agent_id=invalid", "", headers, 400)
+	for _, bad := range []string{"agent_id=invalid", "agent_id=%zz", "agent_id=", "agent_id=" + id + "&agent_id=" + other, "direction=desc&direction=asc", "sort=name%00"} {
+		expectManagement(t, s, "GET", agentsOverviewPath+"?"+bad, "", headers, 400)
+	}
 
 }

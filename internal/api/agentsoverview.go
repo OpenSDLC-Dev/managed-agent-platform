@@ -19,7 +19,10 @@ func (s *server) agentsOverview(r *http.Request) (any, error) {
 	if err := consoleWorkspace(r); err != nil {
 		return nil, err
 	}
-	q := r.URL.Query()
+	q, err := managementQuery(r, "agent_id", "sort", "direction")
+	if err != nil {
+		return nil, err
+	}
 	sort := q.Get("sort")
 	if sort == "" {
 		sort = "sessions"
@@ -37,7 +40,7 @@ func (s *server) agentsOverview(r *http.Request) (any, error) {
 		return nil, errInvalid("direction must be asc or desc")
 	}
 	id := q.Get("agent_id")
-	if id != "" {
+	if q.Has("agent_id") {
 		if err := checkAgentPathID(id); err != nil {
 			return nil, err
 		}
@@ -46,6 +49,6 @@ func (s *server) agentsOverview(r *http.Request) (any, error) {
 	// identifiers remain bind parameters. Charts and totals share one MVCC snapshot.
 	order := sort + " " + direction + " NULLS LAST, name ASC, id ASC"
 	var report json.RawMessage
-	err := s.pool.QueryRow(r.Context(), strings.Replace(agentsOverviewSQL, "/* table order */", order, 1), r.PathValue("org"), r.PathValue("workspace"), id).Scan(&report)
+	err = s.pool.QueryRow(r.Context(), strings.Replace(agentsOverviewSQL, "/* table order */", order, 1), r.PathValue("org"), r.PathValue("workspace"), id).Scan(&report)
 	return report, err
 }
