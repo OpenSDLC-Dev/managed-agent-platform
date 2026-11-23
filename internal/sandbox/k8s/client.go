@@ -330,7 +330,7 @@ func (g *guardedSPDY) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	conn, hc, err := g.dialUpgrade(req)
 	if err != nil {
-		return nil, g.classifyHandshakeErr(err)
+		return nil, err
 	}
 
 	br := bufio.NewReader(conn)
@@ -354,7 +354,7 @@ func (g *guardedSPDY) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func (g *guardedSPDY) dialUpgrade(req *http.Request) (net.Conn, *handshakeConn, error) {
 	if err := req.Context().Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, g.classifyHandshakeErr(err)
 	}
 	proxyURL, err := g.proxier(req)
 	if err != nil {
@@ -393,7 +393,7 @@ func (g *guardedSPDY) dialUpgrade(req *http.Request) (net.Conn, *handshakeConn, 
 	if err := req.Write(conn); err != nil {
 		_ = hc.disarm()
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, g.classifyHandshakeErr(err)
 	}
 	return conn, hc, nil
 }
@@ -414,7 +414,7 @@ func (g *guardedSPDY) dialTarget(ctx context.Context, u *url.URL) (net.Conn, *ha
 		if err := tc.HandshakeContext(ctx); err != nil {
 			_ = hc.disarm()
 			_ = tc.Close()
-			return nil, nil, err
+			return nil, nil, g.classifyHandshakeErr(err)
 		}
 		return tc, hc, nil
 	}
@@ -445,14 +445,14 @@ func (g *guardedSPDY) dialHTTPProxy(req *http.Request, proxyURL *url.URL) (net.C
 	if err := connectReq.Write(proxyConn); err != nil {
 		_ = hc.disarm()
 		_ = proxyConn.Close()
-		return nil, nil, err
+		return nil, nil, g.classifyHandshakeErr(err)
 	}
 	br := bufio.NewReader(proxyConn)
 	resp, err := http.ReadResponse(br, &connectReq)
 	if err != nil {
 		_ = hc.disarm()
 		_ = proxyConn.Close()
-		return nil, nil, err
+		return nil, nil, g.classifyHandshakeErr(err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -470,7 +470,7 @@ func (g *guardedSPDY) dialHTTPProxy(req *http.Request, proxyURL *url.URL) (net.C
 		if err := tc.HandshakeContext(ctx); err != nil {
 			_ = hc.disarm()
 			_ = tc.Close()
-			return nil, nil, err
+			return nil, nil, g.classifyHandshakeErr(err)
 		}
 		return tc, hc, nil
 	}
