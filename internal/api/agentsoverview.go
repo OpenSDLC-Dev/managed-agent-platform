@@ -47,6 +47,9 @@ func (s *server) agentsOverview(r *http.Request) (any, error) {
 	}
 	// Only the allowlisted ORDER BY terms enter SQL. All scope and resource
 	// identifiers remain bind parameters. Charts and totals share one MVCC snapshot.
+	if sort == "error_rate" {
+		sort = "CASE WHEN sessions > 0 THEN error_rate END"
+	}
 	order := sort + " " + direction + " NULLS LAST, name ASC, id ASC"
 	var report json.RawMessage
 	err = s.pool.QueryRow(r.Context(), strings.Replace(agentsOverviewSQL, "/* table order */", order, 1), r.PathValue("org"), r.PathValue("workspace"), id).Scan(&report)

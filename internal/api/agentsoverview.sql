@@ -9,10 +9,14 @@ WITH bounds AS (
         s.active_seconds + CASE WHEN s.status = 'running'
             THEN GREATEST(0, extract(epoch FROM b.as_of - s.running_since)) ELSE 0 END AS active,
         COALESCE((
-            SELECT e.type = 'session.status_idle' AND e.payload #>> '{stop_reason,type}' = 'retries_exhausted'
-            FROM events e WHERE e.session_id = s.id
-                AND e.type IN ('session.status_idle', 'session.status_running', 'session.status_rescheduled')
-            ORDER BY e.seq DESC LIMIT 1
+            -- Reconciliation can restate idle after retiring a child. Only a new
+            -- working interval starts a new outcome; cleanup does not run a turn.
+            SELECT e.payload #>> '{stop_reason,type}' = 'retries_exhausted'
+            FROM events e WHERE e.session_id = s.id AND e.type = 'session.status_idle'
+                AND e.seq > coalesce((SELECT t.seq FROM events t WHERE t.session_id = s.id
+                    AND t.type IN ('session.status_running','session.status_rescheduled')
+                    ORDER BY t.seq DESC LIMIT 1), 0)
+            ORDER BY e.seq LIMIT 1
         ), false) AS failed
     FROM sessions s JOIN scoped a ON a.id = s.agent_id CROSS JOIN bounds b
     WHERE s.org_id = $1 AND s.workspace_id = $2
@@ -61,7 +65,7 @@ WITH bounds AS (
 SELECT jsonb_build_object(
     'summary', jsonb_build_object('sessions', sessions, 'agents', agents, 'error_rate', error_rate,
         'session_change', 100.0 * (sessions - previous) / nullif(previous, 0),
-        'error_change', 100.0 * (error_rate - previous_rate) / nullif(previous_rate, 0)),
+        'error_change', CASE WHEN sessions > 0 THEN 100.0 * (error_rate - previous_rate) / nullif(previous_rate, 0) END),
     'days', (SELECT jsonb_agg(day ORDER BY day) FROM days),
     'series', coalesce((SELECT jsonb_agg(to_jsonb(series) - 'position' ORDER BY position) FROM series), '[]'),
     'active_time', coalesce((SELECT jsonb_agg(to_jsonb(b) - 'position' ORDER BY position) FROM busiest b WHERE position <= 8), '[]'),
