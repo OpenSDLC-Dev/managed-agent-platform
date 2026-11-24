@@ -3,12 +3,16 @@ package backend_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/backend"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
 )
@@ -108,6 +112,64 @@ current-context: c
 			err = p.Reap(context.Background(), domain.NewID("sesn"))
 			if !errors.Is(err, sentinel) {
 				t.Errorf("Reap error = %v, want the sentinel revoke error — the revoker did not thread through backend.New", err)
+			}
+		})
+	}
+}
+
+// TestNewThreadsStallTimeout proves backend.Config.StallTimeout reaches both
+// backends' transports by pointing each at a wedged httptest server that accepts
+// connections and never sends headers.
+func TestNewThreadsStallTimeout(t *testing.T) {
+	unblock := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-unblock
+	}))
+	t.Cleanup(func() {
+		close(unblock)
+		srv.Close()
+	})
+
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "`+srv.URL+`"}}]
+contexts: [{name: c, context: {cluster: c}}]
+current-context: c
+`), 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	const budget = 150 * time.Millisecond
+	for _, tc := range []struct {
+		name string
+		cfg  backend.Config
+	}{
+		{"docker", backend.Config{
+			Backend:      "docker",
+			DockerHost:   "tcp://" + strings.TrimPrefix(srv.URL, "http://"),
+			StallTimeout: budget,
+		}},
+		{"k8s", backend.Config{
+			Backend:       "k8s",
+			K8sKubeconfig: kubeconfig,
+			StallTimeout:  budget,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := backend.New(tc.cfg)
+			if err != nil {
+				t.Fatalf("New(%s) = %v", tc.name, err)
+			}
+			// Bound Owned with an outer deadline well above the 150ms configured
+			// budget and well below the 5m default, so losing the StallTimeout
+			// forwarding fails promptly with context.DeadlineExceeded instead of
+			// waiting 5m and still returning ErrStalled.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, err = p.Owned(ctx)
+			if !errors.Is(err, sandbox.ErrStalled) {
+				t.Fatalf("Owned on wedged %s endpoint = %v, want sandbox.ErrStalled", tc.name, err)
 			}
 		})
 	}

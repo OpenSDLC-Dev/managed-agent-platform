@@ -41,7 +41,21 @@ func TestK8sProviderContract(t *testing.T) {
 		// limit (it is the kubelet's `podPidsLimit` node setting), so the
 		// suite's pids row is not registered here. docs/DIVERGENCES.md records
 		// it; TestPodSpecIgnoresPidsLimit keeps it deliberate.
-		return sandboxtest.Harness{Provider: provider, Image: testImage, Gate: k8sGateFixture}
+		return sandboxtest.Harness{
+			Provider: provider, Image: testImage, Gate: k8sGateFixture,
+			WithStallTimeout: func(t *testing.T, d time.Duration) sandbox.Provider {
+				t.Helper()
+				p, err := k8s.New(k8s.Config{
+					Context:      os.Getenv("MAP_K8S_CONTEXT"),
+					Namespace:    os.Getenv("MAP_K8S_NAMESPACE"),
+					StallTimeout: d,
+				})
+				if err != nil {
+					t.Fatalf("k8s.New(StallTimeout=%s): %v", d, err)
+				}
+				return p
+			},
+		}
 	})
 }
 

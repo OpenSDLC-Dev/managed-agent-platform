@@ -80,6 +80,10 @@
 //	                         `docker build --target gate`); opts into the gate
 //	                         together with CONTROLPLANE_URL
 //	SANDBOX_BACKEND          "docker" (default) or "k8s"
+//	SANDBOX_STALL_TIMEOUT    per-call sandbox transport silence budget, Go
+//	                         duration (default "5m"); a call moving zero bytes
+//	                         for this long fails with sandbox.ErrStalled (#395).
+//	                         Malformed or non-positive fails startup
 //	DOCKER_HOST              Docker daemon address for the docker backend
 //	                         (falls back to the well-known socket)
 //	SANDBOX_DOCKER_GATE_NETWORK   Docker network a session's egress-gate
@@ -342,9 +346,15 @@ func run(ctx context.Context) error {
 	// literal above, where the pool does not exist yet.
 	cfg.ReapKickConn = pool.Config().ConnConfig.Copy()
 
+	sandboxStallTimeout, err := sandbox.ParseStallTimeout("SANDBOX_STALL_TIMEOUT", os.Getenv("SANDBOX_STALL_TIMEOUT"))
+	if err != nil {
+		return err
+	}
+
 	provider, err := backend.New(backend.Config{
 		Backend:             os.Getenv("SANDBOX_BACKEND"),
 		GateTokenRevoker:    executor.GateTokenRevoker(pool),
+		StallTimeout:        sandboxStallTimeout,
 		DockerHost:          os.Getenv("DOCKER_HOST"),
 		DockerGateNetwork:   os.Getenv("SANDBOX_DOCKER_GATE_NETWORK"),
 		K8sKubeconfig:       os.Getenv("SANDBOX_K8S_KUBECONFIG"),

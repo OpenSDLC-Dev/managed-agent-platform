@@ -6,6 +6,7 @@ package backend
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/docker"
@@ -24,6 +25,11 @@ type Config struct {
 	// executor supplies a pool-backed implementation; the BYOC worker, which
 	// has no database, leaves it nil and Reap skips revocation.
 	GateTokenRevoker sandbox.GateTokenRevoker
+
+	// StallTimeout bounds how long a single sandbox transport call may move
+	// zero bytes before failing with sandbox.ErrStalled (#395). Zero or less
+	// takes sandbox.DefaultStallTimeout.
+	StallTimeout time.Duration
 
 	// docker: empty Host falls back to DOCKER_HOST and then the well-known socket.
 	DockerHost string
@@ -64,6 +70,7 @@ func New(cfg Config) (sandbox.Provider, error) {
 			Host:             cfg.DockerHost,
 			GateNetwork:      cfg.DockerGateNetwork,
 			GateTokenRevoker: cfg.GateTokenRevoker,
+			StallTimeout:     cfg.StallTimeout,
 		})
 	case "k8s":
 		return k8s.New(k8s.Config{
@@ -76,6 +83,7 @@ func New(cfg Config) (sandbox.Provider, error) {
 			Tolerations:      cfg.K8sTolerations,
 			ImagePullSecrets: cfg.K8sImagePullSecrets,
 			GateTokenRevoker: cfg.GateTokenRevoker,
+			StallTimeout:     cfg.StallTimeout,
 		})
 	default:
 		return nil, fmt.Errorf("sandbox backend %q is not one of docker, k8s", cfg.Backend)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dockertest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -32,6 +33,14 @@ func TestDockerProviderContract(t *testing.T) {
 			Provider: provider, Image: testImage, Gate: gateFixture,
 			// The daemon caps a single container's process count (HostConfig.PidsLimit).
 			EnforcesPidsLimit: true,
+			WithStallTimeout: func(t *testing.T, d time.Duration) sandbox.Provider {
+				t.Helper()
+				p, err := docker.New(docker.Config{StallTimeout: d})
+				if err != nil {
+					t.Fatalf("docker.New(StallTimeout=%s): %v", d, err)
+				}
+				return p
+			},
 		}
 	})
 }

@@ -55,6 +55,10 @@ type Harness struct {
 	Image             string
 	Gate              func(t *testing.T) GateFixture
 	EnforcesPidsLimit bool
+	// WithStallTimeout builds a provider targeting the same backend with its
+	// per-call silence budget set to d (#395). Required by Run so every backend
+	// is held to the same silence-bound contract.
+	WithStallTimeout func(t *testing.T, d time.Duration) sandbox.Provider
 }
 
 const workdir = "/workspace"
@@ -2174,6 +2178,10 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	if newHarness(t).Gate != nil {
 		gateRows(t, newHarness)
 	}
+
+	// Silence-bound rows (#395): every backend is held to the same per-call
+	// transport silence contract against real sandboxes.
+	runLiveStallContract(t, newHarness)
 }
 
 // containsID reports whether the Owned listing carries the session — the reap

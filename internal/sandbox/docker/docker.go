@@ -200,6 +200,10 @@ type Config struct {
 	// pool-backed implementation it puts on every Spec; the BYOC worker, which
 	// has no database, leaves it nil and Reap skips revocation.
 	GateTokenRevoker sandbox.GateTokenRevoker
+	// StallTimeout bounds how long a single Docker transport call may move zero
+	// bytes before failing with sandbox.ErrStalled (#395). Zero or less takes
+	// sandbox.DefaultStallTimeout.
+	StallTimeout time.Duration
 }
 
 // Provider provisions per-session containers.
@@ -240,7 +244,7 @@ func (p *Provider) warnUnenforceableEphemeralStorage(ctx context.Context, h sand
 }
 
 func New(cfg Config) (*Provider, error) {
-	api, err := newAPIClient(cfg.Host)
+	api, err := newAPIClient(cfg.Host, cfg.StallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -1147,9 +1151,11 @@ func (c *container) Exec(ctx context.Context, req sandbox.ExecRequest) (sandbox.
 
 	// Start the clock before the request that starts the command, so the round
 	// trip is charged to the sandbox and never shortens the command's measured
-	// life.
+	// life. Untimed execs stay silence-guarded through stream EOF; timed execs
+	// guard only the HTTP handshake because the command may legitimately run
+	// silently up to ExecRequest.Timeout (which runCtx already bounds).
 	start := time.Now()
-	stream, err := c.api.execStart(runCtx, execID)
+	stream, err := c.api.execStart(runCtx, execID, seconds == 0)
 	if err != nil {
 		return sandbox.ExecResult{}, c.wrap(err)
 	}
@@ -1468,7 +1474,7 @@ func (c *container) openFile(ctx context.Context, path string, maxBytes int64) (
 		if statusIs(err, 404) && !containerGone(err) {
 			return nil, fileEntry{}, fmt.Errorf("%s: %w", path, sandbox.ErrFileNotExist)
 		}
-		if !containerGone(err) {
+		if !containerGone(err) && !errors.Is(err, sandbox.ErrStalled) {
 			// The daemon reports a path blocked by a non-directory as a plain 500
 			// carrying its own lstat message, so what the read hit is asked in the
 			// sandbox rather than parsed out of that message. It is the read's
@@ -1518,6 +1524,9 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 		return err
 	}
 	err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
+	if errors.Is(err, sandbox.ErrStalled) {
+		return err
+	}
 	if err != nil && !containerGone(err) {
 		// The archive endpoint creates nothing and refuses an unusable extraction
 		// point three ways: 404 for a directory that is missing, 400 for one that
@@ -1531,14 +1540,19 @@ func (c *container) WriteFile(ctx context.Context, path string, data []byte) err
 			// mid-transfer left a piece of the entry behind; shed it on the way out
 			// rather than let the directory keep it. Nothing is in flight here, so
 			// the daemon can also take back what the sandbox user's rm could not.
-			c.discard(ctx, tmp)
-			c.reclaim(ctx, tmp)
+			if !errors.Is(mkErr, sandbox.ErrStalled) {
+				c.discard(ctx, tmp)
+				c.reclaim(ctx, tmp)
+			}
 			return mkErr
 		}
 		err = c.api.putArchive(ctx, c.id, dir, bytes.NewReader(tarball))
 	}
 	if containerGone(err) {
 		return c.gone()
+	}
+	if errors.Is(err, sandbox.ErrStalled) {
+		return err
 	}
 	if err != nil {
 		// Whatever of the entry landed is nobody's file; the stream path sheds its
@@ -1581,6 +1595,7 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(streamTarFile(pw, gopath.Base(tmp), src, size)) }()
 	err = c.api.putArchive(ctx, c.id, dir, pr)
+	_ = pr.CloseWithError(err)
 	if containerGone(err) {
 		return c.gone()
 	}
@@ -1589,11 +1604,13 @@ func (c *container) WriteFileStream(ctx context.Context, path string, src io.Rea
 		// would cost a failed 500 MB mount 500 MB of the sandbox's disk.
 		c.discard(ctx, tmp)
 		c.reclaim(ctx, tmp)
-		if cErr := c.unreplaceable(ctx, path); cErr != nil {
-			return cErr
-		}
-		if cErr := c.notWritable(ctx, path); cErr != nil {
-			return cErr
+		if !errors.Is(err, sandbox.ErrStalled) {
+			if cErr := c.unreplaceable(ctx, path); cErr != nil {
+				return cErr
+			}
+			if cErr := c.notWritable(ctx, path); cErr != nil {
+				return cErr
+			}
 		}
 		return err
 	}
@@ -1639,17 +1656,24 @@ func (c *container) WriteFiles(ctx context.Context, files []sandbox.FileWrite) e
 		if containerGone(err) {
 			return c.gone()
 		}
-		c.shedBulk(ctx, b)
+		if !errors.Is(err, sandbox.ErrStalled) {
+			c.shedBulk(ctx, b)
+		}
 		return err
 	}
 	if err := c.prepareBulk(ctx, b); err != nil {
-		c.shedBulk(ctx, b)
+		if !errors.Is(err, sandbox.ErrStalled) {
+			c.shedBulk(ctx, b)
+		}
 		return err
 	}
 	if err := c.putBulk(ctx, b.Members(c.readOnlyRoot)); err != nil {
 		if containerGone(err) {
 			c.shedBulk(ctx, b)
 			return c.gone()
+		}
+		if errors.Is(err, sandbox.ErrStalled) {
+			return err
 		}
 		// Asked before the shed, which takes away the manifest it reads.
 		rErr := c.refusedBulk(ctx, b)
