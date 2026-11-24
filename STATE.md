@@ -4,8 +4,8 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-None.
+Agents workspace overview for the native Console. See the [private report contract](./docs/DIVERGENCES.md#private-agents-workspace-report).
 
 ## Tasks
 
-None.
+The [PostgreSQL contract](./internal/api/agentsoverview_test.go) covers authorization, window boundaries, error recovery, active clocks and chart ranks. Consumer acceptance runs in managed-agent-console.
