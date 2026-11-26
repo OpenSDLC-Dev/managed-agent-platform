@@ -431,7 +431,29 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 
 	var gateID, volume, mintedToken string
 	if spec.Gate != nil {
-		gate, token, gerr := p.ensureGate(ctx, spec)
+		beforeCreate := func() error {
+			existing, eerr := p.api.inspectContainer(ctx, name)
+			switch {
+			case statusIs(eerr, 404):
+				return nil
+			case eerr != nil:
+				return eerr
+			}
+			if oerr := ours(existing, spec.SessionID); oerr != nil {
+				return oerr
+			}
+			if strings.HasPrefix(existing.HostConfig.NetworkMode, "container:") {
+				// A legacy gated workspace never passed UID-guard admission;
+				// refuse it intact with plain ErrSpecMismatch rather than
+				// triggering automatic migration.
+				if err := guardedSandbox(existing, borrowedGuard(existing.Mounts)); err != nil {
+					return err
+				}
+			}
+			return fmt.Errorf("docker: sandbox %s gate shape (%q) does not match requested gate: %w (%w)",
+				existing.ID, existing.HostConfig.NetworkMode, sandbox.ErrGateShapeMismatch, sandbox.ErrSpecMismatch)
+		}
+		gate, token, gerr := p.ensureGate(ctx, spec, beforeCreate)
 		if gerr != nil {
 			return nil, gerr
 		}
@@ -458,61 +480,20 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sb sandbox
 			sb, _, err := p.startSandbox(ctx, info, workdir, gateID, volume, !info.State.Running)
 			return sb, err
 		}
-		// The sandbox's egress path no longer matches the session's shape: gated
-		// but attached to a different (or since-removed) gate — a stale pairing (a
-		// recreated gate, or a pre-gate `bridge` sandbox from before this session
-		// was gated) — or ungated but still routed through a gate (the session's
-		// gate opt-in was removed). Remove it and recreate it on the current
-		// egress path rather than adopt one with the wrong pairing.
-		if gateID == "" {
-			// Gated→ungated: no replacement gate will re-mint, so revoke the
-			// session's persisted token before dismantling the pair — it must not
-			// outlive its gate (#197). Revoke comes first because it is
-			// idempotent: a teardown that fails below retries both on the next
-			// provision, whereas revoking after a completed teardown would lose
-			// the trigger (this mismatch observation) if the revoke itself failed.
-			if spec.GateTokenRevoker != nil {
-				if rerr := spec.GateTokenRevoker.Revoke(ctx, spec.SessionID); rerr != nil {
-					return nil, fmt.Errorf("docker: revoke gate token for session %s: %w", spec.SessionID, rerr)
-				}
-			}
-		}
+		// The sandbox's egress path no longer matches the session's shape:
+		// refuse intact rather than deleting an existing workspace inside
+		// Provision. The caller owns checkpointing, reaping (which also revokes
+		// any old gate token), re-provisioning, and restoring.
 		oldGuard := borrowedGuard(info.Mounts)
 		if gateID != "" && strings.HasPrefix(info.HostConfig.NetworkMode, "container:") {
-			// A stale guarded pair can be rebuilt. A legacy workspace has
-			// never passed admission; refuse it intact even if its gate died.
+			// A legacy workspace has never passed UID-guard admission; refuse
+			// it intact with plain ErrSpecMismatch even if its gate died.
 			if err := guardedSandbox(info, oldGuard); err != nil {
 				return nil, err
 			}
 		}
-		if rerr := removeIgnoring404(ctx, p.api, info.ID); rerr != nil {
-			return nil, rerr
-		}
-		if err := p.api.releaseGuard(ctx, spec.SessionID, oldGuard); err != nil {
-			return nil, err
-		}
-		if gateID == "" {
-			// The gate half of the dismantled pair, found by its deterministic
-			// name; 404 means it is already gone. Inspect-then-remove, and only a
-			// gate carrying this session's ownership label (the `ours` check every
-			// adoption path makes): the name is a convention, and force-removing
-			// whatever holds it could take out a container the platform does not
-			// own. A gate orphaned the other way (its sandbox gone but the pair
-			// never re-provisioned ungated) is the standalone teardown reaper's to
-			// collect — same owner as the orphan-gate race noted above.
-			gi, gerr := p.api.inspectContainer(ctx, gateName(spec.SessionID))
-			switch {
-			case gerr == nil:
-				if oerr := ours(gi, spec.SessionID); oerr != nil {
-					return nil, oerr
-				}
-				if rerr := removeIgnoring404(ctx, p.api, gi.ID); rerr != nil {
-					return nil, rerr
-				}
-			case !statusIs(gerr, 404):
-				return nil, gerr
-			}
-		}
+		return nil, fmt.Errorf("docker: sandbox %s gate shape (%q) does not match requested gate %q: %w (%w)",
+			info.ID, info.HostConfig.NetworkMode, gateID, sandbox.ErrGateShapeMismatch, sandbox.ErrSpecMismatch)
 	case !statusIs(ierr, 404):
 		return nil, ierr
 	}

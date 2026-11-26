@@ -2654,7 +2654,8 @@ func TestPodSpecGatedUnrestrictedShape(t *testing.T) {
 		t.Errorf("gated unrestricted sandbox command = %v, want uidguard prefix %q", sb.Command, uidguard.Path)
 	}
 
-	// Provision replaces a pre-existing ungated unrestricted pod with a gated one.
+	// Provision refuses an existing ungated unrestricted pod intact so the
+	// executor can checkpoint and migrate it without losing workspace state.
 	m := &mintRecorder{}
 	sid := domain.ID("sesn_unrestricted_reshape")
 	rp := fakeProvider(readyPod(sid))
@@ -2664,8 +2665,32 @@ func TestPodSpecGatedUnrestrictedShape(t *testing.T) {
 		Image:      "img",
 		Networking: domain.Networking{Type: domain.NetUnrestricted},
 		Gate:       gateSpecFixture(m),
+	}); !errors.Is(err, sandbox.ErrGateShapeMismatch) || !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Fatalf("Provision (over ungated unrestricted pod) = %v, want ErrGateShapeMismatch/ErrSpecMismatch", err)
+	}
+	existing, err := rp.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("existing ungated pod was deleted on refusal: %v", err)
+	}
+	if hasGateSidecar(existing) {
+		t.Error("existing ungated pod was replaced without checkpoint migration")
+	}
+	if m.generated != 0 || len(m.persisted) != 0 {
+		t.Errorf("refusal minted %d / persisted %d, want 0/0", m.generated, len(m.persisted))
+	}
+
+	// After an explicit Reap (as migrateGateShape performs post-checkpoint),
+	// Provision creates the gated unrestricted pod cleanly.
+	if err := rp.Reap(context.Background(), sid); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if _, err := rp.Provision(context.Background(), sandbox.Spec{
+		SessionID:  sid,
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		Gate:       gateSpecFixture(m),
 	}); err != nil {
-		t.Fatalf("Provision (upgrade ungated unrestricted pod): %v", err)
+		t.Fatalf("Provision (fresh gated unrestricted pod after Reap): %v", err)
 	}
 	rebuilt, err := rp.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
 	if err != nil {
@@ -2675,7 +2700,7 @@ func TestPodSpecGatedUnrestrictedShape(t *testing.T) {
 		t.Error("rebuilt unrestricted pod has no gate sidecar")
 	}
 	if m.generated != 1 || len(m.persisted) != 1 {
-		t.Errorf("upgrade minted %d / persisted %d, want 1/1", m.generated, len(m.persisted))
+		t.Errorf("fresh gated create minted %d / persisted %d, want 1/1", m.generated, len(m.persisted))
 	}
 }
 
@@ -2727,69 +2752,66 @@ func TestProvisionGatedMintsOnlyOnCreate(t *testing.T) {
 	}
 }
 
-// TestProvisionGateShapeMismatchRebuilds: a pre-gate pod on a now-gated
-// session is replaced by a gated pod (and the reverse), minting only for the
-// gated create and revoking only for the ungated dismantle (#197).
-func TestProvisionGateShapeMismatchRebuilds(t *testing.T) {
+// TestProvisionGateShapeMismatchRefusesIntact: a pre-gate pod on a now-gated
+// session (and the reverse) is refused intact with ErrGateShapeMismatch
+// (wrapping ErrSpecMismatch), deleting nothing, minting nothing, and revoking
+// nothing so the executor can checkpoint before Reap + Provision.
+func TestProvisionGateShapeMismatchRefusesIntact(t *testing.T) {
 	m := &mintRecorder{}
 	sid := domain.ID("sesn_reshape")
 	p := fakeProvider(readyPod(sid)) // pre-gate shape, ready
-	markPodsReadyOnCreate(p)
+	cs := p.client.cs.(*fake.Clientset)
+	deletes := 0
+	cs.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		deletes++
+		return false, nil, nil
+	})
 	spec := sandbox.Spec{SessionID: sid, Image: "img",
 		Networking: domain.Networking{Type: domain.NetLimited}, Gate: gateSpecFixture(m),
 		GateTokenRevoker: m}
-	if _, err := p.Provision(context.Background(), spec); err != nil {
-		t.Fatalf("provision (reshape to gated): %v", err)
+	if _, err := p.Provision(context.Background(), spec); !errors.Is(err, sandbox.ErrGateShapeMismatch) || !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Fatalf("provision (ungated→gated) = %v, want ErrGateShapeMismatch/ErrSpecMismatch", err)
 	}
 	pod, err := p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get rebuilt pod: %v", err)
+		t.Fatalf("existing pod missing after refusal: %v", err)
 	}
-	if !hasGateSidecar(pod) {
-		t.Error("rebuilt pod has no gate sidecar")
+	if hasGateSidecar(pod) {
+		t.Error("refused ungated pod was replaced with a gated pod")
 	}
-	if m.generated != 1 || len(m.persisted) != 1 {
-		t.Errorf("reshape minted %d/persisted %d, want exactly one", m.generated, len(m.persisted))
-	}
-	if len(m.revoked) != 0 {
-		t.Errorf("gated reshape revoked %v; replacement is Ensure's revoke-on-re-mint, not Revoke", m.revoked)
+	if deletes != 0 || m.generated != 0 || len(m.persisted) != 0 || len(m.revoked) != 0 {
+		t.Errorf("ungated→gated refusal mutated state: deletes=%d generated=%d persisted=%v revoked=%v",
+			deletes, m.generated, m.persisted, m.revoked)
 	}
 
-	// The reverse: the session no longer wants a gate — the gated pod is
-	// replaced by a plain one, with no further minting, and the dismantled
-	// gate's token is revoked exactly once (no replacement will re-mint it),
-	// before the pod teardown — the ordering that lets a failed teardown
-	// retry both instead of losing the trigger.
+	// The reverse: an ungated provision over an existing gated pod also refuses
+	// intact with ErrGateShapeMismatch without deleting or revoking.
+	gatedPod := readyFromSpec(fakeProvider(), sandbox.DefaultWorkdir, spec)
+	gatedPod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: gateContainerName, Ready: true}}
+	pg := fakeProvider(gatedPod)
+	gatedDeletes := 0
+	pg.client.cs.(*fake.Clientset).PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gatedDeletes++
+		return false, nil, nil
+	})
 	revokes := 0
 	specUngated := sandbox.Spec{SessionID: sid, Image: "img",
-		GateTokenRevoker: revokerFunc(func(ctx context.Context, got domain.ID) error {
-			if got != sid {
-				t.Errorf("revoked %s, want %s", got, sid)
-			}
-			if _, gerr := p.client.cs.CoreV1().Pods("default").Get(ctx, podName(sid), metav1.GetOptions{}); gerr != nil {
-				t.Errorf("revoke arrived with the gated pod already gone (%v); it must precede the teardown", gerr)
-			}
+		GateTokenRevoker: revokerFunc(func(context.Context, domain.ID) error {
 			revokes++
 			return nil
 		})}
-	if _, err := p.Provision(context.Background(), specUngated); err != nil {
-		t.Fatalf("provision (reshape to ungated): %v", err)
+	if _, err := pg.Provision(context.Background(), specUngated); !errors.Is(err, sandbox.ErrGateShapeMismatch) || !errors.Is(err, sandbox.ErrSpecMismatch) {
+		t.Fatalf("provision (gated→ungated) = %v, want ErrGateShapeMismatch/ErrSpecMismatch", err)
 	}
-	pod, err = p.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	pod, err = pg.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get re-rebuilt pod: %v", err)
+		t.Fatalf("existing gated pod missing after refusal: %v", err)
 	}
-	if hasGateSidecar(pod) {
-		t.Error("ungated reshape kept the gate sidecar")
+	if !hasGateSidecar(pod) {
+		t.Error("existing gated pod was replaced on refusal")
 	}
-	if m.generated != 1 {
-		t.Errorf("ungated reshape minted (generated=%d)", m.generated)
-	}
-	if revokes != 1 {
-		t.Errorf("ungated reshape revoked %d times, want exactly once", revokes)
-	}
-	if len(m.revoked) != 0 {
-		t.Errorf("the gated spec's revoker was called (%v); only the ungated reshape revokes", m.revoked)
+	if gatedDeletes != 0 || revokes != 0 {
+		t.Errorf("gated→ungated refusal mutated state: deletes=%d revokes=%d", gatedDeletes, revokes)
 	}
 }
 

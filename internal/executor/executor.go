@@ -742,7 +742,7 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		}
 		progress()
 	}
-	sb, err := e.provider.Provision(ctx, sandbox.Spec{
+	spec := sandbox.Spec{
 		SessionID:  sessionID,
 		Image:      e.cfg.Image,
 		Workdir:    e.cfg.Workdir,
@@ -750,11 +750,15 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		Env:        env,
 		Hardening:  e.cfg.Hardening,
 		Gate:       e.gateSpec(sess),
-		// Set unconditionally, unlike Gate: the revoker is for the provision
-		// that finds a gate it must dismantle, and that provision's own spec
-		// is the ungated one.
+		// Kept populated for backwards compatibility with providers; gate-shape
+		// changes now go through migrateGateShape → Reap, which revokes via the
+		// provider's revoker before removing containers/pods.
 		GateTokenRevoker: gateTokenMinter{pool: e.pool},
-	})
+	}
+	sb, err := e.provider.Provision(ctx, spec)
+	if errors.Is(err, sandbox.ErrGateShapeMismatch) && !restore {
+		sb, blobKey, restore, err = e.migrateGateShape(ctx, conn, sessionID, sess, spec, progress)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
 	}
@@ -780,6 +784,62 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		return nil, fmt.Errorf("install packages: %w", err)
 	}
 	return sb, nil
+}
+
+// migrateGateShape safely replaces an intact sandbox whose egress-gate shape
+// does not match spec (for example, an already-running ungated unrestricted
+// sandbox after the gate is enabled) without losing its workspace, outputs, or
+// persistent shell state. The caller holds the per-session advisory lock on
+// conn.
+//
+// Fails closed with the existing sandbox untouched if no object store is
+// configured or if memory sync / checkpoint capture fails (including an
+// over-budget workspace or unreadable sandbox): unlike idle TTL reaping, an
+// upgrade-driven gate-shape change never degrades to silent data loss.
+//
+// Crash safety follows plan 24 D6: captureCheckpoint writes the `ready`
+// marker before Reap removes the old sandbox, so a crash during Reap,
+// Provision, or restore leaves the `ready` marker standing and the next
+// provisionSandbox call replays Reap → Provision → restoreCheckpoint cleanly.
+func (e *Executor) migrateGateShape(ctx context.Context, conn rowQueryer, sessionID domain.ID, sess sessionRun, spec sandbox.Spec, progress func()) (sandbox.Sandbox, string, bool, error) {
+	if e.blobs == nil {
+		return nil, "", false, fmt.Errorf("cannot migrate existing sandbox gate shape without an object store configured: %w", sandbox.ErrGateShapeMismatch)
+	}
+	if len(sess.memories) > 0 {
+		switch existing, err := e.provider.Attach(ctx, sessionID); {
+		case err == nil:
+			if err := e.syncMemoryNow(ctx, existing, sessionID, sess.memories, progress); err != nil {
+				return nil, "", false, fmt.Errorf("sync memory before gate-shape migration: %w", err)
+			}
+			progress()
+		case errors.Is(err, sandbox.ErrNotFound):
+			// On Docker a stopped container is ErrNotFound to Attach yet still
+			// readable by Export; proceed to captureCheckpoint, which fails
+			// closed if the sandbox cannot be read.
+		default:
+			return nil, "", false, fmt.Errorf("attach sandbox before gate-shape migration: %w", err)
+		}
+	}
+	if err := e.captureCheckpoint(ctx, sessionID); err != nil {
+		return nil, "", false, fmt.Errorf("checkpoint sandbox before gate-shape migration: %w", err)
+	}
+	progress()
+	marker, blobKey, err := checkpointMarker(ctx, conn, sessionID)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read migration checkpoint marker: %w", err)
+	}
+	if marker != "ready" {
+		return nil, "", false, fmt.Errorf("migration checkpoint marker = %q, want ready", marker)
+	}
+	if err := e.provider.Reap(ctx, sessionID); err != nil {
+		return nil, "", false, fmt.Errorf("reap sandbox for gate-shape migration: %w", err)
+	}
+	progress()
+	sb, err := e.provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return sb, blobKey, true, nil
 }
 
 // sandboxEnv resolves the session's attached vaults into the environment

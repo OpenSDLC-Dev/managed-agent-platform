@@ -37,7 +37,10 @@ func gateName(sessionID domain.ID) string { return "map-gate-" + string(sessionI
 
 // ensureGate returns the running, healthy owner of the sandbox's network
 // namespace, and the minted token only when this call created the gate.
-func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (containerInfo, string, error) {
+// When no gate exists yet (404), beforeCreate runs before minting a token or
+// creating a new gate container so Provision can refuse an existing mismatched
+// sandbox intact without allocating an unused gate.
+func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec, beforeCreate func() error) (containerInfo, string, error) {
 	name := gateName(spec.SessionID)
 	info, ierr := p.api.inspectContainer(ctx, name)
 	switch {
@@ -64,6 +67,12 @@ func (p *Provider) ensureGate(ctx context.Context, spec sandbox.Spec) (container
 		}
 	case !statusIs(ierr, 404):
 		return containerInfo{}, "", ierr
+	default:
+		if beforeCreate != nil {
+			if err := beforeCreate(); err != nil {
+				return containerInfo{}, "", err
+			}
+		}
 	}
 
 	// Create. Mint an in-memory token, create the container with it, and persist

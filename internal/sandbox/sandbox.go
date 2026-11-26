@@ -58,6 +58,14 @@ var (
 	// lifecycle the platform does not have. Both backends produce it, from
 	// their twin `adoptable` checks (#29 docker, #296 k8s).
 	ErrSpecMismatch = errors.New("sandbox: existing sandbox does not match the requested spec")
+	// ErrGateShapeMismatch reports an existing owned sandbox whose egress-gate
+	// shape (ungated vs gated, or paired with a different/retired gate) does not
+	// match the requested Spec.Gate. Both backends refuse to delete an intact
+	// sandbox inside Provision and return an error matching both
+	// ErrGateShapeMismatch and ErrSpecMismatch so the caller can perform a safe
+	// migration (sync memory, capture a workspace checkpoint, Reap, Provision,
+	// and restore) or fail closed with the existing sandbox untouched.
+	ErrGateShapeMismatch = errors.New("sandbox: existing sandbox gate shape does not match the requested spec")
 	// ErrFileNotExist reports a read of a path that does not exist.
 	ErrFileNotExist = errors.New("sandbox: no such file")
 	// ErrIsDirectory reports a file read of a directory, or a write onto one.

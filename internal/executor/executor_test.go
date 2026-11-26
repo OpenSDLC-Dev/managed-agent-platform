@@ -418,10 +418,11 @@ func (f *fakeSandbox) WriteFiles(ctx context.Context, files []sandbox.FileWrite)
 func (f *fakeSandbox) Destroy(context.Context) error { return nil }
 
 type fakeProvider struct {
-	sb           *fakeSandbox
-	provisionErr error
-	provisions   int
-	lastSpec     sandbox.Spec // captured for env-injection assertions
+	sb            *fakeSandbox
+	provisionErr  error
+	provisionHook func(sandbox.Spec) (sandbox.Sandbox, error)
+	provisions    int
+	lastSpec      sandbox.Spec // captured for env-injection assertions
 	// entered/gate mirror fakeSandbox's, for a test that holds provisioning open
 	// (a slow image pull) to observe the lease keeper renew across it.
 	entered chan struct{}
@@ -486,6 +487,9 @@ func (p *fakeProvider) Provision(ctx context.Context, spec sandbox.Spec) (sandbo
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if p.provisionHook != nil {
+		return p.provisionHook(spec)
 	}
 	if p.provisionErr != nil {
 		return nil, p.provisionErr
