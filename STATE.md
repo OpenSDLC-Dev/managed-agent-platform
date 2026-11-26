@@ -10,4 +10,6 @@ Agents workspace overview for the native Console. See the [private report contra
 
 ## Tasks
 
+The [Default upgrade contract](./internal/store/workspaces_migration_test.go) compares effective roles before and after migration and exercises existing credentials and work. The [HTTP grant contract](./internal/api/workspacemembership_test.go) checks live authorization changes. Stage 3 covers resource storage and execution isolation.
+
 The [PostgreSQL contract](./internal/api/agentsoverview_test.go) covers authorization, window boundaries, error recovery, active clocks and chart ranks. Consumer acceptance runs in managed-agent-console.

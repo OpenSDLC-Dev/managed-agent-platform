@@ -83,8 +83,8 @@ Console requires its signed-in human session and CSRF on writes.
   policy. Claude derives Default access from the organization role and gives it no separate
   member list. Record this divergence when membership ships.
   [Default workspace FAQ](https://platform.claude.com/docs/en/manage-claude/workspaces#whats-the-default-workspace)
-  Update the old grant/revoke flow to edit Default
-  membership atomically, including during the rolling upgrade.
+  Keep legacy Playground grant and revoke statements atomic with Default membership
+  changes after the maintenance cutover.
 - Preserve continuation for a still-active initiator whose role was reduced to User
   before upgrade. Record eligibility on existing Default sessions, dreams and deployments
   and propagate it only to work they spawn. This covers an initiator with no Playground
@@ -93,7 +93,7 @@ Console requires its signed-in human session and CSRF on writes.
   ends continuation, as does workspace archival. A role-only change preserves continuation.
 - Bind existing owned keys, resources, sessions, deployments and usage history to Default,
   preserving IDs, owners, issuers and immutable initiators. Apply the same initialization
-  to records written by old replicas during rollout. Replay the backfill without changing
+  to legacy-format writes after cutover. Replay the backfill without changing
   an operator's later grant or resurrecting a revoked one. Inventory unexpected historical
   scope triples before adding constraints and report affected rows for reconciliation.
   Assign new migration numbers when implementing the slice.
