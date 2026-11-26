@@ -162,16 +162,17 @@ type Config struct {
 	// Config by hand wants; cmd/executor resolves the platform's defaults from
 	// the environment (sandbox.HardeningFromEnv), so every deployment gets them.
 	Hardening sandbox.Hardening
-	// ControlplaneURL and GateImage opt the deployment into the per-session egress
-	// gate. A session wants a gate when its networking is `limited` or it has
-	// vaults attached; its gate container (GateImage) fetches that session's egress
-	// config from ControlplaneURL. When both are set, a gate-wanting session gets a
-	// gate; when either is empty, no gate is requested and a gate-wanting session
-	// keeps the backend's own fail-closed networking (Docker `limited` → no egress,
-	// K8s → its init-container isolation, vault-attached → inert placeholders) — the
-	// pre-gate behavior, so an un-opted-in deployment is unchanged rather than
-	// faulted. An unrestricted, vault-less session never wanted a gate and networks
-	// directly regardless. See gateSpec.
+	// ControlplaneURL and GateImage enable the per-session egress gate for every
+	// cloud session — both `limited` and `unrestricted`, with or without vaults
+	// attached. Its gate container (GateImage) fetches that session's egress
+	// config from ControlplaneURL and enforces the networking policy, vault
+	// credential substitution, and the dialguard address floor (blocking
+	// loopback, link-local / cloud metadata, unspecified, multicast, and
+	// embedded IPv6 transition targets even on `unrestricted` sessions). When
+	// either is empty, no gate is requested and the backend keeps its pre-gate
+	// behavior (Docker `limited` → no egress, K8s `limited` → its init-container
+	// isolation, `unrestricted` → direct network, vault-attached → inert
+	// placeholders). See gateSpec.
 	ControlplaneURL string
 	GateImage       string
 	// OTelEndpoint and OTelInsecure are the deployment's OTLP collector config,
@@ -741,7 +742,7 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		}
 		progress()
 	}
-	sb, err := e.provider.Provision(ctx, sandbox.Spec{
+	spec := sandbox.Spec{
 		SessionID:  sessionID,
 		Image:      e.cfg.Image,
 		Workdir:    e.cfg.Workdir,
@@ -749,11 +750,15 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		Env:        env,
 		Hardening:  e.cfg.Hardening,
 		Gate:       e.gateSpec(sess),
-		// Set unconditionally, unlike Gate: the revoker is for the provision
-		// that finds a gate it must dismantle, and that provision's own spec
-		// is the ungated one.
+		// Kept populated for backwards compatibility with providers; gate-shape
+		// changes now go through migrateGateShape → Reap, which revokes via the
+		// provider's revoker before removing containers/pods.
 		GateTokenRevoker: gateTokenMinter{pool: e.pool},
-	})
+	}
+	sb, err := e.provider.Provision(ctx, spec)
+	if errors.Is(err, sandbox.ErrGateShapeMismatch) && !restore {
+		sb, blobKey, restore, err = e.migrateGateShape(ctx, conn, sessionID, sess, spec, progress)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("provision sandbox: %w", err)
 	}
@@ -779,6 +784,62 @@ func (e *Executor) provisionSandbox(ctx context.Context, sessionID domain.ID, se
 		return nil, fmt.Errorf("install packages: %w", err)
 	}
 	return sb, nil
+}
+
+// migrateGateShape safely replaces an intact sandbox whose egress-gate shape
+// does not match spec (for example, an already-running ungated unrestricted
+// sandbox after the gate is enabled) without losing its workspace, outputs, or
+// persistent shell state. The caller holds the per-session advisory lock on
+// conn.
+//
+// Fails closed with the existing sandbox untouched if no object store is
+// configured or if memory sync / checkpoint capture fails (including an
+// over-budget workspace or unreadable sandbox): unlike idle TTL reaping, an
+// upgrade-driven gate-shape change never degrades to silent data loss.
+//
+// Crash safety follows plan 24 D6: captureCheckpoint writes the `ready`
+// marker before Reap removes the old sandbox, so a crash during Reap,
+// Provision, or restore leaves the `ready` marker standing and the next
+// provisionSandbox call replays Reap → Provision → restoreCheckpoint cleanly.
+func (e *Executor) migrateGateShape(ctx context.Context, conn rowQueryer, sessionID domain.ID, sess sessionRun, spec sandbox.Spec, progress func()) (sandbox.Sandbox, string, bool, error) {
+	if e.blobs == nil {
+		return nil, "", false, fmt.Errorf("cannot migrate existing sandbox gate shape without an object store configured: %w", sandbox.ErrGateShapeMismatch)
+	}
+	if len(sess.memories) > 0 {
+		switch existing, err := e.provider.Attach(ctx, sessionID); {
+		case err == nil:
+			if err := e.syncMemoryNow(ctx, existing, sessionID, sess.memories, progress); err != nil {
+				return nil, "", false, fmt.Errorf("sync memory before gate-shape migration: %w", err)
+			}
+			progress()
+		case errors.Is(err, sandbox.ErrNotFound):
+			// On Docker a stopped container is ErrNotFound to Attach yet still
+			// readable by Export; proceed to captureCheckpoint, which fails
+			// closed if the sandbox cannot be read.
+		default:
+			return nil, "", false, fmt.Errorf("attach sandbox before gate-shape migration: %w", err)
+		}
+	}
+	if err := e.captureCheckpoint(ctx, sessionID); err != nil {
+		return nil, "", false, fmt.Errorf("checkpoint sandbox before gate-shape migration: %w", err)
+	}
+	progress()
+	marker, blobKey, err := checkpointMarker(ctx, conn, sessionID)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read migration checkpoint marker: %w", err)
+	}
+	if marker != "ready" {
+		return nil, "", false, fmt.Errorf("migration checkpoint marker = %q, want ready", marker)
+	}
+	if err := e.provider.Reap(ctx, sessionID); err != nil {
+		return nil, "", false, fmt.Errorf("reap sandbox for gate-shape migration: %w", err)
+	}
+	progress()
+	sb, err := e.provider.Provision(ctx, spec)
+	if err != nil {
+		return nil, "", false, err
+	}
+	return sb, blobKey, true, nil
 }
 
 // sandboxEnv resolves the session's attached vaults into the environment
@@ -820,24 +881,21 @@ func (e *Executor) sandboxEnv(ctx context.Context, sessionID domain.ID, vaultIDs
 	return env, nil
 }
 
-// gateSpec decides whether to ask the provider for a per-session egress gate. A
-// session wants one when its egress is `limited` (only its allowed_hosts may
-// leave) or it has vaults attached (their credentials are injected at the gate,
-// never handed to the sandbox). It returns a GateSpec only when a gate is both
-// wanted and configured (GateImage + ControlplaneURL). When the executor has no
-// gate configured — the K8s deployments, and any Docker deployment that has not
-// opted in — it returns nil and the backend applies its own fail-closed
-// networking instead: the Docker provider gives a `limited` sandbox no egress at
-// all (NetworkMode "none"), the K8s provider its init-container isolation, and a
-// vault-attached sandbox keeps the inert placeholders that egress literally with
-// no gate to substitute them. That is the pre-gate behavior, so an un-opted-in
-// deployment is unchanged rather than forced into a provision that never
-// completes. The backend that runs the gate wires the sandbox to it and injects
-// the proxy variables (a deployment detail), so gateSpec stays backend-agnostic
-// and never touches the env.
-func (e *Executor) gateSpec(sess sessionRun) *sandbox.GateSpec {
-	wantsGate := sess.networking.Type == domain.NetLimited || len(sess.vaultIDs) > 0
-	if !wantsGate || e.cfg.GateImage == "" || e.cfg.ControlplaneURL == "" {
+// gateSpec decides whether to ask the provider for a per-session egress gate.
+// Every cloud session wants a gate — `limited` sessions for allowed_hosts
+// enforcement, vault-attached sessions for credential substitution, and
+// `unrestricted` sessions so every outbound dial still passes through the
+// gate's owner-match firewall and address floor (blocking loopback, link-local /
+// cloud metadata, unspecified, multicast, and IPv6 transition targets). It
+// returns a GateSpec whenever the executor is configured with both GateImage
+// and ControlplaneURL. When either is empty, it returns nil and the backend
+// falls back to its ungated networking instead (Docker `limited` → NetworkMode
+// "none", K8s `limited` → route-flush init container, vault-attached → inert
+// placeholders). The backend that runs the gate wires the sandbox to it and
+// injects the proxy variables (a deployment detail), so gateSpec stays
+// backend-agnostic and never touches the env.
+func (e *Executor) gateSpec(_ sessionRun) *sandbox.GateSpec {
+	if e.cfg.GateImage == "" || e.cfg.ControlplaneURL == "" {
 		return nil
 	}
 	return &sandbox.GateSpec{

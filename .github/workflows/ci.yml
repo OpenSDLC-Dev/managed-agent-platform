@@ -297,19 +297,27 @@ jobs:
           echo "$err" | grep 'requires bucket' > /dev/null \
             || { echo "the bucketless render failed for the wrong reason: $err" >&2; exit 1; }
           echo "ok: keyless GCS mode"
-      - name: gate opt-in is off by default and complete when set
+      - name: gate is enabled by default, overridable, and can be disabled
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep -E 'EXECUTOR_GATE_IMAGE|CONTROLPLANE_URL' > /dev/null && { echo "default values must not opt the executor into the gate" >&2; exit 1; }
-          out="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --show-only templates/executor-deployment.yaml)"
-          echo "$out" | grep 'name: EXECUTOR_GATE_IMAGE' > /dev/null || { echo "gateImage did not set EXECUTOR_GATE_IMAGE" >&2; exit 1; }
-          echo "$out" | grep 'name: CONTROLPLANE_URL' > /dev/null || { echo "gateImage did not set CONTROLPLANE_URL" >&2; exit 1; }
-          echo "$out" | grep 'value: "http://t-managed-agent-platform-controlplane:8080"' > /dev/null || { echo "gateImage did not derive CONTROLPLANE_URL from the controlplane Service" >&2; exit 1; }
-          err="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --kube-version 1.26 2>&1 >/dev/null)" \
-            && { echo "gateImage must fail the render on Kubernetes < 1.29 (native sidecars)" >&2; exit 1; }
+          echo "$out" | grep -A1 'name: EXECUTOR_GATE_IMAGE$' | grep 'value: "ghcr.io/opensdlc-dev/managed-agent-platform/gate:0.6.0"' > /dev/null \
+            || { echo "default values must set EXECUTOR_GATE_IMAGE to the chart's published gate image" >&2; exit 1; }
+          echo "$out" | grep 'name: CONTROLPLANE_URL$' > /dev/null \
+            || { echo "default values must set CONTROLPLANE_URL alongside EXECUTOR_GATE_IMAGE" >&2; exit 1; }
+          echo "$out" | grep 'value: "http://t-managed-agent-platform-controlplane:8080"' > /dev/null \
+            || { echo "default gate wiring did not derive CONTROLPLANE_URL from the controlplane Service" >&2; exit 1; }
+          err="$(helm template t "$CHART" -f "$VALUES" --kube-version 1.26 2>&1 >/dev/null)" \
+            && { echo "default gateImage must fail the render on Kubernetes < 1.29 (native sidecars)" >&2; exit 1; }
           echo "$err" | grep 'executor.gateImage needs Kubernetes >= 1.29' > /dev/null \
             || { echo "the 1.26 render failed for the wrong reason: $err" >&2; exit 1; }
-          echo "ok: gate opt-in paths"
+          out="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage=reg/gate:v1 --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -A1 'name: EXECUTOR_GATE_IMAGE$' | grep 'value: "reg/gate:v1"' > /dev/null \
+            || { echo "gateImage override did not reach EXECUTOR_GATE_IMAGE" >&2; exit 1; }
+          out="$(helm template t "$CHART" -f "$VALUES" --set executor.gateImage= --kube-version 1.26 --show-only templates/executor-deployment.yaml)"
+          echo "$out" | grep -E 'EXECUTOR_GATE_IMAGE|CONTROLPLANE_URL' > /dev/null \
+            && { echo "explicit empty executor.gateImage must opt the executor out of the gate" >&2; exit 1; }
+          python3 -I "$CHART/ci/gate_default_test.py"
+          echo "ok: gate default, override, and opt-out paths"
       - name: sandbox hardening and RuntimeClass are off by default and complete when set
         run: |
           out="$(helm template t "$CHART" -f "$VALUES" --show-only templates/executor-deployment.yaml)"

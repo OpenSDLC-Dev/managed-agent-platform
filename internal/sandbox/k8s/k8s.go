@@ -202,24 +202,16 @@ func (p *Provider) Provision(ctx context.Context, spec sandbox.Spec) (sandbox.Sa
 			return p.attach(name, workdir, gated), nil
 		}
 		// The pod's gate shape no longer matches the session's (a pre-gate pod
-		// for a now-gated session, or the reverse) — a pod spec is immutable, so
-		// replace it and fall through to the create below. Mirrors the Docker
-		// provider's stale-pairing rebuild.
-		if !gated {
-			// Gated→ungated: the replacement pod carries no gate, so no re-mint
-			// (whose revoke-on-re-mint covers the other direction) will ever
-			// revoke the token this pod's gate holds — revoke it here so it does
-			// not outlive its gate (#197). Revoke before the delete because it is
-			// idempotent: a delete that fails retries both on the next provision.
-			if spec.GateTokenRevoker != nil {
-				if rerr := spec.GateTokenRevoker.Revoke(ctx, spec.SessionID); rerr != nil {
-					return nil, fmt.Errorf("k8s: revoke gate token for %s: %w", name, rerr)
-				}
-			}
+		// for a now-gated session, or the reverse) — refuse intact rather than
+		// deleting an existing workspace inside Provision. The caller owns
+		// checkpointing, reaping (which revokes any gate token), re-provisioning,
+		// and restoring. A legacy gated pod lacking the UID guard still surfaces
+		// plain ErrSpecMismatch so it is never auto-migrated.
+		if err := checkGuard(existing); err != nil {
+			return nil, err
 		}
-		if derr := p.deleteAndWaitGone(ctx, name, existing.UID); derr != nil {
-			return nil, derr
-		}
+		return nil, fmt.Errorf("k8s: pod %s has gate sidecar %v where session %s asked for %v: %w (%w)",
+			existing.Name, hasGateSidecar(existing), spec.SessionID, gated, sandbox.ErrGateShapeMismatch, sandbox.ErrSpecMismatch)
 	case !apierrors.IsNotFound(err):
 		return nil, fmt.Errorf("k8s: get pod %s: %w", name, err)
 	}

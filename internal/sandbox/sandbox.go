@@ -58,6 +58,14 @@ var (
 	// lifecycle the platform does not have. Both backends produce it, from
 	// their twin `adoptable` checks (#29 docker, #296 k8s).
 	ErrSpecMismatch = errors.New("sandbox: existing sandbox does not match the requested spec")
+	// ErrGateShapeMismatch reports an existing owned sandbox whose egress-gate
+	// shape (ungated vs gated, or paired with a different/retired gate) does not
+	// match the requested Spec.Gate. Both backends refuse to delete an intact
+	// sandbox inside Provision and return an error matching both
+	// ErrGateShapeMismatch and ErrSpecMismatch so the caller can perform a safe
+	// migration (sync memory, capture a workspace checkpoint, Reap, Provision,
+	// and restore) or fail closed with the existing sandbox untouched.
+	ErrGateShapeMismatch = errors.New("sandbox: existing sandbox gate shape does not match the requested spec")
 	// ErrFileNotExist reports a read of a path that does not exist.
 	ErrFileNotExist = errors.New("sandbox: no such file")
 	// ErrIsDirectory reports a file read of a directory, or a write onto one.
@@ -238,10 +246,10 @@ type Spec struct {
 	// iptables, with the sandbox joining that namespace and reaching the network
 	// only through the gate's loopback proxy (the provider points the sandbox's
 	// HTTP_PROXY there — a deployment detail it owns, not the caller's env). nil =
-	// the sandbox networks directly (unrestricted, no vault
-	// credentials). The executor sets it for sessions that are `limited` or
-	// vault-attached; both backends consume it — Docker as a gate-pair the
-	// sandbox joins, K8s as a native sidecar in the sandbox's pod.
+	// ungated fallback when no gate image is configured. The executor sets it
+	// for every cloud session (both `limited` and `unrestricted`, with or
+	// without vaults) whenever configured; both backends consume it — Docker as
+	// a gate-pair the sandbox joins, K8s as a native sidecar in the sandbox's pod.
 	Gate *GateSpec
 	// GateTokenRevoker revokes the session's persisted gate token when a
 	// provision dismantles its gate without replacing it — the gated→ungated

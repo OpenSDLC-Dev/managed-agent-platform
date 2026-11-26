@@ -71,13 +71,15 @@
 //	                         running a turn's calls; what it does not reach is
 //	                         retried on the next pass rather than failing the run
 //	CONTROLPLANE_URL         where a session's egress gate fetches its config;
-//	                         set with EXECUTOR_GATE_IMAGE to opt into the gate.
-//	                         Unset: no gate runs; a gate-wanting session (limited
-//	                         or vault-attached) falls back to the backend's own
-//	                         fail-closed networking (Docker limited -> no egress),
-//	                         while unrestricted sessions network directly as before
+//	                         set with EXECUTOR_GATE_IMAGE to enable the gate for
+//	                         every cloud session (both limited and unrestricted,
+//	                         with or without vaults). Unset: no gate runs; limited
+//	                         sessions fall back to the backend's own fail-closed
+//	                         networking (Docker limited -> no egress, K8s limited
+//	                         -> route-flush init container), and unrestricted
+//	                         sessions network directly without the gate floor
 //	EXECUTOR_GATE_IMAGE      the egress-gate container image (built with
-//	                         `docker build --target gate`); opts into the gate
+//	                         `docker build --target gate`); enables the gate
 //	                         together with CONTROLPLANE_URL
 //	SANDBOX_BACKEND          "docker" (default) or "k8s"
 //	SANDBOX_STALL_TIMEOUT    per-call sandbox transport silence budget, Go

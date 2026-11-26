@@ -169,16 +169,17 @@ executor:
   # -- Image carrying `ip` for the limited-networking init container.
   netSetupImage: "busybox"
   # -- Per-session egress-gate sidecar image (the `--target gate` build); full
-  # ref. Setting it opts the executor into the gate: `limited` or vault-attached
-  # sessions get the gate sidecar in their sandbox pod (the chart derives
-  # CONTROLPLANE_URL from the controlplane Service). Empty keeps the pre-gate
-  # fail-closed behavior — `limited` = the route-flush init container, no
-  # credential substitution. The sidecar needs CAP_NET_ADMIN, so the release
+  # ref. Enabled by default so every cloud sandbox pod (`unrestricted` and
+  # `limited`, with or without vaults) gets the gate sidecar, its owner-match
+  # firewall, and its address floor (the chart derives CONTROLPLANE_URL from the
+  # controlplane Service). Set to "" only to opt out explicitly (keeps the
+  # pre-gate behavior — `limited` uses the route-flush init container,
+  # `unrestricted` runs ungated without the address floor, and no credential
+  # substitution runs). The sidecar needs CAP_NET_ADMIN, so the release
   # namespace must not enforce the `baseline` or `restricted` Pod Security
-  # levels — and it is
-  # a native sidecar, so the cluster must be Kubernetes >= 1.29 (the template
-  # fails the render on older clusters).
-  gateImage: ""
+  # levels — and it is a native sidecar, so the cluster must be Kubernetes >=
+  # 1.29 (the template fails the render on older clusters).
+  gateImage: "ghcr.io/opensdlc-dev/managed-agent-platform/gate:0.6.0"
   # -- Containment applied to every sandbox pod at provision time (#65). The
   # executor's own defaults hold where a value is empty — 2000 millicores (2
   # CPUs) and the `NET_RAW,SETUID,SETGID` capability drops — so these knobs are
