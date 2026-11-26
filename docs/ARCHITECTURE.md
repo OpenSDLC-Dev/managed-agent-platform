@@ -667,7 +667,7 @@ effective UID before entering the image's startup command or a tool exec.
   trust is the session, and a roster should hold only agents you would have run in it
   directly.
 - **Auth is scoped.** Public management calls take owned keys through `x-api-key`
-  or Bearer, with the owner's current stored role. Unowned keys are refused.
+  or Bearer and check the owner's effective role in the key's bound workspace. Unowned keys are refused.
   Keys are hashed at rest. Rotation issues a replacement and archives the old key.
   Workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's
