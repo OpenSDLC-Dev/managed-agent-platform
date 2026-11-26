@@ -1,0 +1,1 @@
+- **Workspace design** — [Plan 42](./docs/plan/42_multi-tenant-activation.md) specifies per-workspace roles, the Default upgrade and isolation checks for the control plane and model gateway. [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56) tracks implementation.
