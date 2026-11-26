@@ -73,6 +73,10 @@ func TestGatewayCookieUsesCurrentRole(t *testing.T) {
 		}
 	}
 	e.setPrincipal(`role='developer',role_source='console',email='current@example.test',display_name='Current profile',last_seen_at='2026-01-01T00:00:00Z'`)
+	if status, _, _ := cookieAdminRequest(t, e, "GET", "/admin/v1/usage/daily", "", h); status != http.StatusForbidden {
+		t.Fatalf("developer without a Default grant read usage: %d", status)
+	}
+	e.grantDefaultDeveloper()
 	for _, path := range []string{"/admin/v1/profiles", "/admin/v1/usage/daily", "/admin/v1/usage/requests", "/admin/%761/%70rofiles"} {
 		status, header, raw := cookieAdminRequest(t, e, "GET", path, "", h)
 		if status != 200 || header.Get("x-platform-signed-out") != "" {

@@ -271,6 +271,14 @@ func (e *env) setPrincipal(set string) {
 	}
 }
 
+func (e *env) grantDefaultDeveloper() {
+	e.t.Helper()
+	if _, err := e.pool.Exec(e.t.Context(), `INSERT INTO workspace_memberships(workspace_id,principal_id,role)
+		VALUES ('default',$1,'developer')`, e.session.PrincipalID); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 func TestProfiles(t *testing.T) {
 	e := newEnv(t, false)
 	list := e.admin("GET", "/admin/v1/profiles", nil).list()
