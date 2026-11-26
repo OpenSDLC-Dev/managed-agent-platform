@@ -196,6 +196,9 @@ UPDATE deployments d SET workspace_grant_generation=NULL WHERE NOT EXISTS
 
 CREATE FUNCTION stamp_workspace_work() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    IF TG_OP='UPDATE' AND NEW.initiator_principal_id IS NOT DISTINCT FROM OLD.initiator_principal_id THEN
+        RETURN NEW;
+    END IF;
     IF TG_TABLE_NAME='sessions' THEN
         IF NEW.initiator_principal_id IS NULL AND NEW.initiator_api_key_id IS NULL AND NEW.created_by IS NOT NULL THEN
             SELECT principal_id,api_key_id INTO NEW.initiator_principal_id,NEW.initiator_api_key_id

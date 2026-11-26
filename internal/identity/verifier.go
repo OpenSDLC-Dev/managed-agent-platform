@@ -93,7 +93,7 @@ func New(ctx context.Context, cfg Config) (*Verifier, error) {
 		if value == "" {
 			return nil, errors.New("identity: the role map has an empty claim value")
 		}
-		if _, ok := roleRank[role]; !ok {
+		if _, ok := claimPriority[role]; !ok {
 			return nil, fmt.Errorf("identity: the role map gives %q the unknown role %q", value, string(role))
 		}
 		roleMap[value] = role

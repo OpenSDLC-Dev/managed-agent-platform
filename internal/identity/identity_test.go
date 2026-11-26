@@ -43,6 +43,8 @@ func TestRoleAtLeast(t *testing.T) {
 		{name: "admin/user", role: identity.RoleAdmin, min: identity.RoleUser, want: true},
 		{name: "admin/developer", role: identity.RoleAdmin, min: identity.RoleDeveloper, want: true},
 		{name: "admin/admin", role: identity.RoleAdmin, min: identity.RoleAdmin, want: true},
+		{name: "billing/developer", role: identity.RoleBilling, min: identity.RoleDeveloper},
+		{name: "developer/billing", role: identity.RoleDeveloper, min: identity.RoleBilling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

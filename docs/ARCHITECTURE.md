@@ -486,7 +486,9 @@ service accounts, receive an explicit Developer grant. A legacy Playground
 approval survives as Default User access. New members and service accounts receive
 their explicit assignments through the organization administrator's existing
 member and service-account create/update endpoints. Pass `default_workspace_role`
-as `user`, `limited_developer`, `developer` or `admin`. On update, omit it to
+as `user`, `limited_developer`, `developer` or `admin`. If multiple IdP groups
+map to organization roles, sign-in selects Admin, Developer, Billing, then User
+in that order. On update, omit the workspace field to
 preserve the grant or pass JSON null to withdraw it. Billing is inherited from
 the organization and can be upgraded to Admin in Default. Resource operations
 recheck the bound owner's grant. Existing work carries its initiator's continuation

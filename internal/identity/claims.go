@@ -103,8 +103,8 @@ func roleValues(v any) []string {
 	}
 }
 
-// strongestRole reduces mapped values to the single strongest role by the fixed
-// order admin > developer > user. Unmapped values drop; nothing mapped yields
+// strongestRole selects one organization role by the configured groups' fixed
+// precedence. Unmapped values drop; nothing mapped yields
 // RoleNone.
 //
 // Reducing by rank rather than by position is the property: neither claim order
@@ -112,7 +112,7 @@ func roleValues(v any) []string {
 func strongestRole(values []string, m map[string]Role) Role {
 	best := RoleNone
 	for _, v := range values {
-		if r, ok := m[v]; ok && roleRank[r] > roleRank[best] {
+		if r, ok := m[v]; ok && claimPriority[r] > claimPriority[best] {
 			best = r
 		}
 	}

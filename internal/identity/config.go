@@ -336,8 +336,8 @@ func parseRoleMap(s string) (map[string]Role, error) {
 		}
 		role, ok := ParseRole(name)
 		if !ok {
-			return nil, fmt.Errorf("%s pair %q names role %q, want %s, %s or %s",
-				envRoleMap, pair, name, RoleUser, RoleDeveloper, RoleAdmin)
+			return nil, fmt.Errorf("%s pair %q names role %q, want %s, %s, %s or %s",
+				envRoleMap, pair, name, RoleUser, RoleBilling, RoleDeveloper, RoleAdmin)
 		}
 		if _, dup := out[value]; dup {
 			return nil, fmt.Errorf("%s maps %q twice", envRoleMap, value)
