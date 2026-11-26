@@ -151,7 +151,10 @@ CREATE FUNCTION revoke_workspace_runs(subject_id text, space_id text) RETURNS vo
 $$;
 CREATE FUNCTION on_workspace_grant_removal() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    PERFORM revoke_workspace_runs(OLD.principal_id, OLD.workspace_id);
+    -- Removing a redundant grant cannot withdraw an active org admin's inherited authority.
+    IF NOT EXISTS (SELECT FROM principals WHERE id=OLD.principal_id AND status='active' AND role='admin') THEN
+        PERFORM revoke_workspace_runs(OLD.principal_id, OLD.workspace_id);
+    END IF;
     RETURN NULL;
 END $$;
 CREATE TRIGGER retire_workspace_runs AFTER DELETE ON workspace_memberships

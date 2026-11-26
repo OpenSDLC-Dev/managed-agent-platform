@@ -22,13 +22,15 @@ func TestDefaultWorkspaceUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyExec(t, pool, `INSERT INTO principals(id,issuer,subject,kind,role,status,playground_access)
-		VALUES ('admin','test','a','user','admin','active',false),
+		VALUES ('admin','test','a','user','admin','active',true),
 		       ('dev','test','d','user','developer','active',false),
 		       ('approved','test','p','user','user','active',true),
 		       ('setup','test','u','user','user','active',false),
 		       ('removed','test','r','user','developer','deactivated',true),
 		       ('service','test','s','service_account','developer','active',false),
 		       ('archived','test','x','service_account','developer','deactivated',false)`)
+	adminSession, _ := pgtest.NewSession(t, pool, "cloud")
+	keyExec(t, pool, `UPDATE sessions SET initiator_principal_id='admin',initiator_api_key_id=NULL WHERE id=$1`, adminSession)
 	token := clioauth.AccessPrefix + strings.Repeat("x", 43)
 	keyExec(t, pool, `WITH grant_row AS (
 		INSERT INTO cli_oauth_grants(principal_id,client_id,scopes,challenge,state_hash,redirect_uri,expires_at)
@@ -100,6 +102,13 @@ func TestDefaultWorkspaceUpgrade(t *testing.T) {
 	check("approved", "admin")
 	keyExec(t, pool, `UPDATE principals SET role='user' WHERE id='approved'`)
 	check("approved", "admin")
+	keyExec(t, pool, `UPDATE principals SET playground_access=false WHERE id='admin'`)
+	check("admin", "admin")
+	var canContinue bool
+	if err := pool.QueryRow(ctx, `SELECT workspace_can_continue(initiator_principal_id,workspace_id,workspace_grant_generation)
+		FROM sessions WHERE id=$1`, adminSession).Scan(&canContinue); err != nil || !canContinue {
+		t.Fatalf("clearing a redundant Playground grant interrupted the organization admin's session: %t, %v", canContinue, err)
+	}
 	keyExec(t, pool, `UPDATE principals SET role='user' WHERE id='admin'`)
 	check("admin", "")
 }
