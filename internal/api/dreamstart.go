@@ -387,6 +387,14 @@ type dreamInputStore struct{ name, description string }
 // accepted — their logs are intact.
 func dreamStartChecks(ctx context.Context, tx pgx.Tx, d dreamRow, cfg DreamRunnerConfig) (dreamInputStore, string, string, error) {
 	var in dreamInputStore
+	var allowed bool
+	if err := tx.QueryRow(ctx, `SELECT workspace_can_continue(initiator_principal_id,workspace_id,workspace_grant_generation)
+		FROM dreams WHERE id=$1`, d.id).Scan(&allowed); err != nil {
+		return in, "", "", err
+	}
+	if !allowed {
+		return in, "internal_error", "dream initiator no longer has access to this workspace", nil
+	}
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx,
 		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 FOR SHARE`,

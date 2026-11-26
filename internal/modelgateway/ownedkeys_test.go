@@ -97,7 +97,7 @@ func TestOwnedKeyUsesCurrentOwnerRoleWithoutGrant(t *testing.T) {
 	d := e.deployment(p, "m")
 	e.alias("fast", target(d, 0))
 	e.alias("slow", target(d, 0))
-	human := e.ownedKey("principal_human", "user", "developer", "key_human")
+	human := e.ownedKey("principal_human", "user", "admin", "key_human")
 	service := e.ownedKey("principal_service", "service_account", "admin", "key_service")
 	e.start()
 	for _, key := range []string{human, service} {

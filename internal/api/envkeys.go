@@ -99,8 +99,8 @@ func issueEnvironmentKey(ctx context.Context, db execer, environmentID, name str
 	// Both timestamps come from the database clock (created_at defaults to now()),
 	// so an expiry can never be minted already-past by a skewed application host.
 	if _, err := db.Exec(ctx,
-		`INSERT INTO environment_keys (id, environment_id, name, key_hash, expires_at)
-		 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))`,
+		`INSERT INTO environment_keys (id, environment_id, name, key_hash, expires_at, workspace_id)
+		 VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), 'default')`,
 		domain.NewID(domain.PrefixEnvironmentKey).String(), environmentID, name, apikey.Hash(key),
 		EnvironmentKeyTTL.Seconds()); err != nil {
 		return "", err

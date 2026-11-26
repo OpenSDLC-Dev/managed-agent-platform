@@ -4,7 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-The owner approved the single-organization workspace design in [plan 42](./docs/plan/42_multi-tenant-activation.md). [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56) tracks the runtime slices.
+[Plan 42](./docs/plan/42_multi-tenant-activation.md) stages 1–2 cover the Default Console routes, registry, explicit grants, credential bindings and upgrade. [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56) remains open for scoped storage and execution, clients and additional workspaces.
 
 Agents workspace overview for the native Console. See the [private report contract](./docs/DIVERGENCES.md#private-agents-workspace-report).
 

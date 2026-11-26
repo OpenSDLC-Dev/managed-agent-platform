@@ -1,6 +1,6 @@
 // Package identity is the platform's human-authentication boundary: it verifies
 // the credential a human operator presents and reduces it to a principal holding
-// one of three roles. Machine credentials never come here — the management
+// a stored organization role. Machine credentials never come here — the management
 // x-api-key and the BYOC environment key keep exactly the semantics they have
 // always had, which is what keeps every documented CLI and SDK flow unchanged
 // (docs/plan/31_console-sso-rbac.md).
@@ -110,6 +110,7 @@ const (
 	RoleUser      Role = "user"
 	RoleDeveloper Role = "developer"
 	RoleAdmin     Role = "admin"
+	RoleBilling   Role = "billing" // aggregate usage only; outside the resource role ordering
 )
 
 // roleRank fixes the strength order. RoleNone is absent from the map, so it
@@ -130,7 +131,7 @@ func (r Role) AtLeast(min Role) bool {
 	return roleRank[r] >= want
 }
 
-// ParseRole accepts exactly the three role names, plus "viewer" as the old name
+// ParseRole accepts organization roles, plus "viewer" as the old name
 // of RoleUser. The alias keeps an IDENTITY_ROLE_MAP written before plan 69 from
 // failing startup; the person it maps now reads nothing, because user reaches
 // only the playground.
@@ -139,6 +140,9 @@ func ParseRole(s string) (Role, bool) {
 		return RoleUser, true
 	}
 	r := Role(s)
+	if r == RoleBilling {
+		return r, true
+	}
 	if _, ok := roleRank[r]; !ok {
 		return RoleNone, false
 	}

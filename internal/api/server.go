@@ -486,7 +486,7 @@ func dispatchManagementAuth(pool *pgxpool.Pool, next *http.ServeMux) http.Handle
 		// this dispatcher. Its credentials were stripped before rewriting; this
 		// arm preserves the human actor and every resource's original role floor.
 		if session, ok := cookieSessionFrom(r.Context()); ok {
-			ctx := context.WithValue(r.Context(), ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.Role})
+			ctx := context.WithValue(r.Context(), ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.WorkspaceRole.ResourceRole()})
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}

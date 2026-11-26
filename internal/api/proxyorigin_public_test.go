@@ -98,7 +98,7 @@ func TestNativeProxyPublicCredentialPrecedence(t *testing.T) {
 	h.Set("X-Goog-IAP-JWT-Assertion", token)
 	res, raw := s.request("POST", "/api/auth/login", "", h)
 	cookie, _ := sessionReply(t, res, raw)
-	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='developer'`); err != nil {
+	if _, err := s.pool.Exec(context.Background(), `UPDATE principals SET role='developer' WHERE id<>$1`, fixtureOwner); err != nil {
 		t.Fatal(err)
 	}
 	owner := ownedPrincipalFixture(t, s.pool, "user", "developer")

@@ -626,8 +626,12 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 
 		body := map[string]any{"name": "key-" + tc.role}
 		status, errType = laneStatus(t, s.signInRequest(http.MethodPost, consoleAPIKeysPath, s.token(tc.role), body))
-		if status != tc.want {
-			t.Errorf("POST api_keys as %s: status %d, want %d (error type %q)", tc.role, status, tc.want, errType)
+		wantCreate := tc.want
+		if tc.role == "platform-devs" {
+			wantCreate = http.StatusForbidden // a new IdP developer has no Default grant
+		}
+		if status != wantCreate {
+			t.Errorf("POST api_keys as %s: status %d, want %d (error type %q)", tc.role, status, wantCreate, errType)
 		}
 	}
 

@@ -43,16 +43,24 @@ func requireCLIOAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 		}
 		markVerified(r.Context())
 		ctx := context.WithValue(r.Context(), cliOAuthContextKey{}, authority)
-		ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: authority.PrincipalID, Role: authority.Role})
+		role := authority.WorkspaceRole.ResourceRole()
+		if cliAuditPath(r) {
+			role = authority.Role
+		}
+		ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: authority.PrincipalID, Role: role})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+func cliAuditPath(r *http.Request) bool {
+	return r.URL.Path == cliWorkspacesPath || r.URL.Path == adminAPIKeysPath || strings.HasPrefix(r.URL.Path, adminAPIKeysPath+"/")
+}
+
 func cliResourceScope(r *http.Request, a clioauth.Authority) error {
-	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != clioauth.WorkspaceID {
+	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != a.WorkspaceID {
 		return errForbidden("workspace is not served by this platform")
 	}
-	if r.URL.Path == cliWorkspacesPath || r.URL.Path == adminAPIKeysPath || strings.HasPrefix(r.URL.Path, adminAPIKeysPath+"/") {
+	if cliAuditPath(r) {
 		if !a.Has(clioauth.OrgAdmin) || a.Role != identity.RoleAdmin {
 			return errForbidden("Authentication method not allowed for this endpoint.")
 		}
@@ -76,7 +84,7 @@ func cliResourceScope(r *http.Request, a clioauth.Authority) error {
 func cliAdminRead(fn func(*http.Request) (any, error)) func(*http.Request) (any, error) {
 	return func(r *http.Request) (any, error) {
 		a, _ := r.Context().Value(cliOAuthContextKey{}).(clioauth.Authority)
-		if !a.Has(clioauth.OrgAdmin) {
+		if !a.Has(clioauth.OrgAdmin) || a.Role != identity.RoleAdmin {
 			return nil, errForbidden("Authentication method not allowed for this endpoint.")
 		}
 		return fn(r)
@@ -84,7 +92,8 @@ func cliAdminRead(fn func(*http.Request) (any, error)) func(*http.Request) (any,
 }
 
 func (s *server) cliWorkspaces(r *http.Request) (any, error) {
-	// The default tenancy is reserved, not an administrable workspace row.
+	// The legacy CLI list omits Default. Registry-backed audit listing and
+	// its Default inclusion option belong to the client rollout in Plan 42.
 	return struct {
 		Data    []any   `json:"data"`
 		HasMore bool    `json:"has_more"`

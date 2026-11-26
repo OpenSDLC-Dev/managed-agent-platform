@@ -91,6 +91,26 @@ func (e *env) token(roles ...string) string {
 	return e.idp.Mint(e.t, c)
 }
 
+func TestBillingOnlyReadsUsageSummaries(t *testing.T) {
+	e := newEnv(t, false)
+	if _, err := e.pool.Exec(t.Context(), `UPDATE principals SET role='billing' WHERE id=$1`, e.session.PrincipalID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/admin/v1/usage/daily", http.StatusOK},
+		{"/admin/v1/usage/requests", http.StatusForbidden},
+		{"/admin/v1/providers", http.StatusForbidden},
+		{"/admin/v1/rate_limits", http.StatusForbidden},
+	} {
+		if got := e.admin(http.MethodGet, tc.path, nil).status; got != tc.want {
+			t.Errorf("billing GET %s: %d, want %d", tc.path, got, tc.want)
+		}
+	}
+}
+
 type reply struct {
 	status int
 	body   map[string]any

@@ -28,16 +28,17 @@ const (
 // Native user fields plus our private role provenance and tombstone status.
 // Internal principal IDs, issuer/subject and credentials never enter this DTO.
 type memberJSON struct {
-	ID               string    `json:"id"`
-	Type             string    `json:"type"`
-	AddedAt          time.Time `json:"added_at"`
-	Email            string    `json:"email"`
-	Name             string    `json:"name"`
-	Role             string    `json:"role"`
-	RoleSource       string    `json:"role_source"`
-	PlaygroundAccess bool      `json:"playground_access"`
-	Status           string    `json:"status"`
-	LoginName        string    `json:"login_name,omitempty"`
+	ID                   string    `json:"id"`
+	Type                 string    `json:"type"`
+	AddedAt              time.Time `json:"added_at"`
+	Email                string    `json:"email"`
+	Name                 string    `json:"name"`
+	Role                 string    `json:"role"`
+	DefaultWorkspaceRole *string   `json:"default_workspace_role,omitempty"`
+	RoleSource           string    `json:"role_source"`
+	PlaygroundAccess     bool      `json:"playground_access"`
+	Status               string    `json:"status"`
+	LoginName            string    `json:"login_name,omitempty"`
 }
 
 type membersPageJSON struct {
@@ -118,7 +119,7 @@ func managementBody(r *http.Request, fields ...string) (map[string]json.RawMessa
 // Unlike identity.ParseRole, new management bodies never accept the legacy
 // viewer alias. The SDK's other organization roles are not platform roles.
 func managementRole(role string, human bool) bool {
-	return role == "developer" || role == "admin" || human && role == "user"
+	return role == "developer" || role == "admin" || human && (role == "user" || role == "billing")
 }
 
 func managementQuery(r *http.Request, singletons ...string) (url.Values, error) {
@@ -155,11 +156,12 @@ func privatePrincipalID(value, wantKind string) (string, error) {
 }
 
 const memberColumns = `id,created_at,email,display_name,role,role_source,status,playground_access,
-	CASE WHEN issuer='urn:managed-agent-platform:local' THEN subject ELSE '' END`
+	CASE WHEN issuer='urn:managed-agent-platform:local' THEN subject ELSE '' END,
+	(SELECT m.role FROM workspace_memberships m WHERE m.workspace_id='default' AND m.principal_id=principals.id)`
 
 func scanMember(row pgx.Row) (memberJSON, error) {
 	var m memberJSON
-	err := row.Scan(&m.ID, &m.AddedAt, &m.Email, &m.Name, &m.Role, &m.RoleSource, &m.Status, &m.PlaygroundAccess, &m.LoginName)
+	err := row.Scan(&m.ID, &m.AddedAt, &m.Email, &m.Name, &m.Role, &m.RoleSource, &m.Status, &m.PlaygroundAccess, &m.LoginName, &m.DefaultWorkspaceRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, errNotFound("Not found")
 	}
@@ -278,7 +280,7 @@ func (s *server) createMember(r *http.Request) (any, error) {
 	if s.login.Mode() != login.ModePassword {
 		return nil, errInvalid("local members require password mode")
 	}
-	obj, err := managementBody(r, "login_name", "password", "name", "role")
+	obj, err := managementBody(r, "login_name", "password", "name", "role", "default_workspace_role")
 	if err != nil {
 		return nil, err
 	}
@@ -308,12 +310,15 @@ func (s *server) createMember(r *http.Request) (any, error) {
 	}
 	defer tx.Rollback(r.Context())
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,display_name,role,created_by)
-		VALUES ($1,$2,$3,$4,$5,$6)`, id, login.LocalIssuer, name, display, role, actor.PrincipalID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,display_name,role,created_by,workspace_grants_initialized)
+		VALUES ($1,$2,$3,$4,$5,$6,true)`, id, login.LocalIssuer, name, display, role, actor.PrincipalID)
 	if err := principalNameConflict(err); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(r.Context(), `INSERT INTO local_accounts(principal_id,password_hash) VALUES ($1,$2)`, id, hash); err != nil {
+		return nil, err
+	}
+	if err := updateDefaultGrant(r, tx, id, obj); err != nil {
 		return nil, err
 	}
 	m, err := readMember(r, tx, id)
@@ -353,12 +358,12 @@ func (s *server) updateMember(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	obj, err := managementBody(r, "role", "playground_access")
+	obj, err := managementBody(r, "role", "playground_access", "default_workspace_role")
 	if err != nil {
 		return nil, err
 	}
 	var role string
-	if _, present := obj["role"]; present || obj["playground_access"] == nil {
+	if _, present := obj["role"]; present || obj["playground_access"] == nil && obj["default_workspace_role"] == nil {
 		role, err = requiredString(obj, "role")
 		if err != nil {
 			return nil, err
@@ -397,6 +402,9 @@ func (s *server) updateMember(r *http.Request) (any, error) {
 	if _, err := tx.Exec(r.Context(), `UPDATE principals SET role=coalesce(nullif($2,''),role),
 		role_source=CASE WHEN $2='' THEN role_source ELSE 'console' END,
 		playground_access=coalesce($3,playground_access),updated_at=clock_timestamp(),updated_by=$4 WHERE id=$1`, id, role, access, actor.PrincipalID); err != nil {
+		return nil, err
+	}
+	if err := updateDefaultGrant(r, tx, id, obj); err != nil {
 		return nil, err
 	}
 	m, err = readMember(r, tx, id)

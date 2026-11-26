@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 const (
@@ -42,9 +42,16 @@ func (s *server) serveConsoleProxy(next http.Handler) http.HandlerFunc {
 			writeError(w, r, errNotFound("Not found"))
 			return
 		}
-		ctx, stop := s.login.WatchAuthority(w, r, func(session login.Session) bool {
-			return session.Role.AtLeast(identity.RoleDeveloper)
-		})
+		decoded, _ := url.PathUnescape(target) // consoleResourcePath validated every segment.
+		allowed := func(session login.Session) bool {
+			return consoleResourceAllowed(session.WorkspaceRole, r.Method, decoded)
+		}
+		session, _ := cookieSessionFrom(r.Context())
+		if !allowed(session) {
+			writeError(w, r, errForbidden("this workspace role cannot use this Console resource"))
+			return
+		}
+		ctx, stop := s.login.WatchAuthority(w, r, allowed)
 		defer stop()
 		forwarded := r.Clone(ctx)
 		forwarded.URL.Path, _ = url.PathUnescape(target)
@@ -58,6 +65,20 @@ func (s *server) serveConsoleProxy(next http.Handler) http.HandlerFunc {
 
 		next.ServeHTTP(&consoleProxyWriter{ResponseWriter: w, prefix: "/" + strings.Join(parts[1:5], "/"), host: r.Host}, forwarded)
 	}
+}
+
+func consoleResourceAllowed(role workspace.Role, method, resourcePath string) bool {
+	if role != workspace.LimitedDeveloper {
+		return role.CanUseResources()
+	}
+	family, rest, _ := strings.Cut(strings.TrimPrefix(resourcePath, "/v1/"), "/")
+	switch family {
+	case "sessions", "memory_stores", "deployments", "deployment_runs":
+		return false
+	case "files":
+		return method != http.MethodDelete && !strings.HasSuffix(rest, "/content")
+	}
+	return true
 }
 
 // consoleResourcePath bounds both dispatch and redirect rewriting to management

@@ -39,11 +39,18 @@ func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal
 		}
 		return fail(err)
 	}
-	caller := identityPrincipal{ID: session.PrincipalID, Role: session.Role}
+	caller := identityPrincipal{ID: session.PrincipalID, Role: keyManagerRole(session)}
 	if !caller.Role.AtLeast(identity.RoleDeveloper) {
 		return fail(errForbidden("this route requires the developer role"))
 	}
 	return tx, caller, nil
+}
+
+func keyManagerRole(session login.Session) identity.Role {
+	if session.Role != identity.RoleAdmin && session.WorkspaceRole.CanUseResources() {
+		return identity.RoleDeveloper
+	}
+	return session.Role
 }
 
 // Lifecycle guards are independent of row permission. Inactive, expired and
@@ -60,7 +67,7 @@ func canManageAPIKey(k ManagementKey, caller identityPrincipal) bool {
 // public alias asserts a kind; the stored row must confirm it before assignment.
 func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, alias *string) (*string, error) {
 	if alias == nil {
-		return &caller.ID, nil
+		return &caller.ID, requireKeyOwnerGrant(r, tx, caller.ID)
 	}
 	if _, err := requireCookieSession(r); err != nil {
 		return nil, err
@@ -82,7 +89,7 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 		return nil, notFound
 	}
 	if id == caller.ID {
-		return &id, nil
+		return &id, requireKeyOwnerGrant(r, tx, id)
 	}
 	if kind != "service_account" {
 		return nil, errForbidden("API keys cannot be created for another user")
@@ -90,5 +97,16 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 	if caller.Role != identity.RoleAdmin {
 		return nil, errForbidden("an admin browser session is required to assign a service account")
 	}
-	return &id, nil
+	return &id, requireKeyOwnerGrant(r, tx, id)
+}
+
+func requireKeyOwnerGrant(r *http.Request, tx pgx.Tx, ownerID string) error {
+	var allowed bool
+	if err := tx.QueryRow(r.Context(), `SELECT coalesce(workspace_role($1,'default') IN ('admin','developer','limited_developer'),false)`, ownerID).Scan(&allowed); err != nil {
+		return err
+	}
+	if !allowed {
+		return errForbidden("the key owner requires developer access in this workspace")
+	}
+	return nil
 }

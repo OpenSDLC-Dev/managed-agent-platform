@@ -7,8 +7,8 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -52,10 +52,10 @@ func (h *handler) authenticate(r *http.Request, path string, openAI bool) (calle
 	}
 	// Read credential and current owner authority in one database snapshot.
 	var c caller
-	var role string
-	err := h.cfg.Keys.QueryRow(r.Context(), `SELECT k.id, p.id, p.role
+	var role workspace.Role
+	err := h.cfg.Keys.QueryRow(r.Context(), `SELECT k.id, p.id, coalesce(workspace_role(p.id,k.workspace_id),'')
 		FROM api_keys k JOIN principals p ON p.id=k.owner_principal_id
-		WHERE k.owned_key_hash=$1 AND k.status='active'
+		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default' AND k.workspace_id='default'
 		  AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp())
 		  AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'`,
 		apikey.Hash(key)).Scan(&c.keyID, &c.principalID, &role)
@@ -65,7 +65,7 @@ func (h *handler) authenticate(r *http.Request, path string, openAI bool) (calle
 	if err != nil {
 		return caller{}, internal(r, "api key lookup failed", err)
 	}
-	if role != "developer" && role != "admin" {
+	if !role.CanUseResources() {
 		return caller{}, forbidden("calling models requires the developer role")
 	}
 	return c, nil
@@ -79,7 +79,7 @@ func (h *handler) authenticateCLI(r *http.Request, token, path string, openAI bo
 	if err != nil {
 		return caller{}, internal(r, "OAuth token lookup failed", err)
 	}
-	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != clioauth.WorkspaceID {
+	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != a.WorkspaceID {
 		return caller{}, forbidden("workspace is not served by this platform")
 	}
 	var refusal string
@@ -98,7 +98,7 @@ func (h *handler) authenticateCLI(r *http.Request, token, path string, openAI bo
 	if !a.Has(clioauth.Inference) && !a.Has(clioauth.Developer) {
 		return caller{}, forbidden("%s", refusal)
 	}
-	if !a.Role.AtLeast(identity.RoleDeveloper) {
+	if !a.WorkspaceRole.CanUseResources() {
 		return caller{}, forbidden("calling models requires the developer role")
 	}
 	// The caller's workspace selects the local grant. The upstream has its own tenancy.

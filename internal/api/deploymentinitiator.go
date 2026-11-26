@@ -91,7 +91,9 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 		return nil, &apiErrorWithHeaders{err: errAuth("invalid or expired browser session"), headers: map[string]string{"x-platform-signed-out": "1"}}
 	}
 	var status string
-	err = tx.QueryRow(ctx, `SELECT status FROM principals WHERE id=$1 AND kind='service_account' AND org_id='default'`, id).Scan(&status)
+	var eligible bool
+	err = tx.QueryRow(ctx, `SELECT status,coalesce(workspace_role(id,'default') IN ('admin','developer','limited_developer'),false)
+		FROM principals WHERE id=$1 AND kind='service_account' AND org_id='default'`, id).Scan(&status, &eligible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("service account not found")
 	}
@@ -100,6 +102,9 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	}
 	if status != "active" {
 		return nil, errInvalid("service account must be active")
+	}
+	if !eligible {
+		return nil, errInvalid("service account requires developer access to this workspace")
 	}
 	if _, err := tx.Exec(ctx, `UPDATE deployments SET initiator_principal_id=$1,initiator_api_key_id=NULL,updated_at=now() WHERE id=$2`, id, deploymentID); err != nil {
 		return nil, err

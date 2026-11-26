@@ -181,16 +181,25 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if m := h.cfg.Login; m != nil && m.NativeEnabled() {
 		w.Header().Set("Cache-Control", "no-store, private")
 	}
-	role, cookie, principalID, err := h.authenticate(r)
+	session, err := h.authenticate(r)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	ctx := context.WithValue(r.Context(), roleKey{}, role)
-	ctx = context.WithValue(ctx, principalKey{}, principalID)
-	if cookie {
-		ctx = context.WithValue(ctx, cookieKey{}, true)
+	role := session.Role
+	_, pattern := h.mux.Handler(r)
+	switch pattern {
+	case "GET /admin/v1/usage/daily":
+		role = identity.RoleNone
+		if session.WorkspaceRole.CanReadUsageSummary() {
+			role = identity.RoleDeveloper
+		}
+	case "GET /admin/v1/usage/requests":
+		role = session.WorkspaceRole.ResourceRole()
 	}
+	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	ctx = context.WithValue(ctx, principalKey{}, session.PrincipalID)
+	ctx = context.WithValue(ctx, cookieKey{}, true)
 	if err := requireRole(ctx, identity.RoleDeveloper); err != nil {
 		writeError(w, r, err)
 		return
@@ -199,22 +208,18 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticate refuses every non-cookie credential before routing.
-func (h *handler) authenticate(r *http.Request) (identity.Role, bool, string, error) {
+func (h *handler) authenticate(r *http.Request) (login.Session, error) {
 	if len(r.Header.Values("x-api-key")) > 0 || len(r.Header.Values("Authorization")) > 0 {
-		return "", false, "", unauthenticated("a browser session cookie is required")
+		return login.Session{}, unauthenticated("a browser session cookie is required")
 	}
-	return h.authenticateCookie(r)
-}
-
-func (h *handler) authenticateCookie(r *http.Request) (identity.Role, bool, string, error) {
 	session, err := h.cfg.Login.Authenticate(r.Context(), r)
 	if err != nil {
-		return "", false, "", err
+		return login.Session{}, err
 	}
 	if err := h.cfg.Login.CheckCSRF(r, session); err != nil {
-		return "", false, "", forbidden("invalid browser origin or CSRF token")
+		return login.Session{}, forbidden("invalid browser origin or CSRF token")
 	}
-	return session.Role, true, session.PrincipalID, nil
+	return session, nil
 }
 
 func requireRole(ctx context.Context, min identity.Role) error {

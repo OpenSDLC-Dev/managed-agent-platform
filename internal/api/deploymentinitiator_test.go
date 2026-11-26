@@ -33,7 +33,7 @@ func TestDeploymentInitiatorCookieAdminAndFutureSchedules(t *testing.T) {
 		t.Fatalf("initiator=%v", initiator)
 	}
 	var account map[string]any
-	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"scheduler"}`, headers, 200), &account)
+	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"scheduler","default_workspace_role":"developer"}`, headers, 200), &account)
 	accountID := account["id"].(string)
 	change := fmt.Sprintf(`{"principal_id":%q}`, accountID)
 	for _, malformed := range []string{"%00", "depl_%00", "not-an-id"} {

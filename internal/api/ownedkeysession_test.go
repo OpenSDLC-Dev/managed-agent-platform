@@ -86,7 +86,7 @@ func TestOwnedKeySessionExpiryAfterWait(t *testing.T) {
 func TestOwnedKeyBadBodyRechecksAuthority(t *testing.T) {
 	for _, path := range []func(string) string{consoleOrgAPIKey, consoleAPIKey} {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-		s, h, caller, headers := ownedMutationCaller(t, "cookie", "developer")
+		s, h, caller, headers := ownedMutationCaller(t, "cookie", "admin")
 		_, key := issueOwnedHTTP(t, s, headers, "bad body authority", nil)
 		before := ownedSnapshot(t, s)
 		body := newCredentialBody(ctx, `{"unknown":1}`)

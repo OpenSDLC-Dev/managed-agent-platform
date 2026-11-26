@@ -108,7 +108,7 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
 		return
 	}
-	if !clioauth.CanConsent(session.Role, in.Scopes) {
+	if !clioauth.CanConsent(session.Role, session.WorkspaceRole, in.Scopes) {
 		writeCLIRoleDenial(w, r, in, s.login.PublicOrigin())
 		return
 	}
@@ -193,7 +193,7 @@ func (s *server) issueCLIConsent(r *http.Request, session login.Session, in clio
 	if err != nil {
 		return "", err
 	}
-	if current.PrincipalID != id || !clioauth.CanConsent(current.Role, in.Scopes) {
+	if current.PrincipalID != id || !clioauth.CanConsent(current.Role, current.WorkspaceRole, in.Scopes) {
 		return "", errCLIRole
 	}
 	code, err := clioauth.IssueCode(ctx, tx, id, in)
