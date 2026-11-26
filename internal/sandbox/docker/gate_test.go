@@ -1682,3 +1682,128 @@ func TestGateContainerAppliesIndependentResourceLimits(t *testing.T) {
 		}
 	})
 }
+
+// TestProvisionGatedUnrestrictedSession verifies that an unrestricted,
+// vault-less session with Spec.Gate set joins the gate's network namespace
+// (never Docker's default bridge), carries proxy env and mandatory capability
+// drops, and replaces any pre-existing ungated bridge container.
+func TestProvisionGatedUnrestrictedSession(t *testing.T) {
+	t.Run("fresh unrestricted session joins gate netns instead of bridge", func(t *testing.T) {
+		m := &fakeMinter{token: "gtk_unrestricted"}
+		s := gatedSpec(m)
+		s.Networking = domain.Networking{Type: domain.NetUnrestricted}
+		s.Env = nil
+		gName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+		var gateBody, sbBody containerConfig
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/json"):
+				switch inspectRef(r.URL.Path) {
+				case "sb1":
+					io.WriteString(w, sandboxJSON("sb1", s, "container:gate1"))
+				case gName, sbName:
+					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+				case "gate1":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				default:
+					t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))
+				}
+			case r.URL.Path == "/containers/create":
+				switch r.URL.Query().Get("name") {
+				case gName:
+					json.NewDecoder(r.Body).Decode(&gateBody)
+					io.WriteString(w, `{"Id":"gate1"}`)
+				case sbName:
+					json.NewDecoder(r.Body).Decode(&sbBody)
+					io.WriteString(w, `{"Id":"sb1"}`)
+				default:
+					t.Errorf("unexpected create name %q", r.URL.Query().Get("name"))
+				}
+			case strings.HasSuffix(r.URL.Path, "/start"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+		})
+		p.gateNetwork = "gate-net"
+
+		if _, err := p.Provision(context.Background(), s); err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		if sbBody.HostConfig.NetworkMode != "container:gate1" {
+			t.Errorf("unrestricted gated sandbox NetworkMode = %q, want container:gate1 (not bridge)", sbBody.HostConfig.NetworkMode)
+		}
+		if !slices.Equal(sbBody.HostConfig.CapDrop, []string{"NET_RAW", "SETUID", "SETGID"}) {
+			t.Errorf("unrestricted gated sandbox CapDrop = %v", sbBody.HostConfig.CapDrop)
+		}
+		if !slices.Equal(sbBody.HostConfig.SecurityOpt, []string{"no-new-privileges"}) {
+			t.Errorf("unrestricted gated sandbox SecurityOpt = %v", sbBody.HostConfig.SecurityOpt)
+		}
+		for _, want := range []string{
+			"HTTP_PROXY=http://127.0.0.1:15080", "HTTPS_PROXY=http://127.0.0.1:15080",
+			"http_proxy=http://127.0.0.1:15080", "https_proxy=http://127.0.0.1:15080",
+			"NO_PROXY=", "no_proxy=",
+		} {
+			if !slices.Contains(sbBody.Env, want) {
+				t.Errorf("unrestricted gated sandbox env missing %q; got %v", want, sbBody.Env)
+			}
+		}
+		if !slices.Contains(gateBody.Env, "GATE_TOKEN=gtk_unrestricted") {
+			t.Errorf("gate env missing token; got %v", gateBody.Env)
+		}
+	})
+
+	t.Run("existing ungated bridge unrestricted sandbox is replaced with gated pair", func(t *testing.T) {
+		m := &fakeMinter{token: "gtk_upgrade"}
+		s := gatedSpec(m)
+		s.Networking = domain.Networking{Type: domain.NetUnrestricted}
+		s.Env = nil
+		gName, sbName := "map-gate-"+string(s.SessionID), "map-"+string(s.SessionID)
+
+		var removedOld bool
+		var sbBody containerConfig
+		p := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/json"):
+				switch inspectRef(r.URL.Path) {
+				case gName:
+					http.Error(w, `{"message":"No such container"}`, http.StatusNotFound)
+				case "gate1":
+					io.WriteString(w, healthJSON("gate1", "healthy", s, true))
+				case sbName:
+					io.WriteString(w, sandboxJSON("old-bridge-sb", s, "bridge"))
+				case "sb-gated":
+					io.WriteString(w, sandboxJSON("sb-gated", s, "container:gate1"))
+				default:
+					t.Errorf("unexpected inspect %q", inspectRef(r.URL.Path))
+				}
+			case r.Method == http.MethodDelete && r.URL.Path == "/containers/old-bridge-sb":
+				removedOld = true
+				w.WriteHeader(http.StatusNoContent)
+			case r.URL.Path == "/containers/create":
+				if r.URL.Query().Get("name") == gName {
+					io.WriteString(w, `{"Id":"gate1"}`)
+				} else {
+					json.NewDecoder(r.Body).Decode(&sbBody)
+					io.WriteString(w, `{"Id":"sb-gated"}`)
+				}
+			case strings.HasSuffix(r.URL.Path, "/start"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+		})
+
+		sb, err := p.Provision(context.Background(), s)
+		if err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+		if !removedOld {
+			t.Error("existing ungated bridge sandbox was not removed")
+		}
+		if sb.ID() != "sb-gated" || sbBody.HostConfig.NetworkMode != "container:gate1" {
+			t.Errorf("rebuilt sandbox id=%q network=%q, want sb-gated / container:gate1", sb.ID(), sbBody.HostConfig.NetworkMode)
+		}
+	})
+}

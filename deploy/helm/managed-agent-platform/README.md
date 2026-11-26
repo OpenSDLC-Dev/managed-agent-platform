@@ -657,25 +657,25 @@ the example maps it to user, which cannot read. Use developer for readers.
 ## Security notes
 
 - **Sandbox Pod network isolation.** The executor launches sandbox Pods in the release
-  namespace, alongside the control plane, brain, and Postgres. The chart ships **no
-  NetworkPolicy**, so a tool running in an unrestricted-networking sandbox can reach those
-  in-cluster services. On a cluster with a policy-enforcing CNI, apply a NetworkPolicy that
-  denies sandbox Pods (label `app.kubernetes.io/part-of: managed-agent-platform` is **not**
-  set on them; select by the provider's `dev.opensdlc.managed-agent-platform.session-id`
-  label) egress to the control-plane and Postgres Services. Setting `executor.gateImage`
-  gives `limited` and vault-attached sessions a first-class egress gate (below), which
-  enforces `allowed_hosts` plus whatever its `allow_mcp_servers` and
-  `allow_package_managers` flags open, but deliberately does not police in-cluster reachability for
-  unrestricted sessions — the NetworkPolicy advice stands either way.
-- **Pod Security Admission and the gate/limited paths.** With `executor.gateImage` unset, a
-  `networking.type: limited` session gets a sandbox Pod with a `NET_ADMIN` init container
-  (it flushes the Pod's routing table). With it set, `limited` **and vault-attached**
-  sessions instead get the `NET_ADMIN` **gate sidecar** (no route flush) — note that this
-  includes vault-attached sessions with unrestricted networking. Either shape is rejected at
+  namespace, alongside the control plane, brain, and Postgres. `executor.gateImage` is
+  enabled by default, so every cloud session (`limited` and `unrestricted`, with or without
+  vaults) gets the per-session egress gate sidecar: it enforces `allowed_hosts` plus
+  whatever `allow_mcp_servers` and `allow_package_managers` open on `limited` sessions, and
+  enforces the address floor (`dialguard.IPAllowed` — blocking cloud metadata / link-local,
+  loopback, unspecified, multicast, and IPv6 transition targets) on `unrestricted` sessions
+  too. Because `dialguard.IPAllowed` deliberately admits RFC 1918 addresses for on-prem /
+  in-VPC operation and the chart ships **no NetworkPolicy**, an `unrestricted` session can
+  still reach RFC 1918 in-cluster services unless you apply a NetworkPolicy denying sandbox
+  Pods (label `app.kubernetes.io/part-of: managed-agent-platform` is **not** set on them;
+  select by the provider's `dev.opensdlc.managed-agent-platform.session-id` label) egress
+  to the control-plane and Postgres Services, or use `networking.type: limited`.
+- **Pod Security Admission and the gate/limited paths.** By default (`executor.gateImage`
+  set), every cloud session's sandbox Pod carries the `NET_ADMIN` **gate sidecar** (no route
+  flush). If `executor.gateImage` is explicitly set to `""`, only `networking.type: limited`
+  sessions get a `NET_ADMIN` init container (route flush), while `unrestricted` sessions
+  run without the gate or address floor. Any Pod carrying `NET_ADMIN` is rejected at
   admission by a namespace enforcing the `baseline` or `restricted` Pod Security Standard,
-  failing every tool call in those sessions. Install into a namespace that permits
-  `NET_ADMIN` if you use limited networking or the gate; only the plain
-  unrestricted-no-vaults path needs no added capability.
+  failing tool calls in those sessions. Install into a namespace that permits `NET_ADMIN`.
 
 ## Managing your own Secret
 
@@ -744,12 +744,13 @@ Four things worth understanding before you turn them on:
   too low ends sessions mid-call
   ([docs/DIVERGENCES.md](../../../docs/DIVERGENCES.md),
   [docs/self-hosted-security.md](../../../docs/self-hosted-security.md) §3).
-- **The egress gate needs a privileged sidecar.** Setting `executor.gateImage` opts
-  `limited` and vault-attached sessions into per-session egress filtering and
-  credential substitution. The sidecar needs `CAP_NET_ADMIN`, which neither the `baseline`
-  nor the `restricted` Pod Security level admits, so the namespace must enforce neither —
-  and it needs Kubernetes ≥ 1.29. Left unset, those sessions keep the fail-closed
-  route-flush instead.
+- **The egress gate needs a privileged sidecar.** `executor.gateImage` is enabled by
+  default so every cloud session (`limited` and `unrestricted`, with or without vaults) gets
+  per-session egress filtering, the address floor, and credential substitution. The sidecar
+  needs `CAP_NET_ADMIN`, which neither the `baseline` nor the `restricted` Pod Security
+  level admits, so the namespace must enforce neither — and it needs Kubernetes ≥ 1.29.
+  Explicitly setting `executor.gateImage=""` opts out (returning `limited` sessions to the
+  route-flush init container and leaving `unrestricted` sessions ungated).
 - **There is no single spelling for turning a `sandboxHardening` knob off.** Numeric caps
   take `0`, `capDrop` takes `none`, `readOnlyRootfs` takes `false` or empty — and
   `runAsUser` takes **empty only**, because `0` there is a valid uid meaning **root**.

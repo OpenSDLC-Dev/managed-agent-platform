@@ -9,49 +9,57 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gatetoken"
 )
 
-// TestGateSpecGatesLimitedAndVaultSessions exercises the gate-need decision (with
-// a configured executor): a limited or vault-attached session is gated (the
-// provider that runs the gate injects the proxy env, not this method); an
-// unrestricted vault-less session is not.
-func TestGateSpecGatesLimitedAndVaultSessions(t *testing.T) {
+// TestGateSpecGatesAllSessions exercises the gate decision (with a configured
+// executor): every cloud session — unrestricted without vaults, limited, and
+// vault-attached — gets a gate spec carrying the deployment's gate image,
+// control-plane URL, OTLP config, and token minter, so unrestricted sessions
+// also pass through the gate's address floor.
+func TestGateSpecGatesAllSessions(t *testing.T) {
 	e := &Executor{cfg: Config{
 		GateImage: "gate:1", ControlplaneURL: "http://cp",
 		OTelEndpoint: "otel:4317", OTelInsecure: true,
 	}}
 
-	// Unrestricted, no vaults: no gate.
-	if gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}}); gate != nil {
-		t.Errorf("ungated session: gate=%v, want nil", gate)
-	}
-
-	// Limited networking: gated, carrying the deployment's OTLP config so the gate
-	// exports its egress spans.
-	gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: domain.NetLimited}})
-	if gate == nil || gate.Image != "gate:1" || gate.ControlplaneURL != "http://cp" {
-		t.Fatalf("limited session gate = %+v, want image gate:1 / cp http://cp", gate)
-	}
-	if gate.OTelEndpoint != "otel:4317" || !gate.OTelInsecure {
-		t.Errorf("gate OTLP = %q insecure=%v, want otel:4317 / true", gate.OTelEndpoint, gate.OTelInsecure)
-	}
-	if gate.TokenMinter == nil {
-		t.Error("gate has no token minter")
-	}
-
-	// Vault-attached (even on unrestricted networking): gated.
-	if gate := e.gateSpec(sessionRun{
-		networking: domain.Networking{Type: domain.NetUnrestricted},
-		vaultIDs:   []string{"vlt_x"},
-	}); gate == nil {
-		t.Fatal("vault-attached session was not gated")
+	for _, tc := range []struct {
+		name string
+		sess sessionRun
+	}{
+		{
+			name: "unrestricted without vaults",
+			sess: sessionRun{networking: domain.Networking{Type: domain.NetUnrestricted}},
+		},
+		{
+			name: "limited without vaults",
+			sess: sessionRun{networking: domain.Networking{Type: domain.NetLimited}},
+		},
+		{
+			name: "unrestricted with vaults",
+			sess: sessionRun{
+				networking: domain.Networking{Type: domain.NetUnrestricted},
+				vaultIDs:   []string{"vlt_x"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := e.gateSpec(tc.sess)
+			if gate == nil || gate.Image != "gate:1" || gate.ControlplaneURL != "http://cp" {
+				t.Fatalf("%s gate = %+v, want image gate:1 / cp http://cp", tc.name, gate)
+			}
+			if gate.OTelEndpoint != "otel:4317" || !gate.OTelInsecure {
+				t.Errorf("%s gate OTLP = %q insecure=%v, want otel:4317 / true", tc.name, gate.OTelEndpoint, gate.OTelInsecure)
+			}
+			if gate.TokenMinter == nil {
+				t.Errorf("%s gate has no token minter", tc.name)
+			}
+		})
 	}
 }
 
 // TestGateSpecWithoutConfigReturnsNoGate: an executor with no gate configured
-// (K8s, or a Docker deployment that has not opted in) asks for no gate even for a
-// session that would want one — the backend then applies its own fail-closed
-// networking (Docker `limited` → no egress, K8s → its init-container isolation),
-// the pre-gate behavior, rather than faulting the provision. It must not silently
-// return a gate the deployment cannot serve.
+// (an explicit opt-out) asks for no gate even for sessions that would use one —
+// the backend then applies its own ungated networking (Docker `limited` → no
+// egress, K8s → its init-container isolation), rather than faulting the
+// provision. It must not silently return a gate the deployment cannot serve.
 func TestGateSpecWithoutConfigReturnsNoGate(t *testing.T) {
 	for _, cfg := range []Config{
 		{},                             // neither set
@@ -59,8 +67,10 @@ func TestGateSpecWithoutConfigReturnsNoGate(t *testing.T) {
 		{ControlplaneURL: "http://cp"}, // no gate image
 	} {
 		e := &Executor{cfg: cfg}
-		if gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: domain.NetLimited}}); gate != nil {
-			t.Errorf("cfg %+v: gateSpec returned a gate the executor cannot serve: %+v", cfg, gate)
+		for _, netType := range []domain.NetworkingType{domain.NetLimited, domain.NetUnrestricted} {
+			if gate := e.gateSpec(sessionRun{networking: domain.Networking{Type: netType}}); gate != nil {
+				t.Errorf("cfg %+v (%s): gateSpec returned a gate the executor cannot serve: %+v", cfg, netType, gate)
+			}
 		}
 	}
 }
@@ -102,11 +112,43 @@ func TestVaultSessionProvisionsWithGate(t *testing.T) {
 	}
 }
 
-// TestUnrestrictedSessionProvisionsWithoutGate is the common path: no vaults,
-// unrestricted egress, no gate, no proxy env.
-func TestUnrestrictedSessionProvisionsWithoutGate(t *testing.T) {
+// TestUnrestrictedSessionProvisionsWithGate is the common cloud path: no vaults,
+// unrestricted egress, still provisioned with a gate when configured so the
+// gate's owner-match firewall and address floor protect every outbound dial.
+func TestUnrestrictedSessionProvisionsWithGate(t *testing.T) {
 	prov := &fakeProvider{sb: &fakeSandbox{}}
 	h := newHarnessWith(t, prov, Config{GateImage: "gate:1", ControlplaneURL: "http://cp"})
+	h.prov = prov
+
+	h.suspend(t, writeUse("out.txt", "hi"))
+	if worked, err := h.exec.step(context.Background()); err != nil || !worked {
+		t.Fatalf("step worked=%v err=%v", worked, err)
+	}
+	spec := h.prov.lastSpec
+	if spec.Gate == nil {
+		t.Fatal("unrestricted session provisioned without a gate")
+	}
+	if spec.Gate.Image != "gate:1" || spec.Gate.ControlplaneURL != "http://cp" {
+		t.Errorf("gate = %+v, want image gate:1 / cp http://cp", spec.Gate)
+	}
+	if spec.Gate.TokenMinter == nil {
+		t.Error("gate has no token minter")
+	}
+	if spec.Env != nil {
+		t.Errorf("unrestricted vault-less session carried unexpected spec.Env=%v", spec.Env)
+	}
+	if spec.GateTokenRevoker == nil {
+		t.Error("spec carries no GateTokenRevoker")
+	}
+}
+
+// TestUnrestrictedSessionWithoutGateConfigProvisionsUngated verifies explicit
+// gate opt-out (empty GateImage): the session provisions without a gate and
+// still carries GateTokenRevoker so any previously gated pair's token is
+// revoked on dismantle (#197).
+func TestUnrestrictedSessionWithoutGateConfigProvisionsUngated(t *testing.T) {
+	prov := &fakeProvider{sb: &fakeSandbox{}}
+	h := newHarnessWith(t, prov, Config{})
 	h.prov = prov
 
 	h.suspend(t, writeUse("out.txt", "hi"))
@@ -116,8 +158,6 @@ func TestUnrestrictedSessionProvisionsWithoutGate(t *testing.T) {
 	if spec := h.prov.lastSpec; spec.Gate != nil || spec.Env != nil {
 		t.Errorf("ungated session provisioned with gate=%v env=%v", spec.Gate, spec.Env)
 	}
-	// The revoker rides every spec, gated or not: the gated→ungated dismantle
-	// is observed by a provision whose own spec is the ungated one (#197).
 	if h.prov.lastSpec.GateTokenRevoker == nil {
 		t.Error("ungated spec carries no GateTokenRevoker — a dismantled gate's token could never be revoked")
 	}

@@ -238,10 +238,10 @@ type Spec struct {
 	// iptables, with the sandbox joining that namespace and reaching the network
 	// only through the gate's loopback proxy (the provider points the sandbox's
 	// HTTP_PROXY there — a deployment detail it owns, not the caller's env). nil =
-	// the sandbox networks directly (unrestricted, no vault
-	// credentials). The executor sets it for sessions that are `limited` or
-	// vault-attached; both backends consume it — Docker as a gate-pair the
-	// sandbox joins, K8s as a native sidecar in the sandbox's pod.
+	// ungated fallback when no gate image is configured. The executor sets it
+	// for every cloud session (both `limited` and `unrestricted`, with or
+	// without vaults) whenever configured; both backends consume it — Docker as
+	// a gate-pair the sandbox joins, K8s as a native sidecar in the sandbox's pod.
 	Gate *GateSpec
 	// GateTokenRevoker revokes the session's persisted gate token when a
 	// provision dismantles its gate without replacing it — the gated→ungated

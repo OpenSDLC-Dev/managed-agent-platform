@@ -162,16 +162,17 @@ type Config struct {
 	// Config by hand wants; cmd/executor resolves the platform's defaults from
 	// the environment (sandbox.HardeningFromEnv), so every deployment gets them.
 	Hardening sandbox.Hardening
-	// ControlplaneURL and GateImage opt the deployment into the per-session egress
-	// gate. A session wants a gate when its networking is `limited` or it has
-	// vaults attached; its gate container (GateImage) fetches that session's egress
-	// config from ControlplaneURL. When both are set, a gate-wanting session gets a
-	// gate; when either is empty, no gate is requested and a gate-wanting session
-	// keeps the backend's own fail-closed networking (Docker `limited` → no egress,
-	// K8s → its init-container isolation, vault-attached → inert placeholders) — the
-	// pre-gate behavior, so an un-opted-in deployment is unchanged rather than
-	// faulted. An unrestricted, vault-less session never wanted a gate and networks
-	// directly regardless. See gateSpec.
+	// ControlplaneURL and GateImage enable the per-session egress gate for every
+	// cloud session — both `limited` and `unrestricted`, with or without vaults
+	// attached. Its gate container (GateImage) fetches that session's egress
+	// config from ControlplaneURL and enforces the networking policy, vault
+	// credential substitution, and the dialguard address floor (blocking
+	// loopback, link-local / cloud metadata, unspecified, multicast, and
+	// embedded IPv6 transition targets even on `unrestricted` sessions). When
+	// either is empty, no gate is requested and the backend keeps its pre-gate
+	// behavior (Docker `limited` → no egress, K8s `limited` → its init-container
+	// isolation, `unrestricted` → direct network, vault-attached → inert
+	// placeholders). See gateSpec.
 	ControlplaneURL string
 	GateImage       string
 	// OTelEndpoint and OTelInsecure are the deployment's OTLP collector config,
@@ -820,24 +821,21 @@ func (e *Executor) sandboxEnv(ctx context.Context, sessionID domain.ID, vaultIDs
 	return env, nil
 }
 
-// gateSpec decides whether to ask the provider for a per-session egress gate. A
-// session wants one when its egress is `limited` (only its allowed_hosts may
-// leave) or it has vaults attached (their credentials are injected at the gate,
-// never handed to the sandbox). It returns a GateSpec only when a gate is both
-// wanted and configured (GateImage + ControlplaneURL). When the executor has no
-// gate configured — the K8s deployments, and any Docker deployment that has not
-// opted in — it returns nil and the backend applies its own fail-closed
-// networking instead: the Docker provider gives a `limited` sandbox no egress at
-// all (NetworkMode "none"), the K8s provider its init-container isolation, and a
-// vault-attached sandbox keeps the inert placeholders that egress literally with
-// no gate to substitute them. That is the pre-gate behavior, so an un-opted-in
-// deployment is unchanged rather than forced into a provision that never
-// completes. The backend that runs the gate wires the sandbox to it and injects
-// the proxy variables (a deployment detail), so gateSpec stays backend-agnostic
-// and never touches the env.
-func (e *Executor) gateSpec(sess sessionRun) *sandbox.GateSpec {
-	wantsGate := sess.networking.Type == domain.NetLimited || len(sess.vaultIDs) > 0
-	if !wantsGate || e.cfg.GateImage == "" || e.cfg.ControlplaneURL == "" {
+// gateSpec decides whether to ask the provider for a per-session egress gate.
+// Every cloud session wants a gate — `limited` sessions for allowed_hosts
+// enforcement, vault-attached sessions for credential substitution, and
+// `unrestricted` sessions so every outbound dial still passes through the
+// gate's owner-match firewall and address floor (blocking loopback, link-local /
+// cloud metadata, unspecified, multicast, and IPv6 transition targets). It
+// returns a GateSpec whenever the executor is configured with both GateImage
+// and ControlplaneURL. When either is empty, it returns nil and the backend
+// falls back to its ungated networking instead (Docker `limited` → NetworkMode
+// "none", K8s `limited` → route-flush init container, vault-attached → inert
+// placeholders). The backend that runs the gate wires the sandbox to it and
+// injects the proxy variables (a deployment detail), so gateSpec stays
+// backend-agnostic and never touches the env.
+func (e *Executor) gateSpec(_ sessionRun) *sandbox.GateSpec {
+	if e.cfg.GateImage == "" || e.cfg.ControlplaneURL == "" {
 		return nil
 	}
 	return &sandbox.GateSpec{

@@ -31,6 +31,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gaterun/uidguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox/sandboxtest"
 )
@@ -2597,6 +2598,84 @@ func TestPodSpecGatedShape(t *testing.T) {
 	}
 	if sbEnv["API_KEY"] != "vltph_x" {
 		t.Errorf("sandbox vault placeholder lost: API_KEY = %q", sbEnv["API_KEY"])
+	}
+}
+
+// TestPodSpecGatedUnrestrictedShape verifies that an unrestricted, vault-less
+// session with Spec.Gate set gets the native egress-gate sidecar, loopback
+// proxy env, mandatory capability drops, and UID guard — never an ungated pod.
+func TestPodSpecGatedUnrestrictedShape(t *testing.T) {
+	p := fakeProvider()
+	spec := sandbox.Spec{
+		SessionID:  domain.ID("sesn_unrestricted_gated"),
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		Gate:       gateSpecFixture(&mintRecorder{}),
+	}
+	pod := p.podSpec("map-sesn-unrestricted-gated", "/workdir", spec, "gtk_unrestricted_token")
+
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != gateContainerName {
+		t.Fatalf("gated unrestricted pod init containers = %+v, want solely %s", pod.Spec.InitContainers, gateContainerName)
+	}
+	g := pod.Spec.InitContainers[0]
+	if g.RestartPolicy == nil || *g.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Error("gate sidecar is not a native sidecar (restartPolicy Always)")
+	}
+	sb := pod.Spec.Containers[0]
+	if sb.SecurityContext == nil || sb.SecurityContext.AllowPrivilegeEscalation == nil || *sb.SecurityContext.AllowPrivilegeEscalation {
+		t.Error("gated unrestricted sandbox allows privilege escalation")
+	}
+	drops := map[corev1.Capability]bool{}
+	if sb.SecurityContext != nil && sb.SecurityContext.Capabilities != nil {
+		for _, c := range sb.SecurityContext.Capabilities.Drop {
+			drops[c] = true
+		}
+	}
+	for _, c := range []corev1.Capability{"NET_RAW", "SETUID", "SETGID"} {
+		if !drops[c] {
+			t.Errorf("gated unrestricted sandbox does not drop %s", c)
+		}
+	}
+	sbEnv := map[string]string{}
+	for _, e := range sb.Env {
+		sbEnv[e.Name] = e.Value
+	}
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if sbEnv[k] != "http://127.0.0.1:15080" {
+			t.Errorf("sandbox %s = %q, want the gate loopback proxy", k, sbEnv[k])
+		}
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if v, ok := sbEnv[k]; !ok || v != "" {
+			t.Errorf("sandbox %s = %q,%v, want forced empty", k, v, ok)
+		}
+	}
+	if len(sb.Command) == 0 || sb.Command[0] != uidguard.Path {
+		t.Errorf("gated unrestricted sandbox command = %v, want uidguard prefix %q", sb.Command, uidguard.Path)
+	}
+
+	// Provision replaces a pre-existing ungated unrestricted pod with a gated one.
+	m := &mintRecorder{}
+	sid := domain.ID("sesn_unrestricted_reshape")
+	rp := fakeProvider(readyPod(sid))
+	markPodsReadyOnCreate(rp)
+	if _, err := rp.Provision(context.Background(), sandbox.Spec{
+		SessionID:  sid,
+		Image:      "img",
+		Networking: domain.Networking{Type: domain.NetUnrestricted},
+		Gate:       gateSpecFixture(m),
+	}); err != nil {
+		t.Fatalf("Provision (upgrade ungated unrestricted pod): %v", err)
+	}
+	rebuilt, err := rp.client.cs.CoreV1().Pods("default").Get(context.Background(), podName(sid), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get rebuilt pod: %v", err)
+	}
+	if !hasGateSidecar(rebuilt) {
+		t.Error("rebuilt unrestricted pod has no gate sidecar")
+	}
+	if m.generated != 1 || len(m.persisted) != 1 {
+		t.Errorf("upgrade minted %d / persisted %d, want 1/1", m.generated, len(m.persisted))
 	}
 }
 
