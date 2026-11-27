@@ -14,18 +14,18 @@ import (
 // beginWorkspaceCredentialMutation holds current human authority through the key write.
 // Read the complete body first. Principal -> browser session -> key is the
 // shared lock order with principal removal, which archives owned keys.
-func (s *server) beginWorkspaceCredentialMutation(r *http.Request, min identity.Role) (pgx.Tx, identityPrincipal, error) {
+func (s *server) beginWorkspaceCredentialMutation(r *http.Request, min identity.Role) (pgx.Tx, login.Session, error) {
 	if _, err := requireCookieSession(r); err != nil {
-		return nil, identityPrincipal{}, err
+		return nil, login.Session{}, err
 	}
 	ctx := r.Context()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return nil, identityPrincipal{}, err
+		return nil, login.Session{}, err
 	}
-	fail := func(err error) (pgx.Tx, identityPrincipal, error) {
+	fail := func(err error) (pgx.Tx, login.Session, error) {
 		tx.Rollback(ctx)
-		return nil, identityPrincipal{}, err
+		return nil, login.Session{}, err
 	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return fail(err)
@@ -47,11 +47,10 @@ func (s *server) beginWorkspaceCredentialMutation(r *http.Request, min identity.
 		}
 		return fail(err)
 	}
-	caller := identityPrincipal{ID: session.PrincipalID, Role: keyManagerRole(session)}
-	if !caller.Role.AtLeast(min) {
+	if !keyManagerRole(session).AtLeast(min) {
 		return fail(errForbidden("this route requires the " + string(min) + " role"))
 	}
-	return tx, caller, nil
+	return tx, session, nil
 }
 
 func keyManagerRole(session login.Session) identity.Role {
@@ -70,9 +69,9 @@ func canManageAPIKey(k ManagementKey, caller identityPrincipal) bool {
 
 // resolveAPIKeyOwner runs only inside the principal-first mutation fence. A
 // public alias asserts a kind; the stored row must confirm it before assignment.
-func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, alias *string) (*string, error) {
+func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller login.Session, alias *string) (*string, error) {
 	if alias == nil {
-		return &caller.ID, requireKeyOwnerGrant(r, tx, caller.ID)
+		return &caller.PrincipalID, requireKeyOwnerGrant(r, tx, caller.PrincipalID)
 	}
 	if _, err := requireCookieSession(r); err != nil {
 		return nil, err
@@ -82,11 +81,12 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 	if !ok {
 		return nil, notFound
 	}
+	if claimedKind == "service_account" && caller.WorkspaceRole != workspace.Admin {
+		return nil, errForbidden("a workspace admin browser session is required to assign a service account")
+	}
 	var kind, status, org string
-	var issuerRole identity.Role
-	err := tx.QueryRow(r.Context(), `SELECT owner.kind,owner.status,owner.org_id,issuer.role
-		FROM principals owner JOIN principals issuer ON issuer.id=$2 WHERE owner.id=$1`, id, caller.ID).
-		Scan(&kind, &status, &org, &issuerRole)
+	err := tx.QueryRow(r.Context(), `SELECT kind,status,org_id FROM principals WHERE id=$1
+		AND (kind<>'service_account' OR workspace_role(id,$2) IS NOT NULL)`, id, workspace.ID(r.Context())).Scan(&kind, &status, &org)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -96,14 +96,11 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 	if kind != claimedKind || status != "active" || org != reservedOrganization {
 		return nil, notFound
 	}
-	if id == caller.ID {
+	if id == caller.PrincipalID {
 		return &id, requireKeyOwnerGrant(r, tx, id)
 	}
 	if kind != "service_account" {
 		return nil, errForbidden("API keys cannot be created for another user")
-	}
-	if issuerRole != identity.RoleAdmin {
-		return nil, errForbidden("an organization admin browser session is required to assign a service account")
 	}
 	return &id, requireKeyOwnerGrant(r, tx, id)
 }

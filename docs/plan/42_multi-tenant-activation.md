@@ -58,7 +58,7 @@ Use explicit capabilities for billing, resource and Console actions. Adding Bill
 linear role ranking would grant unrelated operations. Preserve the Console origin/lane when
 dispatching through private proxies so the Limited Developer restrictions also apply to
 direct private requests. Public API clients retain the documented developer operations.
-Workspace admins manage key records in their workspace. Issuing a key for an existing service account requires an organization Admin and a resource grant for that account in the selected workspace.
+On 2026-11-27 the owner approved workspace Admins issuing keys for active service accounts with resource access in the same workspace. The service account's identity and organization role remain under organization administration.
 A credential narrows the authority of its holder. Organization administration through the
 Console requires its signed-in human session and CSRF on writes.
 [Workspace roles, inheritance and service accounts](https://platform.claude.com/docs/en/manage-claude/workspaces#workspace-roles-and-permissions)

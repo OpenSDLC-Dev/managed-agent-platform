@@ -454,7 +454,7 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Private routes accept browser sessions only. API-key and Authorization headers are
 refused, even beside a valid cookie; incidental proxy assertions supply no authority.
-Workspace developers manage their own API keys. Workspace admins also manage existing key records and environment keys in that workspace. Issuing a service-account key requires an organization admin. Organization admins manage membership, service accounts and deployment initiators. Historical
+Workspace developers manage their own API keys. Workspace admins manage key records and environment keys in their workspace. They can issue a key for an active service account with resource access there. Organization admins manage membership, service accounts and deployment initiators. Historical
 preset rows remain immutable. The resource proxy requires developer and preserves
 each resource's role floor. [Security invariants](#security-invariants) describes
 native login, cookie boundaries and public machine credentials.

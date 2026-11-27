@@ -215,12 +215,12 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	}
 	// The cookie-selected human is the issuer; ownership is resolved below.
 	ctx := r.Context()
-	tx, caller, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
+	tx, session, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	ownerID, err := resolveAPIKeyOwner(r, tx, caller, alias)
+	ownerID, err := resolveAPIKeyOwner(r, tx, session, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -327,12 +327,13 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	notFound := withDetails(errNotFound("API Key `%s` not found.", keyID), userFacingDetails)
 	ctx := r.Context()
 	status, name, bodyErr := apiKeyPatch(raw)
-	tx, caller, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
+	tx, session, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
+	caller := identityPrincipal{ID: session.PrincipalID, Role: keyManagerRole(session)}
 	// Visibility precedes body and lifecycle errors. This read never locks the
 	// target, so neither an invalid body nor a hidden row holds its row lock.
 	key, err := scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE workspace_id=$2 AND id=$1`, keyID, workspace.ID(ctx)))

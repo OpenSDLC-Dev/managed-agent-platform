@@ -167,20 +167,24 @@ func TestOwnedKeyAssignment(t *testing.T) {
 	for _, caller := range []string{admin, developer} {
 		headers := ownedCookie(t, s, caller)
 		for _, tc := range []struct {
-			name  string
-			value any
-			want  int
+			name                string
+			value               any
+			orgAdmin, developer int
 		}{
-			{"number", 3, 400}, {"prefix", "principal_bad", 400}, {"unstorable", "user_bad\x00", 400},
-			{"undecodable", "svac_missing", 404}, {"nonexistent", principal.PublicID(domain.NewID(domain.PrefixPrincipal).String(), "user"), 404},
-			{"wrong-kind", principal.PublicID(sa, "user"), 404},
-			{"foreign", principal.PublicID(foreign, "service_account"), 404}, {"deactivated", principal.PublicID(removed, "service_account"), 404},
-			{"other-human", principal.PublicID(other, "user"), 403},
+			{"number", 3, 400, 400}, {"prefix", "principal_bad", 400, 400}, {"unstorable", "user_bad\x00", 400, 400},
+			{"unknown-service", "svac_missing", 404, 403}, {"nonexistent", principal.PublicID(domain.NewID(domain.PrefixPrincipal).String(), "user"), 404, 404},
+			{"wrong-kind", principal.PublicID(sa, "user"), 404, 404},
+			{"foreign", principal.PublicID(foreign, "service_account"), 404, 403}, {"deactivated", principal.PublicID(removed, "service_account"), 404, 403},
+			{"other-human", principal.PublicID(other, "user"), 403, 403},
 		} {
 			t.Run(caller+"/"+tc.name, func(t *testing.T) {
 				before := ownedSnapshot(t, s)
 				body, _ := json.Marshal(map[string]any{"name": "refused", "principal_id": tc.value})
-				expectManagement(t, s, "POST", consoleAPIKeysPath, string(body), headers, tc.want)
+				want := tc.orgAdmin
+				if caller == developer {
+					want = tc.developer
+				}
+				expectManagement(t, s, "POST", consoleAPIKeysPath, string(body), headers, want)
 				if after := ownedSnapshot(t, s); before != after {
 					t.Fatal("refusal changed key rows")
 				}
@@ -192,10 +196,23 @@ func TestOwnedKeyAssignment(t *testing.T) {
 		grantFixture(t, s.pool, manager, "admin")
 		headers := ownedCookie(t, s, manager)
 		issueOwnedHTTP(t, s, headers, "manager-personal", nil)
+		alias := principal.PublicID(sa, "service_account")
+		issueOwnedHTTP(t, s, headers, "manager-service", &alias)
+		outside := ownedPrincipalFixture(t, s.pool, "service_account", "developer")
+		if _, err := s.pool.Exec(t.Context(), `DELETE FROM workspace_memberships WHERE workspace_id='default' AND principal_id=$1`, outside); err != nil {
+			t.Fatal(err)
+		}
 		before := ownedSnapshot(t, s)
-		expectManagement(t, s, "POST", consoleAPIKeysPath, fmt.Sprintf(`{"name":"service","principal_id":%q}`, principal.PublicID(sa, "service_account")), headers, 403)
+		for _, target := range []string{outside, domain.NewID(domain.PrefixPrincipal).String()} {
+			alias := principal.PublicID(target, "service_account")
+			reply := expectManagement(t, s, "POST", consoleAPIKeysPath, fmt.Sprintf(`{"name":"service","principal_id":%q}`, alias), headers, 404)
+			result := ownedObject(t, reply)
+			if got := errMessage(result); got != fmt.Sprintf("principal %s not found", alias) {
+				t.Fatalf("target refusal %q", got)
+			}
+		}
 		if before != ownedSnapshot(t, s) {
-			t.Fatal("workspace administrator issued a service-account key")
+			t.Fatal("issued a key for an ineligible service account")
 		}
 	})
 	t.Run("developer-service", func(t *testing.T) {
