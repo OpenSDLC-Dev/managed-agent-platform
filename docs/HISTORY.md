@@ -79,6 +79,10 @@ A ten-case MiniMax-M3 historical replay retained five of six incidents after ver
   - Post-verify & Final stages: incident recall `5/6 (83.3%)`, severity calibration `100.0%`, control false-positive rate `0/4 (0.0%)` (catching `#1037`, `#1057`, `#1064`, `#1060`, `#1032`; `#1023` caught as `Nit` in Raw and filtered in Post-Verify).
   - By contrast, `effort=max` spent ~3.5x more thinking characters (`926,996` vs `260,633`), raised control FP to `1/4 (25.0%)`, and dropped `#1060` across verification (`4/6` Final recall).
 
+## Plan 42 workspace activation
+
+The [accepted plan](./plan/42_multi-tenant-activation.md) keeps one organization with independent workspace roles, credentials and resource ownership. The coordinated upgrade retires the previous authority readers before opening additional workspaces. The [lifecycle tests](../internal/api/workspacemanagement_test.go) cover terminal archival, inherited and service-account grants, and work reclamation.
+
 ## Plan 69 completion and staging cleanup
 
 The staging gateway returned HTTP 200 and `PLAN69_OK` for direct Messages request

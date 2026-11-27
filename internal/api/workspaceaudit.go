@@ -55,10 +55,10 @@ func (s *server) cliWorkspaces(r *http.Request) (any, error) {
 		return nil, errInvalid("after_id and before_id are mutually exclusive")
 	}
 	stmt := `WITH eligible AS (
-	SELECT public_id,name,created_at,archived_at FROM workspaces
+	SELECT public_id,name,created_at,archived_at,display_color FROM workspaces
 	WHERE org_id='default' AND ($1 OR id<>'default') AND ($2 OR archived_at IS NULL)
 	AND ($3::text[] IS NULL OR public_id=ANY($3))
-	) SELECT public_id,name,created_at,archived_at FROM eligible`
+	) SELECT public_id,name,created_at,archived_at,display_color FROM eligible`
 	args := []any{includeDefault, archived, ids, limit + 1}
 	order := "DESC"
 	if q.Has("after_id") || q.Has("before_id") {
@@ -81,8 +81,8 @@ func (s *server) cliWorkspaces(r *http.Request) (any, error) {
 		LastID  *string          `json:"last_id"`
 	}{Data: []auditWorkspace{}}
 	for rows.Next() {
-		w := auditWorkspace{Type: "workspace", DisplayColor: "#6C5BB9", Tags: map[string]string{}}
-		if err := rows.Scan(&w.ID, &w.Name, &w.CreatedAt, &w.ArchivedAt); err != nil {
+		w := auditWorkspace{Type: "workspace", Tags: map[string]string{}}
+		if err := rows.Scan(&w.ID, &w.Name, &w.CreatedAt, &w.ArchivedAt, &w.DisplayColor); err != nil {
 			return nil, err
 		}
 		out.Data = append(out.Data, w)

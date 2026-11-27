@@ -978,15 +978,7 @@ func TestAPIKeyUpdatesOnTheRecordedRoute(t *testing.T) {
 	}
 }
 
-// TestConsoleWorkspaceReadIsTheRecordedNotFound pins `GET
-// …/organizations/{org}/workspaces/{id}`. The one recorded read answered 404
-// with `{error_visibility}` (2026-09-05 batch8
-// `item6.after-archive.workspaceB.get`, idx 33), and every other recorded
-// workspace body is a `wrkspc_` row whose fields — a display color, a data
-// residency, a compartment id — this platform has no values for. The reserved
-// `default` workspace is no such row: the reference's own Default workspace
-// never appears in its workspace listing (batch9 idx 4). So every id answers
-// that 404, `default` included, and none renders a workspace.
+// Default has no private settings DTO. Unknown and archived records answer the recorded 404.
 func TestConsoleWorkspaceReadIsTheRecordedNotFound(t *testing.T) {
 	s := newTestServer(t)
 	for _, ws := range []string{"wrkspc_01Spc4DriXcw2C5LMAYvNNkp", "default", "other"} {
@@ -999,7 +991,7 @@ func TestConsoleWorkspaceReadIsTheRecordedNotFound(t *testing.T) {
 	status, body := s.doCookie(http.MethodGet, "/api/console/organizations/"+zeroUUID+"/workspaces/default", nil)
 	wantErr(t, status, body, http.StatusUnauthorized, "authentication_error")
 	status, body = s.doCookie(http.MethodPost, "/api/console/organizations/default/workspaces/default", map[string]any{})
-	wantErr(t, status, body, http.StatusMethodNotAllowed, "invalid_request_error")
+	wantErr(t, status, body, http.StatusBadRequest, "invalid_request_error")
 	res := s.doRaw(http.MethodGet, "/api/console/organizations/default/workspaces/default", nil, nil)
 	res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {

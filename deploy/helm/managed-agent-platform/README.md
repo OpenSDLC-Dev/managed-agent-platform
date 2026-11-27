@@ -148,7 +148,7 @@ Staging CD attaches the existing HTTPS ingress to this edge; see the
 [staging runbook](../../gcp/README.md#native-google-sign-in-and-the-staging-https-edge).
 `console.image` and `appEdge.image` require independent immutable digest references;
 platform `image.tag` overrides never change them.
-The Console pin supports native login, owned API keys and key management for cloud and archived environments.
+The Console pin supports native login, workspace management at `/settings/workspaces`, owned API keys and key management for cloud and archived environments.
 Follow the [native-routing and rollback contract](../../../docs/self-hosted-security.md#owned-key-rollout-and-rollback) when upgrading an older install.
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 

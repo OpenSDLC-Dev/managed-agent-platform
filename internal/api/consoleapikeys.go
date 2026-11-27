@@ -31,10 +31,11 @@ import (
 // consoleAPIKeyPath, under the workspace, is the one this platform served
 // first and keeps as an alias, which the console still drives.
 const (
-	consoleWorkspacePath = "/api/console/organizations/{org}/workspaces/{workspace}"
-	consoleAPIKeysPath   = consoleWorkspacePath + "/api_keys"
-	consoleAPIKeyPath    = consoleAPIKeysPath + "/{key_id}"
-	consoleOrgAPIKeyPath = "/api/console/organizations/{org}/api_keys/{key_id}"
+	consoleWorkspacesPath = "/api/console/organizations/{org}/workspaces"
+	consoleWorkspacePath  = consoleWorkspacesPath + "/{workspace}"
+	consoleAPIKeysPath    = consoleWorkspacePath + "/api_keys"
+	consoleAPIKeyPath     = consoleAPIKeysPath + "/{key_id}"
+	consoleOrgAPIKeyPath  = "/api/console/organizations/{org}/api_keys/{key_id}"
 )
 
 // apiKeyNameMax bounds a management key's name, in characters: the bound the
@@ -173,19 +174,6 @@ func consoleWorkspace(r *http.Request) error {
 // included (2026-09-05 batch8 `item6.after-archive.workspaceB.get` and
 // `.api_keys`; #540): it does not name the workspace.
 var errWorkspaceNotFound = withDetails(errNotFound("Not found"), userFacingDetails)
-
-// getWorkspace answers GET …/workspaces/{workspace} with the 404 the reference
-// was recorded answering an archived workspace with (2026-09-05 batch8
-// `item6.after-archive.workspaceB.get`), for every id, `default` included.
-// The registry's protected Default has no private settings DTO. The
-// reference omits Default from the recorded settings list (batch9
-// `item5.workspaces.list.include_archived`).
-func (s *server) getWorkspace(r *http.Request) (any, error) {
-	if err := consoleOrganization(r); err != nil {
-		return nil, err
-	}
-	return nil, errWorkspaceNotFound
-}
 
 // createAPIKey issues a management credential and returns it once.
 func (s *server) createAPIKey(r *http.Request) (any, error) {

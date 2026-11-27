@@ -262,14 +262,21 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	//
 	// The update is served twice: on the reference's own route, which names no
 	// workspace, and on the workspace-scoped one served first, kept as an alias
-	// (#820). The workspace read answers the reference's recorded 404 and
-	// renders no workspace (getWorkspace). It retains its separate admin floor.
+	// (#820).
 	mux.HandleFunc("POST "+consoleAPIKeysPath, noStore(s.handle(identity.RoleDeveloper, s.createAPIKey)))
 	mux.HandleFunc("GET "+consoleAPIKeysPath, s.handle(identity.RoleDeveloper, s.listAPIKeys))
 	mux.HandleFunc("POST "+consoleOrgAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateAPIKey))
 	mux.HandleFunc("POST "+consoleAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateWorkspaceAPIKey))
+	mux.HandleFunc("GET "+consoleWorkspacesPath, s.handle(identity.RoleAdmin, s.listWorkspaces))
+	mux.HandleFunc("POST "+consoleWorkspacesPath, s.handle(identity.RoleAdmin, s.createWorkspace))
 	mux.HandleFunc("GET "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.getWorkspace))
-	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacePath} {
+	mux.HandleFunc("POST "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.editWorkspace))
+	mux.HandleFunc("POST "+consoleWorkspaceArchivePath, s.handle(identity.RoleAdmin, s.archiveWorkspace))
+	mux.HandleFunc("GET "+consoleWorkspaceKeyOwnersPath, s.handle(identity.RoleAdmin, s.workspaceKeyOwners))
+	mux.HandleFunc("GET "+consoleWorkspaceMembersPath, s.handle(identity.RoleAdmin, s.workspaceMembers))
+	mux.HandleFunc("POST "+consoleWorkspaceMembersPath, s.handle(identity.RoleAdmin, s.grantWorkspaceMember))
+	mux.HandleFunc("DELETE "+consoleWorkspaceMemberPath, s.handle(identity.RoleAdmin, s.removeWorkspaceMember))
+	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacesPath, consoleWorkspacePath, consoleWorkspaceArchivePath, consoleWorkspaceKeyOwnersPath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, errMethodNotAllowed)
 		})

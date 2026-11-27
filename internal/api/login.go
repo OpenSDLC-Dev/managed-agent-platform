@@ -42,7 +42,7 @@ func (s *server) authWorkspaces(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT CASE id WHEN 'default' THEN id ELSE public_id END, name, workspace_role($1,id)
+	rows, err := s.pool.Query(r.Context(), `SELECT CASE id WHEN 'default' THEN id ELSE public_id END AS browser_id, public_id, name, display_color, workspace_role($1,id)
 		FROM workspaces WHERE archived_at IS NULL AND workspace_role($1,id) IS NOT NULL
 		ORDER BY (id='default') DESC, lower(name), public_id`, session.PrincipalID)
 	if err != nil {
@@ -50,14 +50,16 @@ func (s *server) authWorkspaces(r *http.Request) (any, error) {
 	}
 	defer rows.Close()
 	type entry struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-		Role string `json:"role"`
+		ID           string `json:"id"`
+		PublicID     string `json:"public_id"`
+		Name         string `json:"name"`
+		DisplayColor string `json:"display_color"`
+		Role         string `json:"role"`
 	}
 	list := []entry{}
 	for rows.Next() {
 		var w entry
-		if err := rows.Scan(&w.ID, &w.Name, &w.Role); err != nil {
+		if err := rows.Scan(&w.ID, &w.PublicID, &w.Name, &w.DisplayColor, &w.Role); err != nil {
 			return nil, err
 		}
 		list = append(list, w)

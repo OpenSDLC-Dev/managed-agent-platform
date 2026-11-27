@@ -32,7 +32,7 @@ class ComposeConfig(unittest.TestCase):
         for project in ["mapnativeone", "mapnativetwo"]:
             services = self.render("-p", project, "--profile", "console", "--profile", "iam")
             cp, gw, console, edge = [services[key] for key in ["controlplane", "modelgateway", "console", "app-edge"]]
-            self.assertEqual(console["image"], "ghcr.io/opensdlc-dev/managed-agent-console@sha256:52d8f869977e1724204297f8f62252b3ec5f48a6ac2953d969a6897e5050ba65")
+            self.assertEqual(console["image"], "ghcr.io/opensdlc-dev/managed-agent-console@sha256:aad7714a5d36fb7c3f1abb1240c3f44a8b080d3db3a82ba75a67e37560e5430d")
             self.assertIn("@sha256:", edge["image"])
             for service in [console, edge]:
                 self.assertNotIn("build", service)

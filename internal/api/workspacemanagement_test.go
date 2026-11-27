@@ -1,0 +1,372 @@
+package api_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"testing"
+
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+)
+
+func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const path = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/service_accounts"
+	if status, _ := s.doCookie("POST", path, nil); status != http.StatusMethodNotAllowed {
+		t.Fatalf("unsupported key directory method: HTTP %d", status)
+	}
+	// Only service accounts with resource grants in Research are eligible.
+	for i, role := range []string{"developer", "limited_developer", "user", ""} {
+		raw := ownedPrincipalFixture(t, s.pool, "service_account", "developer")
+		if role != "" {
+			if _, err := s.pool.Exec(t.Context(), `INSERT INTO workspace_memberships VALUES ('research',$1,$2)`, raw, role); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET display_name=$2 WHERE id=$1`, raw, fmt.Sprintf("Worker %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstStatus, first := s.doCookie("GET", path+"?limit=1", nil)
+	if firstStatus != 200 {
+		t.Fatalf("directory HTTP %d", firstStatus)
+	}
+	rows := listData(t, first)
+	cursor, _ := first["next_page"].(string)
+	if len(rows) != 1 || cursor == "" {
+		t.Fatalf("first page %v", first)
+	}
+	st, next := s.doCookie("GET", path+"?limit=1&page="+cursor, nil)
+	if st != 200 || len(listData(t, next)) != 1 || next["next_page"] != nil {
+		t.Fatalf("next page: %d %v", st, next)
+	}
+	firstRow, secondRow := rows[0], listData(t, next)[0]
+	names := map[any]bool{firstRow["name"]: true, secondRow["name"]: true}
+	if !names["Worker 0"] || !names["Worker 1"] || len(firstRow) != 2 || len(secondRow) != 2 {
+		t.Fatalf("unexpected workspace directory fields or membership: %v %v", firstRow, secondRow)
+	}
+	const defaultOwners = "/api/console/organizations/default/workspaces/default/service_accounts"
+	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+cursor, nil); status != http.StatusBadRequest {
+		t.Fatalf("another workspace's cursor returned HTTP %d", status)
+	}
+	status, directory := s.doCookie("GET", "/api/console/organizations/default/service_accounts?limit=1", nil)
+	orgCursor, _ := directory["next_page"].(string)
+	if status != http.StatusOK || orgCursor == "" {
+		t.Fatalf("organization directory returned HTTP %d without a usable page", status)
+	}
+	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+orgCursor, nil); status != http.StatusBadRequest {
+		t.Fatalf("organization directory cursor in Default returned HTTP %d", status)
+	}
+}
+
+func TestWorkspaceExplicitWithdrawalAfterInheritedAdmin(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const space = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002"
+	actor := ownedPrincipalFixture(t, s.pool, "user", "admin")
+	issued, err := login.New(s.pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true}).Issue(t.Context(), actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := *s
+	owner.cookie, owner.csrf = "map_session="+issued.Token, issued.Session.CSRFToken
+	status, row := owner.doCookie("POST", space+"/api_keys", map[string]any{"name": "Research owner"})
+	if status != http.StatusOK {
+		t.Fatalf("issue inherited administrator key: %d %v", status, row)
+	}
+	owner.key = row["raw_key"].(string)
+	agent, env := readableFixture(t, &owner)
+	status, row = owner.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create Research session: %d %v", status, row)
+	}
+	sid := row["id"]
+	continues := func(want bool) {
+		t.Helper()
+		var got bool
+		if err := s.pool.QueryRow(t.Context(), `SELECT workspace_can_continue(initiator_principal_id,workspace_id,workspace_grant_generation)
+ FROM sessions WHERE id=$1 AND initiator_principal_id=$2 AND workspace_id='research'`, sid, actor).Scan(&got); err != nil || got != want {
+			t.Fatalf("session continuation = %v, err %v, want %v", got, err, want)
+		}
+	}
+	alias := principal.PublicID(actor, "user")
+	headers := s.cookieHeaders()
+	headers["Content-Type"] = "application/json"
+	if status, row := s.decode(s.doRaw("POST", membersPath+"/"+alias, map[string]any{"role": "developer"}, headers)); status != http.StatusOK {
+		t.Fatalf("demote organization admin: %d %v", status, row)
+	}
+	continues(true)
+	if status, row := s.doCookie("DELETE", space+"/members/"+alias, nil); status != http.StatusOK {
+		t.Fatalf("withdraw Research access: %d %v", status, row)
+	}
+	continues(false)
+}
+
+func TestWorkspaceArchiveDuringWorkerSettlement(t *testing.T) {
+	s := newTestServer(t)
+	b := secondWorkspace(t, s)
+	agent, env := readableFixture(t, b)
+	status, row := b.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create session: %d %v", status, row)
+	}
+	sid := domain.ID(row["id"].(string))
+	ctx := t.Context()
+	settle, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer settle.Rollback(ctx)
+	// A driver appends its results under the session lock and enqueues the next turn in this transaction.
+	if _, err := settle.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		status, _ := s.doCookie("POST", "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/archive", nil)
+		done <- status
+	}()
+	waitForWorkspaceLock(t, s.pool, int(settle.Conn().PgConn().PID()))
+	created, err := queue.New(s.pool).EnqueueThread(ctx, settle, domain.ID(env), sid, "", queue.ModelTurn)
+	if err != nil || !created {
+		t.Fatalf("worker settlement enqueue: created=%v, err=%v", created, err)
+	}
+	// The archive has released its registry lock. This new session must be picked up on the retry.
+	status, late := b.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create concurrent session: %d %v", status, late)
+	}
+	if err := settle.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	awaitWorkspaceStatus(t, done, http.StatusOK)
+	var closed bool
+	if err := s.pool.QueryRow(ctx, `SELECT s.status='terminated' AND w.state='stopped' AND ws.archived_at IS NOT NULL
+ FROM sessions s JOIN work_items w ON w.session_id=s.id JOIN workspaces ws ON ws.id=s.workspace_id
+ WHERE s.id=$1 AND w.kind='model_turn'`, sid.String()).Scan(&closed); err != nil || !closed {
+		t.Fatalf("archival lost the settled work or failed to close it: %v %v", closed, err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT status='terminated' FROM sessions WHERE id=$1`, late["id"]).Scan(&closed); err != nil || !closed {
+		t.Fatalf("session admitted while waiting was not closed: %v %v", closed, err)
+	}
+}
+
+func TestWorkspaceArchivePreservesDeploymentHistory(t *testing.T) {
+	for _, action := range []string{"archive", "pause"} {
+		t.Run(action, func(t *testing.T) {
+			s := newTestServer(t)
+			b := secondWorkspace(t, s)
+			agent, env := readableFixture(t, b)
+			deployment := createDeployment(t, b, deploymentBody(agent, env))["id"].(string)
+			if status, row := b.do("POST", "/v1/deployments/"+deployment+"/"+action, nil); status != http.StatusOK {
+				t.Fatalf("%s deployment: %d %v", action, status, row)
+			}
+			history := func() string {
+				t.Helper()
+				var row string
+				if err := s.pool.QueryRow(t.Context(), `SELECT to_jsonb(d)::text FROM deployments d WHERE id=$1`, deployment).Scan(&row); err != nil {
+					t.Fatal(err)
+				}
+				return row
+			}
+			before := history()
+			const path = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/archive"
+			if status, row := s.doCookie("POST", path, nil); status != http.StatusOK {
+				t.Fatalf("archive workspace: %d %v", status, row)
+			}
+			if history() != before {
+				t.Errorf("workspace archival changed the previously %sd deployment", action)
+			}
+		})
+	}
+}
+
+func TestWorkspaceManagementLifecycle(t *testing.T) {
+	s := newTestServer(t)
+	const path = "/api/console/organizations/default/workspaces"
+	post := func(s *tserver, suffix string, body any, want int) map[string]any {
+		t.Helper()
+		headers := s.cookieHeaders()
+		headers["Content-Type"] = "application/json"
+		status, row := s.decode(s.doRaw("POST", path+suffix, body, headers))
+		if status != want {
+			t.Fatalf("POST %s: %d %v, want %d", suffix, status, row, want)
+		}
+		return row
+	}
+	b := post(s, "", map[string]any{"name": "Research", "display_color": "#123abc"}, 200)
+	id, _ := b["id"].(string)
+	if len(id) != 33 || b["display_color"] != "#123abc" || b["type"] != "workspace" {
+		t.Fatalf("new workspace: %v", b)
+	}
+	list := func(s *tserver, query string) []map[string]any {
+		t.Helper()
+		res := s.doRaw("GET", path+query, nil, s.cookieHeaders())
+		defer res.Body.Close()
+		var rows []map[string]any
+		if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&rows) != nil {
+			t.Fatalf("list HTTP %d", res.StatusCode)
+		}
+		return rows
+	}
+	if status, _ := s.doCookie("GET", path+"?limit=1", nil); status != http.StatusBadRequest {
+		t.Fatalf("unsupported workspace directory parameter: HTTP %d", status)
+	}
+	if rows := list(s, ""); len(rows) != 1 || rows[0]["id"] != id {
+		t.Fatalf("active list: %v", rows)
+	}
+	post(s, "/default", map[string]any{"name": "renamed"}, 400)
+	post(s, "/default/archive", map[string]any{}, 400)
+	member := domain.NewID(domain.PrefixPrincipal).String()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,role) VALUES($1,'fixture','member','developer')`, member); err != nil {
+		t.Fatal(err)
+	}
+	grantFixture(t, s.pool, member, "developer")
+	m := login.New(s.pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})
+	issued, err := m.Issue(t.Context(), member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := *s
+	other.cookie = "map_session=" + issued.Token
+	other.csrf = issued.Session.CSRFToken
+	alias := principal.PublicID(member, "user")
+	grant := func(role string) {
+		post(s, "/"+id+"/members", map[string]any{"principal_id": alias, "role": role}, 200)
+	}
+	ownersPath := path + "/" + id + "/service_accounts"
+	grant("user")
+	if status, _ := other.doCookie("GET", ownersPath, nil); status != 403 {
+		t.Fatalf("user read workspace key owner directory: HTTP %d", status)
+	}
+	if status, _ := other.doCookie("GET", path, nil); status != 403 {
+		t.Fatalf("directory without an admin workspace: HTTP %d", status)
+	}
+	post(&other, "/"+id, map[string]any{"name": "denied"}, 403)
+	post(&other, "", map[string]any{"name": "denied"}, 403)
+	grant("admin")
+	if status, _ := other.doCookie("GET", ownersPath, nil); status != 200 {
+		t.Fatalf("workspace admin could not read key owner directory: HTTP %d", status)
+	}
+	if status, _ := other.doCookie("GET", "/api/console/organizations/default/service_accounts", nil); status != 403 {
+		t.Fatalf("workspace admin read organization service accounts: HTTP %d", status)
+	}
+	post(&other, "/"+id, map[string]any{"name": "Renamed"}, 200)
+	post(&other, "/"+id+"/archive", map[string]any{}, 403)
+	if rows := list(&other, ""); len(rows) != 1 || rows[0]["name"] != "Renamed" {
+		t.Fatalf("workspace administration list: %v", rows)
+	}
+	key := post(s, "/"+id+"/api_keys", map[string]any{"name": "Test B"}, 200)
+	worker := *s
+	worker.key = key["raw_key"].(string)
+	aid, eid := readableFixture(t, &worker)
+	dep := createDeployment(t, &worker, deploymentBody(aid, eid))
+	status, session := worker.do("POST", "/v1/sessions", map[string]any{"agent": aid, "environment_id": eid})
+	if status != 200 {
+		t.Fatalf("session %d %v", status, session)
+	}
+	sid := session["id"].(string)
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sid), "running")
+	if _, err := s.pool.Exec(t.Context(), `UPDATE sessions SET running_since=clock_timestamp()-interval '20 seconds' WHERE id=$1`, sid); err != nil {
+		t.Fatal(err)
+	}
+	wid := domain.NewID(domain.PrefixWork).String()
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO work_items(id,workspace_id,environment_id,session_id,kind,state,lease_expires_at) VALUES($1,$2,$3,$4,'model_turn','active',now()+interval '1 minute')`, wid, id, eid, session["id"]); err != nil {
+		t.Fatal(err)
+	}
+	post(s, "/"+id+"/archive", map[string]any{"name": "unrelated"}, 400)
+	row := post(s, "/"+id+"/archive", map[string]any{}, 200)
+	if row["archived_at"] == nil {
+		t.Fatal(row)
+	}
+	if rows := list(s, ""); len(rows) != 0 {
+		t.Fatalf("archived in active list: %v", rows)
+	}
+	if rows := list(s, "?include_archived=true"); len(rows) != 1 || rows[0]["id"] != id || rows[0]["archived_at"] == nil {
+		t.Fatalf("archive history: %v", rows)
+	}
+	if status, _ := s.doCookie("GET", path+"/"+id, nil); status != 404 {
+		t.Fatalf("archive detail %d", status)
+	}
+	if status, _ := worker.do("GET", "/v1/agents", nil); status != http.StatusUnauthorized {
+		t.Errorf("archived key HTTP %d", status)
+	}
+	var ended bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT d.paused_at IS NOT NULL AND d.paused_kind='error' AND d.paused_error_type='workspace_archived_error' AND d.updated_at=d.paused_at AND w.state='stopped' AND w.lease_expires_at IS NULL FROM deployments d,work_items w WHERE d.id=$1 AND w.id=$2`, dep["id"], wid).Scan(&ended); err != nil || !ended {
+		t.Errorf("archive work cleanup: %v, %v", ended, err)
+	}
+	var closed bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT status='terminated' AND running_since IS NULL AND active_seconds>=19 AND EXISTS (SELECT 1 FROM events WHERE session_id=s.id AND type='session.status_terminated') FROM sessions s WHERE id=$1`, sid).Scan(&closed); err != nil || !closed {
+		t.Errorf("archive did not close the session's event ledger and active clock: %v %v", closed, err)
+	}
+	if _, err := s.pool.Exec(t.Context(), `UPDATE workspaces SET archived_at=NULL WHERE id=$1`, id); err == nil {
+		t.Error("workspace archive was reversible")
+	}
+}
+
+// The same directory entries gain independent workspace grants; inherited rights remain live.
+func TestWorkspaceManagementInheritedAndServiceGrants(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const b = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/members"
+	ctx := t.Context()
+	h := s.cookieHeaders()
+	h["Content-Type"] = "application/json"
+	sa := domain.NewID(domain.PrefixPrincipal).String()
+	billing := domain.NewID(domain.PrefixPrincipal).String()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO principals(id,issuer,subject,kind,role) VALUES($1,'fixture','service','service_account','developer'),($2,'fixture','billing','user','billing')`, sa, billing); err != nil {
+		t.Fatal(err)
+	}
+	change := func(method, path string, body any, want int) {
+		t.Helper()
+		status, v := s.decode(s.doRaw(method, path, body, h))
+		if status != want {
+			t.Fatalf("%s %s %d %v", method, path, status, v)
+		}
+	}
+	type memberRow struct {
+		ID, Name, Role string
+		Inherited      bool
+	}
+	rows := func() map[string]memberRow {
+		t.Helper()
+		res := s.doRaw("GET", b, nil, h)
+		defer res.Body.Close()
+		var items []memberRow
+		if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&items) != nil {
+			t.Fatalf("members HTTP %d", res.StatusCode)
+		}
+		out := map[string]memberRow{}
+		for _, m := range items {
+			out[m.ID] = m
+		}
+		return out
+	}
+	service := principal.PublicID(sa, "service_account")
+	bill := principal.PublicID(billing, "user")
+	if x := rows()[bill]; x.Role != "billing" || !x.Inherited || x.Name != bill {
+		t.Fatal(x)
+	}
+	change("POST", b, map[string]string{"principal_id": bill, "role": "developer"}, 400)
+	change("POST", b, map[string]string{"principal_id": bill, "role": "admin"}, 200)
+	change("POST", b, map[string]string{"principal_id": service, "role": "limited_developer"}, 200)
+	got := rows()
+	if got[service].Name != "service" || got[service].Role != "limited_developer" || got[bill].Role != "admin" || got[bill].Inherited {
+		t.Fatal(got)
+	}
+	var defaultRole *string
+	if err := s.pool.QueryRow(ctx, `SELECT workspace_role($1,'default')`, sa).Scan(&defaultRole); err != nil || defaultRole != nil {
+		t.Fatalf("service Default grant %v %v", defaultRole, err)
+	}
+	change("DELETE", b+"/"+service, nil, 200)
+	change("DELETE", b+"/"+bill, nil, 200)
+	got = rows()
+	if _, ok := got[service]; ok || got[bill].Role != "billing" || !got[bill].Inherited {
+		t.Fatal(got)
+	}
+}

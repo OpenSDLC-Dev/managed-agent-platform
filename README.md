@@ -11,6 +11,7 @@ management APIs authorize an issued key using its owner's current grant in the b
 APIs and gateway administration require browser sessions.
 Gateway inference accepts workspace developer credentials or delegated tokens for an eligible initiator.
 Organization budgets share each public model alias across keys and protocols.
+Organization administrators manage workspaces in Console Settings. Workspace administrators assign members and service accounts in their workspace.
 Existing installations need a short maintenance window for the [Default workspace upgrade](./docs/ARCHITECTURE.md#default-workspace-upgrade).
 
 What runs today, end to end:
@@ -89,7 +90,6 @@ Progress is tracked in:
 
 Deferred past v1 — **seams reserved, not implemented**, each tracked as an issue. The canonical list is the open issues whose titles carry the `(post-v1)` marker (`gh issue list --state open --limit 100 --search "post-v1 in:title"`, which also returns the occasional issue that merely mentions the phrase); the notes below single out what most often surprises a reader, and are neither the whole of that set nor confined to it. Vaults, skills, files, repository mounting, memory stores and scheduled deployments were on this list and have since landed; what remains includes:
 
-- **Multiple workspaces in one organization** are tracked in [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56). [Plan 42](./docs/plan/42_multi-tenant-activation.md) defines workspace roles and the remaining activation stages. Resources, sessions and worker credentials carry their owning workspace.
 - **BYOC gate delivery** ([#165](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/165)) and **credential substitution inside TLS** ([#166](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/166)) — until #166, an in-sandbox HTTPS request keeps its vault placeholders rather than having them substituted at egress.
 
 ## Development

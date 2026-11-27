@@ -116,6 +116,21 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 			role = identity.RoleUser
 		case consoleProxyPath, consoleProxyRootPath, consoleAgentsOverviewPath, consoleTokensPath, consoleRevokePath:
 			role = session.WorkspaceRole.ResourceRole()
+		case consoleWorkspacesPath:
+			// The directory lists the workspaces this person administers across tabs.
+			// Creation retains the organization role.
+			if r.Method == http.MethodGet && role != identity.RoleAdmin {
+				var manages bool
+				if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces w WHERE w.archived_at IS NULL AND workspace_role($1,w.id)='admin')`, session.PrincipalID).Scan(&manages); err != nil {
+					writeError(w, r, err)
+					return
+				}
+				if manages {
+					role = identity.RoleAdmin
+				}
+			}
+		case consoleWorkspacePath, consoleWorkspaceKeyOwnersPath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath:
+			role = session.WorkspaceRole.ResourceRole()
 		case consoleAPIKeysPath, consoleOrgAPIKeyPath, consoleAPIKeyPath:
 			role = keyManagerRole(session)
 		}
