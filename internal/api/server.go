@@ -267,7 +267,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+consoleAPIKeysPath, s.handle(identity.RoleDeveloper, s.listAPIKeys))
 	mux.HandleFunc("POST "+consoleOrgAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateAPIKey))
 	mux.HandleFunc("POST "+consoleAPIKeyPath, s.handle(identity.RoleDeveloper, s.updateWorkspaceAPIKey))
-	mux.HandleFunc("GET "+consoleWorkspacesPath, s.handle(identity.RoleUser, s.listWorkspaces))
+	mux.HandleFunc("GET "+consoleWorkspacesPath, s.handle(identity.RoleAdmin, s.listWorkspaces))
 	mux.HandleFunc("POST "+consoleWorkspacesPath, s.handle(identity.RoleAdmin, s.createWorkspace))
 	mux.HandleFunc("GET "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.getWorkspace))
 	mux.HandleFunc("POST "+consoleWorkspacePath, s.handle(identity.RoleAdmin, s.editWorkspace))

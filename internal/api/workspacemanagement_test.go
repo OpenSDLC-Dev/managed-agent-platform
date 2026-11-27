@@ -62,6 +62,9 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 		post(s, "/"+id+"/members", map[string]any{"principal_id": alias, "role": role}, 200)
 	}
 	grant("user")
+	if status, _ := other.doCookie("GET", path, nil); status != 403 {
+		t.Fatalf("directory without an admin workspace: HTTP %d", status)
+	}
 	post(&other, "/"+id, map[string]any{"name": "denied"}, 403)
 	post(&other, "", map[string]any{"name": "denied"}, 403)
 	grant("admin")
