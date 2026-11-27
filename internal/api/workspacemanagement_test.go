@@ -17,6 +17,9 @@ func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
 	s := newTestServer(t)
 	secondWorkspace(t, s)
 	const path = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/service_accounts"
+	if status, _ := s.doCookie("POST", path, nil); status != http.StatusMethodNotAllowed {
+		t.Fatalf("unsupported key directory method: HTTP %d", status)
+	}
 	// Only service accounts with resource grants in Research are eligible.
 	for i, role := range []string{"developer", "limited_developer", "user", ""} {
 		raw := ownedPrincipalFixture(t, s.pool, "service_account", "developer")
@@ -59,6 +62,49 @@ func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
 	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+orgCursor, nil); status != http.StatusBadRequest {
 		t.Fatalf("organization directory cursor in Default returned HTTP %d", status)
 	}
+}
+
+func TestWorkspaceExplicitWithdrawalAfterInheritedAdmin(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const space = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002"
+	actor := ownedPrincipalFixture(t, s.pool, "user", "admin")
+	issued, err := login.New(s.pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true}).Issue(t.Context(), actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := *s
+	owner.cookie, owner.csrf = "map_session="+issued.Token, issued.Session.CSRFToken
+	status, row := owner.doCookie("POST", space+"/api_keys", map[string]any{"name": "Research owner"})
+	if status != http.StatusOK {
+		t.Fatalf("issue inherited administrator key: %d %v", status, row)
+	}
+	owner.key = row["raw_key"].(string)
+	agent, env := readableFixture(t, &owner)
+	status, row = owner.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create Research session: %d %v", status, row)
+	}
+	sid := row["id"]
+	continues := func(want bool) {
+		t.Helper()
+		var got bool
+		if err := s.pool.QueryRow(t.Context(), `SELECT workspace_can_continue(initiator_principal_id,workspace_id,workspace_grant_generation)
+ FROM sessions WHERE id=$1 AND initiator_principal_id=$2 AND workspace_id='research'`, sid, actor).Scan(&got); err != nil || got != want {
+			t.Fatalf("session continuation = %v, err %v, want %v", got, err, want)
+		}
+	}
+	alias := principal.PublicID(actor, "user")
+	headers := s.cookieHeaders()
+	headers["Content-Type"] = "application/json"
+	if status, row := s.decode(s.doRaw("POST", membersPath+"/"+alias, map[string]any{"role": "developer"}, headers)); status != http.StatusOK {
+		t.Fatalf("demote organization admin: %d %v", status, row)
+	}
+	continues(true)
+	if status, row := s.doCookie("DELETE", space+"/members/"+alias, nil); status != http.StatusOK {
+		t.Fatalf("withdraw Research access: %d %v", status, row)
+	}
+	continues(false)
 }
 
 func TestWorkspaceArchiveDuringWorkerSettlement(t *testing.T) {
@@ -167,6 +213,9 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 			t.Fatalf("list HTTP %d", res.StatusCode)
 		}
 		return rows
+	}
+	if status, _ := s.doCookie("GET", path+"?limit=1", nil); status != http.StatusBadRequest {
+		t.Fatalf("unsupported workspace directory parameter: HTTP %d", status)
 	}
 	if rows := list(s, ""); len(rows) != 1 || rows[0]["id"] != id {
 		t.Fatalf("active list: %v", rows)

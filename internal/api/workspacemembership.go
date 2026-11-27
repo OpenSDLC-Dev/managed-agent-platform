@@ -38,7 +38,8 @@ func setWorkspaceGrant(ctx context.Context, tx pgx.Tx, space, id, orgRole string
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 && space == workspace.Default {
+		// Work started under an inherited role has no explicit membership row to delete.
+		if tag.RowsAffected() == 0 {
 			if _, err := tx.Exec(ctx, `SELECT revoke_workspace_runs($1,$2)`, id, space); err != nil {
 				return err
 			}

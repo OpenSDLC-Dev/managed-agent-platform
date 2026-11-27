@@ -276,7 +276,7 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET "+consoleWorkspaceMembersPath, s.handle(identity.RoleAdmin, s.workspaceMembers))
 	mux.HandleFunc("POST "+consoleWorkspaceMembersPath, s.handle(identity.RoleAdmin, s.grantWorkspaceMember))
 	mux.HandleFunc("DELETE "+consoleWorkspaceMemberPath, s.handle(identity.RoleAdmin, s.removeWorkspaceMember))
-	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacesPath, consoleWorkspacePath, consoleWorkspaceArchivePath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath} {
+	for _, pattern := range []string{consoleAPIKeysPath, consoleAPIKeyPath, consoleOrgAPIKeyPath, consoleWorkspacesPath, consoleWorkspacePath, consoleWorkspaceArchivePath, consoleWorkspaceKeyOwnersPath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, errMethodNotAllowed)
 		})

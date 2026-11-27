@@ -55,6 +55,11 @@ func (s *server) listWorkspaces(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	for key := range q {
+		if key != "include_archived" {
+			return nil, errInvalid("unsupported workspace query parameter %q", key)
+		}
+	}
 	archived, err := parseBoolParam(q, "include_archived")
 	if err != nil {
 		return nil, err
