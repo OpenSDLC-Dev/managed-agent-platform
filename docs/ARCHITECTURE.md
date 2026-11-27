@@ -429,11 +429,12 @@ gateway check the grant and current role on access. The token endpoint stores
 credential hashes and serializes rotation on the grant. A replay or removal
 of the principal revokes the grant.
 
-List page tokens encode their list family and keyset position. A different
-list rejects the token before passing its position to the database. Event
+Resource page tokens encode their workspace, list family and keyset position.
+A different workspace or list rejects the token before querying the next page. Event
 cursors also name the session or child thread being listed. Other nested
 lists can reuse a position across parents, and their queries constrain results
-to the requested parent. The new format rejects tokens issued before plan 71.
+to the requested parent. After upgrading to workspace-bound pagination, start
+existing page walks again from the first page.
 The public Admin key list takes resource IDs as its `after_id` and `before_id` cursors.
 
 An application Caddy edge serves the published Console at the same origin
