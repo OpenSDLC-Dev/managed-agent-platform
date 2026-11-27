@@ -474,6 +474,10 @@ A browser session spans the organization. Its tab sends `x-workspace-id` or uses
 
 CLI consent binds its grant to one active workspace. Owned keys, CLI grants, Playground and claim-bound inference record the originating workspace in the Gateway ledger and both UTC rollups. Workspace filtering precedes pagination and aggregation. Organization Admin and Billing can request an organization-wide daily rollup. Raw requests require workspace resource access. Organization limits apply across every workspace.
 
+### Workspace administration
+
+Organization administrators create and archive workspaces in Console Settings. A workspace administrator can rename the workspace and manage its user and service-account grants. Default keeps its permanent name and remains active. Workspace archival locks the registry row, retires its API keys and environment credentials, pauses deployments and reclaims outstanding leases in one transaction. In-flight calls can still record usage in their originating workspace. Organization reports include that history. Archived workspace IDs remain reserved.
+
 ### Default workspace upgrade
 
 Use a maintenance window when crossing migrations 0071, 0072 or 0073. Migration 0073 changes the daily usage key. Drain in-flight Gateway requests and stop every previous Gateway replica before applying it so each completed call is recorded.

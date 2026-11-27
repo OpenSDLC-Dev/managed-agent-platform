@@ -11,6 +11,7 @@ management APIs authorize an issued key using its owner's current grant in the b
 APIs and gateway administration require browser sessions.
 Gateway inference accepts workspace developer credentials or delegated tokens for an eligible initiator.
 Organization budgets share each public model alias across keys and protocols.
+Organization administrators manage workspaces in Console Settings. Workspace administrators assign members and service accounts in their workspace.
 Existing installations need a short maintenance window for the [Default workspace upgrade](./docs/ARCHITECTURE.md#default-workspace-upgrade).
 
 What runs today, end to end:

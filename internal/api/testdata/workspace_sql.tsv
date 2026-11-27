@@ -65,7 +65,6 @@ internal/api/vaultvalidate.go.validateVaultCredential	0f55443396a02d16	Child acc
 internal/api/workapi.go.claimWork	50b8859f30a381bf	The worker credential or lease supplies the environment and session used for settlement.
 internal/api/workapi.go.finalizeAbandoned	1e1cd20d5ae48c51	The worker credential or lease supplies the environment and session used for settlement.
 internal/api/workapi.go.stopWork	38ec8c99af7127e4	The worker credential or lease supplies the environment and session used for settlement.
-internal/api/workspacemembership.go.updateDefaultGrant	4865d76a0baa0dc0	Organization membership administration acts on an explicitly named grant.
 internal/brain/brain.go.claimLiveSession	b5e203c7b1b62ea8	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
 internal/brain/brain.go.commitUnderLock	38ec8c99af7127e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
 internal/brain/brain.go.pendingInput	fedb60f36a80f530	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
