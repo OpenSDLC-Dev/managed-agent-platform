@@ -248,7 +248,7 @@ func (s *server) beginWorkspaceArchive(r *http.Request, space string) (pgx.Tx, e
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.pool.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, busy); err != nil {
+		if _, err := s.pool.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 AND workspace_id=$2 FOR UPDATE`, busy, space); err != nil {
 			return nil, err
 		}
 	}
