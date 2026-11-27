@@ -719,7 +719,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 			return nil, errInvalid("limit: value must be greater than or equal to 1 and less than or equal to %d", maxLimit)
 		}
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if errors.Is(err, errPageCursor) {
 		return nil, errInvalid(pageTokenInvalid)
 	}
@@ -896,9 +896,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if fetched > page.limit || depth == 1 && fetched == page.limit && lastIsPrefix {
 		var c string
 		if depth == 0 {
-			c = encodeTimeCursor(cursorMemories, dirNext, last.createdAt, last.id)
+			c = encodeTimeCursor(page.space, cursorMemories, dirNext, last.createdAt, last.id)
 		} else {
-			c = encodePathCursor(lastKey)
+			c = encodePathCursor(page.space, lastKey)
 		}
 		out.NextPage = &c
 	}

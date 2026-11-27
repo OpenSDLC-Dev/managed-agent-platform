@@ -41,7 +41,7 @@ func lockResourceWrite(ctx context.Context, tx pgx.Tx) error {
 }
 
 func (s *server) beginResourceWrite(ctx context.Context) (pgx.Tx, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err == nil {
 		if err = lockResourceWrite(ctx, tx); err != nil {
 			_ = tx.Rollback(ctx)

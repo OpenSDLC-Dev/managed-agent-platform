@@ -203,7 +203,7 @@ func TestPageTokensBindToTheirList(t *testing.T) {
 		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", invalidCursor)
 	})
 	t.Run("unknown_list", func(t *testing.T) {
-		p := base64.RawURLEncoding.EncodeToString([]byte("k2|unknown|n|t|1|agent_example"))
+		p := base64.RawURLEncoding.EncodeToString([]byte("k3|default|unknown|n|t|1|agent_example"))
 		status, body := s.do(http.MethodGet, "/v1/agents?page="+p, nil)
 		wantErrMsg(t, status, body, http.StatusBadRequest, "invalid_request_error", invalidCursor)
 	})

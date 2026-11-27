@@ -143,7 +143,7 @@ func (s *server) listThreads(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	page, err := parsePageWith(r.URL.Query(), threadMaxLimit, threadMaxLimit)
+	page, err := parsePageWith(workspace.ID(r.Context()), r.URL.Query(), threadMaxLimit, threadMaxLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func (s *server) listThreads(r *http.Request) (any, error) {
 	}
 	var next *string
 	if more {
-		c := encodeTimeCursor(cursorThreads, dirNext, last.createdAt, last.id)
+		c := encodeTimeCursor(page.space, cursorThreads, dirNext, last.createdAt, last.id)
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil

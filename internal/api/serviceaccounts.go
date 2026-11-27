@@ -100,7 +100,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := parsePage(q)
+	p, err := parsePage("", q)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 		page.Data = page.Data[:p.limit]
 		last := page.Data[len(page.Data)-1]
 		internalID, _, _ := principal.ParsePublicID(last.ID)
-		next := encodeTimeCursor(cursorServiceAccounts, dirNext, last.CreatedAt, internalID)
+		next := encodeTimeCursor(p.space, cursorServiceAccounts, dirNext, last.CreatedAt, internalID)
 		page.NextPage = &next
 	}
 	return page, nil

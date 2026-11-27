@@ -124,7 +124,7 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 	}
 	// No default limit is published for this list; 20 is the sibling lists'
 	// and the one this platform applies (registered as an inference).
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorMemoryVersions, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorMemoryVersions, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

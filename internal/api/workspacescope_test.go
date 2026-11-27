@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -509,6 +510,7 @@ func TestWorkspaceConsoleDemotionDuringWrite(t *testing.T) {
 	agent, env := fixture(t, s.tserver)
 	dep := createDeployment(t, s.tserver, deploymentBody(agent, env))["id"].(string)
 	headers := ownedCookie(t, s, actor)
+	pgtest.DefaultRepeatableRead(t, s.pool)
 	tx, err := s.pool.Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -530,5 +532,27 @@ func TestWorkspaceConsoleDemotionDuringWrite(t *testing.T) {
 	var name string
 	if err = s.pool.QueryRow(t.Context(), `SELECT name FROM deployments WHERE id=$1`, dep).Scan(&name); err != nil || name == "must be refused" {
 		t.Fatalf("deployment was modified: %q %v", name, err)
+	}
+}
+
+func TestWorkspaceListCursor(t *testing.T) {
+	a := newTestServer(t)
+	b := secondWorkspace(t, a)
+	for _, s := range []*tserver{a, b} {
+		for range 2 {
+			if code, body := s.do("POST", "/v1/agents", agentBody(nil)); code != 200 {
+				t.Fatalf("create agent: %d %v", code, body)
+			}
+		}
+	}
+	for _, pair := range [][2]*tserver{{a, b}, {b, a}} {
+		_, first := pair[0].do("GET", "/v1/agents?limit=1", nil)
+		path := "/v1/agents?limit=1&page=" + first["next_page"].(string)
+		if code, body := pair[0].do("GET", path, nil); code != 200 || len(listData(t, body)) != 1 {
+			t.Fatalf("own cursor: %d %v", code, body)
+		}
+		if code, _ := pair[1].do("GET", path, nil); code != http.StatusBadRequest {
+			t.Fatalf("foreign cursor: HTTP %d", code)
+		}
 	}
 }

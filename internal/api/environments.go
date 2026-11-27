@@ -699,7 +699,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 func (s *server) listEnvironments(r *http.Request) (any, error) {
 	ctx := r.Context()
 	q := r.URL.Query()
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -762,7 +762,7 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorEnvironments, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorEnvironments, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

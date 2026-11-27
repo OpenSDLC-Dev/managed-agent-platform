@@ -1367,7 +1367,7 @@ func (s *server) listSessionResources(r *http.Request) (any, error) {
 
 	start := 0
 	if cur := q.Get("page"); cur != "" {
-		last, err := decodeResourceCursor(cur)
+		last, err := decodeResourceCursor(workspace.ID(ctx), id, cur)
 		if err != nil {
 			return nil, err
 		}
@@ -1388,7 +1388,7 @@ func (s *server) listSessionResources(r *http.Request) (any, error) {
 		out.Data = append(out.Data, raw)
 	}
 	if end < len(resources) && len(page) > 0 {
-		c := encodeResourceCursor(resourceKey(page[len(page)-1]))
+		c := encodeResourceCursor(workspace.ID(ctx), id, resourceKey(page[len(page)-1]))
 		out.NextPage = &c
 	}
 	return out, nil
@@ -1799,16 +1799,16 @@ func parseResourceLimit(q url.Values) (int, error) {
 // the resources live in one jsonb array, so a page is a slice and the cursor is
 // simply the last id returned. Self-contained (not the base64 keyset cursor the
 // keyset lists use) because there is no (created_at, id) table walk here.
-func encodeResourceCursor(id string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte("r1|" + id))
+func encodeResourceCursor(space, sessionID, id string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("r2|" + space + "|" + sessionID + "|" + id))
 }
 
-func decodeResourceCursor(s string) (string, error) {
+func decodeResourceCursor(space, sessionID, s string) (string, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return "", errInvalid("invalid page cursor")
 	}
-	rest, ok := strings.CutPrefix(string(raw), "r1|")
+	rest, ok := strings.CutPrefix(string(raw), "r2|"+space+"|"+sessionID+"|")
 	if !ok || rest == "" {
 		return "", errInvalid("invalid page cursor")
 	}

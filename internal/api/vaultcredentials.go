@@ -458,7 +458,7 @@ func (s *server) listVaultCredentials(r *http.Request) (any, error) {
 		return nil, err
 	}
 	q := r.URL.Query()
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +528,7 @@ func (s *server) listVaultCredentials(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorVaultCredentials, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorVaultCredentials, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

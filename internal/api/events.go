@@ -1672,7 +1672,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		}
 	}
 
-	page, err := parsePageMax(q, maxEventLimit)
+	page, err := parsePageMax(workspace.ID(r.Context()), q, maxEventLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1759,7 +1759,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 	}
 	var next *string
 	if more {
-		c := encodeSeqCursor(list, threadID, query.Desc, evs[len(evs)-1])
+		c := encodeSeqCursor(page.space, list, threadID, query.Desc, evs[len(evs)-1])
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil

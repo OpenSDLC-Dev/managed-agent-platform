@@ -20,10 +20,10 @@ func FuzzDecodeCursorNoPanic(f *testing.F) {
 	now := time.Unix(1_700_000_000, 123456789).UTC()
 	f.Add("")
 	f.Add("not-base64!!!")
-	f.Add(encodeTimeCursor(cursorAgents, dirNext, now, string(domain.NewID(domain.PrefixAgent))))
-	f.Add(encodeVersionCursor(7))
-	f.Add(encodePathCursor("/notes/a|b/file.md"))
-	f.Add(encodeSeqCursor(cursorSessionEvents, domain.NewID(domain.PrefixSessionThread), true, domain.Event{
+	f.Add(encodeTimeCursor("default", cursorAgents, dirNext, now, string(domain.NewID(domain.PrefixAgent))))
+	f.Add(encodeVersionCursor("default", 7))
+	f.Add(encodePathCursor("default", "/notes/a|b/file.md"))
+	f.Add(encodeSeqCursor("default", cursorSessionEvents, domain.NewID(domain.PrefixSessionThread), true, domain.Event{
 		ID:  domain.NewID(domain.PrefixEvent),
 		Seq: 12,
 	}))
@@ -69,7 +69,7 @@ func FuzzTimeCursorRoundTrip(f *testing.F) {
 			dir = dirNext
 		}
 		ts := time.Unix(0, unixNano).UTC()
-		tok := encodeTimeCursor(list, dir, ts, id)
+		tok := encodeTimeCursor("default", list, dir, ts, id)
 		got, err := decodeCursor(tok)
 		if err != nil {
 			t.Fatalf("decodeCursor(encodeTimeCursor(%q,%q,%d,%q)) failed: %v", list, dir, unixNano, id, err)
@@ -93,7 +93,7 @@ func FuzzPathCursorRoundTrip(f *testing.F) {
 		if path == "" || !utf8.ValidString(path) || strings.ContainsRune(path, 0) {
 			return
 		}
-		tok := encodePathCursor(path)
+		tok := encodePathCursor("default", path)
 		got, err := decodeCursor(tok)
 		if err != nil {
 			t.Fatalf("decodeCursor(encodePathCursor(%q)) failed: %v", path, err)
@@ -118,7 +118,7 @@ func FuzzSeqCursorRoundTrip(f *testing.F) {
 		}
 		tid := domain.NewID(domain.PrefixSessionThread)
 		eid := domain.NewID(domain.PrefixEvent)
-		tok := encodeSeqCursor(list, tid, desc, domain.Event{ID: eid, Seq: seq})
+		tok := encodeSeqCursor("default", list, tid, desc, domain.Event{ID: eid, Seq: seq})
 		got, err := decodeCursor(tok)
 		if err != nil {
 			t.Fatalf("decodeCursor(encodeSeqCursor) failed: %v", err)

@@ -333,7 +333,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	// the keyset cursor's guards — the grammar check and #135's unstorable-id
 	// reject — rather than growing a second spelling of them. Its limit bounds
 	// are this route's own (1–1000, default 20), not the resource lists' 100.
-	page, err := parsePageWith(q, defaultLimit, maxFileListLimit)
+	page, err := parsePageWith(workspace.ID(r.Context()), q, defaultLimit, maxFileListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +508,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// combination — so the cursor is emitted here rather than withheld on
 		// the arms a legacy client seeds.
 		if hasMore || beforeID != "" {
-			c := encodeTimeCursor(cursorFiles, dirNext, files[len(files)-1].CreatedAt, last)
+			c := encodeTimeCursor(page.space, cursorFiles, dirNext, files[len(files)-1].CreatedAt, last)
 			out.NextPage = &c
 		}
 	}

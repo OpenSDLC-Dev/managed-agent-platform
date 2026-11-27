@@ -107,8 +107,9 @@ func (list cursorList) valid() bool {
 }
 
 type cursor struct {
-	list cursorList
-	dir  string
+	space string
+	list  cursorList
+	dir   string
 	// time-keyed position (agents, environments, sessions)
 	t  time.Time
 	id string
@@ -139,24 +140,25 @@ func (c *cursor) foreignToTime(list cursorList) bool {
 }
 
 type pageParams struct {
+	space string
 	limit int
 	cur   *cursor
 }
 
-func parsePage(q url.Values) (pageParams, error) {
-	return parsePageMax(q, maxLimit)
+func parsePage(space string, q url.Values) (pageParams, error) {
+	return parsePageMax(space, q, maxLimit)
 }
 
 // parsePageMax is parsePage with an explicit maximum limit, for the lists
 // (session and thread events) whose reference cap differs from maxLimit.
-func parsePageMax(q url.Values, max int) (pageParams, error) {
-	return parsePageWith(q, defaultLimit, max)
+func parsePageMax(space string, q url.Values, max int) (pageParams, error) {
+	return parsePageWith(space, q, defaultLimit, max)
 }
 
 // parsePageWith is parsePage with explicit default and maximum limits, for
 // the threads list, whose documented default (1000) is also the cap we impose.
-func parsePageWith(q url.Values, def, max int) (pageParams, error) {
-	p := pageParams{limit: def}
+func parsePageWith(space string, q url.Values, def, max int) (pageParams, error) {
+	p := pageParams{space: space, limit: def}
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > max {
@@ -176,7 +178,7 @@ func parsePageWith(q url.Values, def, max int) (pageParams, error) {
 		// the skills list: the imported anthropic catalog's ids are short names
 		// ("xlsx"), not prefixed ids, and #135's actual invariant is that no
 		// unstorable byte reaches a bind parameter.
-		if c.id != "" && !domain.ID(c.id).Valid() && !storableText(c.id) {
+		if c.space != space || (c.id != "" && !domain.ID(c.id).Valid() && !storableText(c.id)) {
 			return p, errPageCursor
 		}
 		p.cur = c
@@ -184,30 +186,30 @@ func parsePageWith(q url.Values, def, max int) (pageParams, error) {
 	return p, nil
 }
 
-func encodeTimeCursor(list cursorList, dir string, t time.Time, id string) string {
-	raw := fmt.Sprintf("k2|%s|%s|t|%d|%s", list, dir, t.UnixNano(), id)
+func encodeTimeCursor(space string, list cursorList, dir string, t time.Time, id string) string {
+	raw := fmt.Sprintf("k3|%s|%s|%s|t|%d|%s", space, list, dir, t.UnixNano(), id)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-func encodeVersionCursor(version int64) string {
-	raw := fmt.Sprintf("k2|%s|%s|v|%d", cursorAgentVersions, dirNext, version)
+func encodeVersionCursor(space string, version int64) string {
+	raw := fmt.Sprintf("k3|%s|%s|%s|v|%d", space, cursorAgentVersions, dirNext, version)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 // encodePathCursor positions the memories list at depth=1 at a path or a
 // rolled-up prefix. The key is base64url'd INSIDE the token because a path may
 // hold any byte but NUL — "|" among them — and the grammar splits on "|".
-func encodePathCursor(path string) string {
-	raw := fmt.Sprintf("k2|%s|%s|m|%s", cursorMemories, dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))
+func encodePathCursor(space string, path string) string {
+	raw := fmt.Sprintf("k3|%s|%s|%s|m|%s", space, cursorMemories, dirNext, base64.RawURLEncoding.EncodeToString([]byte(path)))
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-func encodeSeqCursor(list cursorList, threadID domain.ID, desc bool, ev domain.Event) string {
+func encodeSeqCursor(space string, list cursorList, threadID domain.ID, desc bool, ev domain.Event) string {
 	order := "a"
 	if desc {
 		order = "d"
 	}
-	raw := fmt.Sprintf("k2|%s|%s|s|%s|%d|%s|%s", list, dirNext, order, ev.Seq, threadID, ev.ID)
+	raw := fmt.Sprintf("k3|%s|%s|%s|s|%s|%d|%s|%s", space, list, dirNext, order, ev.Seq, threadID, ev.ID)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -217,16 +219,18 @@ func decodeCursor(s string) (*cursor, error) {
 		return nil, errPageCursor
 	}
 	parts := strings.Split(string(raw), "|")
-	if len(parts) < 5 || parts[0] != "k2" || (parts[2] != dirNext && parts[2] != dirPrev) {
+	if len(parts) < 6 || parts[0] != "k3" || (parts[3] != dirNext && parts[3] != dirPrev) {
 		return nil, errPageCursor
 	}
-	list := cursorList(parts[1])
+	space := parts[1]
+	parts = parts[2:]
+	list := cursorList(parts[0])
 	if !list.valid() {
 		return nil, errPageCursor
 	}
-	c := &cursor{list: list, dir: parts[2]}
-	key := parts[4:]
-	switch parts[3] {
+	c := &cursor{space: space, list: list, dir: parts[1]}
+	key := parts[3:]
+	switch parts[2] {
 	case "t":
 		if len(key) != 2 {
 			return nil, errPageCursor
@@ -312,7 +316,7 @@ func keysetClause(sortDir string, cur *cursor, argOffset int) (clause, orderDir 
 //	reversed   — whether this was a prev-page fetch
 //
 // key returns the keyset position of a rendered row.
-func pageEdges(list cursorList, n int, more, hadCursor, reversed bool, key func(i int) (time.Time, string)) (next, prev *string) {
+func pageEdges(space string, list cursorList, n int, more, hadCursor, reversed bool, key func(i int) (time.Time, string)) (next, prev *string) {
 	if n == 0 {
 		return nil, nil
 	}
@@ -321,20 +325,20 @@ func pageEdges(list cursorList, n int, more, hadCursor, reversed bool, key func(
 	if reversed {
 		// Walking backwards: something newer (the page we came from) always
 		// exists after this page; more-before is what the probe row answered.
-		c := encodeTimeCursor(list, dirNext, lastT, lastID)
+		c := encodeTimeCursor(space, list, dirNext, lastT, lastID)
 		next = &c
 		if more {
-			p := encodeTimeCursor(list, dirPrev, firstT, firstID)
+			p := encodeTimeCursor(space, list, dirPrev, firstT, firstID)
 			prev = &p
 		}
 		return next, prev
 	}
 	if more {
-		c := encodeTimeCursor(list, dirNext, lastT, lastID)
+		c := encodeTimeCursor(space, list, dirNext, lastT, lastID)
 		next = &c
 	}
 	if hadCursor {
-		p := encodeTimeCursor(list, dirPrev, firstT, firstID)
+		p := encodeTimeCursor(space, list, dirPrev, firstT, firstID)
 		prev = &p
 	}
 	return next, prev

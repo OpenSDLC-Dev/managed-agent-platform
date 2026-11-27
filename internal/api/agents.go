@@ -520,7 +520,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +601,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorAgents, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorAgents, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -613,7 +613,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
-	page, err := parsePage(r.URL.Query())
+	page, err := parsePage(workspace.ID(r.Context()), r.URL.Query())
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +688,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeVersionCursor(lastVersion)
+		c := encodeVersionCursor(page.space, lastVersion)
 		out.NextPage = &c
 	}
 	return out, nil

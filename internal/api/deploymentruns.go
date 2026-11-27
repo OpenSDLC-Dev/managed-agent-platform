@@ -295,7 +295,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// The one list whose published cap is 1000, not maxLimit (§2.6).
-	page, err := parsePageMax(q, maxRunLimit)
+	page, err := parsePageMax(workspace.ID(r.Context()), q, maxRunLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +396,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorDeploymentRuns, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorDeploymentRuns, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

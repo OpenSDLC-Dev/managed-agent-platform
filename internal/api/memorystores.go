@@ -339,7 +339,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if errors.Is(err, errPageCursor) {
 		return nil, errInvalid(pageTokenInvalid)
 	}
@@ -426,7 +426,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorMemoryStores, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorMemoryStores, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

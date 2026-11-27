@@ -597,10 +597,10 @@ func TestDreamListPaging(t *testing.T) {
 // Positions in other list families, encoded in the grammar decodeCursor
 // reads. The end-to-end tests use actual API-issued tokens.
 var foreignCursors = map[string]string{
-	"version":   base64.RawURLEncoding.EncodeToString([]byte("k2|agent_versions|n|v|1")),
-	"seq":       base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|n|s|d|5|sthr_abc|sevt_abc")),
-	"path":      base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|YS9i")), // path = a/b
-	"prev time": base64.RawURLEncoding.EncodeToString([]byte("k2|sessions|p|t|1|sesn_0123456789abcdefghjkmnpq")),
+	"version":   base64.RawURLEncoding.EncodeToString([]byte("k3|default|agent_versions|n|v|1")),
+	"seq":       base64.RawURLEncoding.EncodeToString([]byte("k3|default|session_events|n|s|d|5|sthr_abc|sevt_abc")),
+	"path":      base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|YS9i")), // path = a/b
+	"prev time": base64.RawURLEncoding.EncodeToString([]byte("k3|default|sessions|p|t|1|sesn_0123456789abcdefghjkmnpq")),
 }
 
 func TestDreamListFilters(t *testing.T) {

@@ -1408,7 +1408,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -1592,7 +1592,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 	if out.Data == nil {
 		out.Data = []any{}
 	}
-	out.NextPage, out.PrevPage = pageEdges(cursorSessions, len(data), fetched > page.limit, page.cur != nil, reversed,
+	out.NextPage, out.PrevPage = pageEdges(page.space, cursorSessions, len(data), fetched > page.limit, page.cur != nil, reversed,
 		func(i int) (time.Time, string) { return keys[i].t, keys[i].id })
 	return out, nil
 }

@@ -463,7 +463,7 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -540,7 +540,7 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorDreams, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorDreams, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

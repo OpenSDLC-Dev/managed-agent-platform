@@ -129,7 +129,7 @@ func TestWorkspaceSQLScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	var missing []string
-	check := func(site, sql string) {
+	checkStatement := func(site, sql string) {
 		sql = strings.Join(strings.Fields(sql), " ")
 		names := scopeTableNames(sql, tables)
 		if scopeStatement.MatchString(sql) && scopeDynamic.MatchString(sql) {
@@ -145,6 +145,11 @@ func TestWorkspaceSQLScope(t *testing.T) {
 			return
 		}
 		missing = append(missing, fmt.Sprintf("%s\t%s\t%s\t%s", site, digest, strings.Join(names, ","), sql))
+	}
+	check := func(site, sql string) {
+		for _, stmt := range scopeStatements(sql) {
+			checkStatement(site, stmt)
+		}
 	}
 	for _, tree := range []string{"internal", "cmd"} {
 		err = filepath.WalkDir(filepath.Join(root, tree), func(path string, d fs.DirEntry, err error) error {
@@ -232,4 +237,48 @@ func scopeSQLText(e ast.Expr) (string, bool) {
 		}
 	}
 	return "<?>", false
+}
+
+// PostgreSQL separates top-level statements with semicolons. Retain the exact
+// text of each statement for the reviewed inventory, including quoted bytes.
+var scopeSQLToken = regexp.MustCompile(`(?s)'(?:''|[^'])*'|"(?:""|[^"])*"|--[^\n]*|/\*.*?\*/|\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$|;`)
+
+func scopeStatements(sql string) []string {
+	var out []string
+	start, pos := 0, 0
+	for pos < len(sql) {
+		hit := scopeSQLToken.FindStringIndex(sql[pos:])
+		if hit == nil {
+			break
+		}
+		token := sql[pos+hit[0] : pos+hit[1]]
+		pos += hit[1]
+		switch {
+		case token == ";":
+			out = append(out, sql[start:pos-1])
+			start = pos
+		case token[0] == '$':
+			if end := strings.Index(sql[pos:], token); end >= 0 {
+				pos += end + len(token)
+			}
+		}
+	}
+	return append(out, sql[start:])
+}
+
+func TestWorkspaceSQLStatements(t *testing.T) {
+	// A bound first query in an embedded SQL file must not exempt a later query.
+	first := "SELECT ';', $$a;b$$ FROM agents WHERE workspace_id=$1"
+	second := "SELECT id FROM sessions"
+	sql := first + "; -- another ; in a comment\n" + second
+	var unchecked []string
+	for _, stmt := range scopeStatements(sql) {
+		stmt = scopeDDLComment.ReplaceAllString(stmt, "")
+		if !scopeBinding.MatchString(stmt) {
+			unchecked = append(unchecked, scopeTableNames(stmt, map[string]bool{"agents": true, "sessions": true})...)
+		}
+	}
+	if !slices.Equal(unchecked, []string{"sessions"}) {
+		t.Fatalf("unclassified relations %v, want sessions", unchecked)
+	}
 }

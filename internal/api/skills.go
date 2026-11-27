@@ -324,14 +324,14 @@ const maxSkillLimit = 1000
 // than parsePageWith's shared wording (recorded on each list separately). The
 // limit is re-parsed here only to say it differently, so the cursor half stays
 // in one place.
-func parseSkillsPage(q url.Values) (pageParams, error) {
+func parseSkillsPage(space string, q url.Values) (pageParams, error) {
 	if s := q.Get("limit"); s != "" {
 		n, err := strconv.Atoi(s)
 		if err != nil || n < 1 || n > maxSkillLimit {
 			return pageParams{}, errSkillsLimit
 		}
 	}
-	return parsePageMax(q, maxSkillLimit)
+	return parsePageMax(space, q, maxSkillLimit)
 }
 
 // errSkillsLimit is parseSkillsPage's one refusal of its own; every other one
@@ -481,7 +481,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parseSkillsPage(q)
+	page, err := parseSkillsPage(workspace.ID(r.Context()), q)
 	if errors.Is(err, errSkillsLimit) {
 		return nil, err
 	}
@@ -546,7 +546,7 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorSkills, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorSkills, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -781,7 +781,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	}
 	// Both skills lists cap at 1000 and phrase an out-of-range limit the
 	// reference's way, which is not parsePageWith's shared wording.
-	page, err := parseSkillsPage(r.URL.Query())
+	page, err := parseSkillsPage(workspace.ID(r.Context()), r.URL.Query())
 	if err != nil {
 		return nil, err
 	}
@@ -839,7 +839,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorSkillVersions, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorSkillVersions, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

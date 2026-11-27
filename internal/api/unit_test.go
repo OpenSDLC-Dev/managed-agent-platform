@@ -32,12 +32,12 @@ func TestRepoMountRootIsTheSandboxRepositoryRoot(t *testing.T) {
 func TestCursorRoundTrip(t *testing.T) {
 	ts := time.Date(2026, 7, 10, 1, 2, 3, 456789000, time.UTC)
 	for _, dir := range []string{dirNext, dirPrev} {
-		c, err := decodeCursor(encodeTimeCursor(cursorSessions, dir, ts, "sesn_abc"))
+		c, err := decodeCursor(encodeTimeCursor("default", cursorSessions, dir, ts, "sesn_abc"))
 		if err != nil || c.list != cursorSessions || c.dir != dir || !c.t.Equal(ts) || c.id != "sesn_abc" || c.versioned {
 			t.Errorf("time cursor round-trip (%s): %+v, err %v", dir, c, err)
 		}
 	}
-	c, err := decodeCursor(encodeVersionCursor(7))
+	c, err := decodeCursor(encodeVersionCursor("default", 7))
 	if err != nil || c.list != cursorAgentVersions || !c.versioned || c.version != 7 || c.dir != dirNext {
 		t.Errorf("version cursor round-trip: %+v, err %v", c, err)
 	}
@@ -45,12 +45,12 @@ func TestCursorRoundTrip(t *testing.T) {
 	// base64url'd INSIDE the token, which is what lets a path carry the
 	// grammar's own separator.
 	path := `/a|b/c\d é`
-	c, err = decodeCursor(encodePathCursor(path))
+	c, err = decodeCursor(encodePathCursor("default", path))
 	if err != nil || c.list != cursorMemories || !c.pathKeyed || c.path != path || c.dir != dirNext {
 		t.Errorf("path cursor round-trip: %+v, err %v", c, err)
 	}
 	ev := domain.Event{ID: "sevt_abc", Seq: 42}
-	c, err = decodeCursor(encodeSeqCursor(cursorThreadEvents, "sthr_abc", false, ev))
+	c, err = decodeCursor(encodeSeqCursor("default", cursorThreadEvents, "sthr_abc", false, ev))
 	if err != nil || c.list != cursorThreadEvents || !c.seqKeyed || c.seq != ev.Seq || c.seqDesc ||
 		c.threadID != "sthr_abc" || c.eventID != ev.ID {
 		t.Errorf("event cursor round-trip: %+v, err %v", c, err)
@@ -61,21 +61,21 @@ func TestCursorRoundTrip(t *testing.T) {
 		"not base64":           "@@@",
 		"wrong prefix":         base64.RawURLEncoding.EncodeToString([]byte("x9|agents|n|t|5|id")),
 		"old format":           base64.RawURLEncoding.EncodeToString([]byte("k1|n|t|5|id")),
-		"missing list":         base64.RawURLEncoding.EncodeToString([]byte("k2||n|t|5|id")),
-		"unknown list":         base64.RawURLEncoding.EncodeToString([]byte("k2|unknown|n|t|5|id")),
-		"bad direction":        base64.RawURLEncoding.EncodeToString([]byte("k2|agents|x|t|5|id")),
-		"bad kind":             base64.RawURLEncoding.EncodeToString([]byte("k2|agents|n|z|5")),
-		"missing id":           base64.RawURLEncoding.EncodeToString([]byte("k2|agents|n|t|5|")),
-		"non-numeric time":     base64.RawURLEncoding.EncodeToString([]byte("k2|agents|n|t|abc|id")),
-		"zero version":         base64.RawURLEncoding.EncodeToString([]byte("k2|agent_versions|n|v|0")),
-		"extra version parts":  base64.RawURLEncoding.EncodeToString([]byte("k2|agent_versions|n|v|5|junk")),
-		"path not base64":      base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|!!!")),
-		"empty path":           base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|")),
-		"extra path parts":     base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|" + inner + "|junk")),
-		"unstorable path":      base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\x00")))),
-		"invalid UTF-8 path":   base64.RawURLEncoding.EncodeToString([]byte("k2|memories|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\xff")))),
-		"event without thread": base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|n|s|a|1||sevt_abc")),
-		"invalid event ID":     base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|n|s|a|1|sthr_abc|invalid")),
+		"missing list":         base64.RawURLEncoding.EncodeToString([]byte("k3|default||n|t|5|id")),
+		"unknown list":         base64.RawURLEncoding.EncodeToString([]byte("k3|default|unknown|n|t|5|id")),
+		"bad direction":        base64.RawURLEncoding.EncodeToString([]byte("k3|default|agents|x|t|5|id")),
+		"bad kind":             base64.RawURLEncoding.EncodeToString([]byte("k3|default|agents|n|z|5")),
+		"missing id":           base64.RawURLEncoding.EncodeToString([]byte("k3|default|agents|n|t|5|")),
+		"non-numeric time":     base64.RawURLEncoding.EncodeToString([]byte("k3|default|agents|n|t|abc|id")),
+		"zero version":         base64.RawURLEncoding.EncodeToString([]byte("k3|default|agent_versions|n|v|0")),
+		"extra version parts":  base64.RawURLEncoding.EncodeToString([]byte("k3|default|agent_versions|n|v|5|junk")),
+		"path not base64":      base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|!!!")),
+		"empty path":           base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|")),
+		"extra path parts":     base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|" + inner + "|junk")),
+		"unstorable path":      base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\x00")))),
+		"invalid UTF-8 path":   base64.RawURLEncoding.EncodeToString([]byte("k3|default|memories|n|m|" + base64.RawURLEncoding.EncodeToString([]byte("/a\xff")))),
+		"event without thread": base64.RawURLEncoding.EncodeToString([]byte("k3|default|session_events|n|s|a|1||sevt_abc")),
+		"invalid event ID":     base64.RawURLEncoding.EncodeToString([]byte("k3|default|session_events|n|s|a|1|sthr_abc|invalid")),
 	} {
 		if _, err := decodeCursor(cursor); err == nil {
 			t.Errorf("%s: decodeCursor accepted %q", name, cursor)
@@ -246,12 +246,12 @@ func TestMountPathTakenCleansStoredPaths(t *testing.T) {
 func TestParsePageRejectsBadLimits(t *testing.T) {
 	for _, q := range []string{"limit=abc", "limit=-1", "limit=0", "limit=101"} {
 		vals, _ := url.ParseQuery(q)
-		if _, err := parsePage(vals); err == nil {
+		if _, err := parsePage("default", vals); err == nil {
 			t.Errorf("parsePage accepted %q", q)
 		}
 	}
 	vals, _ := url.ParseQuery("")
-	p, err := parsePage(vals)
+	p, err := parsePage("default", vals)
 	if err != nil || p.limit != defaultLimit || p.cur != nil {
 		t.Errorf("defaults = %+v (%v)", p, err)
 	}
