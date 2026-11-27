@@ -375,8 +375,8 @@ func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) 
 		var principalID *string
 		var allowed bool
 		err := db.QueryRow(ctx, `SELECT i.principal_id,
-			coalesce((p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'),false)
-			FROM session_initiators i LEFT JOIN principals p ON p.id=i.principal_id
+			workspace_can_continue(i.principal_id,s.workspace_id,s.workspace_grant_generation)
+			FROM session_initiators i JOIN sessions s ON s.id=i.session_id
 			WHERE i.session_id=$1`, it.SessionID).Scan(&principalID, &allowed)
 		if err != nil {
 			return nil, fmt.Errorf("queue: resolve initiator: %w", err)

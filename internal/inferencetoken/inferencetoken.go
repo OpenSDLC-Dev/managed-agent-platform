@@ -83,10 +83,10 @@ func Authenticate(ctx context.Context, db Querier, tokens ...string) (Principal,
 		FROM inference_tokens t
 		JOIN work_items w ON w.id=t.work_id AND w.inference_generation=t.claim_generation
 		JOIN sessions s ON s.id=w.session_id
-		JOIN principals p ON p.id=t.principal_id
+		JOIN session_initiators i ON i.session_id=s.id AND i.principal_id=t.principal_id
 		WHERE t.token_hash=ANY($1) AND w.kind='model_turn' AND w.state='active'
 		AND w.lease_expires_at>clock_timestamp() AND s.archived_at IS NULL
-		AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active' LIMIT 1`,
+		AND workspace_can_continue(t.principal_id,s.workspace_id,s.workspace_grant_generation) LIMIT 1`,
 		hashes).Scan(&p.PrincipalID, &p.SessionID, &p.WorkID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil

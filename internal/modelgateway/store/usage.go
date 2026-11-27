@@ -109,21 +109,21 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 		WITH u AS (
 		  INSERT INTO modelgateway.usage (request_id, api_key_id, model, alias, deployment_id, credential_id,
 		      session_id, protocol, endpoint, status, error_type, input_tokens, output_tokens,
-		      cache_write_tokens, cache_read_tokens, cost, latency_us, ttft_us, principal_id, created_at)
+		      cache_write_tokens, cache_read_tokens, cost, latency_us, ttft_us, principal_id, created_at, workspace_id)
 		  SELECT $1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9, $10, NULLIF($11, ''),
 		         $12::bigint, $13::bigint, $14::bigint, $15::bigint,
 		         (coalesce(d.price_input, 0) * $12 + coalesce(d.price_output, 0) * $13
 		          + coalesce(d.price_cache_write, 0) * $14 + coalesce(d.price_cache_read, 0) * $15) / 1000000,
-		         $16, $17, NULLIF($18, ''), $19
+		         $16, $17, NULLIF($18, ''), $19, 'default'
 		  FROM (VALUES (1)) one LEFT JOIN modelgateway.deployments d ON d.id = $5
-		  RETURNING created_at, api_key_id, principal_id, alias, deployment_id, error_type,
+		  RETURNING created_at, api_key_id, principal_id, alias, deployment_id, error_type, workspace_id,
 		            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost
 		)
 		INSERT INTO modelgateway.usage_daily AS t (day, api_key_id, alias, deployment_id, requests, errors,
-		    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost, principal_id)
+		    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost, principal_id, workspace_id)
 		SELECT (created_at AT TIME ZONE 'UTC')::date, api_key_id, alias, deployment_id, 1,
 		       (error_type IS NOT NULL)::integer, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
-		       coalesce(cache_write_tokens, 0), coalesce(cache_read_tokens, 0), coalesce(cost, 0), principal_id
+		       coalesce(cache_write_tokens, 0), coalesce(cache_read_tokens, 0), coalesce(cost, 0), principal_id, workspace_id
 		FROM u
 		ON CONFLICT (day, api_key_id, alias, deployment_id) DO UPDATE SET
 		  requests = t.requests + 1, errors = t.errors + EXCLUDED.errors,
@@ -166,7 +166,7 @@ type UsageFilter struct {
 // query names only the filters given, so each can use its index: a plan
 // written for every filter at once would serve none of them well.
 func (s *Store) ListUsage(ctx context.Context, f UsageFilter, before int64, limit int) ([]Usage, bool, error) {
-	where, args := []string{"true"}, []any{}
+	where, args := []string{"workspace_id='default'"}, []any{}
 	for _, c := range []struct {
 		cond string
 		arg  any
@@ -250,11 +250,11 @@ func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time
 	// A credential filter retains the old per-key view for existing Console
 	// clients. Without it, owned keys are combined in the canonical actor rollup.
 	source := `SELECT day, api_key_id, principal_id, alias, deployment_id, requests, errors,
-		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost FROM modelgateway.usage_actor_daily`
+		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost FROM modelgateway.usage_actor_daily WHERE workspace_id='default'`
 	if f.APIKeyID != "" {
 		source = `SELECT d.day, d.api_key_id, d.principal_id, d.alias, d.deployment_id,
 			d.requests, d.errors, d.input_tokens, d.output_tokens, d.cache_write_tokens, d.cache_read_tokens, d.cost
-			FROM modelgateway.usage_daily d`
+			FROM modelgateway.usage_daily d WHERE d.workspace_id='default'`
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT day, api_key_id, alias, deployment_id, requests, errors, input_tokens, output_tokens,

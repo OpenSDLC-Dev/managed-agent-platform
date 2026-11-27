@@ -1,5 +1,5 @@
 ---
-status: approved
+status: in-progress
 issue: "#56"
 ---
 
@@ -11,10 +11,11 @@ and use workspaces to isolate resources, model activity and access. The organiza
 project storage keys stay `default`. Each resource request resolves exactly one workspace.
 [Issue #56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56)
 
-The first delivery changes the Console's Default page URLs and this design. Today
-the platform serves Default, owns the browser login, stores the principal's organization
-role and keeps an immutable initiator for each session. Workspace membership, additional
-roles and creation of a second workspace are future runtime deliveries.
+The first delivery migrated the Console's Default page URLs. Stage 2 registers
+Default, binds credentials, migrates existing grants and enables independent
+Default roles. The owner selected a maintenance cutover on 2026-11-27. Stop the
+old authority readers before migration 0071. See the [upgrade procedure](../ARCHITECTURE.md#default-workspace-upgrade).
+Stages 3–5 cover scoped storage, multi-workspace clients and activation of a second workspace.
 [Plan 69](./69_principal-bound-auth.md) and [Playground grants](./73_console-playground.md)
 
 ## Identity, roles and membership
@@ -82,8 +83,8 @@ Console requires its signed-in human session and CSRF on writes.
   policy. Claude derives Default access from the organization role and gives it no separate
   member list. Record this divergence when membership ships.
   [Default workspace FAQ](https://platform.claude.com/docs/en/manage-claude/workspaces#whats-the-default-workspace)
-  Update the old grant/revoke flow to edit Default
-  membership atomically, including during the rolling upgrade.
+  Keep legacy Playground grant and revoke statements atomic with Default membership
+  changes after the maintenance cutover.
 - Preserve continuation for a still-active initiator whose role was reduced to User
   before upgrade. Record eligibility on existing Default sessions, dreams and deployments
   and propagate it only to work they spawn. This covers an initiator with no Playground
@@ -92,7 +93,7 @@ Console requires its signed-in human session and CSRF on writes.
   ends continuation, as does workspace archival. A role-only change preserves continuation.
 - Bind existing owned keys, resources, sessions, deployments and usage history to Default,
   preserving IDs, owners, issuers and immutable initiators. Apply the same initialization
-  to records written by old replicas during rollout. Replay the backfill without changing
+  to legacy-format writes after cutover. Replay the backfill without changing
   an operator's later grant or resurrecting a revoked one. Inventory unexpected historical
   scope triples before adding constraints and report affected rows for reconciliation.
   Assign new migration numbers when implementing the slice.
@@ -157,8 +158,8 @@ preserves the discovery procedure and historical recording coordinates for re-au
    HTTP 404 before any Default resource read. Exercise deep links, reload, Back/Forward,
    filtered lists, drawers and the Playground-only landing with the Console fixture.
 2. **Registry, grants and Default upgrade.** Add the registry, membership, billing
-   capabilities, credential bindings and compatible writers. Exercise old and new
-   replicas, repeat migration, inactive principals, service accounts, old CLI tokens
+   capabilities, credential bindings and compatible writers. Exercise pre-upgrade
+   and current writer statements, repeat migration, inactive principals, service accounts, old CLI tokens
    and both states of the legacy Playground grant. Verify the same effective access
    before and after upgrade, including admin demotion and continuation of a demoted
    ungranted User's existing work without permission to start new work.

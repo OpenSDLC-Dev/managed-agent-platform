@@ -2,8 +2,6 @@ package api_test
 
 import (
 	"testing"
-
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/brain"
 )
 
 func TestDreamSessionRecordsInitiator(t *testing.T) {
@@ -19,7 +17,7 @@ func TestDreamSessionRecordsInitiator(t *testing.T) {
 	}
 }
 
-func TestRemovedDreamInitiatorFailsThroughSession(t *testing.T) {
+func TestRemovedDreamInitiatorFailsBeforeCreatingSession(t *testing.T) {
 	s := newTestServer(t)
 	storeID, sessions := createDreamInputs(t, s, 1)
 	dreamID := createDream(t, s, dreamBody(storeID, sessions))["id"].(string)
@@ -29,17 +27,8 @@ func TestRemovedDreamInitiatorFailsThroughSession(t *testing.T) {
 	}
 	tick(t, s)
 	d := getDream(t, s, dreamID)
-	if d["status"] != "running" {
-		t.Fatalf("dream did not start: %v", d)
-	}
-	b := brain.New(s.pool, nil, s.blobs, brain.Config{})
-	if found, err := b.RunOnce(t.Context()); err != nil || !found {
-		t.Fatalf("brain found=%v err=%v", found, err)
-	}
-	tick(t, s)
-	d = getDream(t, s, dreamID)
 	typ, _ := dreamError(t, d)
-	if d["status"] != "failed" || typ != "internal_error" {
+	if d["status"] != "failed" || typ != "internal_error" || d["session_id"] != nil {
 		t.Fatalf("dream=%v", d)
 	}
 }

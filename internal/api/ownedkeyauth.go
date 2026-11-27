@@ -10,6 +10,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -32,15 +33,17 @@ func ownedKeyFrom(ctx context.Context) (apiKeyAuthority, bool) {
 // Read the owner and credential in one snapshot; this is not an IdP sign-in.
 func authenticateManagementKey(ctx context.Context, db apikey.Querier, raw string) (apiKeyAuthority, error) {
 	var authority apiKeyAuthority
-	err := db.QueryRow(ctx, `SELECT k.id, p.id, p.kind, p.role
+	var role workspace.Role
+	err := db.QueryRow(ctx, `SELECT k.id, p.id, p.kind, coalesce(workspace_role(p.id,k.workspace_id),'')
 		FROM api_keys k JOIN principals p ON p.id=k.owner_principal_id
-		WHERE k.owned_key_hash=$1 AND k.status='active'
+		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default' AND k.workspace_id='default'
 		  AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp())
 		  AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'`,
-		apikey.Hash(raw)).Scan(&authority.KeyID, &authority.OwnerID, &authority.OwnerKind, &authority.Role)
+		apikey.Hash(raw)).Scan(&authority.KeyID, &authority.OwnerID, &authority.OwnerKind, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return apiKeyAuthority{}, nil
 	}
+	authority.Role = role.ResourceRole()
 	return authority, err
 }
 

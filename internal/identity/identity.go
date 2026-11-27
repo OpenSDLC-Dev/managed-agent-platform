@@ -1,6 +1,6 @@
 // Package identity is the platform's human-authentication boundary: it verifies
 // the credential a human operator presents and reduces it to a principal holding
-// one of three roles. Machine credentials never come here — the management
+// a stored organization role. Machine credentials never come here — the management
 // x-api-key and the BYOC environment key keep exactly the semantics they have
 // always had, which is what keeps every documented CLI and SDK flow unchanged
 // (docs/plan/31_console-sso-rbac.md).
@@ -100,21 +100,21 @@ import (
 // Role is a platform authority level for an authenticated human.
 //
 // Deliberately not in internal/domain: that package holds Anthropic-native types
-// matching the wire schema (AGENTS.md principle 1), and the three-role model is a
-// declared divergence that never appears on a /v1 path or in a /v1 body.
+// matching the wire schema (AGENTS.md principle 1). Organization grants are
+// resolved by the platform.
 type Role string
 
-// The three roles, plus the absence of one.
+// Organization roles, plus the absence of one.
 const (
 	RoleNone      Role = "" // authenticated, nothing mapped — satisfies nothing
 	RoleUser      Role = "user"
 	RoleDeveloper Role = "developer"
 	RoleAdmin     Role = "admin"
+	RoleBilling   Role = "billing" // aggregate usage only; outside the resource role ordering
 )
 
-// roleRank fixes the strength order. RoleNone is absent from the map, so it
-// ranks zero.
-var roleRank = map[Role]int{RoleUser: 1, RoleDeveloper: 2, RoleAdmin: 3}
+// claimPriority selects a single organization role when several IdP groups match.
+var claimPriority = map[Role]int{RoleUser: 1, RoleBilling: 2, RoleDeveloper: 3, RoleAdmin: 4}
 
 // AtLeast reports whether r satisfies a route's minimum role, on the fixed order
 // admin > developer > user.
@@ -123,14 +123,14 @@ var roleRank = map[Role]int{RoleUser: 1, RoleDeveloper: 2, RoleAdmin: 3}
 // one of the three — including "" — is satisfied by nothing, so a typo in a route
 // annotation denies rather than admits.
 func (r Role) AtLeast(min Role) bool {
-	want, ok := roleRank[min]
-	if !ok {
+	want, ok := claimPriority[min]
+	if !ok || min == RoleBilling || r == RoleBilling {
 		return false
 	}
-	return roleRank[r] >= want
+	return claimPriority[r] >= want
 }
 
-// ParseRole accepts exactly the three role names, plus "viewer" as the old name
+// ParseRole accepts organization roles, plus "viewer" as the old name
 // of RoleUser. The alias keeps an IDENTITY_ROLE_MAP written before plan 69 from
 // failing startup; the person it maps now reads nothing, because user reaches
 // only the playground.
@@ -139,7 +139,7 @@ func ParseRole(s string) (Role, bool) {
 		return RoleUser, true
 	}
 	r := Role(s)
-	if _, ok := roleRank[r]; !ok {
+	if _, ok := claimPriority[r]; !ok {
 		return RoleNone, false
 	}
 	return r, true

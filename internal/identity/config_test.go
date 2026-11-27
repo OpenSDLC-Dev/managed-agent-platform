@@ -736,7 +736,7 @@ func TestParseRoleMap(t *testing.T) {
 		{
 			name:     "role outside the three",
 			spec:     "eng=owner",
-			mentions: []string{configXVarRoleMap, "owner", "user, developer or admin"},
+			mentions: []string{configXVarRoleMap, "owner", "user, billing, developer or admin"},
 		},
 		{name: "role names are case-sensitive", spec: "eng=Admin", mentions: []string{configXVarRoleMap, "Admin"}},
 		{

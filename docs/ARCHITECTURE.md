@@ -453,7 +453,7 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Private routes accept browser sessions only. API-key and Authorization headers are
 refused, even beside a valid cookie; incidental proxy assertions supply no authority.
-Human developers manage their own API keys. Admins manage keys issued by principals,
+Workspace developers manage their own API keys. Organization admins manage keys issued by principals,
 environment keys, members, service accounts and deployment initiators. Historical
 preset rows remain immutable. The resource proxy requires developer and preserves
 each resource's role floor. [Security invariants](#security-invariants) describes
@@ -463,10 +463,36 @@ Initiators are internal columns on sessions, deployments and dreams, separate fr
 audit `created_by`. Insert triggers preserve old writers; the claim resolves missing
 session attribution without acquiring a session lock under its work-item lock.
 Scheduled sessions inherit the deployment's initiator; manual runs use their caller.
-An admin can select an active service account through the cookie-only private API.
+An admin can select an active service account with workspace resource access through the cookie-only private API.
 That changes future scheduled sessions only. A missing member causes a failed
-scheduled run with `unknown_error` and an automatic pause. Dream sessions inherit
-their creator and use the existing session-failure path to `internal_error`.
+scheduled run with `unknown_error` and an automatic pause. A dream checks its
+initiator before creating its pipeline session. Withdrawal ends future model turns.
+
+### Default workspace upgrade
+
+The first startup on migration 0071 requires a maintenance window. Drain requests
+and stop the old control planes, gateways, brains, executors and any other process
+that opens this database or authorizes work. Preserve Postgres, object storage and
+their volumes. Take a database backup, start the new control plane to migrate, then
+start the matching workers and gateway before restoring traffic. An old binary
+uses organization roles for resource access. A rollback to that version requires
+the pre-upgrade database and coordinated restoration of the old services.
+
+The registry maps `default` to the existing CLI public ID. Migration preserves
+owners, initiators, credentials and usage history. It reports unexpected scope
+triples with the affected tables and counts and rolls back for reconciliation.
+Organization Admin inherits Default Admin. Existing active Developers, including
+service accounts, receive an explicit Developer grant. A legacy Playground
+approval survives as Default User access. New members and service accounts receive
+their explicit assignments through the organization administrator's existing
+member and service-account create/update endpoints. Pass `default_workspace_role`
+as `user`, `limited_developer`, `developer` or `admin`. If multiple IdP groups
+map to organization roles, sign-in selects Admin, Developer, Billing, then User
+in that order. On update, omit the workspace field to
+preserve the grant or pass JSON null to withdraw it. Billing is inherited from
+the organization and can be upgraded to Admin in Default. Resource operations
+recheck the bound owner's grant. Existing work carries its initiator's continuation
+generation, which survives role changes and expires on explicit withdrawal.
 
 Model access is **config-driven**: a provider is constructed from `protocol`
 (`anthropic` | `openai`) + `model` + `base_url` + `api_key` (+ optional headers), and a
@@ -641,7 +667,7 @@ effective UID before entering the image's startup command or a tool exec.
   trust is the session, and a roster should hold only agents you would have run in it
   directly.
 - **Auth is scoped.** Public management calls take owned keys through `x-api-key`
-  or Bearer, with the owner's current stored role. Unowned keys are refused.
+  or Bearer and check the owner's effective role in the key's bound workspace. Unowned keys are refused.
   Keys are hashed at rest. Rotation issues a replacement and archives the old key.
   Workers carry an environment key scoped to exactly one
   environment's work queue — a worker can neither read nor write another environment's

@@ -82,10 +82,10 @@ func TestDelegatedInferenceUsesMembershipAndPrincipalUsage(t *testing.T) {
 	p := e.provider(up.URL)
 	e.credential(p, "sk-upstream-1", 1)
 	e.alias("fast", target(e.deployment(p, "m"), 0))
-	key := e.ownedKey("principal_member", "user", "developer", "key_owner")
+	key := e.ownedKey("principal_member", "user", "admin", "key_owner")
+	q, item := e.delegated("key_owner")
 	_, err := e.pool.Exec(e.ctx, `UPDATE principals SET role='user' WHERE id='principal_member'`)
 	e.must(err)
-	q, item := e.delegated("key_owner")
 	e.start()
 	res, raw := e.do("POST", "/v1/messages", `{"model":"fast","max_tokens":8,"messages":[]}`, map[string]string{"x-api-key": key})
 	if res.StatusCode != 403 {

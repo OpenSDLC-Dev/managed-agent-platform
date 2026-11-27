@@ -23,7 +23,7 @@ func TestPlaygroundUsesBrowserAuthorityAndRecordsUsage(t *testing.T) {
 	e.alias("test-chat", target(deployment, 0))
 	e.alias("*", target(deployment, 0))
 	actor := domain.NewID(domain.PrefixPrincipal).String()
-	_, err := e.pool.Exec(e.ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ($1,'test','playground','developer')`, actor)
+	_, err := e.pool.Exec(e.ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ($1,'test','playground','admin')`, actor)
 	e.must(err)
 	const origin = "https://console.example"
 	manager := login.New(e.pool, login.Config{Mode: login.ModePassword, PublicOrigin: origin, Development: true})

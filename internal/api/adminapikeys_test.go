@@ -113,7 +113,10 @@ func TestAdminAPIKeyPagingAndProjection(t *testing.T) {
 	}
 
 	// The single served tenancy applies to lookup, cursor resolution and collection reads.
-	if _, err := s.pool.Exec(ctx, `UPDATE api_keys SET org_id='another' WHERE id=$1`, legacy); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO workspaces (id,public_id,name) VALUES ('another','wrkspc_00000000000000000000000002','Another')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE api_keys SET workspace_id='another' WHERE id=$1`, legacy); err != nil {
 		t.Fatal(err)
 	}
 	visible, err := keys.List(ctx, anthropic.BetaOrganizationAPIKeyListParams{Status: "archived", CreatedByUserID: anthropic.String(user)})

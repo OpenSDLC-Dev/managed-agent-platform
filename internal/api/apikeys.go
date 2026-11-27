@@ -111,8 +111,8 @@ func issueManagementKey(ctx context.Context, db principal.Querier, name string, 
 	// which the credential path refuses exactly as it refuses any lapsed key.
 	digest := apikey.Hash(key)
 	row := db.QueryRow(ctx,
-		`INSERT INTO api_keys (id, name, owned_key_hash, partial_key_hint, created_by, expires_at, owner_principal_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO api_keys (id, name, owned_key_hash, partial_key_hint, created_by, expires_at, owner_principal_id, workspace_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'default')
 		 RETURNING `+managementKeyColumns,
 		domain.NewID(domain.PrefixAPIKey).String(), name, digest, partialKeyHint(key),
 		createdBy, expiresAt, *ownerID)

@@ -86,12 +86,12 @@ func TestOwnedKeyPublicAdmission(t *testing.T) {
 		}
 	}
 	t.Run("current_role", func(t *testing.T) {
-		owner := s.seedLocal("demoted", "developer", "active")
+		owner := s.seedLocal("demoted", "admin", "active")
 		raw, _ := issueOwnedHTTP(t, s, ownedCookie(t, s, owner), "current role", nil)
 		for _, change := range []struct {
 			role string
 			want int
-		}{{"developer", 200}, {"user", 403}, {"admin", 200}} {
+		}{{"admin", 200}, {"user", 403}, {"developer", 403}, {"admin", 200}} {
 			if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET role=$2 WHERE id=$1`, owner, change.role); err != nil {
 				t.Fatal(err)
 			}

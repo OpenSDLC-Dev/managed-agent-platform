@@ -180,10 +180,8 @@ var errWorkspaceNotFound = withDetails(errNotFound("Not found"), userFacingDetai
 // getWorkspace answers GET …/workspaces/{workspace} with the 404 the reference
 // was recorded answering an archived workspace with (2026-09-05 batch8
 // `item6.after-archive.workspaceB.get`), for every id, `default` included.
-// This platform holds no workspace to render: the recorded workspace object is
-// a `wrkspc_` row whose display color, data residency and compartment id have
-// no value here, and the reserved `default` is no such row — nor is the
-// reference's own Default workspace a row of its workspace listing (batch9
+// The registry's protected Default has no private settings DTO. The
+// reference omits Default from the recorded settings list (batch9
 // `item5.workspaces.list.include_archived`).
 func (s *server) getWorkspace(r *http.Request) (any, error) {
 	if err := consoleOrganization(r); err != nil {

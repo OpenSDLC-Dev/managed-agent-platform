@@ -39,7 +39,8 @@ func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key str
 		`SELECT k.environment_id, e.kind, k.revoked_at IS NOT NULL,
 		        k.expires_at IS NOT NULL AND k.expires_at <= now()
 		   FROM environment_keys k
-		   JOIN environments e ON e.id = k.environment_id
+		   JOIN environments e ON e.id = k.environment_id AND (e.org_id,e.workspace_id)=(k.org_id,k.workspace_id)
+		   JOIN workspaces w ON (w.org_id,w.id)=(k.org_id,k.workspace_id) AND w.id='default' AND w.archived_at IS NULL
 		  WHERE k.key_hash = $1`,
 		apikey.Hash(key)).Scan(&envID, &k, &revoked, &expired)
 	switch {

@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: OpenSDLC-Dev/managed-agent-console
-          ref: 558712008767f2413cc5cc92e44a790a66f13aa7
+          ref: 4c23fea6b05ea067e21ddd46d678e65c8ad886bc
           path: console-source
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0

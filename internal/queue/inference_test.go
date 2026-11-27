@@ -173,8 +173,9 @@ func TestModelClaimDelegatesMemberAuthority(t *testing.T) {
 	ctx := t.Context()
 	pool := pgtest.NewPool(t)
 	sid, eid := pgtest.NewSession(t, pool, "cloud")
-	if _, err := pool.Exec(ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_initiator','test','initiator','user');
-		UPDATE sessions SET initiator_principal_id=NULL,initiator_api_key_id=NULL,created_by='principal_initiator'`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_initiator','test','initiator','admin');
+		UPDATE sessions SET initiator_principal_id=NULL,initiator_api_key_id=NULL,created_by='principal_initiator';
+		UPDATE principals SET role='user' WHERE id='principal_initiator'`); err != nil {
 		t.Fatal(err)
 	}
 	q := queue.New(pool)

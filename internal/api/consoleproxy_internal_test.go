@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity/identitytest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -23,7 +24,7 @@ func TestPrivateProxyForwardingContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &server{login: login.New(nil, login.Config{Mode: login.ModeOIDC, PublicOrigin: "https://console.example"}), verifier: v}
-	session := login.Session{PrincipalID: "principal_proxy", Role: identity.RoleDeveloper, ID: "user_proxy", SignedIn: true}
+	session := login.Session{PrincipalID: "principal_proxy", WorkspaceRole: workspace.Developer, Role: identity.RoleDeveloper, ID: "user_proxy", SignedIn: true}
 	ctx := context.WithValue(context.Background(), cookieContextKey{}, session)
 	ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.Role})
 	ctx = context.WithValue(ctx, ctxKeyRequestID, "request-proxy-fixture")
@@ -101,7 +102,7 @@ func TestPrivateProxyResourceRedirects(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &server{login: login.New(nil, login.Config{Mode: login.ModeOIDC, PublicOrigin: "https://console.example"})}
-			ctx := context.WithValue(context.Background(), cookieContextKey{}, login.Session{PrincipalID: "principal_redirect", Role: identity.RoleAdmin})
+			ctx := context.WithValue(context.Background(), cookieContextKey{}, login.Session{PrincipalID: "principal_redirect", WorkspaceRole: workspace.Admin, Role: identity.RoleAdmin})
 			ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: "principal_redirect", Role: identity.RoleAdmin})
 			r := httptest.NewRequest("GET", "http://example.com/api/organizations/default/proxy/v1/agents", nil).WithContext(ctx)
 			r.SetPathValue("org", "default")

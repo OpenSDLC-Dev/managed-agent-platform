@@ -43,6 +43,8 @@ func TestRoleAtLeast(t *testing.T) {
 		{name: "admin/user", role: identity.RoleAdmin, min: identity.RoleUser, want: true},
 		{name: "admin/developer", role: identity.RoleAdmin, min: identity.RoleDeveloper, want: true},
 		{name: "admin/admin", role: identity.RoleAdmin, min: identity.RoleAdmin, want: true},
+		{name: "billing/developer", role: identity.RoleBilling, min: identity.RoleDeveloper},
+		{name: "developer/billing", role: identity.RoleDeveloper, min: identity.RoleBilling},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -80,6 +82,7 @@ func TestParseRole(t *testing.T) {
 	}{
 		{name: "user", in: "user", want: identity.RoleUser, ok: true},
 		{name: "developer", in: "developer", want: identity.RoleDeveloper, ok: true},
+		{name: "billing", in: "billing", want: identity.RoleBilling, ok: true},
 		{name: "admin", in: "admin", want: identity.RoleAdmin, ok: true},
 		// Case, whitespace and near-misses are rejected rather than coerced: the
 		// role map's targets come from operator configuration, and a silently
@@ -117,8 +120,8 @@ func TestParseRoleAcceptsLegacyViewer(t *testing.T) {
 			t.Errorf("ParseRole(%q) = (%q, %v), want (%q, true)", in, string(got), ok, string(identity.RoleUser))
 		}
 	}
-	if got, ok := identity.ParseRole("billing"); ok || got != identity.RoleNone {
-		t.Errorf("ParseRole(%q) = (%q, %v), want (%q, false)", "billing", string(got), ok, string(identity.RoleNone))
+	if got, ok := identity.ParseRole("limited_developer"); ok || got != identity.RoleNone {
+		t.Errorf("workspace-only role parsed as an organization role: %q, %t", got, ok)
 	}
 }
 

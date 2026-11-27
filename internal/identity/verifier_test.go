@@ -60,12 +60,12 @@ const (
 // make the leeway boundaries ambiguous.
 var verifierXBase = time.Date(2026, 3, 4, 15, 4, 5, 0, time.UTC)
 
-// verifierXRoleMap covers all three roles, so a test can assert the strongest
-// one wins rather than only that something mapped.
+// verifierXRoleMap includes every organization role to exercise claim precedence.
 func verifierXRoleMap() map[string]identity.Role {
 	return map[string]identity.Role{
 		"platform-admins": identity.RoleAdmin,
 		"devs":            identity.RoleDeveloper,
+		"finance":         identity.RoleBilling,
 		"everyone":        identity.RoleUser,
 	}
 }
@@ -1555,6 +1555,10 @@ func TestVerifyRoleClaimTypes(t *testing.T) {
 		want  identity.Role
 	}{
 		{name: "a scalar string", roles: "platform-admins", want: identity.RoleAdmin},
+		{name: "billing claim", roles: "finance", want: identity.RoleBilling},
+		{name: "billing and base user", roles: []any{"finance", "everyone"}, want: identity.RoleBilling},
+		{name: "billing and developer", roles: []any{"devs", "finance"}, want: identity.RoleDeveloper},
+		{name: "billing and admin", roles: []any{"finance", "platform-admins"}, want: identity.RoleAdmin},
 		{name: "an array", roles: []any{"devs"}, want: identity.RoleDeveloper},
 		{name: "the strongest of several", roles: []any{"everyone", "platform-admins", "devs"}, want: identity.RoleAdmin},
 		{name: "the strongest, other way round", roles: []any{"platform-admins", "everyone"}, want: identity.RoleAdmin},

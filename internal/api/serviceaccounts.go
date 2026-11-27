@@ -25,17 +25,18 @@ var serviceAccountName = regexp.MustCompile(`^[a-z0-9-]{1,255}$`)
 // BetaServiceAccount's adopted native shape. Nullable fields stay present;
 // audit IDs are rendered from the referenced row's actual kind, not its name.
 type serviceAccountJSON struct {
-	ID                string     `json:"id"`
-	Type              string     `json:"type"`
-	Name              string     `json:"name"`
-	Description       *string    `json:"description"`
-	OrganizationRole  string     `json:"organization_role"`
-	CreatedAt         time.Time  `json:"created_at"`
-	CreatedByActorID  *string    `json:"created_by_actor_id"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	UpdatedByActorID  *string    `json:"updated_by_actor_id"`
-	ArchivedAt        *time.Time `json:"archived_at"`
-	ArchivedByActorID *string    `json:"archived_by_actor_id"`
+	ID                   string     `json:"id"`
+	Type                 string     `json:"type"`
+	Name                 string     `json:"name"`
+	Description          *string    `json:"description"`
+	DefaultWorkspaceRole *string    `json:"default_workspace_role,omitempty"`
+	OrganizationRole     string     `json:"organization_role"`
+	CreatedAt            time.Time  `json:"created_at"`
+	CreatedByActorID     *string    `json:"created_by_actor_id"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	UpdatedByActorID     *string    `json:"updated_by_actor_id"`
+	ArchivedAt           *time.Time `json:"archived_at"`
+	ArchivedByActorID    *string    `json:"archived_by_actor_id"`
 }
 
 type serviceAccountsPageJSON struct {
@@ -44,7 +45,8 @@ type serviceAccountsPageJSON struct {
 }
 
 const serviceAccountColumns = `p.id,p.subject,p.description,p.role,p.created_at,p.created_by,c.kind,
-	p.updated_at,p.updated_by,u.kind,p.deactivated_at,p.deactivated_by,a.kind`
+	p.updated_at,p.updated_by,u.kind,p.deactivated_at,p.deactivated_by,a.kind,
+	(SELECT m.role FROM workspace_memberships m WHERE m.workspace_id='default' AND m.principal_id=p.id)`
 const serviceAccountFrom = ` FROM principals p
 	LEFT JOIN principals c ON c.id=p.created_by
 	LEFT JOIN principals u ON u.id=p.updated_by
@@ -54,7 +56,7 @@ func scanServiceAccount(row pgx.Row) (serviceAccountJSON, error) {
 	var a serviceAccountJSON
 	var createdKind, updatedKind, archivedKind *string
 	err := row.Scan(&a.ID, &a.Name, &a.Description, &a.OrganizationRole, &a.CreatedAt, &a.CreatedByActorID, &createdKind,
-		&a.UpdatedAt, &a.UpdatedByActorID, &updatedKind, &a.ArchivedAt, &a.ArchivedByActorID, &archivedKind)
+		&a.UpdatedAt, &a.UpdatedByActorID, &updatedKind, &a.ArchivedAt, &a.ArchivedByActorID, &archivedKind, &a.DefaultWorkspaceRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a, errNotFound("Not found")
 	}
@@ -156,7 +158,7 @@ func (s *server) createServiceAccount(r *http.Request) (any, error) {
 	if _, err := requireHumanAdmin(r); err != nil {
 		return nil, err
 	}
-	obj, err := managementBody(r, "name", "description", "organization_role")
+	obj, err := managementBody(r, "name", "description", "organization_role", "default_workspace_role")
 	if err != nil {
 		return nil, err
 	}
@@ -189,9 +191,12 @@ func (s *server) createServiceAccount(r *http.Request) (any, error) {
 	}
 	defer tx.Rollback(r.Context())
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by)
-		VALUES ($1,$2,$3,'service_account',$4,$5,$6)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by,workspace_grants_initialized)
+		VALUES ($1,$2,$3,'service_account',$4,$5,$6,true)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
 	if err := principalNameConflict(err); err != nil {
+		return nil, err
+	}
+	if err := updateDefaultGrant(r, tx, id, obj); err != nil {
 		return nil, err
 	}
 	a, err := readServiceAccount(r, tx, id)
@@ -209,7 +214,7 @@ func (s *server) updateServiceAccount(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	obj, err := managementBody(r, "description", "organization_role")
+	obj, err := managementBody(r, "description", "organization_role", "default_workspace_role")
 	if err != nil {
 		return nil, err
 	}
@@ -248,6 +253,9 @@ func (s *server) updateServiceAccount(r *http.Request) (any, error) {
 	}
 	if _, err := tx.Exec(r.Context(), `UPDATE principals SET description=CASE WHEN $2 THEN $3 ELSE description END,
 		role=CASE WHEN $4 THEN $5 ELSE role END,updated_at=clock_timestamp(),updated_by=$6 WHERE id=$1`, id, descriptionSet, description, roleSet, role, actor.PrincipalID); err != nil {
+		return nil, err
+	}
+	if err := updateDefaultGrant(r, tx, id, obj); err != nil {
 		return nil, err
 	}
 	a, err := readServiceAccount(r, tx, id)

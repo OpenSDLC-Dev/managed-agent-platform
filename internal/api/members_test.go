@@ -143,7 +143,7 @@ func TestMappedRoleCannotBeChanged(t *testing.T) {
 	mapped := seedMember(t, s, "mapped", "developer", "idp")
 	path := membersPath + "/" + principal.PublicID(mapped, "user")
 	expectManagement(t, s, "POST", path, `{"role":"admin"}`, h, 409)
-	for _, role := range []string{"viewer", "billing", "owner", "primary_owner", "membership_admin", "managed", "claude_code_user", "Admin", ""} {
+	for _, role := range []string{"viewer", "owner", "primary_owner", "membership_admin", "managed", "claude_code_user", "Admin", ""} {
 		t.Run(role, func(t *testing.T) { expectManagement(t, s, "POST", path, fmt.Sprintf(`{"role":%q}`, role), h, 400) })
 	}
 	expectManagement(t, s, "POST", path, `{"role":null}`, h, 400)
@@ -222,7 +222,7 @@ func TestLocalMemberCreation(t *testing.T) {
 		`{"login_name":"Upper","password":"long-enough-password","role":"user"}`,
 		`{"login_name":"bad","password":"short","role":"user"}`,
 		`{"login_name":"bad","password":"long-enough-password","role":"viewer"}`,
-		`{"login_name":"bad","password":"long-enough-password","role":"billing"}`,
+		`{"login_name":"bad","password":"long-enough-password","role":"limited_developer"}`,
 		`{"login_name":"bad","password":"long-enough-password","role":null}`,
 		`{"login_name":"bad","password":"long-enough-password"}`,
 		`{"login_name":"bad","password":"long-enough-password","role":"user","email":"bad@example.test"}`,

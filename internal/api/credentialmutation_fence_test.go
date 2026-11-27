@@ -88,6 +88,7 @@ func TestNativeCredentialMutationCommitFence(t *testing.T) {
 				defer cancel()
 				s, h := newCredentialHandler(t)
 				caller := seedMember(t, s, "fenced-issuer", "admin", "console")
+				seedWorkspaceDeveloper(t, s, caller)
 				cookie, session := s.issue(caller)
 				headers := nativeHeaders(cookie, session.CSRFToken)
 				target := prepareCredentialTarget(t, ctx, s, h, caller, operation, headers)

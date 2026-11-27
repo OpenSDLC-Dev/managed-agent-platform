@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
@@ -26,7 +27,7 @@ func TestRetireBootstrapKeyPreservesIssuedNamesAndAudit(t *testing.T) {
 		(request_id, api_key_id, model, alias, deployment_id, credential_id, protocol, endpoint, status, latency_us)
 		VALUES ('prior_request', 'rotated', 'm', 'm', 'dep', 'cred', 'anthropic', 'messages', 200, 1)`)
 
-	if err := store.Migrate(ctx, pool); err != nil {
+	if err := store.MigrateThrough(ctx, pool, "0070_deployment_price_metadata.sql"); err != nil {
 		t.Fatal(err)
 	}
 	if got := keySnapshot(t, pool, `SELECT string_agg(id, ',' ORDER BY id) FROM api_keys`); got != "legacy_issued,other_preset,other_workspace,user_key" {
@@ -34,5 +35,11 @@ func TestRetireBootstrapKeyPreservesIssuedNamesAndAudit(t *testing.T) {
 	}
 	if got := keySnapshot(t, pool, `SELECT api_key_id FROM modelgateway.usage WHERE request_id='prior_request'`); got != "rotated" {
 		t.Errorf("historical usage records key ID %q", got)
+	}
+	if err := store.Migrate(ctx, pool); err == nil || !strings.Contains(err.Error(), "api_keys: default/another/default (1 rows)") {
+		t.Fatalf("unregistered historical key scope must be reported for reconciliation: %v", err)
+	}
+	if got := keySnapshot(t, pool, `SELECT workspace_id FROM api_keys WHERE id='other_workspace'`); got != "another" {
+		t.Fatalf("migration changed historical scope to %q", got)
 	}
 }

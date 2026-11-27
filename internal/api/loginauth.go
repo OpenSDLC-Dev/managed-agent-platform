@@ -59,7 +59,7 @@ func privateCookiePath(r *http.Request) bool {
 	return true
 }
 
-func (s *server) requireCookie(next http.Handler) http.Handler {
+func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Proxy assertions may accompany a cookie at an IAP edge, but cannot replace
 		// it. API keys and Authorization are explicitly refused on cookie-only routes.
@@ -86,7 +86,19 @@ func (s *server) requireCookie(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), cookieContextKey{}, session)
-		ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: session.Role})
+		role := session.Role
+		_, pattern := next.Handler(r)
+		_, route, hasMethod := strings.Cut(pattern, " ")
+		if !hasMethod {
+			route = pattern
+		}
+		switch route {
+		case consoleProxyPath, consoleProxyRootPath, consoleAgentsOverviewPath:
+			role = session.WorkspaceRole.ResourceRole()
+		case consoleAPIKeysPath, consoleOrgAPIKeyPath, consoleAPIKeyPath:
+			role = keyManagerRole(session)
+		}
+		ctx = context.WithValue(ctx, ctxKeyIdentity, identityPrincipal{ID: session.PrincipalID, Role: role})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

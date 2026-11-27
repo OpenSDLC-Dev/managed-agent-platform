@@ -33,7 +33,7 @@ func TestDeploymentInitiatorCookieAdminAndFutureSchedules(t *testing.T) {
 		t.Fatalf("initiator=%v", initiator)
 	}
 	var account map[string]any
-	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"scheduler"}`, headers, 200), &account)
+	json.Unmarshal(expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"scheduler","default_workspace_role":"developer"}`, headers, 200), &account)
 	accountID := account["id"].(string)
 	change := fmt.Sprintf(`{"principal_id":%q}`, accountID)
 	for _, malformed := range []string{"%00", "depl_%00", "not-an-id"} {
@@ -93,6 +93,15 @@ func TestDeploymentInitiatorCookieAdminAndFutureSchedules(t *testing.T) {
 	}
 	if manual != admin {
 		t.Fatalf("manual initiator=%s", manual)
+	}
+	accountPath := serviceAccountsPath + "/" + accountID
+	expectManagement(t, s, "POST", accountPath, `{"default_workspace_role":null}`, headers, 200)
+	expectManagement(t, s, "POST", accountPath, `{"default_workspace_role":"developer"}`, headers, 200)
+	expectManagement(t, s, "POST", path, change, headers, 200)
+	var canResume bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT workspace_can_continue(initiator_principal_id,workspace_id,workspace_grant_generation)
+		FROM deployments WHERE id=$1`, id).Scan(&canResume); err != nil || canResume {
+		t.Fatalf("repeating the same initiator assignment revived a revoked deployment: allowed=%t err=%v", canResume, err)
 	}
 	expectManagement(t, s, "POST", serviceAccountsPath+"/"+accountID+"/archive", `{}`, headers, 200)
 	expectManagement(t, s, "POST", path, change, headers, 400)

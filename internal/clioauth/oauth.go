@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,30 +32,32 @@ const (
 	// These identifiers describe the installation's reserved tenancy on the
 	// CLI wire. The database continues to scope these grants to default.
 	OrganizationID = "00000000-0000-4000-8000-000000000001"
-	WorkspaceID    = "wrkspc_00000000000000000000000001"
+	WorkspaceID    = workspace.DefaultPublicID
 )
 
 var ErrInvalidGrant = errors.New("cli oauth: invalid grant")
 
 // Authority is the current principal and the grant's consented scopes.
 type Authority struct {
-	PrincipalID string
-	Role        identity.Role
-	Scopes      []string
+	PrincipalID   string
+	Role          identity.Role
+	WorkspaceRole workspace.Role
+	WorkspaceID   string
+	Scopes        []string
 }
 
 func (a Authority) Has(scope string) bool { return slices.Contains(a.Scopes, scope) }
 
 // CanConsent checks the maximum authority the current role can grant.
-func CanConsent(role identity.Role, scopes []string) bool {
-	if !role.AtLeast(identity.RoleUser) || len(scopes) == 0 {
+func CanConsent(role identity.Role, grant workspace.Role, scopes []string) bool {
+	if (!role.AtLeast(identity.RoleUser) && role != identity.RoleBilling) || len(scopes) == 0 {
 		return false
 	}
 	for _, scope := range scopes {
 		switch scope {
 		case Profile:
 		case Inference, Developer:
-			if !role.AtLeast(identity.RoleDeveloper) {
+			if !grant.CanUseResources() {
 				return false
 			}
 		case OrgAdmin:
@@ -119,8 +122,8 @@ func Prune(ctx context.Context, pool *pgxpool.Pool) error {
 func IssueCode(ctx context.Context, tx pgx.Tx, principalID string, in CodeRequest) (string, error) {
 	code := secret("")
 	_, err := tx.Exec(ctx, `INSERT INTO cli_oauth_grants
-		(principal_id, client_id, scopes, code_hash, challenge, state_hash, redirect_uri, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes')`,
+		(principal_id, client_id, scopes, code_hash, challenge, state_hash, redirect_uri, expires_at, workspace_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes', 'default')`,
 		principalID, in.ClientID, in.Scopes, hash(code), in.Challenge, hash(in.State), in.RedirectURI)
 	if err != nil {
 		return "", err
@@ -218,31 +221,34 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 		return Authority{}, ErrInvalidGrant
 	}
 	var a Authority
-	err := db.QueryRow(ctx, `SELECT p.id, p.role, g.scopes FROM cli_oauth_tokens t
+	err := db.QueryRow(ctx, `SELECT p.id, p.role, g.scopes, w.public_id, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_tokens t
 		JOIN cli_oauth_grants g ON g.id=t.grant_id
 		JOIN principals p ON p.id=g.principal_id
+		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.id='default' AND w.archived_at IS NULL
 		WHERE t.access_hash=$1 AND NOT t.spent AND t.access_expires_at>clock_timestamp()
 		  AND NOT g.revoked AND g.expires_at>clock_timestamp()
 		  AND p.org_id='default' AND p.kind='user' AND p.status='active'`, hash(token)).
-		Scan(&a.PrincipalID, &a.Role, &a.Scopes)
+		Scan(&a.PrincipalID, &a.Role, &a.Scopes, &a.WorkspaceID, &a.WorkspaceRole)
 	return a, grantError(err)
 }
 
 func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) {
 	var role identity.Role
+	var grant workspace.Role
 	var scopes []string
 	out := Tokens{
 		AccessToken: secret(AccessPrefix), RefreshToken: secret(refreshPrefix), Type: "Bearer",
 		Organization: tokenOrganization{OrganizationID, "Managed Agent Platform"},
-		Workspace:    tokenWorkspace{WorkspaceID, "Default"},
 	}
-	if err := tx.QueryRow(ctx, `SELECT md5(p.id)::uuid::text, p.email, p.role, g.scopes FROM cli_oauth_grants g
+	if err := tx.QueryRow(ctx, `SELECT md5(p.id)::uuid::text, p.email, p.role, g.scopes,
+		w.public_id, w.name, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
 		JOIN principals p ON p.id=g.principal_id
+		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.id='default' AND w.archived_at IS NULL
 		WHERE g.id=$1::uuid AND p.org_id='default' AND p.kind='user' AND p.status='active'`, grantID).
-		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes); err != nil {
+		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &grant); err != nil {
 		return Tokens{}, grantError(err)
 	}
-	if !CanConsent(role, scopes) {
+	if !CanConsent(role, grant, scopes) {
 		return Tokens{}, ErrInvalidGrant
 	}
 	out.Scope = strings.Join(scopes, " ")

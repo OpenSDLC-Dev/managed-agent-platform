@@ -31,10 +31,13 @@ func TestOwnedKeyMutationFence(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 				defer cancel()
 				initialRole := "developer"
-				if strings.HasPrefix(withdrawal, "developer-") {
+				if strings.HasPrefix(withdrawal, "developer-") || withdrawal == "user" {
 					initialRole = "admin"
 				}
 				s, h, caller, headers := ownedMutationCaller(t, lane, initialRole)
+				if strings.HasPrefix(withdrawal, "developer-") {
+					seedWorkspaceDeveloper(t, s, caller)
+				}
 				path, patch := consoleAPIKeysPath, `{"name":"fenced-owned"}`
 				if withdrawal == "developer-service" {
 					sa := ownedPrincipalFixture(t, s.pool, "service_account", "developer")
@@ -103,7 +106,7 @@ func TestOwnedKeyMutationFence(t *testing.T) {
 			t.Run(lane+"/"+order, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 				defer cancel()
-				s, h, caller, headers := ownedMutationCaller(t, lane, "developer")
+				s, h, caller, headers := ownedMutationCaller(t, lane, "admin")
 				// Fresh pool connections inherit REPEATABLE READ. A fence with an implicit
 				// Begin would retain a pre-wait snapshot and write after a committed removal.
 				pgtest.DefaultRepeatableRead(t, s.pool)
