@@ -508,18 +508,19 @@ func TestSessionResourceEdgeCases(t *testing.T) {
 	sid := sess["id"].(string)
 
 	// List parameter validation.
-	unknownCursor := base64.RawURLEncoding.EncodeToString([]byte("r1|sesrsc_0000000000000000000000gk"))
+	unknownCursor := base64.RawURLEncoding.EncodeToString([]byte("r2|default|" + sid + "|sesrsc_0000000000000000000000gk"))
 	listCases := map[string]struct {
 		query      string
 		wantStatus int
 		wantRows   int // only checked on 200
 	}{
-		"limit zero":         {"?limit=0", 400, 0},
-		"limit not integer":  {"?limit=abc", 400, 0},
-		"limit over max":     {"?limit=5000", 400, 0},
-		"bad base64 cursor":  {"?page=!!!not-base64", 400, 0},
-		"cursor wrong magic": {"?page=" + base64.RawURLEncoding.EncodeToString([]byte("xx")), 400, 0},
-		"unknown cursor":     {"?page=" + unknownCursor, 200, 0},
+		"limit zero":                       {"?limit=0", 400, 0},
+		"limit not integer":                {"?limit=abc", 400, 0},
+		"limit over max":                   {"?limit=5000", 400, 0},
+		"bad base64 cursor":                {"?page=!!!not-base64", 400, 0},
+		"cursor wrong magic":               {"?page=" + base64.RawURLEncoding.EncodeToString([]byte("xx")), 400, 0},
+		"old unscoped cursor":              {"?page=" + base64.RawURLEncoding.EncodeToString([]byte("r1|sesrsc_0000000000000000000000gk")), 400, 0},
+		"unknown resource in this session": {"?page=" + unknownCursor, 200, 0},
 	}
 	for name, tc := range listCases {
 		status, body := s.do("GET", "/v1/sessions/"+sid+"/resources"+tc.query, nil)
