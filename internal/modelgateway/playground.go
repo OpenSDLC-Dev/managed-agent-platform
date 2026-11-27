@@ -6,6 +6,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 const (
@@ -22,6 +23,9 @@ func (h *handler) servePlayground(w http.ResponseWriter, r *http.Request) {
 	}
 	s, err := m.Authenticate(r.Context(), r)
 	switch {
+	case errors.Is(err, login.ErrWorkspaceSelector):
+		writeError(w, r, forbidden("this organization or workspace is not served"))
+		return
 	case errors.Is(err, login.ErrUnauthenticated):
 		w.Header().Set("x-platform-signed-out", "1")
 		writeError(w, r, unauthenticated("invalid or expired browser session"))
@@ -42,13 +46,16 @@ func (h *handler) servePlayground(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, forbidden("Playground access requires administrator approval"))
 		return
 	}
-	for _, name := range []string{"x-organization-uuid", "x-workspace-id"} {
-		if values := r.Header.Values(name); len(values) > 1 || len(values) == 1 && values[0] != "default" {
-			writeError(w, r, forbidden("this organization or workspace is not served"))
-			return
-		}
+	if values := r.Header.Values("x-organization-uuid"); len(values) > 1 || len(values) == 1 && values[0] != "default" {
+		writeError(w, r, forbidden("this organization or workspace is not served"))
+		return
 	}
-	c := caller{principalID: s.PrincipalID, playground: true}
+	if s.WorkspaceChoices > 1 && r.Header.Get("x-workspace-id") == "" {
+		writeError(w, r, forbidden("select a workspace"))
+		return
+	}
+	r = r.WithContext(workspace.WithID(r.Context(), s.WorkspaceID))
+	c := caller{workspaceID: s.WorkspaceID, principalID: s.PrincipalID, playground: true}
 	if r.URL.Path == playgroundModelsPath {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)

@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -38,8 +39,9 @@ const issuedKeySecretBytes = 32
 // stored, so no surface can render the key a second time, and PartialKeyHint is
 // the only trace of the plaintext that survives.
 type ManagementKey struct {
-	ID   string
-	Name string
+	WorkspaceID, WorkspacePublicID string
+	ID                             string
+	Name                           string
 	// Status is the rendered status, so it may read `expired`, which is not a
 	// value any row holds.
 	Status         string
@@ -74,12 +76,12 @@ const managementKeyColumns = `id, name,
 	CASE WHEN status <> 'archived' AND expires_at IS NOT NULL AND expires_at <= clock_timestamp()
 	     THEN 'expired' ELSE status END AS status,
 	partial_key_hint, created_at, created_by, expires_at, owner_principal_id,
-	coalesce((SELECT kind FROM principals WHERE principals.id = api_keys.owner_principal_id), '')`
+	coalesce((SELECT kind FROM principals WHERE principals.id = api_keys.owner_principal_id), ''), workspace_id, (SELECT public_id FROM workspaces WHERE workspaces.id=api_keys.workspace_id) AS workspace_public_id`
 
 func scanManagementKey(row pgx.Row) (ManagementKey, error) {
 	var k ManagementKey
 	err := row.Scan(&k.ID, &k.Name, &k.Status, &k.PartialKeyHint,
-		&k.CreatedAt, &k.CreatedBy, &k.ExpiresAt, &k.OwnerPrincipalID, &k.OwnerKind)
+		&k.CreatedAt, &k.CreatedBy, &k.ExpiresAt, &k.OwnerPrincipalID, &k.OwnerKind, &k.WorkspaceID, &k.WorkspacePublicID)
 	return k, err
 }
 
@@ -112,10 +114,10 @@ func issueManagementKey(ctx context.Context, db principal.Querier, name string, 
 	digest := apikey.Hash(key)
 	row := db.QueryRow(ctx,
 		`INSERT INTO api_keys (id, name, owned_key_hash, partial_key_hint, created_by, expires_at, owner_principal_id, workspace_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'default')
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING `+managementKeyColumns,
 		domain.NewID(domain.PrefixAPIKey).String(), name, digest, partialKeyHint(key),
-		createdBy, expiresAt, *ownerID)
+		createdBy, expiresAt, *ownerID, workspace.ID(ctx))
 	k, err := scanManagementKey(row)
 	if err != nil {
 		return "", ManagementKey{}, err
@@ -136,8 +138,8 @@ func issueManagementKey(ctx context.Context, db principal.Querier, name string, 
 func updateManagementKey(ctx context.Context, tx pgx.Tx, id string, status, name *string) (ManagementKey, error) {
 	return scanManagementKey(tx.QueryRow(ctx,
 		`UPDATE api_keys SET status = coalesce($2, status), name = coalesce($3, name)
-		  WHERE id = $1
-		  RETURNING `+managementKeyColumns, id, status, name))
+		  WHERE id = $1 AND workspace_id = $4
+		  RETURNING `+managementKeyColumns, id, status, name, workspace.ID(ctx)))
 }
 
 // ListManagementKeys returns every management key, newest first.
@@ -149,15 +151,15 @@ func updateManagementKey(ctx context.Context, tx pgx.Tx, id string, status, name
 // Developers and admins can issue keys, so neither table nor response size is
 // bounded. Owner filtering limits the developer query, not the admin response.
 func ListManagementKeys(ctx context.Context, pool *pgxpool.Pool) ([]ManagementKey, error) {
-	return listManagementKeys(ctx, pool, "")
+	return listManagementKeys(ctx, pool, "", "")
 }
 
 // An empty ownerID preserves the full administrative listing.
-func listManagementKeys(ctx context.Context, pool *pgxpool.Pool, ownerID string) ([]ManagementKey, error) {
-	query := `SELECT ` + managementKeyColumns + ` FROM api_keys`
-	var args []any
+func listManagementKeys(ctx context.Context, pool *pgxpool.Pool, space, ownerID string) ([]ManagementKey, error) {
+	query := `SELECT ` + managementKeyColumns + ` FROM api_keys WHERE ($1::text='' OR workspace_id=$1)`
+	args := []any{space}
 	if ownerID != "" {
-		query += ` WHERE owner_principal_id = $1`
+		query += ` AND owner_principal_id = $2`
 		args = append(args, ownerID)
 	}
 	// id breaks ties so the order is total rather than merely partial: two keys

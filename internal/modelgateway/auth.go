@@ -14,16 +14,29 @@ import (
 
 // caller keeps credential attribution and the principal authorizing inference.
 type caller struct {
-	keyID       string // its api_keys id
-	principalID string
-	sessionID   string // delegated calls use the claim's session, never a caller header
-	delegated   bool
-	playground  bool
+	workspaceID, workspacePublicID string
+	keyID                          string // its api_keys id
+	principalID                    string
+	sessionID                      string // delegated calls use the claim's session, never a caller header
+	delegated                      bool
+	playground                     bool
 }
 
 // authenticate checks a delegated claim, CLI grant or owned key.
 // x-api-key precedes Bearer; repeated fields are ambiguous and refused.
 func (h *handler) authenticate(r *http.Request, path string, openAI bool) (caller, *apiError) {
+	c, err := h.credential(r, path, openAI)
+	if err != nil {
+		return caller{}, err
+	}
+	if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), c.workspacePublicID) {
+		return caller{}, forbidden("workspace is not served by this platform")
+	}
+	r.Header.Del("anthropic-workspace-id")
+	return c, nil
+}
+
+func (h *handler) credential(r *http.Request, path string, openAI bool) (caller, *apiError) {
 	keys := r.Header.Values("x-api-key")
 	if len(keys) > 1 || len(r.Header.Values("Authorization")) > 1 {
 		return caller{}, unauthenticated("a credential header is repeated")
@@ -43,7 +56,7 @@ func (h *handler) authenticate(r *http.Request, path string, openAI bool) (calle
 			return caller{}, internal(r, "inference token lookup failed", err)
 		}
 		if p.WorkID != "" {
-			return caller{principalID: p.PrincipalID, sessionID: p.SessionID, delegated: true}, nil
+			return caller{workspaceID: p.WorkspaceID, workspacePublicID: p.WorkspacePublicID, principalID: p.PrincipalID, sessionID: p.SessionID, delegated: true}, nil
 		}
 		return caller{}, unauthenticated("invalid inference token")
 	}
@@ -53,12 +66,13 @@ func (h *handler) authenticate(r *http.Request, path string, openAI bool) (calle
 	// Read credential and current owner authority in one database snapshot.
 	var c caller
 	var role workspace.Role
-	err := h.cfg.Keys.QueryRow(r.Context(), `SELECT k.id, p.id, coalesce(workspace_role(p.id,k.workspace_id),'')
+	err := h.cfg.Keys.QueryRow(r.Context(), `SELECT k.id, p.id, w.id, w.public_id, coalesce(workspace_role(p.id,k.workspace_id),'')
 		FROM api_keys k JOIN principals p ON p.id=k.owner_principal_id
-		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default' AND k.workspace_id='default'
+		JOIN workspaces w ON (w.org_id,w.id)=(k.org_id,k.workspace_id) AND w.archived_at IS NULL
+		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default'
 		  AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp())
 		  AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'`,
-		apikey.Hash(key)).Scan(&c.keyID, &c.principalID, &role)
+		apikey.Hash(key)).Scan(&c.keyID, &c.principalID, &c.workspaceID, &c.workspacePublicID, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return caller{}, unauthenticated("invalid x-api-key")
 	}
@@ -79,9 +93,6 @@ func (h *handler) authenticateCLI(r *http.Request, token, path string, openAI bo
 	if err != nil {
 		return caller{}, internal(r, "OAuth token lookup failed", err)
 	}
-	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != a.WorkspaceID {
-		return caller{}, forbidden("workspace is not served by this platform")
-	}
 	var refusal string
 	switch {
 	case openAI:
@@ -101,7 +112,5 @@ func (h *handler) authenticateCLI(r *http.Request, token, path string, openAI bo
 	if !a.WorkspaceRole.CanUseResources() {
 		return caller{}, forbidden("calling models requires the developer role")
 	}
-	// The caller's workspace selects the local grant. The upstream has its own tenancy.
-	r.Header.Del("anthropic-workspace-id")
-	return caller{principalID: a.PrincipalID}, nil
+	return caller{principalID: a.PrincipalID, workspaceID: a.WorkspaceKey, workspacePublicID: a.WorkspaceID}, nil
 }

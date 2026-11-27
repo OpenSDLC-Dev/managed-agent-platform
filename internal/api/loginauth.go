@@ -70,6 +70,9 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 		}
 		session, err := s.login.Authenticate(r.Context(), r)
 		if err != nil {
+			if errors.Is(err, login.ErrWorkspaceSelector) {
+				err = errWorkspaceNotFound
+			}
 			if errors.Is(err, login.ErrUnauthenticated) {
 				w.Header().Set("x-platform-signed-out", "1")
 				err = errAuth("invalid or expired browser session")
@@ -86,12 +89,21 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 			writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
 			return
 		}
-		ctx := context.WithValue(workspace.WithID(r.Context(), workspace.Default), cookieContextKey{}, session)
+		hint, _ := workspace.PrivateSelector(r)
+		if hint != "" && (session.WorkspaceID == "" || session.WorkspaceRole == "" && hint != workspace.Default) {
+			writeError(w, r, errWorkspaceNotFound)
+			return
+		}
+		ctx := context.WithValue(workspace.WithID(r.Context(), session.WorkspaceID), cookieContextKey{}, session)
 		role := session.Role
 		_, pattern := next.Handler(r)
 		_, route, hasMethod := strings.Cut(pattern, " ")
 		if !hasMethod {
 			route = pattern
+		}
+		if hint == "" && session.WorkspaceChoices > 1 && (route == consoleProxyPath || route == consoleProxyRootPath || route == consoleTokensPath || route == consoleDeploymentInitiatorPath || route == consoleOrgAPIKeyPath) {
+			writeError(w, r, errInvalid("select a workspace"))
+			return
 		}
 		switch route {
 		case consoleProxyPath, consoleProxyRootPath, consoleAgentsOverviewPath:

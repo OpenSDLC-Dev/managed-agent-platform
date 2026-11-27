@@ -91,14 +91,3 @@ func cliAdminRead(fn func(*http.Request) (any, error)) func(*http.Request) (any,
 		return fn(r)
 	}
 }
-
-func (s *server) cliWorkspaces(r *http.Request) (any, error) {
-	// The legacy CLI list omits Default. Registry-backed audit listing and
-	// its Default inclusion option belong to the client rollout in Plan 42.
-	return struct {
-		Data    []any   `json:"data"`
-		HasMore bool    `json:"has_more"`
-		FirstID *string `json:"first_id"`
-		LastID  *string `json:"last_id"`
-	}{Data: []any{}}, nil
-}

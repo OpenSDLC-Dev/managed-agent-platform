@@ -47,9 +47,10 @@ type writer interface {
 
 // Principal is the member authority of one authenticated model-turn claim.
 type Principal struct {
-	PrincipalID string
-	SessionID   string
-	WorkID      string
+	WorkspaceID, WorkspacePublicID string
+	PrincipalID                    string
+	SessionID                      string
+	WorkID                         string
 }
 
 // Mint commits with the claim whose work-item lock the caller holds. The
@@ -79,15 +80,16 @@ func Authenticate(ctx context.Context, db Querier, tokens ...string) (Principal,
 		hashes[i] = gatetoken.HashToken(token)
 	}
 	var p Principal
-	err := db.QueryRow(ctx, `SELECT t.principal_id,w.session_id,w.id
+	err := db.QueryRow(ctx, `SELECT t.principal_id,w.session_id,w.id,ws.id,ws.public_id
 		FROM inference_tokens t
 		JOIN work_items w ON w.id=t.work_id AND w.inference_generation=t.claim_generation
-		JOIN sessions s ON s.id=w.session_id
+		JOIN sessions s ON (s.id,s.workspace_id)=(w.session_id,w.workspace_id)
+		JOIN workspaces ws ON ws.id=s.workspace_id AND ws.archived_at IS NULL
 		JOIN session_initiators i ON i.session_id=s.id AND i.principal_id=t.principal_id
 		WHERE t.token_hash=ANY($1) AND w.kind='model_turn' AND w.state='active'
 		AND w.lease_expires_at>clock_timestamp() AND s.archived_at IS NULL
 		AND workspace_can_continue(t.principal_id,s.workspace_id,s.workspace_grant_generation) LIMIT 1`,
-		hashes).Scan(&p.PrincipalID, &p.SessionID, &p.WorkID)
+		hashes).Scan(&p.PrincipalID, &p.SessionID, &p.WorkID, &p.WorkspaceID, &p.WorkspacePublicID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

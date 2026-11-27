@@ -31,6 +31,7 @@ type Tokens struct {
 // with the deployment's upstream id for its model and no alias: no inference
 // API key made it, and its tokens cost what a call's do.
 type Usage struct {
+	WorkspaceID  string
 	ID           int64
 	RequestID    string
 	CreatedAt    time.Time // when the request ended
@@ -114,7 +115,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 		         $12::bigint, $13::bigint, $14::bigint, $15::bigint,
 		         (coalesce(d.price_input, 0) * $12 + coalesce(d.price_output, 0) * $13
 		          + coalesce(d.price_cache_write, 0) * $14 + coalesce(d.price_cache_read, 0) * $15) / 1000000,
-		         $16, $17, NULLIF($18, ''), $19, 'default'
+		         $16, $17, NULLIF($18, ''), $19, $20
 		  FROM (VALUES (1)) one LEFT JOIN modelgateway.deployments d ON d.id = $5
 		  RETURNING created_at, api_key_id, principal_id, alias, deployment_id, error_type, workspace_id,
 		            input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost
@@ -125,7 +126,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 		       (error_type IS NOT NULL)::integer, coalesce(input_tokens, 0), coalesce(output_tokens, 0),
 		       coalesce(cache_write_tokens, 0), coalesce(cache_read_tokens, 0), coalesce(cost, 0), principal_id, workspace_id
 		FROM u
-		ON CONFLICT (day, api_key_id, alias, deployment_id) DO UPDATE SET
+		ON CONFLICT (workspace_id, day, api_key_id, alias, deployment_id) DO UPDATE SET
 		  requests = t.requests + 1, errors = t.errors + EXCLUDED.errors,
 		  input_tokens = t.input_tokens + EXCLUDED.input_tokens,
 		  output_tokens = t.output_tokens + EXCLUDED.output_tokens,
@@ -134,7 +135,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 		  cost = t.cost + EXCLUDED.cost
 		RETURNING (SELECT cost::text FROM u)`,
 			u.RequestID, u.APIKeyID, u.Model, u.Alias, u.DeploymentID, u.CredentialID, u.SessionID, u.Protocol,
-			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, u.PrincipalID, completed).Scan(&cost)
+			u.Endpoint, u.Status, u.ErrorType, in, out, cw, cr, u.Latency.Microseconds(), ttft, u.PrincipalID, completed, u.WorkspaceID).Scan(&cost)
 	})
 	windows.Wait()
 	windowErr := modelErr
@@ -154,6 +155,7 @@ func (s *Store) RecordUsage(ctx context.Context, u Usage) (*float64, error) {
 
 // UsageFilter narrows a usage read; an empty field matches every value.
 type UsageFilter struct {
+	WorkspaceID  string
 	APIKeyID     string
 	PrincipalID  string
 	Alias        string
@@ -166,13 +168,13 @@ type UsageFilter struct {
 // query names only the filters given, so each can use its index: a plan
 // written for every filter at once would serve none of them well.
 func (s *Store) ListUsage(ctx context.Context, f UsageFilter, before int64, limit int) ([]Usage, bool, error) {
-	where, args := []string{"workspace_id='default'"}, []any{}
+	where, args := []string{"($1::text='' OR workspace_id=$1)"}, []any{f.WorkspaceID}
 	for _, c := range []struct {
 		cond string
 		arg  any
 		set  bool
 	}{
-		{"id < $%d", before, before > 0},
+		{`id < (SELECT cursor.id FROM modelgateway.usage cursor WHERE cursor.id=$%d AND ($1::text='' OR cursor.workspace_id=$1))`, before, before > 0},
 		{"api_key_id = $%d", f.APIKeyID, f.APIKeyID != ""},
 		{"principal_id = $%d", f.PrincipalID, f.PrincipalID != ""},
 		{"alias = $%d", f.Alias, f.Alias != ""},
@@ -189,7 +191,7 @@ func (s *Store) ListUsage(ctx context.Context, f UsageFilter, before int64, limi
 		SELECT id, request_id, created_at, api_key_id, model, alias, deployment_id, credential_id,
 		       coalesce(session_id, ''), protocol, endpoint, status, coalesce(error_type, ''),
 		       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost::float8,
-		       latency_us, coalesce(ttft_us, 0), coalesce(principal_id, '')
+		       latency_us, coalesce(ttft_us, 0), coalesce(principal_id, ''), workspace_id
 		FROM modelgateway.usage
 		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY id DESC LIMIT $`+strconv.Itoa(len(args)), args...)
@@ -204,7 +206,7 @@ func (s *Store) ListUsage(ctx context.Context, f UsageFilter, before int64, limi
 		var latency, ttft int64
 		if err := rows.Scan(&u.ID, &u.RequestID, &u.CreatedAt, &u.APIKeyID, &u.Model, &u.Alias, &u.DeploymentID,
 			&u.CredentialID, &u.SessionID, &u.Protocol, &u.Endpoint, &u.Status, &u.ErrorType,
-			&in, &o, &cw, &cr, &u.Cost, &latency, &ttft, &u.PrincipalID); err != nil {
+			&in, &o, &cw, &cr, &u.Cost, &latency, &ttft, &u.PrincipalID, &u.WorkspaceID); err != nil {
 			return nil, false, err
 		}
 		if in != nil {
@@ -232,6 +234,7 @@ func deref(p *int64) int64 {
 // DailyUsage is one day's rollup for a principal (or legacy key), alias and
 // deployment. A credential-filtered read retains the per-key breakdown.
 type DailyUsage struct {
+	WorkspaceID  string
 	Day          time.Time // midnight UTC
 	APIKeyID     string
 	PrincipalID  string
@@ -249,21 +252,22 @@ type DailyUsage struct {
 func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time.Time, limit int) ([]DailyUsage, bool, error) {
 	// A credential filter retains the old per-key view for existing Console
 	// clients. Without it, owned keys are combined in the canonical actor rollup.
-	source := `SELECT day, api_key_id, principal_id, alias, deployment_id, requests, errors,
-		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost FROM modelgateway.usage_actor_daily WHERE workspace_id='default'`
+	source := `SELECT workspace_id, day, api_key_id, principal_id, alias, deployment_id, requests, errors,
+		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost FROM modelgateway.usage_actor_daily`
 	if f.APIKeyID != "" {
-		source = `SELECT d.day, d.api_key_id, d.principal_id, d.alias, d.deployment_id,
+		source = `SELECT d.workspace_id, d.day, d.api_key_id, d.principal_id, d.alias, d.deployment_id,
 			d.requests, d.errors, d.input_tokens, d.output_tokens, d.cache_write_tokens, d.cache_read_tokens, d.cost
-			FROM modelgateway.usage_daily d WHERE d.workspace_id='default'`
+			FROM modelgateway.usage_daily d`
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT day, api_key_id, alias, deployment_id, requests, errors, input_tokens, output_tokens,
-		       cache_write_tokens, cache_read_tokens, cost::float8, coalesce(principal_id, '')
+		       cache_write_tokens, cache_read_tokens, cost::float8, coalesce(principal_id, ''), workspace_id
 		FROM (`+source+`) d
 		WHERE day BETWEEN $1::date AND $2::date AND ($3 = '' OR api_key_id = $3) AND ($4 = '' OR alias = $4)
 		  AND ($5 = '' OR deployment_id = $5) AND ($6 = '' OR principal_id = $6)
-		ORDER BY day, coalesce(principal_id, api_key_id), alias, deployment_id LIMIT $7`,
-		from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly), f.APIKeyID, f.Alias, f.DeploymentID, f.PrincipalID, limit+1)
+		AND ($8::text='' OR workspace_id=$8)
+		ORDER BY day, workspace_id, coalesce(principal_id, api_key_id), alias, deployment_id LIMIT $7`,
+		from.UTC().Format(time.DateOnly), to.UTC().Format(time.DateOnly), f.APIKeyID, f.Alias, f.DeploymentID, f.PrincipalID, limit+1, f.WorkspaceID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -272,7 +276,7 @@ func (s *Store) ListDailyUsage(ctx context.Context, f UsageFilter, from, to time
 	for rows.Next() {
 		var d DailyUsage
 		if err := rows.Scan(&d.Day, &d.APIKeyID, &d.Alias, &d.DeploymentID, &d.Requests, &d.Errors,
-			&d.Tokens.Input, &d.Tokens.Output, &d.Tokens.CacheWrite, &d.Tokens.CacheRead, &d.Cost, &d.PrincipalID); err != nil {
+			&d.Tokens.Input, &d.Tokens.Output, &d.Tokens.CacheWrite, &d.Tokens.CacheRead, &d.Cost, &d.PrincipalID, &d.WorkspaceID); err != nil {
 			return nil, false, err
 		}
 		out = append(out, d)

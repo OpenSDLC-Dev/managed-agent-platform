@@ -112,7 +112,7 @@ func TestAdminAPIKeyPagingAndProjection(t *testing.T) {
 		t.Fatal("historical human issuer lost its user alias or acquired ownership")
 	}
 
-	// The single served tenancy applies to lookup, cursor resolution and collection reads.
+	// Org audit reads all registered workspaces while filtered cursors stay within their workspace.
 	if _, err := s.pool.Exec(ctx, `INSERT INTO workspaces (id,public_id,name) VALUES ('another','wrkspc_00000000000000000000000002','Another')`); err != nil {
 		t.Fatal(err)
 	}
@@ -125,14 +125,18 @@ func TestAdminAPIKeyPagingAndProjection(t *testing.T) {
 		t.Fatalf("archived owned and historical keys: got %d, want %d: %v", len(visible.Data), len(ids)+1, err)
 	}
 	auth := asBearer(token)
-	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?after_id=" + foreign, "?limit=1&before_id=", "?limit=1&after_id="} {
+	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?workspace_id=" + clioauth.WorkspaceID + "&after_id=" + foreign, "?limit=1&before_id=", "?limit=1&after_id="} {
 		status, body := s.decode(s.doRaw("GET", auditKeysPath+path, nil, auth))
 		data, ok := body["data"].([]any)
 		if status != 200 || !ok || len(data) != 0 || body["first_id"] != nil || body["last_id"] != nil || body["has_more"] != false {
 			t.Errorf("unexpected empty page for %s: HTTP %d", path, status)
 		}
 	}
-	for _, id := range []string{foreign, domain.NewID(domain.PrefixAPIKey).String()} {
+	other, err := keys.Get(ctx, foreign)
+	if err != nil || other.Scope.WorkspaceID != "wrkspc_00000000000000000000000002" || other.WorkspaceID != other.Scope.WorkspaceID {
+		t.Fatalf("cross-workspace org audit: %v %v", other, err)
+	}
+	for _, id := range []string{domain.NewID(domain.PrefixAPIKey).String()} {
 		status, _ := s.decode(s.doRaw("GET", auditKeysPath+"/"+id, nil, auth))
 		if status != 404 {
 			t.Errorf("hidden or unknown key returned HTTP %d", status)

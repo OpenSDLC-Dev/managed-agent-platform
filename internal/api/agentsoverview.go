@@ -3,6 +3,7 @@ package api
 import (
 	_ "embed"
 	"encoding/json"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"net/http"
 	"strings"
 )
@@ -52,6 +53,6 @@ func (s *server) agentsOverview(r *http.Request) (any, error) {
 	}
 	order := sort + " " + direction + " NULLS LAST, name ASC, id ASC"
 	var report json.RawMessage
-	err = s.pool.QueryRow(r.Context(), strings.Replace(agentsOverviewSQL, "/* table order */", order, 1), r.PathValue("org"), r.PathValue("workspace"), id).Scan(&report)
+	err = s.pool.QueryRow(r.Context(), strings.Replace(agentsOverviewSQL, "/* table order */", order, 1), r.PathValue("org"), workspace.ID(r.Context()), id).Scan(&report)
 	return report, err
 }

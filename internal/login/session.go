@@ -20,6 +20,8 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
+var ErrWorkspaceSelector = errors.New("invalid workspace selector")
+
 // Session is the private session DTO plus the internal audit actor. It contains
 // current authority, not the role or profile at the time the cookie was issued.
 type Session struct {
@@ -27,7 +29,9 @@ type Session struct {
 	SignedIn         bool           `json:"signed_in"`
 	ID               string         `json:"id"`
 	Role             identity.Role  `json:"role"`
-	WorkspaceRole    workspace.Role `json:"-"`
+	WorkspaceRole    workspace.Role `json:"workspace_role,omitempty"`
+	WorkspaceID      string         `json:"workspace_id,omitempty"`
+	WorkspaceChoices int            `json:"-"`
 	RoleSource       string         `json:"role_source"`
 	PlaygroundAccess bool           `json:"playground_access"`
 	Email            string         `json:"email"`
@@ -97,9 +101,9 @@ func (m *Manager) issue(ctx context.Context, principalID string, passwordLogin b
 			WHERE p.id=$2 AND p.kind='user' AND p.status='active'
 			RETURNING principal_id,expires_at
 		)
-		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,coalesce(workspace_role(p.id,'default'),''),
+		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,coalesce(ws.role,''), coalesce(ws.id,''), coalesce(ws.choices,0),
 		       CASE WHEN p.issuer=$3 THEN p.subject ELSE '' END,issued.expires_at
-		FROM issued JOIN principals p ON p.id=issued.principal_id`, hashCredential(token), principalID, LocalIssuer))
+		FROM issued JOIN principals p ON p.id=issued.principal_id CROSS JOIN (VALUES (''::text)) selection(hint) `+browserWorkspace, hashCredential(token), principalID, LocalIssuer))
 	if err != nil {
 		return IssuedSession{}, err
 	}
@@ -137,16 +141,33 @@ func (m *Manager) AuthenticateInTx(ctx context.Context, tx pgx.Tx, r *http.Reque
 	return session, nil
 }
 
+// The selected role and the authenticated subject come from one database snapshot.
+const browserWorkspace = ` LEFT JOIN LATERAL (
+	SELECT w.id, workspace_role(p.id,w.id) AS role, count(*) OVER() AS choices
+	FROM workspaces w WHERE w.org_id=p.org_id AND w.archived_at IS NULL
+	AND CASE WHEN selection.hint='' THEN workspace_role(p.id,w.id) IS NOT NULL
+	         ELSE w.id=selection.hint OR w.public_id=selection.hint END
+	ORDER BY (w.id='default') DESC, w.id LIMIT 1
+) ws ON true `
+
 func authenticate(ctx context.Context, db principal.Querier, r *http.Request, lock string) (Session, error) {
 	token, err := sessionToken(r)
 	if err != nil {
 		return Session{}, err
 	}
+	hint, ok := workspace.PrivateSelector(r)
+	if !ok {
+		return Session{}, ErrWorkspaceSelector
+	}
+	if bound := workspace.ID(ctx); bound != "" {
+		hint = bound
+	}
 	session, err := scanSession(db.QueryRow(ctx, `
-		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,coalesce(workspace_role(p.id,'default'),''),
+		SELECT p.id,p.kind,p.status,p.role,p.role_source,p.email,p.display_name,coalesce(ws.role,''), coalesce(ws.id,''), coalesce(ws.choices,0),
 		       CASE WHEN p.issuer=$2 THEN p.subject ELSE '' END,s.expires_at
 		FROM browser_sessions s JOIN principals p ON p.id=s.principal_id
-		WHERE s.token_hash=$1 AND s.expires_at>clock_timestamp()`+lock, hashCredential(token), LocalIssuer))
+		CROSS JOIN (VALUES ($3::text)) selection(hint) `+browserWorkspace+`
+		WHERE s.token_hash=$1 AND s.expires_at>clock_timestamp()`+lock, hashCredential(token), LocalIssuer, hint))
 	if err != nil {
 		return Session{}, err
 	}
@@ -168,7 +189,7 @@ func (m *Manager) Revoke(ctx context.Context, r *http.Request) error {
 func scanSession(row pgx.Row) (Session, error) {
 	var s Session
 	var kind, status string
-	err := row.Scan(&s.PrincipalID, &kind, &status, &s.Role, &s.RoleSource, &s.Email, &s.Name, &s.WorkspaceRole, &s.LoginName, &s.ExpiresAt)
+	err := row.Scan(&s.PrincipalID, &kind, &status, &s.Role, &s.RoleSource, &s.Email, &s.Name, &s.WorkspaceRole, &s.WorkspaceID, &s.WorkspaceChoices, &s.LoginName, &s.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Session{}, ErrUnauthenticated
 	}

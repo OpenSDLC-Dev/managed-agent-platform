@@ -73,6 +73,7 @@ func CanConsent(role identity.Role, grant workspace.Role, scopes []string) bool 
 }
 
 type CodeRequest struct {
+	WorkspaceKey                            string
 	ClientID, RedirectURI, State, Challenge string
 	Scopes                                  []string
 }
@@ -124,8 +125,8 @@ func IssueCode(ctx context.Context, tx pgx.Tx, principalID string, in CodeReques
 	code := secret("")
 	_, err := tx.Exec(ctx, `INSERT INTO cli_oauth_grants
 		(principal_id, client_id, scopes, code_hash, challenge, state_hash, redirect_uri, expires_at, workspace_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes', 'default')`,
-		principalID, in.ClientID, in.Scopes, hash(code), in.Challenge, hash(in.State), in.RedirectURI)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes', $8)`,
+		principalID, in.ClientID, in.Scopes, hash(code), in.Challenge, hash(in.State), in.RedirectURI, in.WorkspaceKey)
 	if err != nil {
 		return "", err
 	}

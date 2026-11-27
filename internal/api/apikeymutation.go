@@ -7,6 +7,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -29,6 +30,13 @@ func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal
 	if _, err := tx.Exec(ctx, `LOCK TABLE principals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return fail(err)
 	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM workspaces WHERE id=$1 AND archived_at IS NULL FOR SHARE`, workspace.ID(ctx)).Scan(&active); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fail(errForbidden("workspace access was withdrawn"))
+		}
+		return fail(err)
+	}
 	session, err := s.login.AuthenticateInTx(ctx, tx, r)
 	if err != nil {
 		switch {
@@ -47,10 +55,7 @@ func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal
 }
 
 func keyManagerRole(session login.Session) identity.Role {
-	if session.Role != identity.RoleAdmin && session.WorkspaceRole.CanUseResources() {
-		return identity.RoleDeveloper
-	}
-	return session.Role
+	return session.WorkspaceRole.ResourceRole()
 }
 
 // Lifecycle guards are independent of row permission. Inactive, expired and
@@ -102,7 +107,7 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 
 func requireKeyOwnerGrant(r *http.Request, tx pgx.Tx, ownerID string) error {
 	var allowed bool
-	if err := tx.QueryRow(r.Context(), `SELECT coalesce(workspace_role($1,'default') IN ('admin','developer','limited_developer'),false)`, ownerID).Scan(&allowed); err != nil {
+	if err := tx.QueryRow(r.Context(), `SELECT coalesce(workspace_role($1,$2) IN ('admin','developer','limited_developer'),false)`, ownerID, workspace.ID(r.Context())).Scan(&allowed); err != nil {
 		return err
 	}
 	if !allowed {

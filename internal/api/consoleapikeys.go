@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -40,13 +41,6 @@ const (
 // reference was recorded enforcing (2026-09-05 batch5 `rec86.create.name.500`
 // passes, `.501` and `.1000` are refused).
 const apiKeyNameMax = 500
-
-// reservedWorkspace is the only workspace id this platform answers for, beside
-// reservedOrganization. The segment is carried because the reference carries it
-// and because `workspace_id` is already a reserved tenancy column (principle 5):
-// a seam, not an implementation. Until it becomes real scoping, any other value
-// names a workspace that does not exist.
-const reservedWorkspace = "default"
 
 // actorJSON is the private creator, separate from the owner union. Historical
 // unowned rows keep their audit vocabulary; new owned rows render a user alias.
@@ -136,11 +130,15 @@ func apiKeyMetadata(k ManagementKey) apiKeyMetadataJSON {
 			owner = &apiKeyOwnerJSON{Type: "user_actor", UserID: alias}
 		}
 	}
+	var scope *string
+	if k.WorkspaceID != workspace.Default {
+		scope = &k.WorkspacePublicID
+	}
 	return apiKeyMetadataJSON{
 		ID:          k.ID,
 		Type:        apiKeyResourceType,
 		Name:        k.Name,
-		WorkspaceID: nil,
+		WorkspaceID: scope,
 		CreatedAt:   k.CreatedAt.UTC(),
 		Status:      k.Status,
 		ExpiresAt:   utcPtr(k.ExpiresAt),
@@ -156,8 +154,7 @@ func renderAPIKey(k ManagementKey) apiKeyJSON {
 	return apiKeyJSON{apiKeyMetadataJSON: apiKeyMetadata(k), CreatedBy: creator, PartialKeyHint: k.PartialKeyHint}
 }
 
-// consoleWorkspace resolves the {org}/{workspace} pair the workspace-scoped
-// routes here address, without touching the database. The organization is
+// consoleWorkspace requires the workspace already resolved by cookie authentication. The organization is
 // consoleOrganization's; an unrecognized workspace is a 404 carrying the
 // reference's `{error_visibility}` (2026-09-05 batch8
 // `item6.after-archive.workspaceB.api_keys`), so the namespace is no better an
@@ -166,7 +163,7 @@ func consoleWorkspace(r *http.Request) error {
 	if err := consoleOrganization(r); err != nil {
 		return err
 	}
-	if ws := r.PathValue("workspace"); ws != reservedWorkspace {
+	if workspace.ID(r.Context()) == "" {
 		return errWorkspaceNotFound
 	}
 	return nil
@@ -251,7 +248,7 @@ func (s *server) listAPIKeys(r *http.Request) (any, error) {
 	if caller.ID != "" && caller.Role != identity.RoleAdmin {
 		ownerID = caller.ID
 	}
-	keys, err := listManagementKeys(r.Context(), s.pool, ownerID)
+	keys, err := listManagementKeys(r.Context(), s.pool, workspace.ID(r.Context()), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +335,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 
 	// Visibility precedes body and lifecycle errors. This read never locks the
 	// target, so neither an invalid body nor a hidden row holds its row lock.
-	key, err := scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE id=$1`, keyID))
+	key, err := scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE workspace_id=$2 AND id=$1`, keyID, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -352,7 +349,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 		return nil, bodyErr
 	}
 
-	key, err = scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE id=$1 FOR UPDATE`, keyID))
+	key, err = scanManagementKey(tx.QueryRow(ctx, `SELECT `+managementKeyColumns+` FROM api_keys WHERE workspace_id=$2 AND id=$1 FOR UPDATE`, keyID, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -399,7 +396,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	var lapsed bool
 	if err := tx.QueryRow(ctx,
 		`SELECT expires_at IS NOT NULL AND expires_at <= clock_timestamp()
-		 FROM api_keys WHERE id = $1`, keyID).Scan(&lapsed); err != nil {
+		 FROM api_keys WHERE workspace_id=$2 AND id = $1`, keyID, workspace.ID(ctx)).Scan(&lapsed); err != nil {
 		return nil, err
 	}
 	// A lapsed key admits exactly one operation: archiving it. The reference states

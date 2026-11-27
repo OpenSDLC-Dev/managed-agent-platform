@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -41,6 +42,7 @@ var cliConsentPage = template.Must(template.New("cli-consent").Parse(`<!doctype 
 <ul>{{range .Scopes}}<li>{{.}}</li>{{end}}</ul>
 <form method="post" action="/oauth/authorize">
 {{range $name, $value := .Fields}}<input type="hidden" name="{{$name}}" value="{{$value}}">{{end}}
+<label>Workspace <select name="workspace_id" required>{{if gt (len .Workspaces) 1}}<option value="">Choose a workspace</option>{{end}}{{range .Workspaces}}<option value="{{.PublicID}}">{{.Name}}</option>{{end}}</select></label>
 <input type="hidden" name="csrf_token" value="{{.CSRF}}">
 <button type="submit">Authorize CLI</button>
 </form>
@@ -52,6 +54,7 @@ var cliConsentPage = template.Must(template.New("cli-consent").Parse(`<!doctype 
 </main></body></html>`))
 
 type cliConsentView struct {
+	Workspaces   []consentWorkspace
 	AuthorizeURL string
 	Account      string
 	CSRF         string
@@ -108,14 +111,19 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
 		return
 	}
-	if !clioauth.CanConsent(session.Role, session.WorkspaceRole, in.Scopes) {
+	choices, err := s.consentWorkspaces(r, session, in, params.Get("workspace_id"))
+	if err != nil {
+		writeCLIConsentError(w, r, err)
+		return
+	}
+	if len(choices) == 0 || r.Method == http.MethodPost && len(choices) != 1 {
 		writeCLIRoleDenial(w, r, in, s.login.PublicOrigin())
 		return
 	}
 	if r.Method == http.MethodGet {
 		fields := make(map[string]string, len(params))
 		for name, values := range params {
-			if name != "csrf_token" {
+			if name != "csrf_token" && name != "workspace_id" {
 				fields[name] = values[0]
 			}
 		}
@@ -126,9 +134,11 @@ func (s *server) cliAuthorize(w http.ResponseWriter, r *http.Request) {
 		if account == "" {
 			account = session.Name
 		}
-		renderCLIConsent(w, cliConsentView{Account: account, CSRF: session.CSRFToken, Scopes: in.Scopes, Fields: fields})
+		renderCLIConsent(w, cliConsentView{Workspaces: choices, Account: account, CSRF: session.CSRFToken, Scopes: in.Scopes, Fields: fields})
 		return
 	}
+	in.WorkspaceKey = choices[0].Key
+	r = r.WithContext(workspace.WithID(r.Context(), in.WorkspaceKey))
 	code, err := s.issueCLIConsent(r, session, in)
 	if errors.Is(err, errCLIRole) {
 		writeCLIRoleDenial(w, r, in, s.login.PublicOrigin())
@@ -176,7 +186,7 @@ func (s *server) issueCLIConsent(r *http.Request, session login.Session, in clio
 	if err := clioauth.Prune(ctx, s.pool); err != nil {
 		return "", err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return "", err
 	}
@@ -187,6 +197,13 @@ func (s *server) issueCLIConsent(r *http.Request, session login.Session, in clio
 		return "", errAuth("invalid or expired browser session")
 	}
 	if err != nil {
+		return "", err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM workspaces WHERE id=$1 AND archived_at IS NULL FOR SHARE`, in.WorkspaceKey).Scan(&active); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errCLIRole
+		}
 		return "", err
 	}
 	current, err := s.login.AuthenticateInTx(ctx, tx, r)
@@ -221,7 +238,7 @@ func cliAuthorizationRequest(q url.Values, origin string) (clioauth.CodeRequest,
 	if org := q.Get("orgUUID"); org != "" && org != clioauth.OrganizationID {
 		return in, errForbidden("organization is not served by this platform")
 	}
-	if workspace := q.Get("workspace_id"); workspace != "" && workspace != clioauth.WorkspaceID {
+	if id := q.Get("workspace_id"); id != "" && (len(id) != 33 || !strings.HasPrefix(id, "wrkspc_") || !oauthUnreserved(id[7:], 26, 26)) {
 		return in, errForbidden("workspace is not served by this platform")
 	}
 	for _, scope := range strings.Split(q.Get("scope"), " ") {
@@ -395,4 +412,32 @@ func (s *server) exchangeCLIGrant(r *http.Request, params url.Values) (clioauth.
 		return clioauth.Tokens{}, clioauth.ErrInvalidGrant
 	}
 	return clioauth.Exchange(r.Context(), s.pool, in)
+}
+
+type consentWorkspace struct {
+	Key, PublicID, Name string
+}
+
+// Return only workspaces where this account can grant the requested scopes.
+// A profile-only login still works for an organization member without resources.
+func (s *server) consentWorkspaces(r *http.Request, session login.Session, in clioauth.CodeRequest, hint string) ([]consentWorkspace, error) {
+	rows, err := s.pool.Query(r.Context(), `SELECT id,public_id,name,coalesce(workspace_role($1,id),'')
+		FROM workspaces WHERE archived_at IS NULL AND ($2::text='' OR public_id=$2)
+		ORDER BY (id='default') DESC,name,id`, session.PrincipalID, hint)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var choices []consentWorkspace
+	for rows.Next() {
+		var w consentWorkspace
+		var role workspace.Role
+		if err := rows.Scan(&w.Key, &w.PublicID, &w.Name, &role); err != nil {
+			return nil, err
+		}
+		if (role != "" || w.Key == workspace.Default) && clioauth.CanConsent(session.Role, role, in.Scopes) {
+			choices = append(choices, w)
+		}
+	}
+	return choices, rows.Err()
 }

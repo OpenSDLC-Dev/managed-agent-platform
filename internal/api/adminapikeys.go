@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/jackc/pgx/v5"
@@ -27,7 +26,7 @@ type adminAPIKeyJSON struct {
 
 func renderAdminAPIKey(k ManagementKey) adminAPIKeyJSON {
 	out := adminAPIKeyJSON{apiKeyMetadataJSON: apiKeyMetadata(k)}
-	out.Scope.Type, out.Scope.WorkspaceID = "workspace", clioauth.WorkspaceID
+	out.Scope.Type, out.Scope.WorkspaceID = "workspace", k.WorkspacePublicID
 	if k.PartialKeyHint != "" {
 		out.PartialKeyHint = &k.PartialKeyHint
 	}
@@ -41,7 +40,7 @@ func renderAdminAPIKey(k ManagementKey) adminAPIKeyJSON {
 	return out
 }
 
-const servedAPIKeyTenancy = `org_id='default' AND workspace_id='default'`
+const servedAPIKeyTenancy = `org_id='default'`
 
 func (s *server) getAdminAPIKey(r *http.Request) (any, error) {
 	id := r.PathValue("id")
@@ -87,9 +86,10 @@ func (s *server) listAdminAPIKeys(r *http.Request) (any, error) {
 		}
 	}
 	page := adminAPIKeysPage{Data: []adminAPIKeyJSON{}}
-	if q.Has("workspace_id") && q.Get("workspace_id") != clioauth.WorkspaceID {
+	if q.Has("workspace_id") && q.Get("workspace_id") == "" {
 		return page, nil
 	}
+	const scopeFilter = ` AND ($4::text='' OR workspace_id=(SELECT w.id FROM workspaces w WHERE w.public_id=$4))`
 	creator := ""
 	if q.Has("created_by_user_id") {
 		id, kind, ok := principal.ParsePublicID(q.Get("created_by_user_id"))
@@ -102,15 +102,15 @@ func (s *server) listAdminAPIKeys(r *http.Request) (any, error) {
 	// Compare and return the same projected status, including expiry. A cursor
 	// is a position in this tenancy even if its row does not match the filters.
 	query := `SELECT * FROM (SELECT ` + managementKeyColumns + ` FROM api_keys WHERE ` + servedAPIKeyTenancy +
-		` AND ($2::text='' OR created_by=$2)`
+		scopeFilter + ` AND ($2::text='' OR created_by=$2)`
 	order := "DESC"
-	args := []any{status, creator, limit + 1}
+	args := []any{status, creator, limit + 1, q.Get("workspace_id")}
 	if hasAfter || hasBefore {
 		cursor, comparison := q.Get("after_id"), "<"
 		if hasBefore {
 			cursor, comparison, order = q.Get("before_id"), ">", "ASC"
 		}
-		query += ` AND (created_at,id) ` + comparison + ` (SELECT created_at,id FROM api_keys WHERE ` + servedAPIKeyTenancy + ` AND id=$4)`
+		query += ` AND (created_at,id) ` + comparison + ` (SELECT created_at,id FROM api_keys WHERE ` + servedAPIKeyTenancy + scopeFilter + ` AND id=$5)`
 		args = append(args, cursor)
 	}
 	query += `) AS projected WHERE ($1::text='' OR status=$1) ORDER BY created_at ` + order + `, id ` + order + ` LIMIT $3`
