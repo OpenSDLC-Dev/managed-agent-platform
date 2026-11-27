@@ -42,7 +42,7 @@ func (s *server) authWorkspaces(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT CASE id WHEN 'default' THEN id ELSE public_id END, public_id, name, display_color, workspace_role($1,id)
+	rows, err := s.pool.Query(r.Context(), `SELECT CASE id WHEN 'default' THEN id ELSE public_id END AS browser_id, public_id, name, display_color, workspace_role($1,id)
 		FROM workspaces WHERE archived_at IS NULL AND workspace_role($1,id) IS NOT NULL
 		ORDER BY (id='default') DESC, lower(name), public_id`, session.PrincipalID)
 	if err != nil {

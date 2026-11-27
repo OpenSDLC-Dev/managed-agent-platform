@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
@@ -154,7 +156,19 @@ func (s *server) editWorkspace(r *http.Request) (any, error) {
 	return w, tx.Commit(ctx)
 }
 
+// Recorded archive requests may have no body. Reject unrelated mutation fields.
+func emptyWorkspaceMutation(r *http.Request) error {
+	if r.ContentLength == 0 {
+		return nil
+	}
+	_, err := managementBody(r)
+	return err
+}
+
 func (s *server) archiveWorkspace(r *http.Request) (any, error) {
+	if err := emptyWorkspaceMutation(r); err != nil {
+		return nil, err
+	}
 	tx, _, err := s.beginPrincipalMutation(r)
 	if err != nil {
 		return nil, err
@@ -165,12 +179,59 @@ func (s *server) archiveWorkspace(r *http.Request) (any, error) {
 	if space == workspace.Default {
 		return nil, errInvalid("Default workspace cannot be archived")
 	}
+	// Take the workspace write fence before sessions, then retire leases. A request
+	// already holding the fence finishes before we enumerate its sessions.
+	var locked string
+	if err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, space).Scan(&locked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errWorkspaceNotFound
+		}
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND archived_at IS NULL AND status<>'terminated' ORDER BY id FOR UPDATE`, space)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, err
+	}
+	var moves []domain.SessionStatus
+	for _, id := range ids {
+		children, err := terminateLiveChildren(ctx, tx, s.log, id)
+		if err != nil {
+			return nil, err
+		}
+		moves = append(moves, children...)
+		sid := domain.ID(id)
+		batch, transition, err := events.TransitionThread(ctx, tx, sid, events.ThreadTransition{Status: domain.SessionTerminated})
+		if err != nil {
+			return nil, err
+		}
+		if _, err = s.log.AppendInTx(ctx, tx, sid, batch, events.AppendOptions{SetStatus: transition}); err != nil {
+			return nil, err
+		}
+		if transition != nil {
+			moves = append(moves, *transition)
+		}
+	}
+	if len(ids) > 0 {
+		if err := events.NotifyReapKick(ctx, tx); err != nil {
+			return nil, err
+		}
+	}
 	w, err := scanWorkspace(tx.QueryRow(ctx, `UPDATE workspaces SET archived_at=clock_timestamp()
  WHERE id=$1 AND archived_at IS NULL RETURNING `+workspaceColumns, space))
 	if err != nil {
 		return nil, err
 	}
-	return w, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	for _, status := range moves {
+		events.RecordSessionStatus(ctx, status)
+	}
+	return w, nil
 }
 
 type workspaceMember struct {
@@ -185,7 +246,7 @@ func (s *server) workspaceMembers(r *http.Request) (any, error) {
 	if err := consoleOrganization(r); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(r.Context(), `SELECT p.id,p.kind,coalesce(nullif(p.display_name,''),nullif(p.email,''),p.subject),
+	rows, err := s.pool.Query(r.Context(), `SELECT p.id,p.kind,coalesce(nullif(p.display_name,''),nullif(p.email,''),CASE WHEN p.kind='service_account' THEN p.subject ELSE '' END),
  workspace_role(p.id,$1),p.role='admin' OR (p.role='billing' AND workspace_role(p.id,$1)='billing')
  FROM principals p WHERE p.org_id='default' AND workspace_role(p.id,$1) IS NOT NULL ORDER BY 3,p.id`, workspace.ID(r.Context()))
 	if err != nil {
@@ -196,6 +257,9 @@ func (s *server) workspaceMembers(r *http.Request) (any, error) {
 		var m workspaceMember
 		err := row.Scan(&m.ID, &m.Kind, &m.Name, &m.Role, &m.Inherited)
 		m.ID = principal.PublicID(m.ID, m.Kind)
+		if m.Name == "" {
+			m.Name = m.ID
+		}
 		return m, err
 	})
 }
@@ -220,6 +284,9 @@ func (s *server) grantWorkspaceMember(r *http.Request) (any, error) {
 }
 
 func (s *server) removeWorkspaceMember(r *http.Request) (any, error) {
+	if err := emptyWorkspaceMutation(r); err != nil {
+		return nil, err
+	}
 	return s.changeWorkspaceMember(r, r.PathValue("member_id"), nil)
 }
 

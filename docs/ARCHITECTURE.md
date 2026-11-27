@@ -476,7 +476,7 @@ CLI consent binds its grant to one active workspace. Owned keys, CLI grants, Pla
 
 ### Workspace administration
 
-Organization administrators create and archive workspaces in Console Settings. A workspace administrator can rename the workspace and manage its user and service-account grants. Default keeps its permanent name and remains active. Workspace archival locks the registry row, retires its API keys and environment credentials, pauses deployments and reclaims outstanding leases in one transaction. In-flight calls can still record usage in their originating workspace. Organization reports include that history. Archived workspace IDs remain reserved.
+Organization administrators create and archive workspaces in Console Settings. A workspace administrator can rename the workspace and manage its user and service-account grants. Default keeps its permanent name and remains active. Workspace archival locks the registry row, retires its API keys and environment credentials, pauses deployments and reclaims outstanding leases in one transaction. Session termination events stop active clocks and make cloud sandboxes eligible for the executor reaper. In-flight calls can still record usage in their originating workspace. Organization reports include that history. Archived workspace IDs remain reserved.
 
 ### Default workspace upgrade
 

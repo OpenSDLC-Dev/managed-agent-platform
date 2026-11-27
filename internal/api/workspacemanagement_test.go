@@ -7,6 +7,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
@@ -78,10 +79,16 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("session %d %v", status, session)
 	}
+	sid := session["id"].(string)
+	pgtest.SetSessionStatus(t, s.pool, domain.ID(sid), "running")
+	if _, err := s.pool.Exec(t.Context(), `UPDATE sessions SET running_since=clock_timestamp()-interval '20 seconds' WHERE id=$1`, sid); err != nil {
+		t.Fatal(err)
+	}
 	wid := domain.NewID(domain.PrefixWork).String()
 	if _, err := s.pool.Exec(t.Context(), `INSERT INTO work_items(id,workspace_id,environment_id,session_id,kind,state,lease_expires_at) VALUES($1,$2,$3,$4,'model_turn','active',now()+interval '1 minute')`, wid, id, eid, session["id"]); err != nil {
 		t.Fatal(err)
 	}
+	post(s, "/"+id+"/archive", map[string]any{"name": "unrelated"}, 400)
 	row := post(s, "/"+id+"/archive", map[string]any{}, 200)
 	if row["archived_at"] == nil {
 		t.Fatal(row)
@@ -101,6 +108,10 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 	var ended bool
 	if err := s.pool.QueryRow(t.Context(), `SELECT d.paused_at IS NOT NULL AND w.state='stopped' AND w.lease_expires_at IS NULL FROM deployments d,work_items w WHERE d.id=$1 AND w.id=$2`, dep["id"], wid).Scan(&ended); err != nil || !ended {
 		t.Errorf("archive work cleanup: %v, %v", ended, err)
+	}
+	var closed bool
+	if err := s.pool.QueryRow(t.Context(), `SELECT status='terminated' AND running_since IS NULL AND active_seconds>=19 AND EXISTS (SELECT 1 FROM events WHERE session_id=s.id AND type='session.status_terminated') FROM sessions s WHERE id=$1`, sid).Scan(&closed); err != nil || !closed {
+		t.Errorf("archive did not close the session's event ledger and active clock: %v %v", closed, err)
 	}
 	if _, err := s.pool.Exec(t.Context(), `UPDATE workspaces SET archived_at=NULL WHERE id=$1`, id); err == nil {
 		t.Error("workspace archive was reversible")
@@ -127,33 +138,34 @@ func TestWorkspaceManagementInheritedAndServiceGrants(t *testing.T) {
 			t.Fatalf("%s %s %d %v", method, path, status, v)
 		}
 	}
-	rows := func() map[string]struct {
-		Role      string
-		Inherited bool
-	} { t.Helper(); res := s.doRaw("GET", b, nil, h); defer res.Body.Close(); var items []struct {
-		ID, Role  string
-		Inherited bool
-	}; if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&items) != nil {
-		t.Fatalf("members HTTP %d", res.StatusCode)
-	}; out := map[string]struct {
-		Role      string
-		Inherited bool
-	}{}; for _, m := range items {
-		out[m.ID] = struct {
-			Role      string
-			Inherited bool
-		}{m.Role, m.Inherited}
-	}; return out }
+	type memberRow struct {
+		ID, Name, Role string
+		Inherited      bool
+	}
+	rows := func() map[string]memberRow {
+		t.Helper()
+		res := s.doRaw("GET", b, nil, h)
+		defer res.Body.Close()
+		var items []memberRow
+		if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&items) != nil {
+			t.Fatalf("members HTTP %d", res.StatusCode)
+		}
+		out := map[string]memberRow{}
+		for _, m := range items {
+			out[m.ID] = m
+		}
+		return out
+	}
 	service := principal.PublicID(sa, "service_account")
 	bill := principal.PublicID(billing, "user")
-	if x := rows()[bill]; x.Role != "billing" || !x.Inherited {
+	if x := rows()[bill]; x.Role != "billing" || !x.Inherited || x.Name != bill {
 		t.Fatal(x)
 	}
 	change("POST", b, map[string]string{"principal_id": bill, "role": "developer"}, 400)
 	change("POST", b, map[string]string{"principal_id": bill, "role": "admin"}, 200)
 	change("POST", b, map[string]string{"principal_id": service, "role": "limited_developer"}, 200)
 	got := rows()
-	if got[service].Role != "limited_developer" || got[bill].Role != "admin" || got[bill].Inherited {
+	if got[service].Name != "service" || got[service].Role != "limited_developer" || got[bill].Role != "admin" || got[bill].Inherited {
 		t.Fatal(got)
 	}
 	var defaultRole *string
