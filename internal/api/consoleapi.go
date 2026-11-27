@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -292,7 +293,7 @@ func (s *server) consoleEnvironment(r *http.Request) (string, error) {
 	}
 	var exists bool
 	err = s.pool.QueryRow(r.Context(),
-		`SELECT true FROM environments WHERE id = $1`+notInternal, id).Scan(&exists)
+		`SELECT true FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal, id, workspace.ID(r.Context())).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errConsoleEnvironmentNotFound(id)
 	}
@@ -350,7 +351,7 @@ func (s *server) createEnvironmentKey(r *http.Request) (any, error) {
 
 	var exists bool
 	err = tx.QueryRow(ctx,
-		`SELECT true FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&exists)
+		`SELECT true FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal+` FOR SHARE`, envID, workspace.ID(ctx)).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errConsoleEnvironmentNotFound(envID)
 	}

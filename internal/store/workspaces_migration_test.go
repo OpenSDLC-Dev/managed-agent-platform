@@ -59,7 +59,7 @@ func TestDefaultWorkspaceUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows.Close()
-	if err := store.Migrate(ctx, pool); err != nil {
+	if err := store.MigrateThrough(ctx, pool, "0071_default_workspace.sql"); err != nil {
 		t.Fatal(err)
 	}
 	var publicID string

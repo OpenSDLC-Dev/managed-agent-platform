@@ -16,6 +16,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -228,7 +229,7 @@ func (e *Executor) materializeFile(ctx context.Context, sb sandbox.Sandbox, m fi
 	// session's copy of an upload shares the upload's object (#578).
 	var key string
 	err := e.pool.QueryRow(ctx,
-		`SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1 AND `+store.FileLiveSQL, m.FileID).Scan(&key)
+		`SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1 AND workspace_id = $2 AND `+store.FileLiveSQL, m.FileID, workspace.ID(ctx)).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s", errFileMissing, m.FileID)
 	}

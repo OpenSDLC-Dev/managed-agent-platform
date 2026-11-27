@@ -100,7 +100,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := parsePage(q)
+	p, err := parsePage("", q)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func (s *server) listServiceAccounts(r *http.Request) (any, error) {
 		page.Data = page.Data[:p.limit]
 		last := page.Data[len(page.Data)-1]
 		internalID, _, _ := principal.ParsePublicID(last.ID)
-		next := encodeTimeCursor(cursorServiceAccounts, dirNext, last.CreatedAt, internalID)
+		next := encodeTimeCursor(p.space, cursorServiceAccounts, dirNext, last.CreatedAt, internalID)
 		page.NextPage = &next
 	}
 	return page, nil
@@ -191,8 +191,8 @@ func (s *server) createServiceAccount(r *http.Request) (any, error) {
 	}
 	defer tx.Rollback(r.Context())
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by,workspace_grants_initialized)
-		VALUES ($1,$2,$3,'service_account',$4,$5,$6,true)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by)
+		VALUES ($1,$2,$3,'service_account',$4,$5,$6)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
 	if err := principalNameConflict(err); err != nil {
 		return nil, err
 	}

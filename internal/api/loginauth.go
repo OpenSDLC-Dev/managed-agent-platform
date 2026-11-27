@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -85,7 +86,7 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 			writeError(w, r, errForbidden("invalid browser origin or CSRF token"))
 			return
 		}
-		ctx := context.WithValue(r.Context(), cookieContextKey{}, session)
+		ctx := context.WithValue(workspace.WithID(r.Context(), workspace.Default), cookieContextKey{}, session)
 		role := session.Role
 		_, pattern := next.Handler(r)
 		_, route, hasMethod := strings.Cut(pattern, " ")

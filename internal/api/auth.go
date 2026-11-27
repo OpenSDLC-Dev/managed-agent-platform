@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -101,8 +102,12 @@ func requireAPIKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid x-api-key"))
 			return
 		}
+		if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), authority.WorkspacePublicID) {
+			writeError(w, r, errForbidden("workspace is not served by this platform"))
+			return
+		}
 		markVerified(r.Context())
-		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, authority.KeyID)
+		ctx := context.WithValue(workspace.WithID(r.Context(), authority.WorkspaceID), ctxKeyPrincipal, authority.KeyID)
 		ctx = context.WithValue(ctx, ownedKeyContextKey{}, authority)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -13,6 +13,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -127,7 +128,7 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 	switch skills.ClassifyPin(version) {
 	case skills.PinLatest:
 		var latest *string
-		err := b.pool.QueryRow(ctx, `SELECT latest_version FROM skills WHERE id = $1`, skillID).Scan(&latest)
+		err := b.pool.QueryRow(ctx, `SELECT latest_version FROM skills WHERE id = $1 AND (workspace_id = $2 OR source = 'anthropic')`, skillID, workspace.ID(ctx)).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", "", fmt.Errorf("skill %s not found", skillID)
 		}
@@ -138,16 +139,19 @@ func (b *Brain) resolveSkillMeta(ctx context.Context, skillID, version string) (
 			return "", "", fmt.Errorf("skill %s has no version to resolve %q against", skillID, version)
 		}
 		row = b.pool.QueryRow(ctx,
-			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-			skillID, *latest)
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+			skillID, *latest, workspace.ID(ctx))
 	case skills.PinID:
 		row = b.pool.QueryRow(ctx,
-			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND id = $2`,
-			skillID, version)
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND id = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+			skillID, version, workspace.ID(ctx))
 	case skills.PinNumber:
 		row = b.pool.QueryRow(ctx,
-			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-			skillID, version)
+			`SELECT name, description FROM skill_versions WHERE skill_id = $1 AND version = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+			skillID, version, workspace.ID(ctx))
 	default:
 		return "", "", fmt.Errorf("skill %s version %q is neither %q, a version id nor a version number",
 			skillID, version, skills.LatestAlias)

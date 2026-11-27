@@ -826,7 +826,7 @@ func TestListEventsPagingAndFilters(t *testing.T) {
 
 	// A time-keyed cursor (the resource lists' kind) is rejected, not
 	// misread as a seq position.
-	timeCursor := base64.RawURLEncoding.EncodeToString([]byte("k2|agents|n|t|1752000000000000000|agent_x"))
+	timeCursor := base64.RawURLEncoding.EncodeToString([]byte("k3|default|agents|n|t|1752000000000000000|agent_x"))
 	status, res = s.do(http.MethodGet, path+"?page="+timeCursor, nil)
 	wantErr(t, status, res, http.StatusBadRequest, "invalid_request_error")
 }

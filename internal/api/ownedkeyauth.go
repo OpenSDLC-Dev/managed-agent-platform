@@ -17,8 +17,9 @@ import (
 // apiKeyAuthority keeps the authenticated credential separate from its current
 // owner authority. Audit and Memory actors name KeyID, never OwnerID.
 type apiKeyAuthority struct {
-	KeyID, OwnerID, OwnerKind string
-	Role                      identity.Role
+	KeyID, OwnerID, OwnerKind      string
+	WorkspaceID, WorkspacePublicID string
+	Role                           identity.Role
 }
 
 type ownedKeyContextKey struct{}
@@ -34,12 +35,13 @@ func ownedKeyFrom(ctx context.Context) (apiKeyAuthority, bool) {
 func authenticateManagementKey(ctx context.Context, db apikey.Querier, raw string) (apiKeyAuthority, error) {
 	var authority apiKeyAuthority
 	var role workspace.Role
-	err := db.QueryRow(ctx, `SELECT k.id, p.id, p.kind, coalesce(workspace_role(p.id,k.workspace_id),'')
+	err := db.QueryRow(ctx, `SELECT k.id, p.id, p.kind, w.id, w.public_id, coalesce(workspace_role(p.id,w.id),'')
 		FROM api_keys k JOIN principals p ON p.id=k.owner_principal_id
-		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default' AND k.workspace_id='default'
+		JOIN workspaces w ON (w.org_id,w.id)=(k.org_id,k.workspace_id) AND w.archived_at IS NULL
+		WHERE k.owned_key_hash=$1 AND k.status='active' AND k.org_id='default'
 		  AND (k.expires_at IS NULL OR k.expires_at > clock_timestamp())
 		  AND p.org_id='default' AND p.kind IN ('user','service_account') AND p.status='active'`,
-		apikey.Hash(raw)).Scan(&authority.KeyID, &authority.OwnerID, &authority.OwnerKind, &role)
+		apikey.Hash(raw)).Scan(&authority.KeyID, &authority.OwnerID, &authority.OwnerKind, &authority.WorkspaceID, &authority.WorkspacePublicID, &role)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return apiKeyAuthority{}, nil
 	}

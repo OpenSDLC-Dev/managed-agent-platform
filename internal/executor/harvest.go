@@ -424,10 +424,10 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		rows, qerr := tx.Query(ctx,
 			`DELETE FROM files
 			  WHERE id IN (SELECT id FROM files
-			                WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
+			                WHERE scope_type = 'session' AND scope_id = $1 AND workspace_id = $2 AND source_file_id IS NULL
 			                ORDER BY id FOR UPDATE)
 			 RETURNING `+store.FileObjectKeySQL,
-			item.SessionID.String())
+			item.SessionID.String(), item.WorkspaceID)
 		if qerr != nil {
 			return qerr
 		}
@@ -436,8 +436,8 @@ func (e *Executor) settleHarvest(ctx context.Context, item *queue.Item, files []
 		}
 		for _, f := range files {
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id)
-				 VALUES ($1, $2, $3, $4, true, 'session', $5)`,
+				`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, workspace_id)
+				 VALUES ($1, $2, $3, $4, true, 'session', $5, (SELECT workspace_id FROM sessions WHERE id = $5))`,
 				f.id.String(), f.path, f.mime, f.size, item.SessionID.String()); err != nil {
 				return err
 			}

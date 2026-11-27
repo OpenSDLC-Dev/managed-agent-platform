@@ -235,14 +235,15 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 
 	var (
 		archivedAt  *time.Time
+		workspaceID string
 		agentName   *string
 		storedUsage []byte
 		stored      sessionClock
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, resolved_agent->>'name', usage, active_seconds, running_since
+		`SELECT archived_at, resolved_agent->>'name', usage, active_seconds, running_since, workspace_id
 		   FROM sessions WHERE id = $1 FOR UPDATE`,
-		sessionID.String()).Scan(&archivedAt, &agentName, &storedUsage, &stored.active, &stored.since)
+		sessionID.String()).Scan(&archivedAt, &agentName, &storedUsage, &stored.active, &stored.since, &workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrSessionNotFound
 	}
@@ -314,11 +315,11 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 	// that earlier row until the clock passes it.
 	var (
 		sb        strings.Builder
-		args      = []any{lastCreated}
+		args      = []any{lastCreated, workspaceID}
 		out       = make([]domain.Event, 0, len(evs))
 		lastStamp time.Time
 	)
-	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at, thread_id, cross_posted) VALUES `)
+	sb.WriteString(`INSERT INTO events (id, session_id, seq, type, payload, processed_at, created_at, thread_id, cross_posted, workspace_id) VALUES `)
 	for i, ev := range evs {
 		seq++
 		id := ev.ID
@@ -394,7 +395,7 @@ func (l *Log) AppendInTx(ctx context.Context, tx pgx.Tx, sessionID domain.ID, ev
 			sb.WriteString(", ")
 		}
 		n := len(args)
-		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, GREATEST(statement_timestamp(), $1::timestamptz + interval '1 microsecond'), $%d, $%d)",
+		fmt.Fprintf(&sb, "($%d, $%d, $%d, $%d, $%d, $%d, GREATEST(statement_timestamp(), $1::timestamptz + interval '1 microsecond'), $%d, $%d, $2)",
 			n+1, n+2, n+3, n+4, n+5, n+6, n+7, n+8)
 		args = append(args, id.String(), sessionID.String(), seq, string(ev.Type), payload, utcOrNil(ev.ProcessedAt),
 			nullableID(ev.ThreadID), ev.CrossPosted)

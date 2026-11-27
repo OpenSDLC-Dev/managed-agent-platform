@@ -135,12 +135,16 @@ func newTestServerWithCipher(t *testing.T, cipher secrets.Cipher) *tserver {
 // do issues a request with the test API key. body may be nil, a raw string
 // (sent verbatim), or any JSON-marshalable value. It returns the status code
 // and the decoded JSON response object (nil if the body is not a JSON object).
+func (s *tserver) managementKey() string {
+	if s.key != "" {
+		return s.key
+	}
+	return testKey
+}
+
 func (s *tserver) do(method, path string, body any) (int, map[string]any) {
 	s.t.Helper()
-	key := s.key
-	if key == "" {
-		key = testKey
-	}
+	key := s.managementKey()
 	res := s.doRaw(method, path, body, map[string]string{"x-api-key": key})
 	return s.decode(res)
 }

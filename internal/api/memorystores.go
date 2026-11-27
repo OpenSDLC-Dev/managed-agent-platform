@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -140,10 +141,18 @@ func (s *server) createMemoryStore(r *http.Request) (any, error) {
 
 	id := domain.NewID(domain.PrefixMemoryStore).String()
 	var createdAt, updatedAt time.Time
-	if err := s.pool.QueryRow(ctx,
-		`INSERT INTO memory_stores (id, name, description, metadata, created_by)
-		 VALUES ($1, $2, $3, $4, $5) RETURNING created_at, updated_at`,
-		id, name, description, metadata, createdBy).Scan(&createdAt, &updatedAt); err != nil {
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err = tx.QueryRow(ctx,
+		`INSERT INTO memory_stores (workspace_id, id, name, description, metadata, created_by)
+		 VALUES ($6, $1, $2, $3, $4, $5) RETURNING created_at, updated_at`,
+		id, name, description, metadata, createdBy, workspace.ID(ctx)).Scan(&createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderMemoryStore(id, name, description, metadata, createdAt, updatedAt, nil), nil
@@ -174,7 +183,7 @@ func (s *server) getMemoryStore(r *http.Request) (any, error) {
 	var row memoryStoreRow
 	err := s.pool.QueryRow(ctx,
 		`SELECT name, description, metadata, created_at, updated_at, archived_at
-		 FROM memory_stores WHERE id = $1`, id).
+		 FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
@@ -236,7 +245,7 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +254,7 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	var row memoryStoreRow
 	err = tx.QueryRow(ctx,
 		`SELECT name, description, metadata, created_at, updated_at, archived_at
-		 FROM memory_stores WHERE id = $1 FOR UPDATE`, id).
+		 FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("memory store %s not found", id)
@@ -312,8 +321,8 @@ func (s *server) updateMemoryStore(r *http.Request) (any, error) {
 	if row.name != oldName || row.description != oldDescription || !maps.Equal(metadata, oldMetadata) {
 		if err := tx.QueryRow(ctx,
 			`UPDATE memory_stores SET name = $2, description = $3, metadata = $4, updated_at = now()
-			 WHERE id = $1 RETURNING updated_at`,
-			id, row.name, row.description, metadata).Scan(&row.updatedAt); err != nil {
+			 WHERE memory_stores.workspace_id = $5 AND id = $1 RETURNING updated_at`,
+			id, row.name, row.description, metadata, workspace.ID(ctx)).Scan(&row.updatedAt); err != nil {
 			return nil, err
 		}
 	}
@@ -330,7 +339,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if errors.Is(err, errPageCursor) {
 		return nil, errInvalid(pageTokenInvalid)
 	}
@@ -354,8 +363,8 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 	}
 
 	query := `SELECT id, name, description, metadata, created_at, updated_at, archived_at
-	          FROM memory_stores WHERE true`
-	var args []any
+	          FROM memory_stores WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -417,7 +426,7 @@ func (s *server) listMemoryStores(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorMemoryStores, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorMemoryStores, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -437,12 +446,17 @@ func (s *server) archiveMemoryStore(r *http.Request) (any, error) {
 	// anthropic-sdk-go v1.70.1 — spec
 	// components.schemas.BetaManagedAgentsMemoryStore.properties.updated_at).
 	var row memoryStoreRow
-	err := s.pool.QueryRow(ctx,
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx,
 		`UPDATE memory_stores SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1
-		 RETURNING name, description, metadata, created_at, updated_at, archived_at`, id).
+		 WHERE memory_stores.workspace_id = $2 AND id = $1
+		 RETURNING name, description, metadata, created_at, updated_at, archived_at`, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("memory store %s not found", id)
@@ -452,6 +466,9 @@ func (s *server) archiveMemoryStore(r *http.Request) (any, error) {
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderMemoryStore(id, row.name, row.description, metadata,
@@ -468,12 +485,20 @@ func (s *server) deleteMemoryStore(r *http.Request) (any, error) {
 	// retrievable" (checked against anthropic-sdk-go v1.66.0 —
 	// betamemorystore.go BetaManagedAgentsDeletedMemoryStore). Slice 2's tables
 	// carry the ON DELETE CASCADE that makes the second half true.
-	tag, err := s.pool.Exec(ctx, `DELETE FROM memory_stores WHERE id = $1`, id)
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("memory store %s not found", id)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return map[string]string{"id": id, "type": "memory_store_deleted"}, nil
 }

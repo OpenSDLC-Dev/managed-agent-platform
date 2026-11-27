@@ -81,8 +81,8 @@ func TestMigration0047DropsTheCopyGuardAndTheTombstoneTrigger(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.Migrate(ctx, pool); err != nil {
-		t.Fatalf("migrate the rest: %v", err)
+	if err := store.MigrateThrough(ctx, pool, "0047_drop_file_copy_guard.sql"); err != nil {
+		t.Fatalf("migrate through 0047: %v", err)
 	}
 	if got := triggersAndFunctions(t, pool); !slices.Equal(got, kept) {
 		t.Errorf("after 0047: %v, want only the reference count's: %v", got, kept)

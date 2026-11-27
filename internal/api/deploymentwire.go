@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
-	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/jackc/pgx/v5"
+
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
@@ -71,33 +73,47 @@ func principalPtr(ctx context.Context) *string {
 // parseInitialEvents has already refused every type but the three a deployment
 // admits.
 //
-// The second is a file rubric with no object storage to snapshot into. That
-// one the normalizer cannot see, so it is checked here with the message the
-// event path already uses.
-func (s *server) validateDeploymentInitialEvents(initial []json.RawMessage) error {
+// File rubrics are validated before the template is saved and again when a run
+// snapshots the file.
+func (s *server) validateDeploymentInitialEvents(ctx context.Context, tx pgx.Tx, initial []json.RawMessage) error {
 	if len(initial) == 0 {
-		// validateDeploymentBounds' floor, which create and update both run on
-		// the list they would store, refuses it in the one sentence they share.
 		return nil
 	}
-	if _, err := events.NormalizeInitialEvents("", events.ManagementCredential, initial); err != nil {
+	normalized, err := events.NormalizeInitialEvents("", events.ManagementCredential, initial)
+	if err != nil {
 		return errInvalid("initial_events: %s", err)
 	}
-	if s.blobs != nil {
-		return nil
+	if err := validateEventFileSources(ctx, tx, normalized); err != nil {
+		return err
 	}
-	for _, raw := range initial {
-		var ev struct {
-			Type   string `json:"type"`
-			Rubric struct {
-				Type string `json:"type"`
-			} `json:"rubric"`
-		}
-		if err := json.Unmarshal(raw, &ev); err != nil {
-			continue // NormalizeInitialEvents' to judge, at the fire.
-		}
-		if ev.Type == string(domain.EventUserDefineOutcome) && ev.Rubric.Type == "file" {
+	defs, err := events.DefineOutcomes(normalized)
+	if err != nil {
+		return errInvalid("initial_events: %s", err)
+	}
+	for _, d := range defs {
+		if d.RubricType == "file" && s.blobs == nil {
 			return errInvalid("file rubrics require the files surface, which this deployment does not configure")
+		}
+		if err := events.ValidateRubricFile(ctx, tx, d); err != nil {
+			var refused *events.Refusal
+			if errors.As(err, &refused) {
+				return errInvalid("initial_events: %s", err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDeploymentResources(ctx context.Context, tx pgx.Tx, resources []resourceInput) error {
+	if err := validateLiveFileIDs(ctx, tx, mountSourceIDs(resources)); err != nil {
+		return err
+	}
+	for _, in := range resources {
+		if in.kind == resourceKindMemory {
+			if _, err := snapshotMemoryStore(ctx, tx, in); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -145,6 +145,7 @@ func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (string
 	err := pool.QueryRow(ctx,
 		`SELECT t.session_id FROM session_gate_tokens t
 		    JOIN sessions s ON s.id = t.session_id
+		    JOIN workspaces w ON w.id = s.workspace_id AND w.archived_at IS NULL
 		  WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND s.archived_at IS NULL`,
 		HashToken(token)).Scan(&sessionID)
 	if err == pgx.ErrNoRows {

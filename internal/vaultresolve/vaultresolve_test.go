@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -82,7 +83,7 @@ func names(bindings []vaultresolve.Binding) []string {
 
 func TestBindings(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	sess := domain.NewID("sesn").String()
 
 	v1 := newVault(t, pool, false)
@@ -178,7 +179,7 @@ func TestBindings(t *testing.T) {
 
 func TestBindingsCorruptAuthDocErrors(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	// A row whose auth document has a non-string secret_name (only reachable by
 	// out-of-band corruption — the API always writes a string) surfaces as a
@@ -199,7 +200,7 @@ func TestBindingsCorruptAuthDocErrors(t *testing.T) {
 
 func TestBindingsArchivedVaultExcluded(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	// An archived vault yields nothing — the revocation half the acceptance run
 	// asserts (a fresh resolution mints no placeholder). The credential here is

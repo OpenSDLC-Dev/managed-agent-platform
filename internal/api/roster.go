@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -211,7 +212,7 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	// must answer the same 404 as the other three rather than this route's
 	// "not found" 400 (§4.4).
 	rows, err := tx.Query(ctx,
-		`SELECT id, version, archived_at, internal FROM agents WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+		`SELECT id, version, archived_at, internal FROM agents WHERE agents.workspace_id = $2 AND id = ANY($1) ORDER BY id FOR SHARE`, ids, workspace.ID(ctx))
 	if err != nil {
 		return nil, rosterLockErr(err)
 	}
@@ -259,9 +260,9 @@ func resolveRoster(ctx context.Context, tx pgx.Tx, raw json.RawMessage, selfID s
 	found, nested := map[string]bool{}, map[string]bool{}
 	rows, err = tx.Query(ctx,
 		`SELECT v.agent_id, v.spec->'multiagent'
-		   FROM agent_versions v
+		   FROM agent_versions v JOIN agents a ON a.id = v.agent_id AND a.workspace_id = $3
 		   JOIN unnest($1::text[], $2::bigint[]) AS p(agent_id, version)
-		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions)
+		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -488,9 +489,9 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 	members := map[string]memberRow{}
 	rows, err := db.Query(ctx,
 		`SELECT v.agent_id, v.name, v.spec
-		   FROM agent_versions v
+		   FROM agent_versions v JOIN agents a ON a.id = v.agent_id AND a.workspace_id = $3
 		   JOIN unnest($1::text[], $2::bigint[]) AS p(agent_id, version)
-		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions)
+		     ON p.agent_id = v.agent_id AND p.version = v.version`, agentIDs, versions, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -528,6 +529,11 @@ func snapshotRoster(ctx context.Context, db querier, stored json.RawMessage, sel
 			return nil, errInvalid("multiagent member %s version %d not found", ref.ID, ref.Version)
 		}
 		m.spec.Normalize()
+		if len(m.spec.Skills) > 0 {
+			if err := validateSkillRefs(ctx, db, mustJSON(m.spec.Skills)); err != nil {
+				return nil, err
+			}
+		}
 		if err := validateAgentSpec(m.spec); err != nil {
 			return nil, errInvalid("multiagent member %s: %s", ref.ID, err.Error())
 		}

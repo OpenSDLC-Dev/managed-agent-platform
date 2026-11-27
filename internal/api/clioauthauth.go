@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,7 +43,7 @@ func requireCLIOAuth(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			return
 		}
 		markVerified(r.Context())
-		ctx := context.WithValue(r.Context(), cliOAuthContextKey{}, authority)
+		ctx := context.WithValue(workspace.WithID(r.Context(), authority.WorkspaceKey), cliOAuthContextKey{}, authority)
 		role := authority.WorkspaceRole.ResourceRole()
 		if cliAuditPath(r) {
 			role = authority.Role
@@ -57,7 +58,7 @@ func cliAuditPath(r *http.Request) bool {
 }
 
 func cliResourceScope(r *http.Request, a clioauth.Authority) error {
-	if hints := r.Header.Values("anthropic-workspace-id"); len(hints) > 1 || len(hints) == 1 && hints[0] != a.WorkspaceID {
+	if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), a.WorkspaceID) {
 		return errForbidden("workspace is not served by this platform")
 	}
 	if cliAuditPath(r) {

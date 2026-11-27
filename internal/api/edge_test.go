@@ -284,7 +284,7 @@ func TestPathAndQueryRejectNUL(t *testing.T) {
 
 	// Id-shaped query filters, the page cursor, and the free-form types[] filter
 	// → 400 invalid_request_error. The cursor carries the NUL in its decoded id.
-	nulCursor := base64.RawURLEncoding.EncodeToString([]byte("k2|sessions|n|t|1|sesn_\x00"))
+	nulCursor := base64.RawURLEncoding.EncodeToString([]byte("k3|default|sessions|n|t|1|sesn_\x00"))
 	for name, path := range map[string]string{
 		"agent_id filter":            "/v1/sessions?agent_id=agent_" + nul,
 		"page cursor id":             "/v1/sessions?page=" + nulCursor,

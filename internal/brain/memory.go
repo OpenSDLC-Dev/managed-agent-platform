@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
@@ -69,7 +70,7 @@ func (b *Brain) resolveMemoryBlock(ctx context.Context, resourcesJSON []byte) (s
 			continue
 		}
 		var archivedAt *time.Time
-		err := b.pool.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1`, m.MemoryStoreID).Scan(&archivedAt)
+		err := b.pool.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 AND workspace_id = $2`, m.MemoryStoreID, workspace.ID(ctx)).Scan(&archivedAt)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			slog.WarnContext(ctx, "memory store attached to the session no longer exists",

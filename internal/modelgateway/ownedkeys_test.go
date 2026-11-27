@@ -15,6 +15,10 @@ func (e *env) ownedKey(owner, kind, role, name string) string {
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO principals (id,issuer,subject,kind,role)
 		VALUES ($1,'gateway-owned-test',$1,$2,$3) ON CONFLICT (id) DO NOTHING`, owner, kind, role)
 	e.must(err)
+	if role == "developer" {
+		_, err = e.pool.Exec(e.ctx, `INSERT INTO workspace_memberships VALUES ('default',$1,'developer') ON CONFLICT DO NOTHING`, owner)
+		e.must(err)
+	}
 	key := "sk-map-api01-owned-" + name
 	_, err = e.pool.Exec(e.ctx, `INSERT INTO api_keys (id,name,owner_principal_id,owned_key_hash,created_by)
 		VALUES ($1,$1,$2,$3,$2)`, name, owner, apikey.Hash(key))

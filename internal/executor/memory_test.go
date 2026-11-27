@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
@@ -41,7 +42,7 @@ func (h *harness) seedMemoryStore(t *testing.T, id, name string) {
 // version, and returns the memory id.
 func (h *harness) seedMemory(t *testing.T, storeID, path, content string) string {
 	t.Helper()
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	memoryID := domain.NewID(domain.PrefixMemory).String()
 	versionID := domain.NewID(domain.PrefixMemoryVersion).String()
 	sha := sha256hex([]byte(content))
@@ -272,7 +273,7 @@ func TestMemoryMountsOrderByStore(t *testing.T) {
 // the tools do not re-run for a memory they never depended on.
 func TestMemorySettleFailureSkipsTheStore(t *testing.T) {
 	h, sb := materialized(t, "read_write")
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := h.pool.Exec(ctx, `
 		CREATE OR REPLACE FUNCTION map_test_refuse_version() RETURNS trigger LANGUAGE plpgsql AS $$
 		BEGIN RAISE EXCEPTION 'refused by the test'; END $$;
@@ -307,7 +308,7 @@ func TestMemorySettleFailureSkipsTheStore(t *testing.T) {
 // which removes the local file.
 func TestMemorySyncPullsRemoteChanges(t *testing.T) {
 	h, sb := materialized(t, "read_write")
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := h.pool.Exec(ctx,
 		`UPDATE memories SET content = 'remote v2', content_sha256 = $2 WHERE memory_store_id = $1 AND path = '/notes.md'`,
 		memStoreID, sha256hex([]byte("remote v2"))); err != nil {
@@ -612,7 +613,7 @@ func TestMemorySyncStampsEachMemoryAsItWritesIt(t *testing.T) {
 	sb.files[memMount+"/notes.md"] = "hello v2"
 	h.suspend(t, writeUse("out.txt", "x"))
 
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	holder, err := h.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the lock holder: %v", err)
@@ -982,7 +983,7 @@ func TestASyncLandsOnlyADirectoryWithNoMarkerAtAll(t *testing.T) {
 			refs := []memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}}
 			sync := func() {
 				t.Helper()
-				if err := h.exec.syncMemoryNow(context.Background(), sb, h.sid, refs, func() {}); err != nil {
+				if err := h.exec.syncMemoryNow(workspace.WithID(context.Background(), workspace.Default), sb, h.sid, refs, func() {}); err != nil {
 					t.Fatalf("sync: %v", err)
 				}
 			}
@@ -1294,7 +1295,7 @@ func TestAMarkerReadTheStartupEndedSkipsTheStore(t *testing.T) {
 	h.seedMemoryStore(t, memStoreID, "Notes")
 	h.seedMemory(t, memStoreID, "/notes.md", "hello")
 	refs := []memoryRef{{Type: "memory_store", MemoryStoreID: memStoreID, Access: "read_write", MountPath: memMount}}
-	if err := h.exec.syncMemoryNow(context.Background(), sb, h.sid, refs, func() {}); err != nil {
+	if err := h.exec.syncMemoryNow(workspace.WithID(context.Background(), workspace.Default), sb, h.sid, refs, func() {}); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if _, ok := sb.files[memMount+"/notes.md"]; ok {

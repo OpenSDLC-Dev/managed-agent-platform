@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // runError tags an apiError with the run-error type a deployment run records
@@ -74,7 +75,7 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 	// The request body is neither read nor refused: the reference declares no
 	// requestBody on any deployment action (§5.1).
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +99,7 @@ func (s *server) runDeployment(r *http.Request) (any, error) {
 	)
 	err = tx.QueryRow(ctx,
 		`SELECT name, environment_id, agent_id, agent_version, vault_ids, initial_events, resources, archived_at
-		   FROM deployments WHERE id = $1 FOR SHARE`, id).
+		   FROM deployments WHERE deployments.workspace_id = $2 AND id = $1 FOR SHARE`, id, workspace.ID(ctx)).
 		Scan(&name, &envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment %s not found", id)
@@ -274,7 +275,7 @@ func (s *server) getDeploymentRun(r *http.Request) (any, error) {
 		return nil, err
 	}
 	run, err := scanRun(s.pool.QueryRow(ctx,
-		`SELECT `+runColumns+` FROM deployment_runs WHERE id = $1`, id))
+		`SELECT `+runColumns+` FROM deployment_runs WHERE id = $1 AND EXISTS (SELECT 1 FROM deployments d WHERE d.id = deployment_id AND d.workspace_id = $2)`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment run %s not found", id)
 	}
@@ -294,13 +295,13 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// The one list whose published cap is 1000, not maxLimit (§2.6).
-	page, err := parsePageMax(q, maxRunLimit)
+	page, err := parsePageMax(workspace.ID(r.Context()), q, maxRunLimit)
 	if err != nil {
 		return nil, err
 	}
 
-	query := `SELECT ` + runColumns + ` FROM deployment_runs WHERE true`
-	var args []any
+	query := `SELECT ` + runColumns + ` FROM deployment_runs WHERE EXISTS (SELECT 1 FROM deployments d WHERE d.id = deployment_id AND d.workspace_id = $1)`
+	args := []any{workspace.ID(ctx)}
 	if deplID := q.Get("deployment_id"); deplID != "" {
 		// Shape first, as the sessions list does: a malformed id can never
 		// name a stored deployment, and rejecting it keeps an unstorable byte
@@ -395,7 +396,7 @@ func (s *server) listDeploymentRuns(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorDeploymentRuns, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorDeploymentRuns, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil

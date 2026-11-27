@@ -17,6 +17,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -142,7 +143,7 @@ func memoryActor(ctx context.Context) map[string]string {
 func lockMemoryStore(ctx context.Context, tx pgx.Tx, storeID string) (archived bool, err error) {
 	var archivedAt *time.Time
 	err = tx.QueryRow(ctx,
-		`SELECT archived_at FROM memory_stores WHERE id = $1 FOR UPDATE`, storeID).Scan(&archivedAt)
+		`SELECT archived_at FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1 FOR UPDATE`, storeID, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, errNotFound("memory store %s not found", storeID)
 	}
@@ -237,7 +238,7 @@ func failsBothDigestRules(v string) bool {
 func (s *server) checkMemoryStore(ctx context.Context, storeID string) error {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT true FROM memory_stores WHERE id = $1`, storeID).Scan(&exists)
+		`SELECT true FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1`, storeID, workspace.ID(ctx)).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("memory store %s not found", storeID)
 	}
@@ -341,7 +342,7 @@ func (s *server) createMemory(r *http.Request) (any, error) {
 		return nil, errInvalid("%s", err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -422,8 +423,9 @@ func (s *server) getMemory(r *http.Request) (any, error) {
 	}
 	var row memoryRow
 	err = row.scan(s.pool.QueryRow(ctx,
-		`SELECT `+memoryColumns+` FROM memories WHERE id = $1 AND memory_store_id = $2`,
-		memoryID, storeID))
+		`SELECT `+memoryColumns+` FROM memories WHERE id = $1 AND memory_store_id = $2
+		 AND EXISTS (SELECT 1 FROM memory_stores WHERE id = $2 AND workspace_id = $3)`,
+		memoryID, storeID, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Read the store second, not first: the hit path is one query, and
 		// the miss still names the store when that is what is missing.
@@ -489,7 +491,7 @@ func (s *server) updateMemory(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +657,7 @@ func (s *server) deleteMemory(r *http.Request) (any, error) {
 		return nil, errInvalid("expected_content_sha256: must be 64 lowercase hex characters")
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -717,7 +719,7 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 			return nil, errInvalid("limit: value must be greater than or equal to 1 and less than or equal to %d", maxLimit)
 		}
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if errors.Is(err, errPageCursor) {
 		return nil, errInvalid(pageTokenInvalid)
 	}
@@ -894,9 +896,9 @@ func (s *server) listMemories(r *http.Request) (any, error) {
 	if fetched > page.limit || depth == 1 && fetched == page.limit && lastIsPrefix {
 		var c string
 		if depth == 0 {
-			c = encodeTimeCursor(cursorMemories, dirNext, last.createdAt, last.id)
+			c = encodeTimeCursor(page.space, cursorMemories, dirNext, last.createdAt, last.id)
 		} else {
-			c = encodePathCursor(lastKey)
+			c = encodePathCursor(page.space, lastKey)
 		}
 		out.NextPage = &c
 	}

@@ -17,6 +17,7 @@ func TestInferenceTokenEndsWithItsClaimAndMembership(t *testing.T) {
 			pool := pgtest.NewPool(t)
 			sid, eid := pgtest.NewSession(t, pool, "cloud")
 			if _, err := pool.Exec(ctx, `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_owner','test','owner','developer');
+				INSERT INTO workspace_memberships(workspace_id,principal_id,role) VALUES ('default','principal_owner','developer');
 				UPDATE sessions SET initiator_principal_id=NULL,initiator_api_key_id=NULL,created_by='principal_owner'`); err != nil {
 				t.Fatal(err)
 			}

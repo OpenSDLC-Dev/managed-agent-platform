@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/cron"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // upcomingRunsCount is the reference's "up to 5 timestamps of upcoming cron
@@ -200,7 +201,7 @@ func finishDeployment(ctx context.Context, db querier, d domain.Deployment) (dom
 // the list still return the row.
 func loadDeployment(ctx context.Context, tx pgx.Tx, id string) (domain.Deployment, error) {
 	d, err := scanDeployment(tx.QueryRow(ctx,
-		`SELECT `+deploymentColumns+` FROM deployments WHERE id = $1 FOR UPDATE`, id))
+		`SELECT `+deploymentColumns+` FROM deployments WHERE deployments.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, errNotFound("deployment %s not found", id)
 	}
@@ -293,7 +294,7 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	}
 
 	id := domain.NewID(domain.PrefixDeployment).String()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -309,19 +310,22 @@ func (s *server) createDeployment(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.validateDeploymentInitialEvents(initial); err != nil {
+	if err := s.validateDeploymentInitialEvents(ctx, tx, initial); err != nil {
 		return nil, err
 	}
 
+	if err := validateDeploymentResources(ctx, tx, resourceInputs); err != nil {
+		return nil, err
+	}
 	stored := deploymentResourcesFrom(resourceInputs, sealed)
 	d, err := scanDeployment(tx.QueryRow(ctx,
-		`INSERT INTO deployments (id, name, description, agent_id, agent_version, environment_id,
+		`INSERT INTO deployments (workspace_id, id, name, description, agent_id, agent_version, environment_id,
 			vault_ids, initial_events, resources, metadata, schedule_expression, schedule_timezone, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		 VALUES ($14, $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 RETURNING `+deploymentColumns,
 		id, name, derefOr(description, ""), string(agent.ID), agent.Version, envID,
 		vaultIDs, mustJSON(initial), mustJSON(stored), metadata,
-		nullableText(expr), nullableText(tz), principalPtr(ctx)))
+		nullableText(expr), nullableText(tz), principalPtr(ctx), workspace.ID(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +342,7 @@ func (s *server) getDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 	d, err := scanDeployment(s.pool.QueryRow(ctx,
-		`SELECT `+deploymentColumns+` FROM deployments WHERE id = $1`, id))
+		`SELECT `+deploymentColumns+` FROM deployments WHERE deployments.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment %s not found", id)
 	}
@@ -354,7 +358,7 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -384,8 +388,8 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	query := `SELECT ` + deploymentColumns + ` FROM deployments WHERE true`
-	var args []any
+	query := `SELECT ` + deploymentColumns + ` FROM deployments WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -466,7 +470,7 @@ func (s *server) listDeployments(r *http.Request) (any, error) {
 		out.Data = append(out.Data, *d)
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorDeployments, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorDeployments, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -507,7 +511,7 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 			// the row will name; the transaction judges the pair again below.
 			target, _, _, _ := stringField(obj, "environment_id")
 			if target == "" {
-				err := s.pool.QueryRow(ctx, `SELECT environment_id FROM deployments WHERE id = $1`, id).Scan(&target)
+				err := s.pool.QueryRow(ctx, `SELECT environment_id FROM deployments WHERE deployments.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).Scan(&target)
 				if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 					return nil, err
 				}
@@ -525,7 +529,7 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -616,16 +620,19 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		if isNull(raw) {
 			return nil, errInvalid("initial_events cannot be cleared")
 		}
-		if err := s.validateDeploymentInitialEvents(initial); err != nil {
+		if err := s.validateDeploymentInitialEvents(ctx, tx, initial); err != nil {
 			return nil, err
 		}
 		storedInitial = initial
+	}
+	if err := validateDeploymentResources(ctx, tx, resourceInputs); err != nil {
+		return nil, err
 	}
 	resourcesJSON := mustJSON(deploymentResourcesFrom(resourceInputs, sealed))
 	if !resourcesSet {
 		// Preserve: re-read the column rather than round-tripping the echo,
 		// which has had the sealed tokens stripped out of it.
-		if err := tx.QueryRow(ctx, `SELECT resources FROM deployments WHERE id = $1`, id).
+		if err := tx.QueryRow(ctx, `SELECT resources FROM deployments WHERE deployments.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 			Scan(&resourcesJSON); err != nil {
 			return nil, err
 		}
@@ -677,11 +684,11 @@ func (s *server) updateDeployment(r *http.Request) (any, error) {
 		   name = $2, description = $3, agent_id = $4, agent_version = $5, environment_id = $6,
 		   vault_ids = $7, initial_events = $8, resources = $9, metadata = $10,
 		   schedule_expression = $11, schedule_timezone = $12, updated_at = now()
-		 WHERE id = $1
+		 WHERE deployments.workspace_id = $13 AND id = $1
 		 RETURNING `+deploymentColumns,
 		id, name, derefOr(description, ""), string(agent.ID), agent.Version, envID,
 		vaultIDs, mustJSON(storedInitial), resourcesJSON, metadata,
-		nullableText(newExpr), nullableText(newTZ)))
+		nullableText(newExpr), nullableText(newTZ), workspace.ID(ctx)))
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +714,7 @@ func (s *server) archiveDeployment(r *http.Request) (any, error) {
 	if err := checkID(id, "deployment"); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -719,8 +726,8 @@ func (s *server) archiveDeployment(r *http.Request) (any, error) {
 		`UPDATE deployments SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1
-		 RETURNING `+deploymentColumns, id))
+		 WHERE deployments.workspace_id = $2 AND id = $1
+		 RETURNING `+deploymentColumns, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment %s not found", id)
 	}
@@ -757,7 +764,7 @@ func (s *server) setDeploymentPause(r *http.Request, pause bool) (any, error) {
 	if err := checkID(id, "deployment"); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -828,7 +835,7 @@ func (s *server) sealDeploymentRepoTokens(ctx context.Context, inputs []resource
 // reference's words, as every environment lookup does (#540).
 func requireLiveEnvironment(ctx context.Context, tx pgx.Tx, envID string) error {
 	var archivedAt *time.Time
-	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE id = $1`+notInternal+` FOR SHARE`, envID).Scan(&archivedAt)
+	err := tx.QueryRow(ctx, `SELECT archived_at FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal+` FOR SHARE`, envID, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errEnvironmentNotFound(envID)
 	}

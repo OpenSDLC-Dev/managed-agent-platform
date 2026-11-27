@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -92,8 +93,8 @@ func (q *Queue) HasUndrainedWork(ctx context.Context, envID domain.ID) (bool, er
 	var undrained bool
 	if err := q.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM work_items
-		                 WHERE environment_id = $1`+workAPIScope+`
-		                   AND state <> 'stopped')`, envID).Scan(&undrained); err != nil {
+		                 WHERE environment_id = $1 AND workspace_id = $2`+workAPIScope+`
+		                   AND state <> 'stopped')`, envID, workspace.ID(ctx)).Scan(&undrained); err != nil {
 		return false, fmt.Errorf("queue: undrained work %s: %w", envID, err)
 	}
 	return undrained, nil

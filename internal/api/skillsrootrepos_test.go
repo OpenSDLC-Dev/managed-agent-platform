@@ -14,7 +14,7 @@ import (
 func skilledAgent(t *testing.T, s *tserver, name string) string {
 	t.Helper()
 	return createAgent(t, s, map[string]any{"name": name, "model": "claude-opus-4-8",
-		"skills": []any{map[string]any{"type": "custom", "skill_id": "skill_01DoesNotExistXXXXXXXXXXX"}}})["id"].(string)
+		"skills": []any{map[string]any{"type": "custom", "skill_id": s.createSkill(t)["id"]}}})["id"].(string)
 }
 
 // skillsRepo is a repository named `skills` — github.com/anthropics/skills is
@@ -42,7 +42,7 @@ func TestSkillsRootRepositorySharesTheDirectory(t *testing.T) {
 	coordinator := createAgent(t, s, map[string]any{"name": "coordinator", "model": "claude-opus-4-8",
 		"multiagent": map[string]any{"type": "coordinator", "agents": []any{member}}})["id"].(string)
 	override := map[string]any{"type": "agent_with_overrides", "id": plain,
-		"skills": []any{map[string]any{"type": "custom", "skill_id": "skill_01DoesNotExistXXXXXXXXXXX"}}}
+		"skills": []any{map[string]any{"type": "custom", "skill_id": s.createSkill(t)["id"]}}}
 
 	for _, tc := range []struct {
 		name  string

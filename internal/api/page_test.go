@@ -162,14 +162,14 @@ func TestPageTokenRefusalWords(t *testing.T) {
 	}
 	// A time cursor whose id no row could hold is refused while the page is
 	// parsed too, so it takes the same words (#135).
-	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k2|memory_stores|n|t|1|a\x00b")))
+	unstorable := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k3|default|memory_stores|n|t|1|a\x00b")))
 	for _, list := range []string{"/v1/memory_stores", memories} {
 		status, res := s.do(http.MethodGet, list+"?page="+unstorable, nil)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", tokenWords)
 	}
 	// No list mints a backwards sequence cursor, so the events lists take one
 	// as a token that does not decode.
-	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k2|session_events|p|s|a|1|sthr_abc|sevt_abc")))
+	backwardsSeq := url.QueryEscape(base64.RawURLEncoding.EncodeToString([]byte("k3|default|session_events|p|s|a|1|sthr_abc|sevt_abc")))
 	for _, list := range []string{events, threadEvents} {
 		status, res := s.do(http.MethodGet, list+"?page="+backwardsSeq, nil)
 		wantErrMsg(t, status, res, http.StatusBadRequest, "invalid_request_error", cursorWords)

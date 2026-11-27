@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -78,10 +79,18 @@ func (s *server) createVault(r *http.Request) (any, error) {
 
 	id := domain.NewID(domain.PrefixVault).String()
 	var createdAt, updatedAt time.Time
-	if err := s.pool.QueryRow(ctx,
-		`INSERT INTO vaults (id, display_name, metadata)
-		 VALUES ($1, $2, $3) RETURNING created_at, updated_at`,
-		id, displayName, metadata).Scan(&createdAt, &updatedAt); err != nil {
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	if err = tx.QueryRow(ctx,
+		`INSERT INTO vaults (workspace_id, id, display_name, metadata)
+		 VALUES ($4, $1, $2, $3) RETURNING created_at, updated_at`,
+		id, displayName, metadata, workspace.ID(ctx)).Scan(&createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderVault(id, displayName, metadata, createdAt, updatedAt, nil), nil
@@ -103,7 +112,7 @@ func (s *server) getVault(r *http.Request) (any, error) {
 	var row vaultRow
 	err := s.pool.QueryRow(ctx,
 		`SELECT display_name, metadata, created_at, updated_at, archived_at
-		 FROM vaults WHERE id = $1`, id).
+		 FROM vaults WHERE vaults.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&row.displayName, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("vault %s not found", id)
@@ -132,7 +141,7 @@ func (s *server) updateVault(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +150,7 @@ func (s *server) updateVault(r *http.Request) (any, error) {
 	var row vaultRow
 	err = tx.QueryRow(ctx,
 		`SELECT display_name, metadata, created_at, updated_at, archived_at
-		 FROM vaults WHERE id = $1 FOR UPDATE`, id).
+		 FROM vaults WHERE vaults.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).
 		Scan(&row.displayName, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("vault %s not found", id)
@@ -183,8 +192,8 @@ func (s *server) updateVault(r *http.Request) (any, error) {
 
 	if err := tx.QueryRow(ctx,
 		`UPDATE vaults SET display_name = $2, metadata = $3, updated_at = now()
-		 WHERE id = $1 RETURNING updated_at`,
-		id, row.displayName, metadata).Scan(&row.updatedAt); err != nil {
+		 WHERE vaults.workspace_id = $4 AND id = $1 RETURNING updated_at`,
+		id, row.displayName, metadata, workspace.ID(ctx)).Scan(&row.updatedAt); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -196,7 +205,7 @@ func (s *server) updateVault(r *http.Request) (any, error) {
 func (s *server) listVaults(r *http.Request) (any, error) {
 	ctx := r.Context()
 	q := r.URL.Query()
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -206,8 +215,8 @@ func (s *server) listVaults(r *http.Request) (any, error) {
 	}
 
 	query := `SELECT id, display_name, metadata, created_at, updated_at, archived_at
-	          FROM vaults WHERE true`
-	var args []any
+	          FROM vaults WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -258,7 +267,7 @@ func (s *server) listVaults(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorVaults, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorVaults, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -273,7 +282,7 @@ func (s *server) archiveVault(r *http.Request) (any, error) {
 	// Archiving the vault purges every credential's sealed secrets (the docs'
 	// "secrets are purged; records are retained") and archives them with it,
 	// idempotently: an already-archived credential keeps its own archived_at.
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -284,8 +293,8 @@ func (s *server) archiveVault(r *http.Request) (any, error) {
 		`UPDATE vaults SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1
-		 RETURNING display_name, metadata, created_at, updated_at, archived_at`, id).
+		 WHERE vaults.workspace_id = $2 AND id = $1
+		 RETURNING display_name, metadata, created_at, updated_at, archived_at`, id, workspace.ID(ctx)).
 		Scan(&row.displayName, &row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("vault %s not found", id)
@@ -321,12 +330,20 @@ func (s *server) deleteVault(r *http.Request) (any, error) {
 	// credential cannot outlive its vault). Recorded as INFERRED in
 	// docs/DIVERGENCES.md: the reference's behavior for a non-empty vault is
 	// unobserved.
-	tag, err := s.pool.Exec(ctx, `DELETE FROM vaults WHERE id = $1`, id)
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM vaults WHERE vaults.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, errNotFound("vault %s not found", id)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return map[string]string{"id": id, "type": "vault_deleted"}, nil
 }

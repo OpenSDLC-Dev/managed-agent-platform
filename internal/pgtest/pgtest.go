@@ -426,6 +426,10 @@ func NewSessionInEnv(t *testing.T, pool *pgxpool.Pool, envID domain.ID) (session
 		// missing or historical attribution set that state explicitly.
 		{`INSERT INTO principals(id,issuer,subject,kind,role)
 		  VALUES ('principal_pgtest','pgtest','session-fixture','service_account','developer') ON CONFLICT DO NOTHING`, nil},
+		// NewSession also seeds historical migration tests whose schema predates grants.
+		{`DO $$ BEGIN IF to_regclass('workspace_memberships') IS NOT NULL THEN
+		    INSERT INTO workspace_memberships VALUES ('default','principal_pgtest','developer') ON CONFLICT DO NOTHING;
+		  END IF; END $$`, nil},
 		{`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id, status, created_by)
 		  VALUES ($1, $2, 1, $3, $4, 'idle', 'principal_pgtest')`, []any{sessionID, agentID, resolved, envID}},
 		// The primary thread every session has (plan 35): status the session's,

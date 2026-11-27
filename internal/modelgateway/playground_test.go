@@ -105,6 +105,8 @@ func TestPlaygroundWithdrawsOpenStreams(t *testing.T) {
 	_, err := e.pool.Exec(e.ctx, `INSERT INTO principals(id,issuer,subject,role,playground_access)
 		VALUES ($1,'test','playground-withdraw','user',true)`, actor)
 	e.must(err)
+	_, err = e.pool.Exec(e.ctx, `INSERT INTO workspace_memberships VALUES ('default',$1,'user')`, actor)
+	e.must(err)
 	const origin = "https://console.example"
 	manager := login.New(e.pool, login.Config{Mode: login.ModePassword, PublicOrigin: origin, Development: true})
 	issued, err := manager.Issue(e.ctx, actor)

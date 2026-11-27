@@ -33,6 +33,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -594,9 +595,9 @@ func (b *Brain) deliverablesSection(ctx context.Context, sid domain.ID) (string,
 	// them, and the harvest's own rows have none.
 	rows, err := b.pool.Query(ctx,
 		`SELECT id, filename, mime_type, size_bytes, `+store.FileObjectKeySQL+` FROM files
-		  WHERE scope_type = 'session' AND scope_id = $1 AND source_file_id IS NULL
+		  WHERE scope_type = 'session' AND scope_id = $1 AND workspace_id = $2 AND source_file_id IS NULL
 		  ORDER BY filename`,
-		sid.String())
+		sid.String(), workspace.ID(ctx))
 	if err != nil {
 		return "", fmt.Errorf("list deliverables: %w", err)
 	}

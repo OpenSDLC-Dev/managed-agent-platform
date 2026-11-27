@@ -107,6 +107,7 @@ func TestRefusedInitiatorSettlementFaultIsLoggedWithoutModelSpans(t *testing.T) 
 func TestMemberDemotionDoesNotStopModelTurns(t *testing.T) {
 	h := newHarness(t, [][]provider.Chunk{{done("end_turn", 1)}, {done("end_turn", 1)}}, nil)
 	if _, err := h.pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_member','test','member','developer');
+		INSERT INTO workspace_memberships(workspace_id,principal_id,role) VALUES ('default','principal_member','developer');
 		UPDATE sessions SET initiator_principal_id='principal_member',initiator_api_key_id=NULL`); err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +129,7 @@ func TestRemovedInitiatorCanFinishQueuedToolsBeforeRefusedTurn(t *testing.T) {
 		done("tool_use", 1),
 	}}, nil)
 	if _, err := h.pool.Exec(t.Context(), `INSERT INTO principals(id,issuer,subject,role) VALUES ('principal_member','test','member','developer');
+		INSERT INTO workspace_memberships(workspace_id,principal_id,role) VALUES ('default','principal_member','developer');
 		UPDATE sessions SET initiator_principal_id='principal_member',initiator_api_key_id=NULL,
 		resolved_agent=jsonb_set(resolved_agent,'{tools}','[{"type":"agent_toolset_20260401"}]')`); err != nil {
 		t.Fatal(err)

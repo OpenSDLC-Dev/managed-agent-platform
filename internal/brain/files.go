@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -114,7 +115,7 @@ func (b *Brain) resolveFilesBlock(ctx context.Context, resourcesJSON []byte) (st
 // (#655, plan 49).
 func (b *Brain) liveFiles(ctx context.Context, ids []string) (map[string]bool, error) {
 	rows, err := b.pool.Query(ctx,
-		`SELECT id FROM files WHERE id = ANY($1) AND `+store.FileLiveSQL, ids)
+		`SELECT id FROM files WHERE id = ANY($1) AND workspace_id = $2 AND `+store.FileLiveSQL, ids, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}

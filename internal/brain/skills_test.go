@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -127,7 +128,7 @@ func TestSkillsRoot(t *testing.T) {
 // about.
 func seedSkill(t *testing.T, b *Brain, id, version, name, description string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := b.pool.Exec(ctx,
 		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $2, $3)
 		 ON CONFLICT (id) DO UPDATE SET latest_version = EXCLUDED.latest_version`,
@@ -154,7 +155,7 @@ func ref(t *testing.T, id, version string) json.RawMessage {
 func TestResolveSkillsBlock(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	if block, injected, misses := b.resolveSkillsBlock(ctx, domain.ResolvedAgent{}, "cloud", nil); block != "" || injected != 0 || misses != 0 {
 		t.Errorf("no skills = %q,%d,%d", block, injected, misses)
@@ -235,7 +236,7 @@ func setVersionID(t *testing.T, b *Brain, skillID, version, versionID string) {
 func TestResolveSkillMetaAddressingForms(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	// Three versions of one skill; latest_version lands on 300. Descriptions,
 	// not names, carry the version identity: the reference requires the
@@ -301,7 +302,7 @@ func TestResolveSkillMetaRejectsMalformedIDBeforeItBinds(t *testing.T) {
 	b := &Brain{pool: pool}
 	seedSkill(t, b, "skill_malformed", "100", "malformed", "first")
 
-	_, _, err := b.resolveSkillMeta(context.Background(), "skill_malformed", "skver_\x00")
+	_, _, err := b.resolveSkillMeta(workspace.WithID(context.Background(), workspace.Default), "skill_malformed", "skver_\x00")
 	if err == nil {
 		t.Fatal("a NUL-bearing version id resolved")
 	}
@@ -318,7 +319,7 @@ func TestResolveSkillMetaRejectsMalformedIDBeforeItBinds(t *testing.T) {
 func TestResolveSkillsBlockInjectsIDPinnedVersion(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	seedSkill(t, b, "skill_inj", "100", "injected", "the pinned one")
 	setVersionID(t, b, "skill_inj", "100", "skver_ver100")

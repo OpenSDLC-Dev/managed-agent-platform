@@ -18,6 +18,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -97,7 +98,7 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	// front (FOR UPDATE OF s) so the state-machine decision — flip to
 	// running? enqueue a turn? — is made against a status no concurrent
 	// send can move underneath us, and commits atomically with the append.
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +112,8 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	err = tx.QueryRow(ctx,
 		`SELECT e.kind, s.status, s.environment_id, s.archived_at
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1 FOR UPDATE OF s`,
-		id).Scan(&envKind, &status, &envID, &sessionArchivedAt)
+		 WHERE s.id = $1 AND s.workspace_id = $2 FOR UPDATE OF s`,
+		id, workspace.ID(ctx)).Scan(&envKind, &status, &envID, &sessionArchivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", id)
 	}
@@ -136,6 +137,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	if err != nil {
 		return nil, errInvalid("%s", err)
+	}
+	if err := validateEventFileSources(ctx, tx, newEvents); err != nil {
+		return nil, err
 	}
 	// A tool result must answer an outstanding tool call. The log is
 	// append-only: accepting a result with a wrong or unknown reference would
@@ -1381,7 +1385,7 @@ func (s *server) interruptSessionInTx(ctx context.Context, tx pgx.Tx, sessionID 
 	err := tx.QueryRow(ctx,
 		`SELECT e.kind, s.status, s.archived_at
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1 FOR UPDATE OF s`, sessionID).Scan(&envKind, &status, &archivedAt)
+		 WHERE s.id = $1 AND s.workspace_id = $2 FOR UPDATE OF s`, sessionID, workspace.ID(ctx)).Scan(&envKind, &status, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", sessionID)
 	}
@@ -1492,7 +1496,7 @@ func (s *server) postDreamStageInTx(ctx context.Context, tx pgx.Tx, sessionID, t
 	err := tx.QueryRow(ctx,
 		`SELECT e.kind, s.status, s.archived_at, s.environment_id
 		 FROM sessions s JOIN environments e ON e.id = s.environment_id
-		 WHERE s.id = $1 FOR UPDATE OF s`, sessionID).Scan(&envKind, &status, &archivedAt, &envID)
+		 WHERE s.id = $1 AND s.workspace_id = $2 FOR UPDATE OF s`, sessionID, workspace.ID(ctx)).Scan(&envKind, &status, &archivedAt, &envID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", sessionID)
 	}
@@ -1569,7 +1573,7 @@ func (s *server) snapshotRubrics(ctx context.Context, db querier, defs []events.
 			return errInvalid("file rubrics require the files surface, which this deployment does not configure")
 		}
 		var key string
-		if err := db.QueryRow(ctx, `SELECT `+store.FileObjectKeySQL+` FROM files WHERE id = $1`, d.RubricFileID).Scan(&key); err != nil {
+		if err := db.QueryRow(ctx, `SELECT `+store.FileObjectKeySQL+` FROM files WHERE files.workspace_id = $2 AND id = $1`, d.RubricFileID, workspace.ID(ctx)).Scan(&key); err != nil {
 			return fmt.Errorf("read rubric file %s: %w", d.RubricFileID, err)
 		}
 		rc, size, err := s.blobs.Get(ctx, key)
@@ -1583,6 +1587,46 @@ func (s *server) snapshotRubrics(ctx context.Context, db querier, defs []events.
 		}
 	}
 	return nil
+}
+
+// Image and document file sources in user messages and tool results name files
+// uploaded through this platform. Other block types can carry arbitrary text.
+func validateEventFileSources(ctx context.Context, tx pgx.Tx, batch []events.NewEvent) error {
+	var ids []string
+	for _, event := range batch {
+		var payload struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return err
+		}
+		if len(payload.Content) == 0 || payload.Content[0] != '[' {
+			continue
+		}
+		var blocks []struct {
+			Type   string          `json:"type"`
+			Source json.RawMessage `json:"source"`
+		}
+		if err := json.Unmarshal(payload.Content, &blocks); err != nil {
+			return err
+		}
+		for _, block := range blocks {
+			if block.Type != "image" && block.Type != "document" {
+				continue
+			}
+			var source struct {
+				Type   string `json:"type"`
+				FileID string `json:"file_id"`
+			}
+			if err := json.Unmarshal(block.Source, &source); err != nil {
+				return err
+			}
+			if source.Type == "file" {
+				ids = append(ids, source.FileID)
+			}
+		}
+	}
+	return validateLiveFileIDs(ctx, tx, ids)
 }
 
 // listSessionEvents implements GET /v1/sessions/{id}/events with the
@@ -1628,7 +1672,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 		}
 	}
 
-	page, err := parsePageMax(q, maxEventLimit)
+	page, err := parsePageMax(workspace.ID(r.Context()), q, maxEventLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1715,7 +1759,7 @@ func (s *server) listEvents(r *http.Request, id string, query events.ListQuery, 
 	}
 	var next *string
 	if more {
-		c := encodeSeqCursor(list, threadID, query.Desc, evs[len(evs)-1])
+		c := encodeSeqCursor(page.space, list, threadID, query.Desc, evs[len(evs)-1])
 		next = &c
 	}
 	return pageJSON{Data: data, NextPage: next}, nil
@@ -2041,7 +2085,7 @@ func eventWire(ev domain.Event, scope events.Scope) (json.RawMessage, error) {
 // sessionExists resolves list/stream 404s (session_ already normalized).
 func (s *server) sessionExists(ctx context.Context, id string) error {
 	var one int
-	err := s.pool.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1`, id).Scan(&one)
+	err := s.pool.QueryRow(ctx, `SELECT 1 FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("session %s not found", id)
 	}
@@ -2057,8 +2101,8 @@ func (s *server) sessionView(ctx context.Context, id string) (eventsView, error)
 	var kind string
 	var multiagent []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT e.kind, s.resolved_agent->'multiagent' FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`,
-		id).Scan(&kind, &multiagent)
+		`SELECT e.kind, s.resolved_agent->'multiagent' FROM sessions s JOIN environments e ON e.id = s.environment_id WHERE s.id = $1 AND s.workspace_id = $2`,
+		id, workspace.ID(ctx)).Scan(&kind, &multiagent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return eventsView{}, errNotFound("session %s not found", id)
 	}

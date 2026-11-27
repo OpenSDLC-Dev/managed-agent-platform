@@ -290,7 +290,7 @@ func historicalKeyServer(t *testing.T) (*nativeServer, string, string) {
 	t.Helper()
 	pool := preIssuerPool(t)
 	s := &nativeServer{tserver: &tserver{t: t, pool: pool}, manager: login.New(pool, login.Config{Mode: login.ModePassword, PublicOrigin: nativeOrigin, Development: true})}
-	developer := seedMember(t, s, "historical-issuer", "developer", "console")
+	developer := seedOrganizationMember(t, s, "historical-issuer", "developer", "console")
 	old := insertHistoricalKey(t, pool, "legacy-human", "historical-issued-key")
 	if _, err := pool.Exec(t.Context(), "UPDATE api_keys SET created_by=$2 WHERE id=$1", old, developer); err != nil {
 		t.Fatal(err)

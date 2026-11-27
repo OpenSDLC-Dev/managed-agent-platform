@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // wantUploadsPointer is the reference's own sentence, as the model quoted it in
@@ -17,7 +18,7 @@ const wantUploadsPointer = "User uploads (files uploaded to the session by the u
 func TestResolveFilesBlock(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	if block, n, m := b.resolveFilesBlock(ctx, nil); block != "" || n != 0 || m != 0 {
 		t.Errorf("nil resources = %q,%d,%d", block, n, m)
@@ -63,7 +64,7 @@ func TestResolveFilesBlock(t *testing.T) {
 func TestResolveFilesBlockListsLegacyMounts(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	seedFileRow(t, b, "file_legacy", "input.csv", "text/csv", 77)
 	seedFileRow(t, b, "file_inject", "evil.txt", "text/plain", 9)
@@ -107,7 +108,7 @@ func TestResolveFilesBlockListsLegacyMounts(t *testing.T) {
 func TestResolveFilesBlockNamesOnlyLegacyMountsWithoutThePointer(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	seedFileRow(t, b, "file_legacy", "input.csv", "text/csv", 77)
 	block, n, misses := b.resolveFilesBlock(ctx, mustResourcesJSON(t,
@@ -128,7 +129,7 @@ func TestResolveFilesBlockNamesOnlyLegacyMountsWithoutThePointer(t *testing.T) {
 func TestResolveFilesBlockCountsEachMountOfOneFile(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	seedFileRow(t, b, "file_twice", "data.csv", "text/csv", 8)
 	block, n, misses := b.resolveFilesBlock(ctx, mustResourcesJSON(t,
@@ -151,7 +152,7 @@ func TestResolveFilesBlockStoreErrorIsAMissPerMount(t *testing.T) {
 	b := &Brain{pool: pool}
 	pool.Close()
 
-	block, n, misses := b.resolveFilesBlock(context.Background(), mustResourcesJSON(t,
+	block, n, misses := b.resolveFilesBlock(workspace.WithID(context.Background(), workspace.Default), mustResourcesJSON(t,
 		map[string]string{"type": "file", "file_id": "file_a", "mount_path": "/mnt/session/uploads/a"},
 		map[string]string{"type": "file", "file_id": "file_b", "mount_path": "/mnt/session/uploads/b"},
 		map[string]string{"type": "github_repository"},
@@ -167,7 +168,7 @@ func TestResolveFilesBlockStoreErrorIsAMissPerMount(t *testing.T) {
 func TestResolveFilesBlockSkipsExpired(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	b := &Brain{pool: pool}
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	seedFileRow(t, b, "file_expired", "gone.pdf", "application/pdf", 2048)
 	if _, err := pool.Exec(ctx,

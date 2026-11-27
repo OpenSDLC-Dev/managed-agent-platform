@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // TestEnvVarCredentialDestinationBinding verifies plan 70 slice 1 (#1052):
@@ -121,7 +122,7 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 		if status != http.StatusOK {
 			t.Fatalf("expand with secret_value: status %d (%v)", status, resp)
 		}
-		creds, err := vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_test", []string{vaultID})
+		creds, err := vaultresolve.Credentials(workspace.WithID(t.Context(), workspace.Default), s.pool, cipher, "sesn_test", []string{vaultID})
 		if err != nil {
 			t.Fatalf("resolve after rotate-expand: %v", err)
 		}
@@ -184,7 +185,7 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 
 		// Narrowed credential still resolves cleanly with the original secret,
 		// narrowed host list, and updated injection_location.
-		creds, err := vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_test", []string{vaultID})
+		creds, err := vaultresolve.Credentials(workspace.WithID(t.Context(), workspace.Default), s.pool, cipher, "sesn_test", []string{vaultID})
 		if err != nil {
 			t.Fatalf("resolve narrowed: %v", err)
 		}
@@ -339,7 +340,7 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 			"auth.networking: stored destination policy does not match sealed secret; supply secret_value to rebind")
 
 		// Resolution for the gate also fails closed without leaking the secret.
-		_, err = vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_tamper", []string{tamperVault})
+		_, err = vaultresolve.Credentials(workspace.WithID(t.Context(), workspace.Default), s.pool, cipher, "sesn_tamper", []string{tamperVault})
 		if err == nil {
 			t.Fatal("expected vaultresolve.Credentials to fail closed on tampered binding")
 		}
@@ -357,7 +358,7 @@ func TestEnvVarCredentialDestinationBinding(t *testing.T) {
 		}); status != http.StatusOK {
 			t.Fatalf("rebind with new secret_value: status %d (%v)", status, resp)
 		}
-		creds, err := vaultresolve.Credentials(t.Context(), s.pool, cipher, "sesn_tamper", []string{tamperVault})
+		creds, err := vaultresolve.Credentials(workspace.WithID(t.Context(), workspace.Default), s.pool, cipher, "sesn_tamper", []string{tamperVault})
 		if err != nil {
 			t.Fatalf("resolve after rebind: %v", err)
 		}

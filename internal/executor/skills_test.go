@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // skillArchive builds an archive shaped like the one the registry stores: every
@@ -37,7 +38,7 @@ func skillArchive(t *testing.T, name string, files map[string]string) []byte {
 // archive digest recorded at upload — plus the archive in object storage.
 func (h *harness) seedSkill(t *testing.T, id, version, name string, files map[string]string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := h.pool.Exec(ctx,
 		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ($1, 'custom', $1, $2)
 		 ON CONFLICT (id) DO UPDATE SET latest_version = $2`, id, version); err != nil {
@@ -439,7 +440,7 @@ func (h *harness) setVersionID(t *testing.T, skillID, version, versionID string)
 // unresolvable rows return "300" where nothing should resolve at all.
 func TestResolveSkillVersionAddressingForms(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	// Three versions of one skill; latest_version lands on 300.
 	h.seedSkill(t, "skill_res_pin", "100", "resolved-skill", map[string]string{"SKILL.md": "v1"})
@@ -502,7 +503,7 @@ func TestResolveSkillVersionRejectsMalformedIDBeforeItBinds(t *testing.T) {
 	h := newHarness(t, &fakeSandbox{})
 	h.seedSkill(t, "skill_malformed", "100", "malformed-skill", map[string]string{"SKILL.md": "v1"})
 
-	_, err := h.exec.resolveSkillVersion(context.Background(),
+	_, err := h.exec.resolveSkillVersion(workspace.WithID(context.Background(), workspace.Default),
 		skillRef{SkillID: "skill_malformed", Version: "skver_\x00"})
 	if !errors.Is(err, errSkillNotFound) {
 		t.Fatalf("a NUL-bearing version id failed with %v, want errSkillNotFound", err)

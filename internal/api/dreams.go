@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -187,7 +188,7 @@ func (s *server) createDream(r *http.Request) (any, error) {
 		return nil, errInvalid("output_behavior.memory_store_id must be the job's own memory_store input")
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -202,12 +203,12 @@ func (s *server) createDream(r *http.Request) (any, error) {
 	// byte-preserving (it reorders object keys and drops insignificant
 	// whitespace), so "as sent" is by value, not by bytes.
 	d, err := scanDream(tx.QueryRow(ctx,
-		`INSERT INTO dreams (id, status, inputs, input_memory_store_id, input_session_ids,
+		`INSERT INTO dreams (workspace_id, id, status, inputs, input_memory_store_id, input_session_ids,
 			model, instructions, output_behavior, target_memory_store_id, created_by)
-		 VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7, $8, $9)
+		 VALUES ($10, $1, 'pending', $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING `+dreamColumns,
 		domain.NewID(domain.PrefixDream).String(), rawInputs, storeID, sessionIDs,
-		mustJSON(model), instructions, behavior, target, principalPtr(ctx)))
+		mustJSON(model), instructions, behavior, target, principalPtr(ctx), workspace.ID(ctx)))
 	if err != nil {
 		// The hold (§5.3). dreams_target_hold_idx is the enforcement — one
 		// live in-place dream per target store, "live" being any status not
@@ -236,8 +237,8 @@ func (s *server) createDream(r *http.Request) (any, error) {
 func (s *server) dreamTargetHeld(ctx context.Context, storeID string) error {
 	var holder string
 	if err := s.pool.QueryRow(ctx,
-		`SELECT id FROM dreams WHERE target_memory_store_id = $1 AND closed_at IS NULL`,
-		storeID).Scan(&holder); err != nil {
+		`SELECT id FROM dreams WHERE dreams.workspace_id = $2 AND target_memory_store_id = $1 AND closed_at IS NULL`,
+		storeID, workspace.ID(ctx)).Scan(&holder); err != nil {
 		return errTargetStoreHeld("memory store %s is still held by a prior update_existing "+
 			"dream; retry", storeID)
 	}
@@ -401,7 +402,7 @@ func parseDreamOutputBehavior(obj map[string]json.RawMessage) (json.RawMessage, 
 func checkDreamInputsExist(ctx context.Context, db querier, storeID string, sessionIDs []string) error {
 	var archivedAt *time.Time
 	err := db.QueryRow(ctx,
-		`SELECT archived_at FROM memory_stores WHERE id = $1 FOR SHARE`, storeID).Scan(&archivedAt)
+		`SELECT archived_at FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1 FOR SHARE`, storeID, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("memory store %s not found", storeID)
 	}
@@ -412,7 +413,7 @@ func checkDreamInputsExist(ctx context.Context, db querier, storeID string, sess
 		return errInvalid("memory store %s is archived", storeID)
 	}
 
-	rows, err := db.Query(ctx, `SELECT id FROM sessions WHERE id = ANY($1)`, sessionIDs)
+	rows, err := db.Query(ctx, `SELECT id FROM sessions WHERE sessions.workspace_id = $2 AND id = ANY($1)`, sessionIDs, workspace.ID(ctx))
 	if err != nil {
 		return err
 	}
@@ -446,7 +447,7 @@ func (s *server) getDream(r *http.Request) (any, error) {
 	}
 	// No archived filter: retrieve answers an archived dream too (§5.1).
 	d, err := scanDream(s.pool.QueryRow(ctx,
-		`SELECT `+dreamColumns+` FROM dreams WHERE id = $1`, id))
+		`SELECT `+dreamColumns+` FROM dreams WHERE dreams.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("dream %s not found", id)
 	}
@@ -462,7 +463,7 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -480,8 +481,8 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 		}
 	}
 
-	query := `SELECT ` + dreamColumns + ` FROM dreams WHERE true`
-	var args []any
+	query := `SELECT ` + dreamColumns + ` FROM dreams WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -539,7 +540,7 @@ func (s *server) listDreams(r *http.Request) (any, error) {
 		return nil, err
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorDreams, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorDreams, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -562,7 +563,7 @@ func (s *server) archiveDream(r *http.Request) (any, error) {
 			return errInvalid("dream %s is %s; cancel it first", id, status)
 		}
 		_, err := tx.Exec(ctx,
-			`UPDATE dreams SET archived_at = now(), updated_at = now() WHERE id = $1`, id)
+			`UPDATE dreams SET archived_at = now(), updated_at = now() WHERE dreams.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx))
 		return err
 	})
 }
@@ -591,7 +592,7 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 			moved = true
 			_, err := tx.Exec(ctx,
 				`UPDATE dreams SET status = 'canceled', ended_at = now(), closed_at = now(),
-				        updated_at = now() WHERE id = $1`, id)
+				        updated_at = now() WHERE dreams.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx))
 			return err
 		case "running":
 			// The interrupt runs in this transaction, not as a bare event
@@ -612,7 +613,7 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 			moved = true
 			_, err := tx.Exec(ctx,
 				`UPDATE dreams SET status = 'canceled', ended_at = now(), updated_at = now()
-				  WHERE id = $1`, id)
+				  WHERE dreams.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx))
 			return err
 		default:
 			return errInvalid("dream %s is %s; only a pending or running dream can be canceled", id, status)
@@ -632,7 +633,7 @@ func (s *server) cancelDream(r *http.Request) (any, error) {
 // the one column list every other handler reads.
 func (s *server) dreamAction(ctx context.Context, id string,
 	apply func(context.Context, pgx.Tx, string, *time.Time, *string) error) (any, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +650,7 @@ func (s *server) dreamAction(ctx context.Context, id string,
 	var archivedAt *time.Time
 	var sessionID *string
 	err = tx.QueryRow(ctx,
-		`SELECT status, archived_at, session_id FROM dreams WHERE id = $1 FOR UPDATE`, id).
+		`SELECT status, archived_at, session_id FROM dreams WHERE dreams.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).
 		Scan(&status, &archivedAt, &sessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("dream %s not found", id)
@@ -660,7 +661,7 @@ func (s *server) dreamAction(ctx context.Context, id string,
 	if err := apply(ctx, tx, status, archivedAt, sessionID); err != nil {
 		return nil, err
 	}
-	d, err := scanDream(tx.QueryRow(ctx, `SELECT `+dreamColumns+` FROM dreams WHERE id = $1`, id))
+	d, err := scanDream(tx.QueryRow(ctx, `SELECT `+dreamColumns+` FROM dreams WHERE dreams.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)))
 	if err != nil {
 		return nil, err
 	}

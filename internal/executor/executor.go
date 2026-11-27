@@ -78,6 +78,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool/jina"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/webtool/tavily"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -424,6 +425,7 @@ func (e *Executor) step(ctx context.Context) (bool, error) {
 		if item == nil {
 			continue
 		}
+		ctx = workspace.WithID(ctx, item.WorkspaceID)
 		switch kind {
 		case queue.WebExec:
 			_ = e.processWeb(ctx, item)

@@ -26,6 +26,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/provider"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -135,6 +136,7 @@ func (b *Brain) RunOnce(ctx context.Context) (found bool, err error) {
 	if err != nil || item == nil {
 		return false, err
 	}
+	ctx = workspace.WithID(ctx, item.WorkspaceID)
 	if item.InferenceToken == "" {
 		// Refuse before a consumer span, replay, discovery or grading. The
 		// liveness gate may still settle tools accepted by a previous turn.

@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // ErrCredentialUnusable marks a credential that matched and cannot be used: its
@@ -84,8 +85,8 @@ func MCPCredentialFor(ctx context.Context, db DB, cipher secrets.Cipher,
 		    FROM vault_credentials c
 		    JOIN vaults v ON v.id = c.vault_id
 		  WHERE c.vault_id = ANY($1) AND c.auth_type IN ('mcp_oauth', 'static_bearer')
-		    AND c.archived_at IS NULL AND v.archived_at IS NULL`,
-		vaultIDs)
+		    AND v.workspace_id = $2 AND c.archived_at IS NULL AND v.archived_at IS NULL`,
+		vaultIDs, workspace.ID(ctx))
 	if err != nil {
 		return "", err
 	}

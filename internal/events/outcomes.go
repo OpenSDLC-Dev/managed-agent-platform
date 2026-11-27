@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -117,24 +118,26 @@ func ValidateDefineOutcomes(ctx context.Context, tx pgx.Tx, sessionID domain.ID,
 			}
 		}
 	}
-	d := defs[0]
-	if d.RubricType == "file" {
-		var sizeBytes int64
-		// An expired file is not a rubric source: the snapshot that follows this
-		// check copies bytes the content route already refuses to serve
-		// (#655, plan 49).
-		err := tx.QueryRow(ctx,
-			`SELECT size_bytes FROM files WHERE id = $1 AND `+store.FileLiveSQL+` FOR SHARE`,
-			d.RubricFileID).Scan(&sizeBytes)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return refuse("rubric file %s not found", d.RubricFileID)
-		}
-		if err != nil {
-			return err
-		}
-		if sizeBytes > maxRubricFileBytes {
-			return refuse("rubric file %s is %d bytes; the rubric cap is %d bytes", d.RubricFileID, sizeBytes, maxRubricFileBytes)
-		}
+	return ValidateRubricFile(ctx, tx, defs[0])
+}
+
+// ValidateRubricFile pins a live, same-workspace file while the caller records
+// a template or snapshots the rubric for a session.
+func ValidateRubricFile(ctx context.Context, tx pgx.Tx, d DefineOutcome) error {
+	if d.RubricType != "file" {
+		return nil
+	}
+	var size int64
+	err := tx.QueryRow(ctx, `SELECT size_bytes FROM files WHERE id=$1 AND workspace_id=$2 AND `+store.FileLiveSQL+` FOR SHARE`,
+		d.RubricFileID, workspace.ID(ctx)).Scan(&size)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return refuse("rubric file %s not found", d.RubricFileID)
+	}
+	if err != nil {
+		return err
+	}
+	if size > maxRubricFileBytes {
+		return refuse("rubric file %s is %d bytes; the rubric cap is %d bytes", d.RubricFileID, size, maxRubricFileBytes)
 	}
 	return nil
 }

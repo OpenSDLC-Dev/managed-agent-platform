@@ -21,6 +21,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -228,7 +229,7 @@ func TestAnExpiredCredentialIsRefreshedBeforeItIsSent(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	got, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	got, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +276,7 @@ func TestASecondDialUsesTheStoredRotation(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	for i, want := range []string{"access-1", "access-1"} {
 		got, err := vaultresolve.MCPCredentialFor(ctx, pool, cipher, []string{v}, mcpServer)
 		if err != nil {
@@ -303,7 +304,7 @@ func TestARefreshTokenTheIssuerKeepsIsKept(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+	if _, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 		[]string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +326,7 @@ func TestAnIssuerThatNamesNoLifetimeLeavesTheExpiryUnknown(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := vaultresolve.MCPCredentialFor(ctx, pool, cipher, []string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +377,7 @@ func TestWhenTheExpiryDecidesToRefresh(t *testing.T) {
 				sealed: map[string]string{"access_token": "still-good", "refresh_token": "refresh-1"},
 			})
 
-			got, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+			got, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 				[]string{v}, mcpServer)
 			if err != nil {
 				t.Fatal(err)
@@ -419,7 +420,7 @@ func TestACredentialThatCannotRefreshSendsTheTokenItHas(t *testing.T) {
 			v := newVault(t, pool, false)
 			newRefreshableCred(t, pool, cipher, v, spec)
 
-			got, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+			got, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 				[]string{v}, mcpServer)
 			if err != nil {
 				t.Fatal(err)
@@ -461,7 +462,7 @@ func TestARefusedRefreshIsTheCredentialsFault(t *testing.T) {
 				sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 			})
 
-			_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+			_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 				[]string{v}, mcpServer)
 			if !errorsIsUnusable(err) {
 				t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
@@ -490,7 +491,7 @@ func TestAnIssuerHavingAMomentIsRetryable(t *testing.T) {
 				sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 			})
 
-			_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+			_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 				[]string{v}, mcpServer)
 			if err == nil {
 				t.Fatal("a failed exchange resolved a token")
@@ -525,7 +526,7 @@ func TestAnAddressTheGuardRefusesIsTheCredentialsFault(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
 	}
@@ -583,7 +584,7 @@ func TestAnUnreachableIssuerIsRetryable(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if err == nil {
 		t.Fatal("a failed dial resolved a token")
 	}
@@ -613,7 +614,7 @@ func TestARefreshDoesNotFollowARedirect(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
 	}
@@ -631,7 +632,7 @@ func TestARotationDoesNotClobberAConcurrentWrite(t *testing.T) {
 	t.Run("a credential updated meanwhile keeps the newer write", func(t *testing.T) {
 		pool := pgtest.NewPool(t)
 		cipher := testCipher(t)
-		ctx := context.Background()
+		ctx := workspace.WithID(context.Background(), workspace.Default)
 
 		var id string
 		issuer := newTokenEndpoint(t, func(w http.ResponseWriter, n int) {
@@ -669,7 +670,7 @@ func TestARotationDoesNotClobberAConcurrentWrite(t *testing.T) {
 	t.Run("a credential archived meanwhile is not written to", func(t *testing.T) {
 		pool := pgtest.NewPool(t)
 		cipher := testCipher(t)
-		ctx := context.Background()
+		ctx := workspace.WithID(context.Background(), workspace.Default)
 
 		var id string
 		issuer := newTokenEndpoint(t, func(w http.ResponseWriter, n int) {
@@ -740,7 +741,7 @@ func TestARefreshedTokenMustBeSendableBeforeItIsStored(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
 	}
@@ -777,7 +778,7 @@ func TestAnUnsendableTokenStillStoresTheRefreshTokenBesideIt(t *testing.T) {
 	})
 	before, _ := storedCred(t, pool, cipher, id)
 
-	_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if !errorsIsUnusable(err) {
 		t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
 	}
@@ -825,7 +826,7 @@ func TestAFailedWriteIsLoggedAsItsSQLSTATE(t *testing.T) {
 
 	// The dial still gets its fresh token: the exchange succeeded, and failing it
 	// over a write would turn a working credential into a broken one.
-	token, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher, []string{v}, mcpServer)
+	token, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher, []string{v}, mcpServer)
 	if err != nil || token != "fresh" {
 		t.Fatalf("token = %q, err = %v; want the fresh token despite the failed write", token, err)
 	}
@@ -900,7 +901,7 @@ func TestAnAnswerThatIsNotAGrantIsTheCredentialsFault(t *testing.T) {
 				sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 			})
 
-			_, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+			_, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 				[]string{v}, mcpServer)
 			if !errorsIsUnusable(err) {
 				t.Fatalf("err = %v, want it marked ErrCredentialUnusable", err)
@@ -946,7 +947,7 @@ func TestALifetimeThatCannotBeBelievedLeavesTheExpiryUnknown(t *testing.T) {
 				sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 			})
 
-			ctx := context.Background()
+			ctx := workspace.WithID(context.Background(), workspace.Default)
 			if _, err := vaultresolve.MCPCredentialFor(ctx, pool, cipher, []string{v}, mcpServer); err != nil {
 				t.Fatal(err)
 			}
@@ -978,7 +979,7 @@ func TestTheLargestBelievableLifetimeIsBelieved(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+	if _, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 		[]string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}
@@ -1025,7 +1026,7 @@ func TestARefusedRefreshReadsBackARotationThatLandedMeanwhile(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pool := pgtest.NewPool(t)
 			cipher := testCipher(t)
-			ctx := context.Background()
+			ctx := workspace.WithID(context.Background(), workspace.Default)
 
 			var id string
 			issuer := newTokenEndpoint(t, func(w http.ResponseWriter, _ int) {
@@ -1086,7 +1087,7 @@ func stampExpiry(t *testing.T, pool *pgxpool.Pool, id string, at *time.Time) {
 // abandoning the write would leave the row holding a token nothing honours.
 func TestARotationIsStoredEvenWhenTheCallerIsAlreadyDone(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(workspace.WithID(t.Context(), workspace.Default))
 	defer cancel()
 	// The cancellation is staged from inside the reseal, which is the first thing
 	// the write does and the first moment the exchange is certainly over. Staging
@@ -1133,7 +1134,7 @@ func (c cancellingCipher) Encrypt(ctx context.Context, plaintext []byte) ([]byte
 func TestAnUnreadableAuthDocumentIsTheCredentialsFault(t *testing.T) {
 	pool := pgtest.NewPool(t)
 	cipher := testCipher(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	sealed, err := json.Marshal(map[string]string{"access_token": "expired"})
 	if err != nil {
@@ -1175,7 +1176,7 @@ func TestTheClientSecretComesFromTheSealedDocument(t *testing.T) {
 		},
 	})
 
-	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+	if _, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 		[]string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}
@@ -1201,7 +1202,7 @@ func TestClientSecretPostReadsTheSameSealedField(t *testing.T) {
 		},
 	})
 
-	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+	if _, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 		[]string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}
@@ -1229,7 +1230,7 @@ func TestTheStoredResourceAndScopeReachTheExchange(t *testing.T) {
 		sealed: map[string]string{"access_token": "expired", "refresh_token": "refresh-1"},
 	})
 
-	if _, err := vaultresolve.MCPCredentialFor(context.Background(), pool, cipher,
+	if _, err := vaultresolve.MCPCredentialFor(workspace.WithID(context.Background(), workspace.Default), pool, cipher,
 		[]string{v}, mcpServer); err != nil {
 		t.Fatal(err)
 	}

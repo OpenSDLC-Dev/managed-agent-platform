@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -147,7 +148,7 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 	}
 	id := domain.NewID(domain.PrefixAgent).String()
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +167,7 @@ func (s *server) createAgent(r *http.Request) (any, error) {
 		createdAt, updatedAt time.Time
 	)
 	if err := tx.QueryRow(ctx,
-		`SELECT name, spec, metadata, created_at, updated_at FROM agents WHERE id = $1`, id).
+		`SELECT name, spec, metadata, created_at, updated_at FROM agents WHERE agents.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&name, &specJSON, &metaJSON, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
@@ -236,7 +237,7 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 			return false, err
 		}
 	}
-	if err := checkAnthropicSkillRefs(ctx, tx, obj["skills"]); err != nil {
+	if err := validateSkillRefs(ctx, tx, obj["skills"]); err != nil {
 		return false, err
 	}
 	specJSON, err := json.Marshal(spec)
@@ -245,9 +246,9 @@ func (s *server) insertAgentInTx(ctx context.Context, tx pgx.Tx, body json.RawMe
 	}
 
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO agents (id, name, version, spec, metadata, internal)
-		 VALUES ($1, $2, 1, $3, $4, $5) ON CONFLICT DO NOTHING`,
-		id, name, specJSON, metadata, internal)
+		`INSERT INTO agents (workspace_id, id, name, version, spec, metadata, internal)
+		 VALUES ($6, $1, $2, 1, $3, $4, $5) ON CONFLICT DO NOTHING`,
+		id, name, specJSON, metadata, internal, workspace.ID(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -287,7 +288,7 @@ func (s *server) getAgent(r *http.Request) (any, error) {
 	)
 	err = s.pool.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
-		 FROM agents WHERE id = $1`+notInternal, id).
+		 FROM agents WHERE agents.workspace_id = $2 AND id = $1`+notInternal, id, workspace.ID(ctx)).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -315,7 +316,7 @@ func (s *server) getAgentVersion(ctx context.Context, id string, version int64) 
 	err := s.pool.QueryRow(ctx,
 		`SELECT v.name, v.spec, a.metadata, a.created_at, v.created_at, a.archived_at
 		 FROM agents a JOIN agent_versions v ON v.agent_id = a.id
-		 WHERE a.id = $1 AND v.version = $2`+notInternal, id, version).
+		 WHERE a.workspace_id = $3 AND a.id = $1 AND v.version = $2`+notInternal, id, version, workspace.ID(ctx)).
 		Scan(&name, &specJSON, &metaJSON, &createdAt, &vAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s version %d not found", id, version)
@@ -374,7 +375,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +390,7 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	)
 	err = tx.QueryRow(ctx,
 		`SELECT name, version, spec, metadata, created_at, updated_at, archived_at
-		 FROM agents WHERE id = $1`+notInternal+` FOR UPDATE`, id).
+		 FROM agents WHERE agents.workspace_id = $2 AND id = $1`+notInternal+` FOR UPDATE`, id, workspace.ID(ctx)).
 		Scan(&name, &current, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -457,6 +458,9 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	if err := parseAgentSpecFields(obj, &spec, agentUpdatePath); err != nil {
 		return nil, err
 	}
+	if err := validateSkillRefs(ctx, tx, obj["skills"]); err != nil {
+		return nil, err
+	}
 	spec.Normalize()
 	// Validated on the merged result: the reference's update wording is "the
 	// agent's resulting tools", so an update that clears tools while keeping
@@ -495,8 +499,8 @@ func (s *server) updateAgent(r *http.Request) (any, error) {
 	}
 	if err := tx.QueryRow(ctx,
 		`UPDATE agents SET name = $2, version = $3, spec = $4, metadata = $5, updated_at = now()
-		 WHERE id = $1 RETURNING updated_at`,
-		id, name, newVersion, newSpecJSON, metadata).Scan(&updatedAt); err != nil {
+		 WHERE agents.workspace_id = $6 AND id = $1 RETURNING updated_at`,
+		id, name, newVersion, newSpecJSON, metadata, workspace.ID(ctx)).Scan(&updatedAt); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx,
@@ -516,7 +520,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	page, err := parsePage(q)
+	page, err := parsePage(workspace.ID(r.Context()), q)
 	if err != nil {
 		return nil, err
 	}
@@ -533,8 +537,8 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	query := `SELECT id, name, version, spec, metadata, created_at, updated_at, archived_at FROM agents WHERE true` + notInternal
-	var args []any
+	query := `SELECT id, name, version, spec, metadata, created_at, updated_at, archived_at FROM agents WHERE workspace_id = $1` + notInternal
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -597,7 +601,7 @@ func (s *server) listAgents(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeTimeCursor(cursorAgents, dirNext, lastT, lastID)
+		c := encodeTimeCursor(page.space, cursorAgents, dirNext, lastT, lastID)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -609,7 +613,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
-	page, err := parsePage(r.URL.Query())
+	page, err := parsePage(workspace.ID(r.Context()), r.URL.Query())
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +624,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 		archivedAt *time.Time
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT metadata, created_at, archived_at FROM agents WHERE id = $1`+notInternal, id).
+		`SELECT metadata, created_at, archived_at FROM agents WHERE agents.workspace_id = $2 AND id = $1`+notInternal, id, workspace.ID(ctx)).
 		Scan(&metaJSON, &createdAt, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
@@ -684,7 +688,7 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 		out.Data = []any{}
 	}
 	if fetched > page.limit {
-		c := encodeVersionCursor(lastVersion)
+		c := encodeVersionCursor(page.space, lastVersion)
 		out.NextPage = &c
 	}
 	return out, nil
@@ -715,8 +719,8 @@ func (s *server) listAgentVersions(r *http.Request) (any, error) {
 func refuseDeploymentsPinningAgent(ctx context.Context, db querier, agentID string) error {
 	rows, err := db.Query(ctx,
 		`SELECT id, count(*) OVER () FROM deployments
-		  WHERE agent_id = $1 AND archived_at IS NULL
-		  ORDER BY created_at, id LIMIT $2`, agentID, blockingDeploymentsNamed)
+		  WHERE deployments.workspace_id = $3 AND agent_id = $1 AND archived_at IS NULL
+		  ORDER BY created_at, id LIMIT $2`, agentID, blockingDeploymentsNamed, workspace.ID(ctx))
 	if err != nil {
 		return err
 	}
@@ -754,7 +758,7 @@ func (s *server) archiveAgent(r *http.Request) (any, error) {
 	if err := checkAgentPathID(id); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -772,7 +776,7 @@ func (s *server) archiveAgent(r *http.Request) (any, error) {
 	// be repinned, so a repin racing this would leave a live deployment pinning
 	// an archived agent.
 	var archivedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE id = $1`+notInternal+` FOR UPDATE`, id).Scan(&archivedAt)
+	err = tx.QueryRow(ctx, `SELECT archived_at FROM agents WHERE agents.workspace_id = $2 AND id = $1`+notInternal+` FOR UPDATE`, id, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("agent %s not found", id)
 	}
@@ -801,8 +805,8 @@ func (s *server) archiveAgent(r *http.Request) (any, error) {
 		`UPDATE agents SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1
-		 RETURNING name, version, spec, metadata, created_at, updated_at, archived_at`, id).
+		 WHERE agents.workspace_id = $2 AND id = $1
+		 RETURNING name, version, spec, metadata, created_at, updated_at, archived_at`, id, workspace.ID(ctx)).
 		Scan(&name, &version, &specJSON, &metaJSON, &createdAt, &updatedAt, &archivedAt)
 	if err != nil {
 		return nil, err

@@ -14,6 +14,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -198,7 +199,7 @@ func (s *server) createFile(r *http.Request) (any, error) {
 // (pg_proc.proisstrict), so a NULL argument makes a NULL interval and now()
 // plus NULL is NULL, which is exactly "does not expire".
 func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (time.Time, *time.Time, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return time.Time{}, nil, err
 	}
@@ -206,10 +207,10 @@ func (s *server) insertFile(ctx context.Context, id string, up *fileUpload) (tim
 	var createdAt time.Time
 	var expiresAt *time.Time
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, expires_at)
-		 VALUES ($1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint))
+		`INSERT INTO files (workspace_id, id, filename, mime_type, size_bytes, downloadable, expires_at)
+		 VALUES ($6, $1, $2, $3, $4, false, now() + make_interval(secs => $5::bigint))
 		 RETURNING created_at, expires_at`,
-		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn).
+		id, up.filename, up.mimeType, int64(len(up.data)), up.expiresIn, workspace.ID(ctx)).
 		Scan(&createdAt, &expiresAt); err != nil {
 		return time.Time{}, nil, err
 	}
@@ -240,7 +241,7 @@ func (s *server) getFile(r *http.Request) (any, error) {
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at, expires_at
-		 FROM files WHERE id = $1`, id).
+		 FROM files WHERE files.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&filename, &mimeType, &sizeBytes, &downloadable, &scopeType, &scopeID, &createdAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errFileNotFound(id)
@@ -332,7 +333,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 	// the keyset cursor's guards — the grammar check and #135's unstorable-id
 	// reject — rather than growing a second spelling of them. Its limit bounds
 	// are this route's own (1–1000, default 20), not the resource lists' 100.
-	page, err := parsePageWith(q, defaultLimit, maxFileListLimit)
+	page, err := parsePageWith(workspace.ID(r.Context()), q, defaultLimit, maxFileListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +372,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		if !storableText(cursorID) {
 			return nil, errInvalid("invalid page cursor")
 		}
-		err := s.pool.QueryRow(ctx, `SELECT created_at, id FROM files WHERE id = $1`, cursorID).
+		err := s.pool.QueryRow(ctx, `SELECT created_at, id FROM files WHERE files.workspace_id = $2 AND id = $1`, cursorID, workspace.ID(ctx)).
 			Scan(&curCreatedAt, &curID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return filePageJSON{Data: []any{}}, nil
@@ -392,8 +393,8 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		return filePageJSON{Data: []any{}}, nil
 	}
 
-	query := `SELECT id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at, expires_at FROM files WHERE true`
-	var args []any
+	query := `SELECT id, filename, mime_type, size_bytes, downloadable, scope_type, scope_id, created_at, expires_at FROM files WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if scopeID != "" {
 		args = append(args, scopeID)
 		query += fmt.Sprintf(` AND scope_id = $%d`, len(args))
@@ -507,7 +508,7 @@ func (s *server) listFiles(r *http.Request) (any, error) {
 		// combination — so the cursor is emitted here rather than withheld on
 		// the arms a legacy client seeds.
 		if hasMore || beforeID != "" {
-			c := encodeTimeCursor(cursorFiles, dirNext, files[len(files)-1].CreatedAt, last)
+			c := encodeTimeCursor(page.space, cursorFiles, dirNext, files[len(files)-1].CreatedAt, last)
 			out.NextPage = &c
 		}
 	}
@@ -533,7 +534,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT d.id FROM files f
 		   LEFT JOIN dreams d ON d.id = f.dream_id AND d.closed_at IS NULL
-		  WHERE f.id = $1`, id).Scan(&dreamID)
+		  WHERE f.id = $1 AND f.workspace_id = $2`, id, workspace.ID(ctx)).Scan(&dreamID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("file %s not found", id)
 	}
@@ -557,6 +558,9 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockResourceWrite(ctx, tx); err != nil {
+		return nil, err
+	}
 	// The key is the row's (0046): an upload's copies share its object, so
 	// deleting the upload leaves the bytes to them — the reference's behavior,
 	// the copy still answering after its upload's delete (2026-09-02 batch2 idx
@@ -564,7 +568,7 @@ func (s *server) deleteFile(r *http.Request) (any, error) {
 	// to the drain. EnqueueObjectDeletes holds that count. The id may be a
 	// copy's, whose key is its source's.
 	var key string
-	err = tx.QueryRow(ctx, `DELETE FROM files WHERE id = $1 RETURNING `+store.FileObjectKeySQL, id).Scan(&key)
+	err = tx.QueryRow(ctx, `DELETE FROM files WHERE files.workspace_id = $2 AND id = $1 RETURNING `+store.FileObjectKeySQL, id, workspace.ID(ctx)).Scan(&key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("file %s not found", id)
 	}
@@ -626,7 +630,7 @@ func (s *server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	// (#578), never at a key derived from the id asked for.
 	err := s.pool.QueryRow(ctx,
 		`SELECT filename, mime_type, downloadable, NOT `+store.FileLiveSQL+`, `+store.FileObjectKeySQL+`
-		   FROM files WHERE id = $1`, id).
+		   FROM files WHERE files.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&filename, &mimeType, &downloadable, &expired, &key)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, notFound())
@@ -716,9 +720,9 @@ func (s *server) fileMountedInEnvironment(ctx context.Context, envID, fileID str
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM sessions
-		   WHERE environment_id = $1
+		   WHERE environment_id = $1 AND workspace_id = $3
 		     AND resources @> jsonb_build_array(jsonb_build_object('file_id', $2::text)))`,
-		envID, fileID).Scan(&exists); err != nil {
+		envID, fileID, workspace.ID(ctx)).Scan(&exists); err != nil {
 		slog.WarnContext(ctx, "file mount scope check failed",
 			"file_id", fileID, "environment_id", envID, "err", err)
 		return false

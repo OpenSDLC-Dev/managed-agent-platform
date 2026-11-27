@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"io"
 	"log/slog"
 	"net/http"
@@ -314,7 +315,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	if !selfHostedKeyFrom(r.Context()) {
 		return nil, noRetry(errNotFound("Environment `%s` not found, or does not support work listing. The work API is only available for self-hosted environments.", envID))
 	}
-	page, err := parsePage(r.URL.Query())
+	page, err := parsePage(workspace.ID(r.Context()), r.URL.Query())
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +343,7 @@ func (s *server) listWork(r *http.Request) (any, error) {
 	}
 	if len(items) > page.limit {
 		last := items[page.limit-1]
-		c := encodeTimeCursor(cursorWork, dirNext, last.CreatedAt, last.ID.String())
+		c := encodeTimeCursor(page.space, cursorWork, dirNext, last.CreatedAt, last.ID.String())
 		out.NextPage = &c
 	}
 	return out, nil

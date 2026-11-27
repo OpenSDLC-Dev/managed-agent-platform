@@ -11,13 +11,14 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // seedAlphaNotes writes an imported (non-prebuilt) anthropic skill with one
 // version, 20260101, as its latest.
 func seedAlphaNotes(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO skills (id, source, display_title, latest_version) VALUES ('alpha-notes', 'anthropic', 'alpha-notes', '20260101')`); err != nil {
 		t.Fatal(err)
@@ -33,13 +34,13 @@ func seedAlphaNotes(t *testing.T, pool *pgxpool.Pool) {
 // checkRefs runs the check in a transaction of its own and returns its answer.
 func checkRefs(t *testing.T, pool *pgxpool.Pool, raw string) error {
 	t.Helper()
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return checkAnthropicSkillRefs(ctx, tx, json.RawMessage(raw))
+	return validateSkillRefs(ctx, tx, json.RawMessage(raw))
 }
 
 // TestTheAnthropicSkillCheckTakesNoLock pins the check as the read it is: the
@@ -50,14 +51,14 @@ func checkRefs(t *testing.T, pool *pgxpool.Pool, raw string) error {
 // dangling reference that materialization skips (best-effort, registered).
 func TestTheAnthropicSkillCheckTakesNoLock(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	seedAlphaNotes(t, pool)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := checkAnthropicSkillRefs(ctx, tx, json.RawMessage(`[{"type":"anthropic","skill_id":"alpha-notes"}]`)); err != nil {
+	if err := validateSkillRefs(ctx, tx, json.RawMessage(`[{"type":"anthropic","skill_id":"alpha-notes"}]`)); err != nil {
 		t.Fatalf("check: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `SELECT 1 FROM skills WHERE id = 'alpha-notes' FOR UPDATE NOWAIT`); err != nil {
@@ -74,7 +75,7 @@ func TestTheAnthropicSkillCheckTakesNoLock(t *testing.T) {
 // refuses, before the upload commits or after.
 func TestTheAnthropicSkillCheckBesideAVersionUpload(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	seedAlphaNotes(t, pool)
 	upload, err := pool.Begin(ctx)
 	if err != nil {
@@ -103,7 +104,7 @@ func TestTheAnthropicSkillCheckBesideAVersionUpload(t *testing.T) {
 			return
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
-		done <- checkAnthropicSkillRefs(ctx, tx, json.RawMessage(latest))
+		done <- validateSkillRefs(ctx, tx, json.RawMessage(latest))
 	}()
 	select {
 	case err := <-done:

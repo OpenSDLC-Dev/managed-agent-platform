@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/worktoken"
 )
 
@@ -126,6 +127,10 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, errAuth("invalid sessions token"))
 			return
 		}
+		if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), principal.WorkspacePublicID) {
+			writeError(w, r, errForbidden("workspace is not served by this platform"))
+			return
+		}
 		markVerified(r.Context())
 		refused := errAuth("the sessions token does not authorize this route")
 		p := r.URL.EscapedPath()
@@ -170,7 +175,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			var attached bool
 			if err := pool.QueryRow(r.Context(),
 				`SELECT coalesce((SELECT resources @> jsonb_build_array(jsonb_build_object('type', 'memory_store', 'memory_store_id', $2::text))
-				                    FROM sessions WHERE id = $1), false)`, principal.SessionID, storeID).Scan(&attached); err != nil {
+				                    FROM sessions WHERE id = $1 AND workspace_id = $3), false)`, principal.SessionID, storeID, principal.WorkspaceID).Scan(&attached); err != nil {
 				writeError(w, r, err)
 				return
 			}
@@ -182,7 +187,7 @@ func requireWorkToken(pool *pgxpool.Pool, next http.Handler) http.Handler {
 			writeError(w, r, refused)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyEnvironment, principal.EnvironmentID)
+		ctx := context.WithValue(workspace.WithID(r.Context(), principal.WorkspaceID), ctxKeyEnvironment, principal.EnvironmentID)
 		ctx = context.WithValue(ctx, ctxKeyWorkSession, principal.SessionID)
 		ctx = context.WithValue(ctx, ctxKeyCredential, events.EnvironmentCredential)
 		next.ServeHTTP(w, r.WithContext(ctx))

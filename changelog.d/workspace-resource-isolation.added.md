@@ -1,0 +1,1 @@
+- Bind resource reads, file downloads, session snapshots, worker credentials and scheduled execution to their owning workspace. (#56)

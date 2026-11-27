@@ -25,6 +25,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/memsync"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // This file is the platform-managed half of memory stores (plan 36 slice 4,
@@ -84,7 +85,7 @@ func (e *Executor) archivedStores(ctx context.Context, mounts []memoryRef) (map[
 		ids[i] = m.MemoryStoreID
 	}
 	rows, err := e.pool.Query(ctx,
-		`SELECT id FROM memory_stores WHERE id = ANY($1) AND archived_at IS NOT NULL`, ids)
+		`SELECT id FROM memory_stores WHERE id = ANY($1) AND workspace_id = $2 AND archived_at IS NOT NULL`, ids, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +232,7 @@ func (e *Executor) materializeStore(ctx context.Context, sb sandbox.Sandbox, sid
 	}
 
 	var exists bool
-	err = e.pool.QueryRow(ctx, `SELECT true FROM memory_stores WHERE id = $1`, m.MemoryStoreID).Scan(&exists)
+	err = e.pool.QueryRow(ctx, `SELECT true FROM memory_stores WHERE id = $1 AND workspace_id = $2`, m.MemoryStoreID, workspace.ID(ctx)).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return memoryOutcomeNotFound, errors.New("memory store row missing")
 	}
@@ -535,7 +536,7 @@ func (e *Executor) settleMemory(ctx context.Context, tx pgx.Tx, ms *memorySync) 
 func (e *Executor) settleStore(ctx context.Context, tx pgx.Tx, sid domain.ID, st *storeSync) error {
 	id := st.ref.MemoryStoreID
 	var archivedAt *time.Time
-	err := tx.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 FOR UPDATE`, id).Scan(&archivedAt)
+	err := tx.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 AND workspace_id = $2 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Deleted since the attachment (decision 7 keeps the element): the
 		// directory stays as the agent left it, and nothing is written.
@@ -885,7 +886,8 @@ func (ms *memorySync) end(ctx context.Context) {
 // goes. The resources are read here, since the reaper holds no session.
 func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox, sid domain.ID) error {
 	var resourcesJSON []byte
-	err := e.pool.QueryRow(ctx, `SELECT resources FROM sessions WHERE id = $1`, sid.String()).Scan(&resourcesJSON)
+	var space string
+	err := e.pool.QueryRow(ctx, `SELECT resources, workspace_id FROM sessions WHERE id = $1`, sid.String()).Scan(&resourcesJSON, &space)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -896,7 +898,7 @@ func (e *Executor) syncMemoryStandalone(ctx context.Context, sb sandbox.Sandbox,
 	if err := json.Unmarshal(resourcesJSON, &refs); err != nil {
 		return err
 	}
-	return e.syncMemoryNow(ctx, sb, sid, refs, func() {})
+	return e.syncMemoryNow(workspace.WithID(ctx, space), sb, sid, refs, func() {})
 }
 
 // syncMemoryNow runs the three phases in their own transaction, which takes
