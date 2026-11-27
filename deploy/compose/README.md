@@ -60,7 +60,7 @@ OIDC or trusted-proxy login. Issue API keys after signing in.
 
 The `console` profile adds the published Console image and an application Caddy edge.
 Both images have independent immutable pins. Platform builds do not rebuild Console.
-The current Console pin supports native login, owned API keys and key management for cloud and archived environments.
+The current Console pin supports native login, workspace management at `/settings/workspaces`, owned API keys and key management for cloud and archived environments.
 When upgrading an older install, follow the [native-routing and rollback contract](../../docs/self-hosted-security.md#owned-key-rollout-and-rollback).
 Legacy SSO resource BFF calls cannot replace the required native cookie route.
 The edge binds only `127.0.0.1:${CONSOLE_PORT:-3000}`. Existing API listeners stay on
