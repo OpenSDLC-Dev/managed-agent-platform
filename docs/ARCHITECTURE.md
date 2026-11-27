@@ -691,12 +691,15 @@ effective UID before entering the image's startup command or a tool exec.
   does, has no worker to serve and reaches nothing of its own environment either: the
   work API refuses it its work, and its sessions and their mounted files answer it one
   404; only the workspace-global skill reads serve it, as the reference's do (#820).
-  One event runs the other way: a `user.tool_result`, the result of a
-  built-in toolset call, is admitted only under a worker's credential, and a management
-  key or human posting one is refused 403 on any session (#662). The rule is that
-  event's alone: management still posts `user.custom_tool_result` and
-  `user.tool_confirmation`, and a `user.interrupt` still has the platform answer the
-  calls it ends. Environment keys are hashed at rest too, issued one per host so a
+  Inbound session event types are partitioned by credential: a `user.tool_result`
+  (the result of a built-in toolset call) is admitted only under a worker's
+  credential on `self_hosted` environments, refusing a management key or human
+  403 on any session (#662). Every other inbound event type (`user.message`,
+  `user.interrupt`, `user.tool_confirmation`, `user.custom_tool_result`,
+  `user.define_outcome`, and `system.message`) requires a management credential
+  and refuses an environment key or per-item sessions token with 403, so a worker
+  credential cannot approve `always_ask` tools (including platform-executed MCP
+  calls) or drive session turns. Environment keys are hashed at rest too, issued one per host so a
   compromised host is revoked alone, and expire a year after issue; expired and
   unknown are one indistinguishable 401, and a revoked key this platform minted gets
   the reference's own 401 on every public route (a management key beside it is

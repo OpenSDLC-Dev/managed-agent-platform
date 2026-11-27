@@ -135,20 +135,27 @@ func TestSendEchoShapesPerType(t *testing.T) {
 	riskyID := appendToolUseWithPerm(t, s, sid, "risky", "ask")
 	safeID := appendToolUseWithPerm(t, s, sid, "safe", "ask")
 
-	// Under the worker's credential, since the batch carries a user.tool_result.
-	echo := sendEventsAs(t, s, workerAuth(t, s, sid), sid,
+	// user.tool_result is worker-only; the remaining six inbound types are
+	// management-only, so the two credential classes send separately.
+	toolEcho := sendEventsAs(t, s, workerAuth(t, s, sid), sid,
+		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
+	)
+	if len(toolEcho) != 1 {
+		t.Fatalf("echoed %d worker events, want 1", len(toolEcho))
+	}
+
+	echo := sendEvents(t, s, sid,
 		map[string]any{"type": "user.interrupt"},
 		map[string]any{"type": "user.tool_confirmation", "result": "deny",
 			"tool_use_id": riskyID, "deny_message": "too risky"},
 		map[string]any{"type": "user.tool_confirmation", "result": "allow", "tool_use_id": safeID},
 		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": customID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}, "is_error": false},
-		map[string]any{"type": "user.tool_result", "tool_use_id": toolID},
 		map[string]any{"type": "user.message", "content": []any{map[string]any{"type": "text", "text": "hi"}}},
 		map[string]any{"type": "system.message", "content": []any{map[string]any{"type": "text", "text": "note"}}},
 	)
-	if len(echo) != 7 {
-		t.Fatalf("echoed %d events, want 7", len(echo))
+	if len(echo) != 6 {
+		t.Fatalf("echoed %d events, want 6", len(echo))
 	}
 
 	// A null session_thread_id or deny_message is omitted, never rendered
@@ -176,13 +183,13 @@ func TestSendEchoShapesPerType(t *testing.T) {
 		t.Errorf("custom_tool_result echo = %v", custom)
 	}
 
-	toolRes := echo[4]
+	toolRes := toolEcho[0]
 	wantExactKeys(t, toolRes, "id", "type", "tool_use_id", "content", "is_error", "processed_at")
 	if toolRes["content"] != nil || toolRes["is_error"] != nil {
 		t.Errorf("omitted content/is_error should render null: %v", toolRes)
 	}
 
-	system := echo[6]
+	system := echo[5]
 	wantExactKeys(t, system, "id", "type", "content", "processed_at")
 	if system["type"] != "system.message" {
 		t.Errorf("system echo = %v", system)

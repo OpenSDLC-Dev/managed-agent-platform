@@ -26,10 +26,13 @@ import (
 // do user.define_outcome's single-active check and file-rubric validation
 // (ValidateDefineOutcomes in the API layer).
 
-// Credential is the class of credential a batch arrives under. It decides who
-// may post a user.tool_result (#662), and nothing else. The zero value is
-// every caller that is not a worker, so a sender nobody classified is refused
-// rather than admitted.
+// Credential is the class of credential a batch arrives under. It partitions
+// inbound event types between management callers (API keys and human sessions)
+// and self-hosted workers (environment keys and per-item sessions tokens):
+// EnvironmentCredential may post only user.tool_result (on self_hosted
+// environments), and every other inbound event type requires
+// ManagementCredential. The zero value is ManagementCredential, so an
+// unclassified caller can never post a worker's user.tool_result.
 type Credential int
 
 const (
@@ -51,6 +54,14 @@ var ErrEnvironmentCredentialRequired = errors.New("`user.tool_result` may only b
 	"(the self-hosted runner's Session-Instance JWT); " +
 	"an API key or Console session cannot post this event type")
 
+// ErrManagementCredentialRequired refuses any management-only inbound event
+// type (everything except user.tool_result) sent under a worker credential
+// (an environment key or per-item sessions token). NormalizeInbound wraps it
+// with the event's index and type, and the API answers it 403 permission_error.
+var ErrManagementCredentialRequired = errors.New("may only be sent with management credentials " +
+	"(an API key or Console session); " +
+	"an environment key or sessions token cannot post this event type")
+
 // verbatim is an inbound refusal already in the reference's recorded words,
 // index and all, so NormalizeInbound passes it through rather than prefixing
 // "events[i]: " (#540). ours is the refusal in this platform's words, which a
@@ -62,7 +73,9 @@ func (e verbatim) Error() string { return e.ref }
 
 // NormalizeInbound validates one send batch. envKind is the session's
 // environment kind ("cloud" | "self_hosted") and cred the class of credential
-// the batch arrived under; both gate user.tool_result, the credential first.
+// the batch arrived under: EnvironmentCredential is limited to
+// user.tool_result (on self_hosted environments), and every other inbound
+// event type requires ManagementCredential.
 func NormalizeInbound(envKind string, cred Credential, raws []json.RawMessage) ([]NewEvent, error) {
 	return normalizeBatch(envKind, cred, raws, true)
 }
@@ -170,14 +183,32 @@ func normalizeOne(envKind string, cred Credential, i int, raw json.RawMessage) (
 
 	et := domain.EventType(typ)
 	switch et {
-	case domain.EventUserMessage:
-		return normalizeUserMessage(obj, i)
-	case domain.EventUserInterrupt:
-		return normalizeUserInterrupt(obj)
-	case domain.EventUserToolConfirm:
-		return normalizeToolConfirmation(obj, i)
-	case domain.EventUserCustomToolRes:
-		return normalizeToolResult(obj, et, "custom_tool_use_id")
+	case domain.EventUserMessage,
+		domain.EventUserInterrupt,
+		domain.EventUserToolConfirm,
+		domain.EventUserCustomToolRes,
+		domain.EventSystemMessage,
+		domain.EventUserDefineOutcome:
+		// Check credential before reading event fields so a worker credential
+		// cannot approve ask-gated tools (including platform-executed MCP calls),
+		// drive turns, interrupt sessions, or inject operator system messages.
+		if cred != ManagementCredential {
+			return NewEvent{}, fmt.Errorf("`%s` %w", et, ErrManagementCredentialRequired)
+		}
+		switch et {
+		case domain.EventUserMessage:
+			return normalizeUserMessage(obj, i)
+		case domain.EventUserInterrupt:
+			return normalizeUserInterrupt(obj)
+		case domain.EventUserToolConfirm:
+			return normalizeToolConfirmation(obj, i)
+		case domain.EventUserCustomToolRes:
+			return normalizeToolResult(obj, et, "custom_tool_use_id")
+		case domain.EventSystemMessage:
+			return normalizeSystemMessage(obj)
+		case domain.EventUserDefineOutcome:
+			return normalizeDefineOutcome(obj)
+		}
 	case domain.EventUserToolResult:
 		// The credential first, before anything else about the event is
 		// read: the reference refuses a management caller on every session
@@ -191,10 +222,6 @@ func normalizeOne(envKind string, cred Credential, i int, raw json.RawMessage) (
 			return NewEvent{}, fmt.Errorf("user.tool_result is only valid on self_hosted environments")
 		}
 		return normalizeToolResult(obj, et, "tool_use_id")
-	case domain.EventSystemMessage:
-		return normalizeSystemMessage(obj)
-	case domain.EventUserDefineOutcome:
-		return normalizeDefineOutcome(obj)
 	}
 	// Any other type — platform-emitted, a stream-only preview frame, or
 	// unknown — is refused in the reference's words (2026-09-02 batch2

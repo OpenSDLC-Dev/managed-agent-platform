@@ -89,9 +89,21 @@ func TestWhatTheSendWaitsOn(t *testing.T) {
 		callID := appendGatedToolUse(t, s, sid, domain.EventAgentToolUse,
 			`{"name":"bash","input":{},"evaluated_permission":"allow","session_thread_id":null}`)
 		sendRefusedWhileAwaiting(t, s, sid, whileAwaiting("user.message", 0, callID), userMessage("still there?"))
-		sendEventsAs(t, s, workerAuth(t, s, sid), sid, userMessage("carry on"),
+		// A worker credential cannot smuggle a user.message beside its result.
+		st, body := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sid+"/events", map[string]any{
+			"events": []any{
+				userMessage("carry on"),
+				map[string]any{"type": "user.tool_result", "tool_use_id": callID,
+					"content": []any{map[string]any{"type": "text", "text": "ok"}}},
+			},
+		}, workerAuth(t, s, sid)))
+		wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", managementOnlyRefusal(0, "user.message"))
+		// Once the worker posts user.tool_result, the call is answered and a
+		// subsequent management user.message is accepted.
+		sendEventsAs(t, s, workerAuth(t, s, sid), sid,
 			map[string]any{"type": "user.tool_result", "tool_use_id": callID,
 				"content": []any{map[string]any{"type": "text", "text": "ok"}}})
+		sendEvents(t, s, sid, userMessage("carry on"))
 	})
 
 	t.Run("an allow leaves a worker's call awaiting its result", func(t *testing.T) {

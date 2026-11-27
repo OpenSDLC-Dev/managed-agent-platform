@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 )
@@ -162,10 +163,6 @@ func TestNativeProxyOriginAdmittedWorkerPrecedence(t *testing.T) {
 	if workToken == "" {
 		t.Fatal("poll did not issue a sessions token")
 	}
-	body, err := json.Marshal(map[string]any{"events": []any{userMessage("machine lane with a foreign Origin")}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		name, bearer string
 		keys         []string
@@ -181,20 +178,28 @@ func TestNativeProxyOriginAdmittedWorkerPrecedence(t *testing.T) {
 		{"invalid-work-token", "wtk_invalid", nil, 401},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			useID := appendToolUse(t, s.tserver, sessionID, domain.EventAgentToolUse)
+			body, err := json.Marshal(map[string]any{"events": []any{map[string]any{
+				"type": "user.tool_result", "tool_use_id": useID,
+				"content": []any{map[string]any{"type": "text", "text": "machine lane with a foreign Origin"}},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			headers := http.Header{"Content-Type": {"text/plain"}, "Origin": {"https://foreign.example"}, "Sec-Fetch-Site": {"cross-site"},
 				"Authorization": {"Bearer " + tc.bearer}, "X-Goog-Iap-Jwt-Assertion": {token}}
 			if tc.keys != nil {
 				headers["X-Api-Key"] = tc.keys
 			}
 			var before, after int
-			if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE session_id=$1 AND type='user.message'`, sessionID).Scan(&before); err != nil {
+			if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE session_id=$1 AND type='user.tool_result'`, sessionID).Scan(&before); err != nil {
 				t.Fatal(err)
 			}
 			res, raw := s.request("POST", "/v1/sessions/"+sessionID+"/events", string(body), headers)
 			if res.StatusCode != tc.want {
 				t.Errorf("worker precedence=%d %s, want %d", res.StatusCode, raw, tc.want)
 			}
-			if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE session_id=$1 AND type='user.message'`, sessionID).Scan(&after); err != nil {
+			if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM events WHERE session_id=$1 AND type='user.tool_result'`, sessionID).Scan(&after); err != nil {
 				t.Fatal(err)
 			}
 			want := before

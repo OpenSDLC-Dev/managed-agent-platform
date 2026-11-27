@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -23,7 +24,11 @@ func TestSendChecksTellRefusalsFromFaults(t *testing.T) {
 	sid, _ := pgtest.NewSession(t, pool, "self_hosted")
 	normalize := func(ev string) []events.NewEvent {
 		t.Helper()
-		evs, err := events.NormalizeInbound("self_hosted", events.EnvironmentCredential, []json.RawMessage{json.RawMessage(ev)})
+		cred := events.ManagementCredential
+		if strings.Contains(ev, `"user.tool_result"`) {
+			cred = events.EnvironmentCredential
+		}
+		evs, err := events.NormalizeInbound("self_hosted", cred, []json.RawMessage{json.RawMessage(ev)})
 		if err != nil {
 			t.Fatalf("normalize %s: %v", ev, err)
 		}

@@ -190,7 +190,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("claim: %+v %v", item, err)
 	}
-	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentCustomToolUse)
 	if err := q.Complete(ctx, s.pool, item); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 		userMessage("are you still there?"))
 	// The first message woke the session, so it follows its pair; the second
 	// was never appended.
-	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.tool_use"}
+	want := []string{"session.status_running", "session.thread_status_running", "user.message", "agent.custom_tool_use"}
 	got := s.eventTypes(sessionID)
 	if len(got) != len(want) {
 		t.Fatalf("event log = %v, want %v", got, want)
@@ -212,11 +212,12 @@ func TestUserMessageDoesNotResumePastAnUnansweredToolUse(t *testing.T) {
 		}
 	}
 
-	// The repair: the outstanding result and the next message in one batch.
-	// The result answers the use, so the resume fires — gating on the
-	// pre-batch log alone would stall a send that is legal and complete.
-	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID,
-		map[string]any{"type": "user.tool_result", "tool_use_id": toolUseID,
+	// The repair: the outstanding custom result and the next message in one
+	// management batch. The result answers the use, so the resume fires —
+	// gating on the pre-batch log alone would stall a send that is legal and
+	// complete.
+	sendEvents(t, s, sessionID,
+		map[string]any{"type": "user.custom_tool_result", "custom_tool_use_id": toolUseID,
 			"content": []any{map[string]any{"type": "text", "text": "ok"}}},
 		userMessage("carry on"))
 

@@ -398,23 +398,33 @@ func TestConfirmationBatchedWithTheLastToolResultResumesTheTurn(t *testing.T) {
 	}
 }
 
-// TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt is the same
-// omission seen from the other side: a platform call answered in the same batch
-// must not look outstanding either, or the resume provisions a sandbox and runs
-// an executor pass that finds nothing to do.
+// TestConfirmationWithAnAnsweredWorkerToolDoesNotRunTheExecutorForIt verifies
+// that once a worker's tool_result has answered the sibling call, a management
+// denial of the gated call resumes the model turn without enqueuing tool_exec
+// — and that neither credential may combine user.tool_confirmation with
+// user.tool_result in a single batch.
 func TestConfirmationBatchedWithAToolResultDoesNotRunTheExecutorForIt(t *testing.T) {
 	s := newTestServer(t)
 	sessionID := selfHostedSession(t, s)
 	askID := appendAskToolUse(t, s, sessionID, "bash")
 	otherID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
+	denyEv := confirm(askID, "deny", map[string]any{"deny_message": "no"})
+	resEv := map[string]any{"type": "user.tool_result", "tool_use_id": otherID,
+		"content": []any{map[string]any{"type": "text", "text": "done"}}}
+	path := "/v1/sessions/" + sessionID + "/events"
 
-	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID,
-		confirm(askID, "deny", map[string]any{"deny_message": "no"}),
-		map[string]any{"type": "user.tool_result", "tool_use_id": otherID,
-			"content": []any{map[string]any{"type": "text", "text": "done"}}})
+	// Neither credential can combine confirmation + worker tool_result in one batch.
+	st, body := readJSON(t, s.doRaw(http.MethodPost, path, map[string]any{"events": []any{denyEv, resEv}}, workerAuth(t, s, sessionID)))
+	wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", managementOnlyRefusal(0, "user.tool_confirmation"))
+	st, body = readJSON(t, s.doRaw(http.MethodPost, path, map[string]any{"events": []any{denyEv, resEv}}, map[string]string{"x-api-key": testKey}))
+	wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", toolResultRefusal(1))
+
+	// Legitimate split: worker answers otherID, management denies askID.
+	sendEventsAs(t, s, workerAuth(t, s, sessionID), sessionID, resEv)
+	sendEvents(t, s, sessionID, denyEv)
 
 	if n := s.liveWork(sessionID, queue.ToolExec); n != 0 {
-		t.Errorf("live tool_exec = %d, want 0 — the only platform call was answered in this batch", n)
+		t.Errorf("live tool_exec = %d, want 0 — the only platform call was already answered", n)
 	}
 	if n := s.liveWork(sessionID, queue.ModelTurn); n != 1 {
 		t.Errorf("live model_turn = %d, want 1", n)
