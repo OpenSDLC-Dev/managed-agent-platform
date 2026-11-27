@@ -46,8 +46,17 @@ func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
 	if !names["Worker 0"] || !names["Worker 1"] || len(firstRow) != 2 || len(secondRow) != 2 {
 		t.Fatalf("unexpected workspace directory fields or membership: %v %v", firstRow, secondRow)
 	}
-	if status, _ := s.doCookie("GET", "/api/console/organizations/default/workspaces/default/service_accounts?limit=1&page="+cursor, nil); status == 200 {
-		t.Fatal("accepted a foreign workspace cursor")
+	const defaultOwners = "/api/console/organizations/default/workspaces/default/service_accounts"
+	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+cursor, nil); status != http.StatusBadRequest {
+		t.Fatalf("another workspace's cursor returned HTTP %d", status)
+	}
+	status, directory := s.doCookie("GET", "/api/console/organizations/default/service_accounts?limit=1", nil)
+	orgCursor, _ := directory["next_page"].(string)
+	if status != http.StatusOK || orgCursor == "" {
+		t.Fatalf("organization directory returned HTTP %d without a usable page", status)
+	}
+	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+orgCursor, nil); status != http.StatusBadRequest {
+		t.Fatalf("organization directory cursor in Default returned HTTP %d", status)
 	}
 }
 
