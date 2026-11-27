@@ -15,7 +15,7 @@ import (
 func price(v float64) *float64 { return &v }
 
 func usage(key, alias, dep string, tokens *store.Tokens) store.Usage {
-	return store.Usage{RequestID: "req_1", APIKeyID: key, Model: alias, Alias: alias, DeploymentID: dep,
+	return store.Usage{WorkspaceID: "default", RequestID: "req_1", APIKeyID: key, Model: alias, Alias: alias, DeploymentID: dep,
 		CredentialID: "cred_1", Protocol: "anthropic", Endpoint: "messages", Status: 200, Tokens: tokens,
 		Latency: 1500 * time.Millisecond}
 }

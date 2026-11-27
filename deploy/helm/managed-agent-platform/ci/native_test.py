@@ -160,7 +160,12 @@ class NativeRender(unittest.TestCase):
                 values.update(existingSecret="external-platform", postgresql={"enabled": False}, minio={"enabled": False}, openbao={"enabled": False})
             text = render(values)
             console = section(text, "console.yaml")
-            self.assertNotIn("env:", console)
+            env = re.search(r"(?ms)^          env:\n(.*?)^          ports:", console).group(1).strip()
+            self.assertEqual([line.strip() for line in env.splitlines()], [
+                "- name: CONSOLE_CONTROLPLANE_URL",
+                'value: "http://native-test-managed-agent-platform-controlplane:8080"',
+            ])
+            self.assertNotIn("envFrom:", console)
             self.assertNotIn("secretKeyRef:", console)
             self.assertNotIn("checksum/", console)
             gateway = section(text, "modelgateway-deployment.yaml")

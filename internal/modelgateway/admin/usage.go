@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // dailyUsageView is one UTC day's rollup for a principal (or legacy key),
 // alias and deployment. A key filter retains the credential breakdown.
 type dailyUsageView struct {
+	WorkspaceID      string  `json:"workspace_id"`
 	Day              string  `json:"day"`
 	APIKeyID         string  `json:"api_key_id"`
 	PrincipalID      *string `json:"principal_id"`
@@ -32,6 +34,7 @@ type dailyUsageView struct {
 // and a session, error or time to first token the request did not have is
 // null.
 type usageView struct {
+	WorkspaceID      string    `json:"workspace_id"`
 	ID               int64     `json:"id"`
 	RequestID        string    `json:"request_id"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -99,8 +102,8 @@ func query(r *http.Request, allowed ...string) (url.Values, error) {
 	return q, nil
 }
 
-func usageFilter(q url.Values) store.UsageFilter {
-	return store.UsageFilter{APIKeyID: q.Get("api_key_id"), PrincipalID: q.Get("principal_id"), Alias: q.Get("alias"),
+func usageFilter(r *http.Request, q url.Values) store.UsageFilter {
+	return store.UsageFilter{WorkspaceID: workspace.ID(r.Context()), APIKeyID: q.Get("api_key_id"), PrincipalID: q.Get("principal_id"), Alias: q.Get("alias"),
 		DeploymentID: q.Get("deployment_id"), SessionID: q.Get("session_id")}
 }
 
@@ -137,7 +140,7 @@ func (h *handler) dailyUsage(r *http.Request) (any, error) {
 	case to.Sub(from) >= maxDays*24*time.Hour:
 		return nil, invalid("from and to span more than %d days", maxDays)
 	}
-	days, more, err := h.cfg.Store.ListDailyUsage(r.Context(), usageFilter(q), from, to, maxDailyRows)
+	days, more, err := h.cfg.Store.ListDailyUsage(r.Context(), usageFilter(r, q), from, to, maxDailyRows)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +149,7 @@ func (h *handler) dailyUsage(r *http.Request) (any, error) {
 	}
 	out := make([]dailyUsageView, 0, len(days))
 	for _, d := range days {
-		out = append(out, dailyUsageView{Day: d.Day.Format(time.DateOnly), APIKeyID: d.APIKeyID, PrincipalID: nonEmpty(d.PrincipalID), Alias: d.Alias,
+		out = append(out, dailyUsageView{WorkspaceID: d.WorkspaceID, Day: d.Day.Format(time.DateOnly), APIKeyID: d.APIKeyID, PrincipalID: nonEmpty(d.PrincipalID), Alias: d.Alias,
 			DeploymentID: d.DeploymentID, Requests: d.Requests, Errors: d.Errors, InputTokens: d.Tokens.Input,
 			OutputTokens: d.Tokens.Output, CacheWriteTokens: d.Tokens.CacheWrite, CacheReadTokens: d.Tokens.CacheRead,
 			Cost: d.Cost})
@@ -173,13 +176,13 @@ func (h *handler) listUsage(r *http.Request) (any, error) {
 			return nil, invalid("before: %q is not a row id", v)
 		}
 	}
-	rows, more, err := h.cfg.Store.ListUsage(r.Context(), usageFilter(q), before, limit)
+	rows, more, err := h.cfg.Store.ListUsage(r.Context(), usageFilter(r, q), before, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]usageView, 0, len(rows))
 	for _, u := range rows {
-		v := usageView{ID: u.ID, RequestID: u.RequestID, CreatedAt: u.CreatedAt, APIKeyID: u.APIKeyID, PrincipalID: nonEmpty(u.PrincipalID), Model: u.Model,
+		v := usageView{WorkspaceID: u.WorkspaceID, ID: u.ID, RequestID: u.RequestID, CreatedAt: u.CreatedAt, APIKeyID: u.APIKeyID, PrincipalID: nonEmpty(u.PrincipalID), Model: u.Model,
 			Alias: u.Alias, DeploymentID: u.DeploymentID, CredentialID: u.CredentialID, SessionID: nonEmpty(u.SessionID),
 			Protocol: u.Protocol, Endpoint: u.Endpoint, Status: u.Status, ErrorType: nonEmpty(u.ErrorType), Cost: u.Cost,
 			LatencyMS: millis(u.Latency)}

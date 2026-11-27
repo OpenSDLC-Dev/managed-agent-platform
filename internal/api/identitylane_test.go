@@ -412,8 +412,8 @@ func checkTheMappingIsStoredAndFollowed(t *testing.T, s *laneServer, send func(m
 	if status, errType := laneStatus(t, send(http.MethodGet, path, "platform-devs")); status != http.StatusForbidden || errType != "permission_error" {
 		t.Errorf("GET tokens mapped to developer: status %d, error %q, want 403 permission_error", status, errType)
 	}
-	if status, errType := laneStatus(t, send(http.MethodGet, consoleAPIKeysPath, "platform-devs")); status != http.StatusOK {
-		t.Errorf("GET api_keys mapped to developer: status %d, error %q, want 200", status, errType)
+	if status, errType := laneStatus(t, send(http.MethodGet, consoleAPIKeysPath, "platform-devs")); status != http.StatusForbidden {
+		t.Errorf("mapped developer without a Default grant: status %d, error %q, want 403", status, errType)
 	}
 	if role, source := storedRole(t, s); role != "developer" || source != "idp" {
 		t.Errorf("after a developer mapping: stored (role, role_source) = (%q, %q), want (developer, idp)", role, source)
@@ -613,7 +613,7 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 		want int
 	}{
 		{role: "platform-read", want: http.StatusForbidden},
-		{role: "platform-devs", want: http.StatusOK},
+		{role: "platform-devs", want: http.StatusForbidden},
 		{role: "platform-admins", want: http.StatusOK},
 	} {
 		status, errType := laneStatus(t, s.signInRequest(http.MethodGet, consoleAPIKeysPath, s.token(tc.role), nil))
@@ -627,9 +627,6 @@ func TestIdentityLaneAPIKeyRoutesRequireDeveloper(t *testing.T) {
 		body := map[string]any{"name": "key-" + tc.role}
 		status, errType = laneStatus(t, s.signInRequest(http.MethodPost, consoleAPIKeysPath, s.token(tc.role), body))
 		wantCreate := tc.want
-		if tc.role == "platform-devs" {
-			wantCreate = http.StatusForbidden // a new IdP developer has no Default grant
-		}
 		if status != wantCreate {
 			t.Errorf("POST api_keys as %s: status %d, want %d (error type %q)", tc.role, status, wantCreate, errType)
 		}

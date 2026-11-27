@@ -306,9 +306,10 @@ func NewHandler(pool *pgxpool.Pool, blobs blob.Store, cipher secrets.Cipher, ver
 	mux.HandleFunc("GET /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginStart)))
 	mux.HandleFunc("POST /api/auth/login", noStore(roleGate(identity.RoleUser, s.loginPost)))
 	mux.HandleFunc("GET /api/auth/callback", noStore(roleGate(identity.RoleUser, s.loginCallback)))
+	mux.HandleFunc("GET /api/auth/workspaces", noStore(s.handle(identity.RoleUser, s.authWorkspaces)))
 	mux.HandleFunc("GET /api/auth/session", noStore(s.handle(identity.RoleUser, s.authSession)))
 	mux.HandleFunc("POST /api/auth/logout", noStore(roleGate(identity.RoleUser, s.logout)))
-	for _, pattern := range []string{"/api/auth/config", "/api/auth/login", "/api/auth/callback", "/api/auth/session", "/api/auth/logout"} {
+	for _, pattern := range []string{"/api/auth/config", "/api/auth/login", "/api/auth/callback", "/api/auth/workspaces", "/api/auth/session", "/api/auth/logout"} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Pragma", "no-cache")

@@ -4,7 +4,7 @@ What is being worked on right now, and how far along it is — nothing else. **S
 
 ## Active work
 
-[Plan 42](./docs/plan/42_multi-tenant-activation.md) stages 1–3 cover Default Console routes, explicit workspace grants, credential binding, scoped resources and execution. [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56) remains open for Gateway accounting, clients and workspace management.
+[Plan 42](./docs/plan/42_multi-tenant-activation.md) stages 1–4 cover workspace-scoped resources, execution, browser and CLI credentials, and Gateway accounting. [#56](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues/56) remains open for workspace management and activation.
 
 Agents workspace overview for the native Console. See the [private report contract](./docs/DIVERGENCES.md#private-agents-workspace-report).
 

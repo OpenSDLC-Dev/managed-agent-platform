@@ -19,7 +19,7 @@ func (e *env) record(u store.Usage) {
 }
 
 func row(key, alias, dep string, tokens *store.Tokens) store.Usage {
-	return store.Usage{RequestID: "req_x", APIKeyID: key, Model: alias, Alias: alias, DeploymentID: dep, CredentialID: "gwcred_1",
+	return store.Usage{WorkspaceID: "default", RequestID: "req_x", APIKeyID: key, Model: alias, Alias: alias, DeploymentID: dep, CredentialID: "gwcred_1",
 		Protocol: "anthropic", Endpoint: "messages", Status: 200, Tokens: tokens, Latency: 1234567 * time.Microsecond}
 }
 

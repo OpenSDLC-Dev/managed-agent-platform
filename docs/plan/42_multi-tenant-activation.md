@@ -17,7 +17,7 @@ Default roles. The owner selected a maintenance cutover on 2026-11-27. Stop the
 old authority readers before migration 0071. See the [upgrade procedure](../ARCHITECTURE.md#default-workspace-upgrade).
 Stage 3 binds resource storage, background execution and worker reads to their owning workspace.
 The owner approved coordinated upgrades. Migration 0072 retires the old writer initialization trigger.
-Stages 4 and 5 cover clients, reporting and workspace activation.
+Stage 4 binds browser and OAuth clients to a selected workspace and accounts for every Gateway request in its originating workspace. Drain and stop previous Gateway replicas before migration 0073 changes the rollup key. Stage 5 enables the private workspace lifecycle and Console management.
 [Plan 69](./69_principal-bound-auth.md) and [Playground grants](./73_console-playground.md)
 
 ## Identity, roles and membership
@@ -58,7 +58,7 @@ Use explicit capabilities for billing, resource and Console actions. Adding Bill
 linear role ranking would grant unrelated operations. Preserve the Console origin/lane when
 dispatching through private proxies so the Limited Developer restrictions also apply to
 direct private requests. Public API clients retain the documented developer operations.
-Service-account identities can be assigned supported workspace grants and own keys.
+On 2026-11-27 the owner approved workspace Admins issuing keys for active service accounts with resource access in the same workspace. The service account's identity and organization role remain under organization administration.
 A credential narrows the authority of its holder. Organization administration through the
 Console requires its signed-in human session and CSRF on writes.
 [Workspace roles, inheritance and service accounts](https://platform.claude.com/docs/en/manage-claude/workspaces#workspace-roles-and-permissions)

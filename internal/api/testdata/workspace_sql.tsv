@@ -1,12 +1,9 @@
 # Site, normalized SQL fingerprints, and authorization boundary. A changed or new statement requires review.
 internal/api/adminapikeys.go.getAdminAPIKey	41edf399fd7957bf	Organization audit endpoint; its shared key predicate constrains visibility and cursor resolution.
-internal/api/adminapikeys.go.listAdminAPIKeys	27a0efe193527141 688dd0eb0b8e6c5b	Organization audit endpoint; its shared key predicate constrains visibility and cursor resolution.
+internal/api/adminapikeys.go.listAdminAPIKeys	1186b9a444461f77 95827534154b5bf8	Organization audit checks consent and applies its shared organization and workspace predicates to both query and cursor.
 internal/api/agents.go.insertAgentInTx	bc807887eb22ac7b	Agent version belongs to the agent already inserted or loaded in this workspace.
 internal/api/agents.go.listAgentVersions	c9daf9a1e313d0c0	Agent version belongs to the agent already inserted or loaded in this workspace.
 internal/api/agents.go.updateAgent	64322649237a3ec6	Agent version belongs to the agent already inserted or loaded in this workspace.
-internal/api/apikeys.go.listManagementKeys	495538eca10e9ab3	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
-internal/api/apikeys.go.updateManagementKey	0f25732a6bd5ed90	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
-internal/api/consoleapikeys.go.updateAPIKeyIn	0148f130676fb290 5fba309df56d816b b97ed1cda8d68c31	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
 internal/api/deploymentparse.go.resolveDeploymentAgent	853b1568260fc75b	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
 internal/api/deploymentruns.go.runDeployment	9e799ed15bdef035 bad381678af9f64b f406acd17c62a052	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
 internal/api/deployments.go.fillScheduleTimestamps	8c00533d6a8e6da9	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
@@ -93,10 +90,11 @@ internal/brain/reposkills.go.nestedSkillBlocks	c66228208b997246	Claimed model tu
 internal/brain/reposkills.go.repoSkillsFor	693a38ac5eeed0c0	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
 internal/brain/reposkills.go.suspendForRepoSkills	0406fefb6e59aff8	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
 internal/clioauth/oauth.go.Authenticate	ccdaefb5c397adb9	The OAuth grant or token hash identifies the credential and its workspace.
-internal/clioauth/oauth.go.Exchange	13c09c3885dbbe31 5a69ae2744161335	The OAuth grant or token hash identifies the credential and its workspace.
+internal/clioauth/oauth.go.Exchange	70f1b4214c4d075b f0b5e79abcc06e58	The OAuth grant or token hash identifies the credential and its workspace.
 internal/clioauth/oauth.go.Prune	5cc18aa6e1f8c4f8	Installation-wide expiry of OAuth grants and tokens.
-internal/clioauth/oauth.go.Refresh	4f75c7bc69b48d6b bbd53cb25a6cf929 caf1db500af38267 fdedba2142599001	The OAuth grant or token hash identifies the credential and its workspace.
-internal/clioauth/oauth.go.mintTokens	1d15c2f8587679d6 b8acbf48ad0ed6e6	Token rows belong to the authorized grant being issued.
+internal/clioauth/oauth.go.Refresh	27dc334000151c96 bbd53cb25a6cf929 caf1db500af38267 fdedba2142599001	The OAuth grant or token hash identifies the credential and its workspace.
+internal/clioauth/oauth.go.lockGrant	6d82223d481a2bbb	Lock the grant identified by the presented code or refresh token while holding its principal lock.
+internal/clioauth/oauth.go.mintTokens	1d15c2f8587679d6 77d07df20912f0ea f9a0a0a185780c8c	Lock the workspace named by the grant before checking current consent and issuing credentials.
 internal/events/approvalmetric.go.ClearedApprovalWait	60706cf89ac4f74a	Internal event-log operation for the authorized session or its locked worker claim.
 internal/events/approvalmetric.go.PendingApprovalThreads	71b0e9865867eac2	Internal event-log operation for the authorized session or its locked worker claim.
 internal/events/log.go.AppendInTx	02299fa309774871 0fa56dd1038d987a 14daa129c16bcb20 21617878e7381faf 431476b3b009dc61 86a6bf4313f3cf8f 9f24709b7900c5db a1ffeb0caf579942 a8b70a32ada95a2c bca88631c8f7aae7 f68b73080c91e31f	Internal event-log operation for the authorized session or its locked worker claim.
@@ -169,9 +167,9 @@ internal/gatetoken/gatetoken.go	de9e56d9587e6c8c	Internal credential lifecycle i
 internal/gatetoken/gatetoken.go.Authenticate	d46064bfca1836e8	Hash authentication resolves a machine credential and its owning session.
 internal/gatetoken/gatetoken.go.Ensure	8dba0cd9f68d098f ffd832f541cdf55b	Internal credential lifecycle is keyed by its owning session, claim or generation.
 internal/gatetoken/gatetoken.go.RevokeIfCurrent	38ec8c99af7127e4	Internal credential lifecycle is keyed by its owning session, claim or generation.
-internal/inferencetoken/inferencetoken.go.Authenticate	51753117e89dda34	Hash authentication resolves a machine credential and its owning session.
+internal/inferencetoken/inferencetoken.go.Authenticate	c07a8c5faebd5025	The token hash and live claim derive the session and its registered workspace.
 internal/inferencetoken/inferencetoken.go.Mint	d1e856ed76d5c8fa	Internal credential lifecycle is keyed by its owning session, claim or generation.
-internal/modelgateway/auth.go.authenticate	2a3a564eddc445ab	Credential hash resolves its owner and registered binding.
+internal/modelgateway/auth.go.credential	e8a326ea9f112c75	Credential hash resolves its owner, live role and registered binding.
 internal/modelgateway/store/aliases.go.CreateAlias	caf42f01e6545d28	Organization-operated model catalog and provider configuration.
 internal/modelgateway/store/aliases.go.DeleteAlias	8983fb31a9eb2da6 a7aa0e97913e5074	Organization-operated model catalog and provider configuration.
 internal/modelgateway/store/aliases.go.UpdateAlias	f4a23d413fcb86f0	Organization-operated model catalog and provider configuration.
@@ -196,9 +194,9 @@ internal/modelgateway/store/providers.go.DeleteProvider	310c872d6e04de14 b93ea53
 internal/modelgateway/store/providers.go.GetProvider	1690395fe2e15a4c	Organization-operated model catalog and provider configuration.
 internal/modelgateway/store/providers.go.UpdateProvider	274f100c9665da1b e1dfbb3152b0c97f	Organization-operated model catalog and provider configuration.
 internal/modelgateway/store/providers.go.listProviders	9d75028d9c15130d	Organization-operated model catalog and provider configuration.
-internal/modelgateway/store/usage.go.ListDailyUsage	7332de9e50479b56 a66d938fe78b7f10	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
-internal/modelgateway/store/usage.go.ListUsage	60dcaccd57d5b4ed	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
-internal/modelgateway/store/usage.go.SweepUsage	d65126a88c739203	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
+internal/modelgateway/store/usage.go.ListDailyUsage	4512bf18712de4ab 4b5333eafe8de90c	Both rollup sources apply the selected workspace before ordering or limiting. An organization summary requires organization Billing or Admin.
+internal/modelgateway/store/usage.go.ListUsage	8203fe1c862fa513	The common ledger predicate checks the selected workspace for both the page and its cursor.
+internal/modelgateway/store/usage.go.SweepUsage	d65126a88c739203	Retention removes expired ledger rows across the organization after UTC rollup.
 internal/queue/lifecycle.go	46c3df1b8edc99b3	The internal caller supplies an authorized session, environment or lease.
 internal/queue/lifecycle.go.Ack	af223073056ad7ad	The authenticated worker fixes its environment; a work item must belong to that environment.
 internal/queue/lifecycle.go.GetWork	a11d4c3c561c3b1b	The authenticated worker fixes its environment; a work item must belong to that environment.

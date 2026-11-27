@@ -48,7 +48,7 @@ func (h *handler) record(w http.ResponseWriter, r *http.Request, c caller, alias
 	_ = rc.SetWriteDeadline(time.Time{})
 	defer func() { _ = rc.SetWriteDeadline(time.Now().Add(time.Duration(writeStall.Load()))) }()
 	u := store.Usage{
-		RequestID: requestID(r), APIKeyID: c.keyID, PrincipalID: c.principalID, Model: ledgerText(model), Alias: alias,
+		WorkspaceID: c.workspaceID, RequestID: requestID(r), APIKeyID: c.keyID, PrincipalID: c.principalID, Model: ledgerText(model), Alias: alias,
 		SessionID: r.Header.Get(SessionHeader), Protocol: string(proto), Endpoint: routes[path].endpoint,
 		Status: out.status, ErrorType: ledgerText(out.errType), Tokens: out.tokens, Latency: time.Since(start), TTFT: out.ttft,
 	}

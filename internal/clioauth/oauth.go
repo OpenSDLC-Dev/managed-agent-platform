@@ -50,7 +50,10 @@ type Authority struct {
 func (a Authority) Has(scope string) bool { return slices.Contains(a.Scopes, scope) }
 
 // CanConsent checks the maximum authority the current role can grant.
-func CanConsent(role identity.Role, grant workspace.Role, scopes []string) bool {
+func CanConsent(role identity.Role, grant workspace.Role, space string, scopes []string) bool {
+	if space != workspace.Default && grant == "" {
+		return false
+	}
 	if (!role.AtLeast(identity.RoleUser) && role != identity.RoleBilling) || len(scopes) == 0 {
 		return false
 	}
@@ -73,6 +76,7 @@ func CanConsent(role identity.Role, grant workspace.Role, scopes []string) bool 
 }
 
 type CodeRequest struct {
+	WorkspaceKey                            string
 	ClientID, RedirectURI, State, Challenge string
 	Scopes                                  []string
 }
@@ -124,8 +128,8 @@ func IssueCode(ctx context.Context, tx pgx.Tx, principalID string, in CodeReques
 	code := secret("")
 	_, err := tx.Exec(ctx, `INSERT INTO cli_oauth_grants
 		(principal_id, client_id, scopes, code_hash, challenge, state_hash, redirect_uri, expires_at, workspace_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes', 'default')`,
-		principalID, in.ClientID, in.Scopes, hash(code), in.Challenge, hash(in.State), in.RedirectURI)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()+interval '5 minutes', $8)`,
+		principalID, in.ClientID, in.Scopes, hash(code), in.Challenge, hash(in.State), in.RedirectURI, in.WorkspaceKey)
 	if err != nil {
 		return "", err
 	}
@@ -133,27 +137,30 @@ func IssueCode(ctx context.Context, tx pgx.Tx, principalID string, in CodeReques
 }
 
 func Exchange(ctx context.Context, pool *pgxpool.Pool, in ExchangeRequest) (Tokens, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Tokens{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock before sampling expiry. A request that waited behind another
-	// exchange must see the current code state and database clock.
+	// Principal removal locks the principal before revoking its grants.
+	codeHash := hash(in.Code)
 	var id string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM cli_oauth_grants WHERE code_hash=$1 FOR UPDATE`,
-		hash(in.Code)).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT g.id::text FROM cli_oauth_grants g JOIN principals p ON p.id=g.principal_id
+		WHERE g.code_hash=$1 FOR SHARE OF p`, codeHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
+	}
+	if err := lockGrant(ctx, tx, id); err != nil {
+		return Tokens{}, err
 	}
 	challenge := sha256.Sum256([]byte(in.Verifier))
 	if err := tx.QueryRow(ctx, `UPDATE cli_oauth_grants
 		SET code_hash=NULL, challenge='', state_hash='', redirect_uri='',
 		    expires_at=clock_timestamp()+interval '30 days'
 		WHERE id=$1::uuid AND NOT revoked AND expires_at>clock_timestamp()
-		  AND client_id=$2 AND challenge=$3 AND state_hash=$4 AND redirect_uri=$5
+		  AND client_id=$2 AND challenge=$3 AND state_hash=$4 AND redirect_uri=$5 AND code_hash=$6
 		RETURNING id::text`,
-		id, in.ClientID, base64.RawURLEncoding.EncodeToString(challenge[:]), hash(in.State), in.RedirectURI).Scan(&id); err != nil {
+		id, in.ClientID, base64.RawURLEncoding.EncodeToString(challenge[:]), hash(in.State), in.RedirectURI, codeHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
 	}
 	tokens, err := mintTokens(ctx, tx, id)
@@ -166,13 +173,12 @@ func Exchange(ctx context.Context, pool *pgxpool.Pool, in ExchangeRequest) (Toke
 	return tokens, nil
 }
 
-// Refresh serializes rotation on the grant row. The second statement sees
-// whether another refresh spent this token while the request waited.
+// Refresh serializes rotation on the grant row before reading the token's current state.
 func Refresh(ctx context.Context, pool *pgxpool.Pool, clientID, refreshToken string) (Tokens, error) {
 	if !strings.HasPrefix(refreshToken, refreshPrefix) || len(refreshToken) != len(refreshPrefix)+43 {
 		return Tokens{}, ErrInvalidGrant
 	}
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -180,8 +186,11 @@ func Refresh(ctx context.Context, pool *pgxpool.Pool, clientID, refreshToken str
 	refreshHash := hash(refreshToken)
 	var id string
 	if err := tx.QueryRow(ctx, `SELECT g.id::text FROM cli_oauth_tokens t JOIN cli_oauth_grants g ON g.id=t.grant_id
-		WHERE t.refresh_hash=$1 FOR UPDATE OF g`, refreshHash).Scan(&id); err != nil {
+		JOIN principals p ON p.id=g.principal_id WHERE t.refresh_hash=$1 FOR SHARE OF p`, refreshHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
+	}
+	if err := lockGrant(ctx, tx, id); err != nil {
+		return Tokens{}, err
 	}
 	var spent bool
 	if err := tx.QueryRow(ctx, `SELECT t.spent FROM cli_oauth_tokens t JOIN cli_oauth_grants g ON g.id=t.grant_id
@@ -230,26 +239,42 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 		  AND NOT g.revoked AND g.expires_at>clock_timestamp()
 		  AND p.org_id='default' AND p.kind='user' AND p.status='active'`, hash(token)).
 		Scan(&a.PrincipalID, &a.Role, &a.Scopes, &a.WorkspaceID, &a.WorkspaceKey, &a.WorkspaceRole)
+	if err == nil && a.WorkspaceKey != workspace.Default && a.WorkspaceRole == "" {
+		return Authority{}, ErrInvalidGrant
+	}
 	return a, grantError(err)
 }
 
+// Lock in a separate statement so the caller samples expiry and spent state after any wait.
+func lockGrant(ctx context.Context, tx pgx.Tx, grantID string) error {
+	var locked bool
+	return grantError(tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants WHERE id=$1::uuid FOR UPDATE`, grantID).Scan(&locked))
+}
+
 func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) {
+	// The caller holds the principal and grant locks. Serialize with workspace membership edits
+	// before reading effective consent in a fresh snapshot.
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants g JOIN workspaces w ON w.id=g.workspace_id WHERE g.id=$1 AND w.archived_at IS NULL FOR SHARE OF w`, grantID).Scan(&locked); err != nil {
+		return Tokens{}, grantError(err)
+	}
 	var role identity.Role
 	var grant workspace.Role
+	var space string
 	var scopes []string
 	out := Tokens{
 		AccessToken: secret(AccessPrefix), RefreshToken: secret(refreshPrefix), Type: "Bearer",
 		Organization: tokenOrganization{OrganizationID, "Managed Agent Platform"},
 	}
 	if err := tx.QueryRow(ctx, `SELECT md5(p.id)::uuid::text, p.email, p.role, g.scopes,
-		w.public_id, w.name, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
+		w.public_id, w.name, w.id, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
 		JOIN principals p ON p.id=g.principal_id
 		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.archived_at IS NULL
 		WHERE g.id=$1::uuid AND p.org_id='default' AND p.kind='user' AND p.status='active'`, grantID).
-		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &grant); err != nil {
+		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &space, &grant); err != nil {
 		return Tokens{}, grantError(err)
 	}
-	if !CanConsent(role, grant, scopes) {
+	if !CanConsent(role, grant, space, scopes) {
 		return Tokens{}, ErrInvalidGrant
 	}
 	out.Scope = strings.Join(scopes, " ")

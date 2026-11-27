@@ -7,7 +7,7 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 > **Status: v0.6.0.** A `v*` tag publishes container images and the Helm chart to GHCR. The GitHub Release includes worker binaries and release notes. See [the release process](./docs/RELEASING.md).
 
 The control plane and model gateway require native login configuration. Public
-management APIs authorize an issued key using its owner's current Default workspace grant. Private
+management APIs authorize an issued key using its owner's current grant in the bound workspace. Private
 APIs and gateway administration require browser sessions.
 Gateway inference accepts workspace developer credentials or delegated tokens for an eligible initiator.
 Organization budgets share each public model alias across keys and protocols.
@@ -34,7 +34,7 @@ Public `/v1` does not admit IdP JWTs or proxy assertions. Browser sessions reach
 
 The Console Playground sends prompts to configured chat models through the model gateway. An administrator enables access in Members for accounts with the `user` role. See [Playground access](./docs/self-hosted-security.md#playground).
 
-Use `ant auth login` with the platform's Console origin for interactive CLI access. The browser asks for consent and the CLI saves scoped credentials in its profile. Automation can use a principal-owned API key. Native login requires `CONSOLE_PUBLIC_ORIGIN`, and private routes accept only browser sessions. See [CLI OAuth and browser login](./docs/self-hosted-security.md#cli-oauth) and the [archived key audit procedure](./docs/self-hosted-security.md#audit-archived-api-keys).
+Use `ant auth login` with the platform's Console origin for interactive CLI access. Select a workspace during browser consent. The CLI saves its scoped credentials in the selected profile. Automation can use a principal-owned API key. Native login requires `CONSOLE_PUBLIC_ORIGIN`, and private routes accept only browser sessions. See [CLI OAuth and browser login](./docs/self-hosted-security.md#cli-oauth) and the [archived key audit procedure](./docs/self-hosted-security.md#audit-archived-api-keys).
 
 Deploy locally with [docker-compose](./deploy/compose) or to Kubernetes with the [Helm chart](./deploy/helm). Compose defaults to development password login; its `console` profile adds the published Console and one-origin edge. Helm enables both by default and requires a native login mode and public origin. Follow the [Plan 69 upgrade procedure](./docs/UPGRADING_PLAN69.md) before replacing a deployment that uses unowned keys. [CHANGELOG.md](./CHANGELOG.md) is what landed when; the [issue tracker](https://github.com/OpenSDLC-Dev/managed-agent-platform/issues) is what's next.
 

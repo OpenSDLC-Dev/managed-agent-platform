@@ -152,12 +152,13 @@ func TestNoRouteAdmitsUserExceptRedemption(t *testing.T) {
 // TestNativeLoginRouteMatrix plus the password, OIDC and IAP runtime tests cover
 // each entry. A new auth-subtree resource is not silently added to this set.
 var nativeAuthPatterns = map[string]bool{
-	"GET /api/auth/config":   true,
-	"GET /api/auth/login":    true,
-	"POST /api/auth/login":   true,
-	"GET /api/auth/callback": true,
-	"GET /api/auth/session":  true,
-	"POST /api/auth/logout":  true,
+	"GET /api/auth/config":     true,
+	"GET /api/auth/login":      true,
+	"POST /api/auth/login":     true,
+	"GET /api/auth/callback":   true,
+	"GET /api/auth/session":    true,
+	"GET /api/auth/workspaces": true,
+	"POST /api/auth/logout":    true,
 }
 
 // TestTheMatrixCoversEveryAnnotatedRoute joins the two halves of the guard.

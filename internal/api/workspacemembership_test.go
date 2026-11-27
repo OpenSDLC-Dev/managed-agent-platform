@@ -46,6 +46,8 @@ func TestDefaultWorkspaceGrantAndBoundCredential(t *testing.T) {
 
 	account := ownedObject(t, expectManagement(t, s, "POST", serviceAccountsPath, `{"name":"workspace-service"}`, admin, 200))
 	alias := account["id"].(string)
+	expectManagement(t, s, "POST", consoleAPIKeysPath, `{"name":"unused","principal_id":"`+alias+`"}`, admin, 404)
+	expectManagement(t, s, "POST", serviceAccountsPath+"/"+alias, `{"default_workspace_role":"user"}`, admin, 200)
 	expectManagement(t, s, "POST", consoleAPIKeysPath, `{"name":"unused","principal_id":"`+alias+`"}`, admin, 403)
 	expectManagement(t, s, "POST", serviceAccountsPath+"/"+alias, `{"default_workspace_role":"developer"}`, admin, 200)
 	serviceKey, _ := issueOwnedHTTP(t, s, admin, "service", &alias)

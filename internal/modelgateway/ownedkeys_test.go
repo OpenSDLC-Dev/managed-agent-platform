@@ -137,3 +137,41 @@ func TestOwnedKeyUsesCurrentOwnerRoleWithoutGrant(t *testing.T) {
 		t.Fatalf("removed owner: %d %s", res.StatusCode, raw)
 	}
 }
+
+func TestWorkspaceInferenceAttribution(t *testing.T) {
+	e := newEnv(t)
+	up := newFake(t, message("ok"))
+	p := e.provider(up.URL)
+	e.credential(p, "sk-upstream-fixture", 1)
+	e.alias("fast", target(e.deployment(p, "model"), 0))
+	const owner = "principal_gateway_fixture"
+	a := e.ownedKey(owner, "user", "admin", "key_a")
+	const b = "sk-map-api01-owned-research"
+	const publicB = "wrkspc_00000000000000000000000002"
+	_, err := e.pool.Exec(e.ctx, `INSERT INTO workspaces(id,public_id,name) VALUES('research',$1,'Research')`, publicB)
+	e.must(err)
+	_, err = e.pool.Exec(e.ctx, `INSERT INTO api_keys(id,name,workspace_id,owner_principal_id,owned_key_hash,created_by) VALUES('key_b','Research','research',$1,$2,$1)`, owner, apikey.Hash(b))
+	e.must(err)
+	e.start()
+	const body = `{"model":"fast","max_tokens":8,"messages":[]}`
+	for _, tc := range []struct {
+		key, hint string
+		want      int
+	}{{a, "", 200}, {b, publicB, 200}, {b, "wrkspc_00000000000000000000000001", 403}, {a, publicB, 403}} {
+		headers := map[string]string{"x-api-key": tc.key}
+		if tc.hint != "" {
+			headers["anthropic-workspace-id"] = tc.hint
+		}
+		resp, _ := e.do("POST", "/v1/messages", body, headers)
+		if resp.StatusCode != tc.want {
+			t.Errorf("key workspace selector %q: HTTP %d, want %d", tc.hint, resp.StatusCode, tc.want)
+		}
+	}
+	for _, rel := range []string{"usage", "usage_daily", "usage_actor_daily"} {
+		var scopes int
+		e.must(e.pool.QueryRow(e.ctx, "SELECT COUNT(DISTINCT workspace_id) FROM modelgateway."+rel+" WHERE principal_id=$1", owner).Scan(&scopes))
+		if scopes != 2 {
+			t.Errorf("%s attributed %d workspaces, want 2", rel, scopes)
+		}
+	}
+}

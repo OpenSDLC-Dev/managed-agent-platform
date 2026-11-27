@@ -454,8 +454,7 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Private routes accept browser sessions only. API-key and Authorization headers are
 refused, even beside a valid cookie; incidental proxy assertions supply no authority.
-Workspace developers manage their own API keys. Organization admins manage keys issued by principals,
-environment keys, members, service accounts and deployment initiators. Historical
+Workspace developers manage their own API keys. Workspace admins manage key records and environment keys in their workspace. They can issue a key for an active service account with resource access there. Organization admins manage membership, service accounts and deployment initiators. Historical
 preset rows remain immutable. The resource proxy requires developer and preserves
 each resource's role floor. [Security invariants](#security-invariants) describes
 native login, cookie boundaries and public machine credentials.
@@ -469,10 +468,16 @@ That changes future scheduled sessions only. A missing member causes a failed
 scheduled run with `unknown_error` and an automatic pause. A dream checks its
 initiator before creating its pipeline session. Withdrawal ends future model turns.
 
+### Workspace selection and accounting
+
+A browser session spans the organization. Its tab sends `x-workspace-id` or uses a private workspace path. Both selectors must agree. `GET /api/auth/workspaces` lists the signed-in principal's active workspaces. `GET /api/auth/session` returns the selected browser ID, name and effective role. Default uses the browser slug `default`. Other browser IDs and all public credential bindings use the registry's public ID.
+
+CLI consent binds its grant to one active workspace. Owned keys, CLI grants, Playground and claim-bound inference record the originating workspace in the Gateway ledger and both UTC rollups. Workspace filtering precedes pagination and aggregation. Organization Admin and Billing can request an organization-wide daily rollup. Raw requests require workspace resource access. Organization limits apply across every workspace.
+
 ### Default workspace upgrade
 
-The first startup on migration 0071 requires a maintenance window. Drain requests
-and stop the old control planes, gateways, brains, executors and any other process
+Use a maintenance window when crossing migrations 0071, 0072 or 0073. Migration 0073 changes the daily usage key. Drain in-flight Gateway requests and stop every previous Gateway replica before applying it so each completed call is recorded.
+Drain requests and stop the old control planes, gateways, brains, executors and any other process
 that opens this database or authorizes work. Preserve Postgres, object storage and
 their volumes. Take a database backup, start the new control plane to migrate, then
 start the matching workers and gateway before restoring traffic. An old binary
@@ -590,7 +595,7 @@ Served by `cmd/modelgateway`, which compose runs and the Helm chart runs unless 
 
 | Package | What it owns |
 |---|---|
-| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction (retried whole on a lock timeout or deadlock), an advisory lock, and the filename as the immutable version record — and the schema reserves the multi-tenant columns it does not yet enforce. |
+| `store/` | The Postgres schema. Every table lives in `migrations/`, embedded in the binaries so a deployment needs no migration step. Three properties of `Migrate` are contract rather than detail — one all-or-nothing transaction (retried whole on a lock timeout or deadlock), an advisory lock, and the filename as the immutable version record — and workspace-scoped resource rows have registry-backed ownership. |
 | `blob/` | The object-storage seam: `s3/` for anything speaking S3, `gcs/` native on Application Default Credentials, one contract suite for both. |
 | `skills/` | Skill-upload validation and canonical-zip normalization, funnelled through one place so the rules cannot drift between entry points. |
 | `cron/` | The occurrence engine behind a deployment's schedule: the reference's 5-field POSIX dialect, matched literally against a wall clock in an IANA zone. `Due`, `Next` and `Upcoming` share one walk, so the list a client reads in `upcoming_runs_at` and the instant the scheduler fires cannot disagree. It imports `time/tzdata` itself rather than leaving that to a `main`, because the server image ships no zoneinfo and the failure would appear only there. |
@@ -795,8 +800,7 @@ effective UID before entering the image's startup command or a tool exec.
   The canonical daily rollup combines a principal's keys. Migration 0062 preserves
   historical key attribution and lets old ledger writers feed that rollup too.
   The old per-key rollup remains for mixed-version writers and credential-filtered reads.
-- **Sessions are not bound to an end-user.** Scoping keys are org/workspace/project
-  (reserved, single-tenant defaults in v1); end-user ownership is an application-layer
+- **Sessions are not bound to an end-user.** Organization and project use the reserved Default keys. The workspace registry resolves resource scope. End-user ownership is an application-layer
   concern hooked on session `metadata` and the audit-only `created_by`.
 - **A scheduled fire creates unattributed, and the NULL is the audit answer.**
   `created_by` records who caused a row to exist: a manual `POST /run` is an

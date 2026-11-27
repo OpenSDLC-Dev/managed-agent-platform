@@ -76,6 +76,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/modelgateway/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // Config is what the admin API needs.
@@ -187,17 +188,34 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := session.Role
+	hint, _ := workspace.PrivateSelector(r)
+	scope := session.WorkspaceKey
+	if hint != "" && (scope == "" || session.WorkspaceRole == "") {
+		writeError(w, r, forbidden("workspace is not available"))
+		return
+	}
 	_, pattern := h.mux.Handler(r)
 	switch pattern {
+	case "POST /admin/v1/deployments/{id}/test":
+		if hint == "" && session.WorkspaceChoices > 1 {
+			writeError(w, r, forbidden("select a workspace"))
+			return
+		}
 	case "GET /admin/v1/usage/daily":
 		role = identity.RoleNone
-		if session.WorkspaceRole.CanReadUsageSummary() {
+		if hint == "" && (session.Role == identity.RoleAdmin || session.Role == identity.RoleBilling) {
+			scope = ""
+			role = identity.RoleDeveloper
+		} else if (hint != "" || session.WorkspaceChoices == 1) && session.WorkspaceRole.CanReadUsageSummary() {
 			role = identity.RoleDeveloper
 		}
 	case "GET /admin/v1/usage/requests":
 		role = session.WorkspaceRole.ResourceRole()
+		if hint == "" && session.WorkspaceChoices > 1 {
+			role = identity.RoleNone
+		}
 	}
-	ctx := context.WithValue(r.Context(), roleKey{}, role)
+	ctx := context.WithValue(workspace.WithID(r.Context(), scope), roleKey{}, role)
 	ctx = context.WithValue(ctx, principalKey{}, session.PrincipalID)
 	ctx = context.WithValue(ctx, cookieKey{}, true)
 	if err := requireRole(ctx, identity.RoleDeveloper); err != nil {
@@ -213,6 +231,9 @@ func (h *handler) authenticate(r *http.Request) (login.Session, error) {
 		return login.Session{}, unauthenticated("a browser session cookie is required")
 	}
 	session, err := h.cfg.Login.Authenticate(r.Context(), r)
+	if errors.Is(err, login.ErrWorkspaceSelector) {
+		return login.Session{}, forbidden("invalid workspace selector")
+	}
 	if err != nil {
 		return login.Session{}, err
 	}
