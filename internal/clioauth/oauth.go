@@ -143,21 +143,24 @@ func Exchange(ctx context.Context, pool *pgxpool.Pool, in ExchangeRequest) (Toke
 	}
 	defer tx.Rollback(ctx)
 
-	// Lock before sampling expiry. A request that waited behind another
-	// exchange must see the current code state and database clock.
+	// Principal removal locks the principal before revoking its grants.
+	codeHash := hash(in.Code)
 	var id string
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM cli_oauth_grants WHERE code_hash=$1 FOR UPDATE`,
-		hash(in.Code)).Scan(&id); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT g.id::text FROM cli_oauth_grants g JOIN principals p ON p.id=g.principal_id
+		WHERE g.code_hash=$1 FOR SHARE OF p`, codeHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
+	}
+	if err := lockGrant(ctx, tx, id); err != nil {
+		return Tokens{}, err
 	}
 	challenge := sha256.Sum256([]byte(in.Verifier))
 	if err := tx.QueryRow(ctx, `UPDATE cli_oauth_grants
 		SET code_hash=NULL, challenge='', state_hash='', redirect_uri='',
 		    expires_at=clock_timestamp()+interval '30 days'
 		WHERE id=$1::uuid AND NOT revoked AND expires_at>clock_timestamp()
-		  AND client_id=$2 AND challenge=$3 AND state_hash=$4 AND redirect_uri=$5
+		  AND client_id=$2 AND challenge=$3 AND state_hash=$4 AND redirect_uri=$5 AND code_hash=$6
 		RETURNING id::text`,
-		id, in.ClientID, base64.RawURLEncoding.EncodeToString(challenge[:]), hash(in.State), in.RedirectURI).Scan(&id); err != nil {
+		id, in.ClientID, base64.RawURLEncoding.EncodeToString(challenge[:]), hash(in.State), in.RedirectURI, codeHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
 	}
 	tokens, err := mintTokens(ctx, tx, id)
@@ -170,8 +173,7 @@ func Exchange(ctx context.Context, pool *pgxpool.Pool, in ExchangeRequest) (Toke
 	return tokens, nil
 }
 
-// Refresh serializes rotation on the grant row. The second statement sees
-// whether another refresh spent this token while the request waited.
+// Refresh serializes rotation on the grant row before reading the token's current state.
 func Refresh(ctx context.Context, pool *pgxpool.Pool, clientID, refreshToken string) (Tokens, error) {
 	if !strings.HasPrefix(refreshToken, refreshPrefix) || len(refreshToken) != len(refreshPrefix)+43 {
 		return Tokens{}, ErrInvalidGrant
@@ -184,8 +186,11 @@ func Refresh(ctx context.Context, pool *pgxpool.Pool, clientID, refreshToken str
 	refreshHash := hash(refreshToken)
 	var id string
 	if err := tx.QueryRow(ctx, `SELECT g.id::text FROM cli_oauth_tokens t JOIN cli_oauth_grants g ON g.id=t.grant_id
-		WHERE t.refresh_hash=$1 FOR UPDATE OF g`, refreshHash).Scan(&id); err != nil {
+		JOIN principals p ON p.id=g.principal_id WHERE t.refresh_hash=$1 FOR SHARE OF p`, refreshHash).Scan(&id); err != nil {
 		return Tokens{}, grantError(err)
+	}
+	if err := lockGrant(ctx, tx, id); err != nil {
+		return Tokens{}, err
 	}
 	var spent bool
 	if err := tx.QueryRow(ctx, `SELECT t.spent FROM cli_oauth_tokens t JOIN cli_oauth_grants g ON g.id=t.grant_id
@@ -240,13 +245,16 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 	return a, grantError(err)
 }
 
-func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) {
-	// Membership edits lock the workspace, organization role changes lock the principal.
-	// Acquire those locks before reading the effective grant in a fresh snapshot.
+// Lock in a separate statement so the caller samples expiry and spent state after any wait.
+func lockGrant(ctx context.Context, tx pgx.Tx, grantID string) error {
 	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants g JOIN principals p ON p.id=g.principal_id WHERE g.id=$1 FOR SHARE OF p`, grantID).Scan(&locked); err != nil {
-		return Tokens{}, grantError(err)
-	}
+	return grantError(tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants WHERE id=$1::uuid FOR UPDATE`, grantID).Scan(&locked))
+}
+
+func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) {
+	// The caller holds the principal and grant locks. Serialize with workspace membership edits
+	// before reading effective consent in a fresh snapshot.
+	var locked bool
 	if err := tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants g JOIN workspaces w ON w.id=g.workspace_id WHERE g.id=$1 AND w.archived_at IS NULL FOR SHARE OF w`, grantID).Scan(&locked); err != nil {
 		return Tokens{}, grantError(err)
 	}

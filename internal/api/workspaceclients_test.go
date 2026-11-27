@@ -140,3 +140,55 @@ func TestNonDefaultProfileGrantRequiresMembership(t *testing.T) {
 		t.Errorf("revoked cookie HTTP %d", status)
 	}
 }
+
+// A removal locks the principal before its SQL trigger updates the grant.
+// A waiting token request must leave that grant available to the removal.
+func TestOAuthPrincipalRemovalLockOrder(t *testing.T) {
+	for _, flow := range []string{"exchange", "refresh"} {
+		t.Run(flow, func(t *testing.T) {
+			s := newTestServer(t)
+			ctx := t.Context()
+			var run func() error
+			if flow == "exchange" {
+				f := consentCLI(t, s, "user:profile")
+				run = func() error {
+					_, err := clioauth.Exchange(ctx, s.pool, clioauth.ExchangeRequest{Code: f.Get("code"), Verifier: f.Get("code_verifier"), State: f.Get("state"), ClientID: antClientID, RedirectURI: f.Get("redirect_uri")})
+					return err
+				}
+			} else {
+				tokens := issueCLITokens(t, s, "user:profile")
+				run = func() error {
+					_, err := clioauth.Refresh(ctx, s.pool, antClientID, tokens["refresh_token"].(string))
+					return err
+				}
+			}
+			removal, err := s.pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var owner string
+			if err := removal.QueryRow(ctx, `SELECT p.id FROM principals p JOIN cli_oauth_grants g ON g.principal_id=p.id FOR UPDATE OF p`).Scan(&owner); err != nil {
+				removal.Rollback(ctx)
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- run() }()
+			defer func() {
+				removal.Rollback(ctx)
+				if err := <-done; !t.Failed() && !errors.Is(err, clioauth.ErrInvalidGrant) {
+					t.Errorf("token after removal: %v", err)
+				}
+			}()
+			waitForWorkspaceLock(t, s.pool, int(removal.Conn().PgConn().PID()))
+			if _, err = removal.Exec(ctx, `SELECT id FROM cli_oauth_grants WHERE principal_id=$1 FOR UPDATE NOWAIT`, owner); err != nil {
+				t.Fatalf("token waiter held the grant before its principal: %v", err)
+			}
+			if _, err = removal.Exec(ctx, `UPDATE principals SET status='deactivated',deactivated_at=clock_timestamp() WHERE id=$1`, owner); err != nil {
+				t.Fatal(err)
+			}
+			if err = removal.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
