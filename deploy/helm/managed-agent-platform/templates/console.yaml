@@ -38,7 +38,7 @@ spec:
           image: {{ .Values.console.image | quote }}
           env:
             - name: CONSOLE_CONTROLPLANE_URL
-              value: "http://{{ include \"map.fullname\" . }}-controlplane:{{ .Values.controlplane.service.port }}"
+              value: "http://{{ include "map.fullname" . }}-controlplane:{{ .Values.controlplane.service.port }}"
           ports:
             - name: http
               containerPort: 3000
