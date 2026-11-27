@@ -93,7 +93,7 @@ internal/clioauth/oauth.go.Authenticate	ccdaefb5c397adb9	The OAuth grant or toke
 internal/clioauth/oauth.go.Exchange	13c09c3885dbbe31 5a69ae2744161335	The OAuth grant or token hash identifies the credential and its workspace.
 internal/clioauth/oauth.go.Prune	5cc18aa6e1f8c4f8	Installation-wide expiry of OAuth grants and tokens.
 internal/clioauth/oauth.go.Refresh	4f75c7bc69b48d6b bbd53cb25a6cf929 caf1db500af38267 fdedba2142599001	The OAuth grant or token hash identifies the credential and its workspace.
-internal/clioauth/oauth.go.mintTokens	1d15c2f8587679d6 77d07df20912f0ea 8725159db3b71344 b8acbf48ad0ed6e6	Lock the principal and workspace named by the grant before checking current consent and issuing credentials.
+internal/clioauth/oauth.go.mintTokens	1d15c2f8587679d6 77d07df20912f0ea 8725159db3b71344 f9a0a0a185780c8c	Lock the principal and workspace named by the grant before checking current consent and issuing credentials.
 internal/events/approvalmetric.go.ClearedApprovalWait	60706cf89ac4f74a	Internal event-log operation for the authorized session or its locked worker claim.
 internal/events/approvalmetric.go.PendingApprovalThreads	71b0e9865867eac2	Internal event-log operation for the authorized session or its locked worker claim.
 internal/events/log.go.AppendInTx	02299fa309774871 0fa56dd1038d987a 14daa129c16bcb20 21617878e7381faf 431476b3b009dc61 86a6bf4313f3cf8f 9f24709b7900c5db a1ffeb0caf579942 a8b70a32ada95a2c bca88631c8f7aae7 f68b73080c91e31f	Internal event-log operation for the authorized session or its locked worker claim.

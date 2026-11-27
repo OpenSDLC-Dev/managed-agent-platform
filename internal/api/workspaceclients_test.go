@@ -1,10 +1,13 @@
 package api_test
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/clioauth"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
@@ -94,5 +97,46 @@ func TestTwoWorkspaceClients(t *testing.T) {
 	status, other := tab(research, "/api/organizations/default/proxy/v1/agents/"+created["default"])
 	if status != http.StatusNotFound || strings.Contains(other["error"].(map[string]any)["message"].(string), "workspace") {
 		t.Errorf("foreign resource: %d %v", status, other)
+	}
+}
+
+func TestNonDefaultProfileGrantRequiresMembership(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const b = "wrkspc_00000000000000000000000002"
+	var actor string
+	if err := s.pool.QueryRow(t.Context(), `SELECT id FROM principals WHERE kind='user' AND role='admin'`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	profileA := issueCLITokens(t, s, "user:profile", workspace.DefaultPublicID)
+	profileB := issueCLITokens(t, s, "user:profile", b)
+	pendingB := consentCLI(t, s, "user:profile", b)
+	if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET role='user' WHERE id=$1`, actor); err != nil {
+		t.Fatal(err)
+	}
+	refresh := func(tokens map[string]any) int {
+		values := url.Values{"grant_type": {"refresh_token"}, "client_id": {antClientID}, "refresh_token": {tokens["refresh_token"].(string)}}
+		status, _ := s.decode(s.doRaw("POST", "/v1/oauth/token", values.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}))
+		return status
+	}
+	if _, err := clioauth.Authenticate(t.Context(), s.pool, profileB["access_token"].(string)); !errors.Is(err, clioauth.ErrInvalidGrant) {
+		t.Errorf("removed B profile token error %v", err)
+	}
+	if status, _ := s.decode(s.doRaw("POST", "/v1/oauth/token", pendingB.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})); status != 400 {
+		t.Errorf("removed B profile exchange HTTP %d, want 400", status)
+	}
+	if status := refresh(profileB); status != 400 {
+		t.Errorf("removed B profile refresh HTTP %d, want 400", status)
+	}
+	if status := refresh(profileA); status != 200 {
+		t.Errorf("Default profile refresh HTTP %d, want 200", status)
+	}
+	h := s.cookieHeaders()
+	h["x-workspace-id"] = b
+	if status, _ := s.decode(s.doRaw("POST", "/api/auth/logout", nil, h)); status != 200 {
+		t.Errorf("logout from removed workspace HTTP %d", status)
+	}
+	if status, _ := s.decode(s.doRaw("GET", "/api/auth/session", nil, s.cookieHeaders())); status != 401 {
+		t.Errorf("revoked cookie HTTP %d", status)
 	}
 }

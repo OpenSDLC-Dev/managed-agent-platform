@@ -210,7 +210,7 @@ func (s *server) issueCLIConsent(r *http.Request, session login.Session, in clio
 	if err != nil {
 		return "", err
 	}
-	if current.PrincipalID != id || !clioauth.CanConsent(current.Role, current.WorkspaceRole, in.Scopes) {
+	if current.PrincipalID != id || !clioauth.CanConsent(current.Role, current.WorkspaceRole, in.WorkspaceKey, in.Scopes) {
 		return "", errCLIRole
 	}
 	code, err := clioauth.IssueCode(ctx, tx, id, in)
@@ -435,7 +435,7 @@ func (s *server) consentWorkspaces(r *http.Request, session login.Session, in cl
 		if err := rows.Scan(&w.Key, &w.PublicID, &w.Name, &role); err != nil {
 			return nil, err
 		}
-		if (role != "" || w.Key == workspace.Default) && clioauth.CanConsent(session.Role, role, in.Scopes) {
+		if clioauth.CanConsent(session.Role, role, w.Key, in.Scopes) {
 			choices = append(choices, w)
 		}
 	}

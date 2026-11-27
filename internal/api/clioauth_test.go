@@ -413,7 +413,7 @@ func cliGatewayFixture(t *testing.T, s *tserver) string {
 	return server.URL
 }
 
-func issueCLITokens(t *testing.T, s *tserver, scope string, space ...string) map[string]any {
+func consentCLI(t *testing.T, s *tserver, scope string, space ...string) url.Values {
 	t.Helper()
 	const state = "cli-probe-state"
 	verifier := strings.Repeat("c", 64)
@@ -436,8 +436,13 @@ func issueCLITokens(t *testing.T, s *tserver, scope string, space ...string) map
 	if err != nil || res.StatusCode != http.StatusOK || !ok || !cut || code == "" {
 		t.Fatalf("consent: HTTP %d, err %v", res.StatusCode, err)
 	}
-	q = url.Values{"grant_type": {"authorization_code"}, "client_id": {antClientID}, "code": {code},
+	return url.Values{"grant_type": {"authorization_code"}, "client_id": {antClientID}, "code": {code},
 		"state": {state}, "redirect_uri": {redirect}, "code_verifier": {verifier}}
+}
+
+func issueCLITokens(t *testing.T, s *tserver, scope string, space ...string) map[string]any {
+	t.Helper()
+	q := consentCLI(t, s, scope, space...)
 	status, body := s.decode(s.doRaw(http.MethodPost, "/v1/oauth/token", q.Encode(),
 		map[string]string{"Content-Type": "application/x-www-form-urlencoded"}))
 	if status != http.StatusOK || body["access_token"] == nil || body["refresh_token"] == nil {

@@ -69,6 +69,15 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 			writeError(w, r, errAuth("a browser session cookie is required"))
 			return
 		}
+		_, pattern := next.Handler(r)
+		_, route, hasMethod := strings.Cut(pattern, " ")
+		if !hasMethod {
+			route = pattern
+		}
+		if route == "/api/auth/logout" {
+			r = r.Clone(r.Context())
+			r.Header.Del("x-workspace-id")
+		}
 		session, err := s.login.Authenticate(r.Context(), r)
 		if err != nil {
 			if errors.Is(err, login.ErrWorkspaceSelector) {
@@ -97,11 +106,6 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 		}
 		ctx := context.WithValue(workspace.WithID(r.Context(), session.WorkspaceKey), cookieContextKey{}, session)
 		role := session.Role
-		_, pattern := next.Handler(r)
-		_, route, hasMethod := strings.Cut(pattern, " ")
-		if !hasMethod {
-			route = pattern
-		}
 		if hint == "" && session.WorkspaceChoices > 1 && (route == consoleProxyPath || route == consoleProxyRootPath || route == consoleTokensPath || route == consoleRevokePath || route == consoleDeploymentInitiatorPath || route == consoleOrgAPIKeyPath) {
 			writeError(w, r, errInvalid("select a workspace"))
 			return

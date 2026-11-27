@@ -64,15 +64,23 @@ func TestGatewayDiagnosticUsageNamesCookiePrincipal(t *testing.T) {
 		cfg.Admin, err = admin.New(admin.Config{Store: e.s, Cipher: e.cipher, Prober: prober, Login: m})
 		e.must(err)
 	})
-	res, raw := e.do("POST", "/admin/v1/deployments/"+d.ID+"/test", `{}`, map[string]string{
-		"Cookie": "map_session=" + issued.Token, "Origin": "https://console.example", "X-Csrf-Token": issued.CSRFToken,
-	})
+	const research = "wrkspc_00000000000000000000000002"
+	_, err = e.pool.Exec(e.ctx, `INSERT INTO workspaces (id, public_id, name) VALUES ('research',$1,'Research')`, research)
+	e.must(err)
+	headers := map[string]string{"Cookie": "map_session=" + issued.Token, "Origin": "https://console.example", "X-Csrf-Token": issued.CSRFToken}
+	path := "/admin/v1/deployments/" + d.ID + "/test"
+	res, _ := e.do("POST", path, `{}`, headers)
+	if res.StatusCode != 403 {
+		t.Fatalf("ambiguous diagnostic HTTP %d", res.StatusCode)
+	}
+	headers["x-workspace-id"] = research
+	res, raw := e.do("POST", path, `{}`, headers)
 	if res.StatusCode != 200 {
 		t.Fatalf("diagnostic: %d %s", res.StatusCode, raw)
 	}
 	rows, _, err := e.s.ListUsage(e.ctx, store.UsageFilter{PrincipalID: "principal_admin"}, 0, 10)
 	e.must(err)
-	if len(rows) != 1 || rows[0].APIKeyID != "" || rows[0].Endpoint != "deployment_test" {
+	if len(rows) != 1 || rows[0].APIKeyID != "" || rows[0].Endpoint != "deployment_test" || rows[0].WorkspaceID != "research" {
 		t.Fatalf("diagnostic actor: %+v", rows)
 	}
 }

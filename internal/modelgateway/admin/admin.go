@@ -196,6 +196,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	_, pattern := h.mux.Handler(r)
 	switch pattern {
+	case "POST /admin/v1/deployments/{id}/test":
+		if hint == "" && session.WorkspaceChoices > 1 {
+			writeError(w, r, forbidden("select a workspace"))
+			return
+		}
 	case "GET /admin/v1/usage/daily":
 		role = identity.RoleNone
 		if hint == "" && (session.Role == identity.RoleAdmin || session.Role == identity.RoleBilling) {

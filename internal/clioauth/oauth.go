@@ -50,7 +50,10 @@ type Authority struct {
 func (a Authority) Has(scope string) bool { return slices.Contains(a.Scopes, scope) }
 
 // CanConsent checks the maximum authority the current role can grant.
-func CanConsent(role identity.Role, grant workspace.Role, scopes []string) bool {
+func CanConsent(role identity.Role, grant workspace.Role, space string, scopes []string) bool {
+	if space != workspace.Default && grant == "" {
+		return false
+	}
 	if (!role.AtLeast(identity.RoleUser) && role != identity.RoleBilling) || len(scopes) == 0 {
 		return false
 	}
@@ -231,6 +234,9 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 		  AND NOT g.revoked AND g.expires_at>clock_timestamp()
 		  AND p.org_id='default' AND p.kind='user' AND p.status='active'`, hash(token)).
 		Scan(&a.PrincipalID, &a.Role, &a.Scopes, &a.WorkspaceID, &a.WorkspaceKey, &a.WorkspaceRole)
+	if err == nil && a.WorkspaceKey != workspace.Default && a.WorkspaceRole == "" {
+		return Authority{}, ErrInvalidGrant
+	}
 	return a, grantError(err)
 }
 
@@ -246,20 +252,21 @@ func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) 
 	}
 	var role identity.Role
 	var grant workspace.Role
+	var space string
 	var scopes []string
 	out := Tokens{
 		AccessToken: secret(AccessPrefix), RefreshToken: secret(refreshPrefix), Type: "Bearer",
 		Organization: tokenOrganization{OrganizationID, "Managed Agent Platform"},
 	}
 	if err := tx.QueryRow(ctx, `SELECT md5(p.id)::uuid::text, p.email, p.role, g.scopes,
-		w.public_id, w.name, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
+		w.public_id, w.name, w.id, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
 		JOIN principals p ON p.id=g.principal_id
 		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.archived_at IS NULL
 		WHERE g.id=$1::uuid AND p.org_id='default' AND p.kind='user' AND p.status='active'`, grantID).
-		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &grant); err != nil {
+		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &space, &grant); err != nil {
 		return Tokens{}, grantError(err)
 	}
-	if !CanConsent(role, grant, scopes) {
+	if !CanConsent(role, grant, space, scopes) {
 		return Tokens{}, ErrInvalidGrant
 	}
 	out.Scope = strings.Join(scopes, " ")
