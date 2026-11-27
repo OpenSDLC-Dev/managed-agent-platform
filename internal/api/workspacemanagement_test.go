@@ -131,13 +131,23 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 	grant := func(role string) {
 		post(s, "/"+id+"/members", map[string]any{"principal_id": alias, "role": role}, 200)
 	}
+	ownersPath := path + "/" + id + "/service_accounts"
 	grant("user")
+	if status, _ := other.doCookie("GET", ownersPath, nil); status != 403 {
+		t.Fatalf("user read workspace key owner directory: HTTP %d", status)
+	}
 	if status, _ := other.doCookie("GET", path, nil); status != 403 {
 		t.Fatalf("directory without an admin workspace: HTTP %d", status)
 	}
 	post(&other, "/"+id, map[string]any{"name": "denied"}, 403)
 	post(&other, "", map[string]any{"name": "denied"}, 403)
 	grant("admin")
+	if status, _ := other.doCookie("GET", ownersPath, nil); status != 200 {
+		t.Fatalf("workspace admin could not read key owner directory: HTTP %d", status)
+	}
+	if status, _ := other.doCookie("GET", "/api/console/organizations/default/service_accounts", nil); status != 403 {
+		t.Fatalf("workspace admin read organization service accounts: HTTP %d", status)
+	}
 	post(&other, "/"+id, map[string]any{"name": "Renamed"}, 200)
 	post(&other, "/"+id+"/archive", map[string]any{}, 403)
 	if rows := list(&other, ""); len(rows) != 1 || rows[0]["name"] != "Renamed" {
