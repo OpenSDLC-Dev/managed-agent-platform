@@ -17,7 +17,7 @@ Default roles. The owner selected a maintenance cutover on 2026-11-27. Stop the
 old authority readers before migration 0071. See the [upgrade procedure](../ARCHITECTURE.md#default-workspace-upgrade).
 Stage 3 binds resource storage, background execution and worker reads to their owning workspace.
 The owner approved coordinated upgrades. Migration 0072 retires the old writer initialization trigger.
-Stages 4 and 5 cover clients, reporting and workspace activation.
+Stage 4 binds browser and OAuth clients to a selected workspace and accounts for every Gateway request in its originating workspace. Stage 5 enables the private workspace lifecycle and Console management.
 [Plan 69](./69_principal-bound-auth.md) and [Playground grants](./73_console-playground.md)
 
 ## Identity, roles and membership

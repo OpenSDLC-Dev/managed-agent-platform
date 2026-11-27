@@ -438,14 +438,19 @@ func (s *server) revokeEnvironmentKey(r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	found, err := RevokeEnvironmentKey(r.Context(), s.pool, envID, keyID)
+	tx, err := s.beginCredentialMutation(r)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(r.Context())
+	found, err := RevokeEnvironmentKey(r.Context(), tx, envID, keyID)
 	if err != nil {
 		return err
 	}
 	if !found {
 		return errEnvironmentKeyNotFound()
 	}
-	return nil
+	return tx.Commit(r.Context())
 }
 
 // noStore forbids caching the response of a route that hands back a

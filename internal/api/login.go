@@ -36,6 +36,37 @@ func (s *server) authSession(r *http.Request) (any, error) {
 	}{session, version.Version}, nil
 }
 
+// authWorkspaces is the private navigation list, including the Default browser slug.
+func (s *server) authWorkspaces(r *http.Request) (any, error) {
+	session, err := requireCookieSession(r)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(r.Context(), `SELECT CASE id WHEN 'default' THEN id ELSE public_id END, name, workspace_role($1,id)
+		FROM workspaces WHERE archived_at IS NULL AND workspace_role($1,id) IS NOT NULL
+		ORDER BY (id='default') DESC, lower(name), public_id`, session.PrincipalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type entry struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Role string `json:"role"`
+	}
+	list := []entry{}
+	for rows.Next() {
+		var w entry
+		if err := rows.Scan(&w.ID, &w.Name, &w.Role); err != nil {
+			return nil, err
+		}
+		list = append(list, w)
+	}
+	return struct {
+		Data []entry `json:"data"`
+	}{list}, rows.Err()
+}
+
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	if _, err := requireCookieSession(r); err != nil {
 		writeError(w, r, err)

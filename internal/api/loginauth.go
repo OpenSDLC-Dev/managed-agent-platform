@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/inferencetoken"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
@@ -34,7 +35,7 @@ func requireCookieSession(r *http.Request) (login.Session, error) {
 // beginCredentialMutation fences cookie-selected authority until the write commits.
 // Callers read the body first.
 func (s *server) beginCredentialMutation(r *http.Request) (pgx.Tx, error) {
-	tx, _, err := s.beginPrincipalMutation(r)
+	tx, _, err := s.beginWorkspaceCredentialMutation(r, identity.RoleAdmin)
 	return tx, err
 }
 
@@ -94,19 +95,22 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 			writeError(w, r, errWorkspaceNotFound)
 			return
 		}
-		ctx := context.WithValue(workspace.WithID(r.Context(), session.WorkspaceID), cookieContextKey{}, session)
+		ctx := context.WithValue(workspace.WithID(r.Context(), session.WorkspaceKey), cookieContextKey{}, session)
 		role := session.Role
 		_, pattern := next.Handler(r)
 		_, route, hasMethod := strings.Cut(pattern, " ")
 		if !hasMethod {
 			route = pattern
 		}
-		if hint == "" && session.WorkspaceChoices > 1 && (route == consoleProxyPath || route == consoleProxyRootPath || route == consoleTokensPath || route == consoleDeploymentInitiatorPath || route == consoleOrgAPIKeyPath) {
+		if hint == "" && session.WorkspaceChoices > 1 && (route == consoleProxyPath || route == consoleProxyRootPath || route == consoleTokensPath || route == consoleRevokePath || route == consoleDeploymentInitiatorPath || route == consoleOrgAPIKeyPath) {
 			writeError(w, r, errInvalid("select a workspace"))
 			return
 		}
 		switch route {
-		case consoleProxyPath, consoleProxyRootPath, consoleAgentsOverviewPath:
+		case "/api/auth/session", "/api/auth/workspaces", "/api/auth/logout":
+			// Every active signed-in account can inspect its own session and leave it.
+			role = identity.RoleUser
+		case consoleProxyPath, consoleProxyRootPath, consoleAgentsOverviewPath, consoleTokensPath, consoleRevokePath:
 			role = session.WorkspaceRole.ResourceRole()
 		case consoleAPIKeysPath, consoleOrgAPIKeyPath, consoleAPIKeyPath:
 			role = keyManagerRole(session)
@@ -180,7 +184,7 @@ func (s *server) dispatchLoginAuth(next *http.ServeMux) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cookieOnly := pattern == "GET /api/auth/session" || pattern == "/api/auth/session" || pattern == "POST /api/auth/logout" || pattern == "/api/auth/logout"
+		cookieOnly := pattern == "GET /api/auth/workspaces" || pattern == "/api/auth/workspaces" || pattern == "GET /api/auth/session" || pattern == "/api/auth/session" || pattern == "POST /api/auth/logout" || pattern == "/api/auth/logout"
 		if s.nativeLogin() && strings.HasSuffix(pattern, " "+consoleSetupCodePath) && s.login.Mode() != login.ModePassword {
 			cookieOnly = true
 		}

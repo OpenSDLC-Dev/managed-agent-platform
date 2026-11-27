@@ -1,0 +1,1 @@
+Browser tabs and CLI grants select a workspace. The model gateway attributes key, Playground and delegated inference to that workspace and restricts request details and billing summaries to their authorized scope.

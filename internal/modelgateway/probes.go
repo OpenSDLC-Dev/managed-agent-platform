@@ -256,7 +256,11 @@ func (p prober) test(ctx context.Context, d store.Deployment, prov store.Provide
 	if t := out.tokens; t != nil {
 		res.Usage = &admin.TestUsage{InputTokens: t.Input, OutputTokens: t.Output, CacheWriteTokens: t.CacheWrite, CacheReadTokens: t.CacheRead}
 	}
-	u := store.Usage{WorkspaceID: workspace.Default, RequestID: requestID(r), Model: d.UpstreamModel, DeploymentID: d.ID, CredentialID: c.ID,
+	space := workspace.ID(ctx)
+	if space == "" {
+		space = workspace.Default
+	}
+	u := store.Usage{WorkspaceID: space, RequestID: requestID(r), Model: d.UpstreamModel, DeploymentID: d.ID, CredentialID: c.ID,
 		Protocol: string(in), Endpoint: testEndpoint, Status: status, ErrorType: ledgerText(errType), Tokens: out.tokens, Latency: latency}
 	if id := admin.PrincipalID(ctx); id != "" {
 		u.PrincipalID = id

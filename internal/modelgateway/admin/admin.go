@@ -189,7 +189,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	role := session.Role
 	hint, _ := workspace.PrivateSelector(r)
-	scope := session.WorkspaceID
+	scope := session.WorkspaceKey
 	if hint != "" && (scope == "" || session.WorkspaceRole == "") {
 		writeError(w, r, forbidden("workspace is not available"))
 		return

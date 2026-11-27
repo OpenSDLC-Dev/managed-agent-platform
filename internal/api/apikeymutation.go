@@ -11,10 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beginAPIKeyMutation holds current human authority through the key write.
+// beginWorkspaceCredentialMutation holds current human authority through the key write.
 // Read the complete body first. Principal -> browser session -> key is the
 // shared lock order with principal removal, which archives owned keys.
-func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal, error) {
+func (s *server) beginWorkspaceCredentialMutation(r *http.Request, min identity.Role) (pgx.Tx, identityPrincipal, error) {
 	if _, err := requireCookieSession(r); err != nil {
 		return nil, identityPrincipal{}, err
 	}
@@ -48,8 +48,8 @@ func (s *server) beginAPIKeyMutation(r *http.Request) (pgx.Tx, identityPrincipal
 		return fail(err)
 	}
 	caller := identityPrincipal{ID: session.PrincipalID, Role: keyManagerRole(session)}
-	if !caller.Role.AtLeast(identity.RoleDeveloper) {
-		return fail(errForbidden("this route requires the developer role"))
+	if !caller.Role.AtLeast(min) {
+		return fail(errForbidden("this route requires the " + string(min) + " role"))
 	}
 	return tx, caller, nil
 }

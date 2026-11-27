@@ -469,6 +469,12 @@ That changes future scheduled sessions only. A missing member causes a failed
 scheduled run with `unknown_error` and an automatic pause. A dream checks its
 initiator before creating its pipeline session. Withdrawal ends future model turns.
 
+### Workspace selection and accounting
+
+A browser session spans the organization. Its tab sends `x-workspace-id` or uses a private workspace path. Both selectors must agree. `GET /api/auth/workspaces` lists the signed-in principal's active workspaces. `GET /api/auth/session` returns the selected browser ID, name and effective role. Default uses the browser slug `default`. Other browser IDs and all public credential bindings use the registry's public ID.
+
+CLI consent binds its grant to one active workspace. Owned keys, CLI grants, Playground and claim-bound inference record the originating workspace in the Gateway ledger and both UTC rollups. Workspace filtering precedes pagination and aggregation. Organization Admin and Billing can request an organization-wide daily rollup. Raw requests require workspace resource access. Organization limits apply across every workspace.
+
 ### Default workspace upgrade
 
 The first startup on migration 0071 requires a maintenance window. Drain requests

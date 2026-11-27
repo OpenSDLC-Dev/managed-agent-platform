@@ -215,7 +215,7 @@ func (s *server) createAPIKey(r *http.Request) (any, error) {
 	}
 	// The cookie-selected human is the issuer; ownership is resolved below.
 	ctx := r.Context()
-	tx, caller, err := s.beginAPIKeyMutation(r)
+	tx, caller, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +327,7 @@ func (s *server) updateAPIKeyIn(r *http.Request) (any, error) {
 	notFound := withDetails(errNotFound("API Key `%s` not found.", keyID), userFacingDetails)
 	ctx := r.Context()
 	status, name, bodyErr := apiKeyPatch(raw)
-	tx, caller, err := s.beginAPIKeyMutation(r)
+	tx, caller, err := s.beginWorkspaceCredentialMutation(r, identity.RoleDeveloper)
 	if err != nil {
 		return nil, err
 	}

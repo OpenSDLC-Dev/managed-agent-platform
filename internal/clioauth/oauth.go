@@ -134,7 +134,7 @@ func IssueCode(ctx context.Context, tx pgx.Tx, principalID string, in CodeReques
 }
 
 func Exchange(ctx context.Context, pool *pgxpool.Pool, in ExchangeRequest) (Tokens, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -173,7 +173,7 @@ func Refresh(ctx context.Context, pool *pgxpool.Pool, clientID, refreshToken str
 	if !strings.HasPrefix(refreshToken, refreshPrefix) || len(refreshToken) != len(refreshPrefix)+43 {
 		return Tokens{}, ErrInvalidGrant
 	}
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -235,6 +235,15 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 }
 
 func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) {
+	// Membership edits lock the workspace, organization role changes lock the principal.
+	// Acquire those locks before reading the effective grant in a fresh snapshot.
+	var locked bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants g JOIN principals p ON p.id=g.principal_id WHERE g.id=$1 FOR SHARE OF p`, grantID).Scan(&locked); err != nil {
+		return Tokens{}, grantError(err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT true FROM cli_oauth_grants g JOIN workspaces w ON w.id=g.workspace_id WHERE g.id=$1 AND w.archived_at IS NULL FOR SHARE OF w`, grantID).Scan(&locked); err != nil {
+		return Tokens{}, grantError(err)
+	}
 	var role identity.Role
 	var grant workspace.Role
 	var scopes []string

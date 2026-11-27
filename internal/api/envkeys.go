@@ -167,7 +167,7 @@ func ListEnvironmentKeys(ctx context.Context, pool *pgxpool.Pool, environmentID 
 // Revoking an already-revoked key succeeds and still reports found, so a retry
 // is not an error; coalesce keeps the original revocation timestamp rather than
 // sliding it forward on every repeat.
-func RevokeEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, environmentID, keyID string) (found bool, err error) {
+func RevokeEnvironmentKey(ctx context.Context, pool execer, environmentID, keyID string) (found bool, err error) {
 	tag, err := pool.Exec(ctx,
 		`UPDATE environment_keys SET revoked_at = coalesce(revoked_at, now())
 		  WHERE id = $1 AND environment_id = $2`, keyID, environmentID)

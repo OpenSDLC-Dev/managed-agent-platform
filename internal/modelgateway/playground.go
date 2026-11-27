@@ -54,8 +54,8 @@ func (h *handler) servePlayground(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, forbidden("select a workspace"))
 		return
 	}
-	r = r.WithContext(workspace.WithID(r.Context(), s.WorkspaceID))
-	c := caller{workspaceID: s.WorkspaceID, principalID: s.PrincipalID, playground: true}
+	r = r.WithContext(workspace.WithID(r.Context(), s.WorkspaceKey))
+	c := caller{workspaceID: s.WorkspaceKey, principalID: s.PrincipalID, playground: true}
 	if r.URL.Path == playgroundModelsPath {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)

@@ -413,7 +413,7 @@ func cliGatewayFixture(t *testing.T, s *tserver) string {
 	return server.URL
 }
 
-func issueCLITokens(t *testing.T, s *tserver, scope string) map[string]any {
+func issueCLITokens(t *testing.T, s *tserver, scope string, space ...string) map[string]any {
 	t.Helper()
 	const state = "cli-probe-state"
 	verifier := strings.Repeat("c", 64)
@@ -423,6 +423,9 @@ func issueCLITokens(t *testing.T, s *tserver, scope string) map[string]any {
 		"client_id": {antClientID}, "response_type": {"code"}, "redirect_uri": {redirect},
 		"scope": {scope}, "state": {state}, "code_challenge_method": {"S256"},
 		"code_challenge": {base64.RawURLEncoding.EncodeToString(pkce[:])}, "csrf_token": {s.csrf},
+	}
+	if len(space) > 0 {
+		q.Set("workspace_id", space[0])
 	}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Cookie": s.cookie, "Origin": nativeOrigin}
 	res := s.doRaw(http.MethodPost, "/oauth/authorize", q.Encode(), form)
