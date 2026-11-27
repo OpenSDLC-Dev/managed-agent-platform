@@ -70,11 +70,14 @@
 // beside it: a revoked key this platform minted gets its own 401, and a live
 // one the reference's recorded refusal where one was recorded
 // (answerEnvironmentKey, envauth.go). Outside the events subtree the dual-auth routes
-// are GET-only. Inside it, one event type runs the work API's way: a
-// user.tool_result is the environment credential's alone, and a management or
-// human caller posting one is refused 403 (#662) — by events.NormalizeInbound,
-// given the credential class the two environment lanes record (credentialFrom,
-// envauth.go).
+// are GET-only. Inside it, inbound event types are partitioned by credential:
+// user.tool_result is the environment credential's alone (refusing a management
+// or human caller 403, #662), while every other inbound event type
+// (user.message, user.interrupt, user.tool_confirmation,
+// user.custom_tool_result, user.define_outcome, system.message) requires a
+// management credential and refuses an environment credential 403 — enforced by
+// events.NormalizeInbound given the credential class the two environment lanes
+// record (credentialFrom, envauth.go).
 //
 // The cross-cutting fact no single file makes obvious: dispatchAuth classifies
 // on r.URL.EscapedPath() while ServeMux matches the DECODED path, and the

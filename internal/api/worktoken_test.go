@@ -179,22 +179,31 @@ func TestSessionsTokenAdmissionMatrix(t *testing.T) {
 		t.Fatalf("ack = %d", st)
 	}
 
-	// Its own item's heartbeat; its own session's read, events list and send.
+	// Its own item's heartbeat; its own session's read, events list, and
+	// user.tool_result send. Management-only event types (such as user.message)
+	// are refused 403 permission_error under the sessions token.
 	if st := status(t, s, http.MethodPost, work+"/heartbeat?expected_last_heartbeat=NO_HEARTBEAT", nil, tok); st != http.StatusOK {
 		t.Errorf("heartbeat with the token = %d, want 200", st)
 	}
+	useID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 	for _, probe := range []struct {
 		method, path string
 		body         any
 	}{
 		{http.MethodGet, "/v1/sessions/" + sessionID, nil},
 		{http.MethodGet, "/v1/sessions/" + sessionID + "/events", nil},
-		{http.MethodPost, "/v1/sessions/" + sessionID + "/events", map[string]any{"events": []any{userMessage("from the worker")}}},
+		{http.MethodPost, "/v1/sessions/" + sessionID + "/events", map[string]any{"events": []any{map[string]any{
+			"type": "user.tool_result", "tool_use_id": useID,
+			"content": []any{map[string]any{"type": "text", "text": "from the worker"}},
+		}}}},
 	} {
 		if st := status(t, s, probe.method, probe.path, probe.body, tok); st != http.StatusOK {
 			t.Errorf("%s %s with the token = %d, want 200", probe.method, probe.path, st)
 		}
 	}
+	st, body := readJSON(t, s.doRaw(http.MethodPost, "/v1/sessions/"+sessionID+"/events",
+		map[string]any{"events": []any{userMessage("from the worker")}}, tok))
+	wantErrMsg(t, st, body, http.StatusForbidden, "permission_error", managementOnlyRefusal(0, "user.message"))
 	// The skill reads, workspace-global as they are for the environment key.
 	skill := s.createSkill(t)
 	if st := status(t, s, http.MethodGet, "/v1/skills/"+skill["id"].(string), nil, tok); st != http.StatusOK {
@@ -476,7 +485,7 @@ func TestSessionsTokenOutlivesWindDownWhileStopping(t *testing.T) {
 		}
 	}
 	for path, body := range map[string]any{
-		session + "/events": map[string]any{"events": []any{userMessage("late")}},
+		session + "/events": map[string]any{"events": []any{map[string]any{"type": "user.tool_result", "tool_use_id": "sevt_late"}}},
 		memories:            map[string]any{"path": "/late.md", "content": "late"},
 	} {
 		if st := status(t, s, http.MethodPost, path, body, asBearer(token)); st != http.StatusUnauthorized {

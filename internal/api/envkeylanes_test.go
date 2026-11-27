@@ -75,8 +75,10 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 
 	// One environment of each kind, each with a session that mounts an upload
 	// (downloadable=false, so only the worker lane serves its bytes), a queued
-	// work item and a key issued on the console route.
-	type world struct{ env, session, file, work, key string }
+	// work item, an open built-in tool use (for user.tool_result, the one
+	// inbound event type a worker credential may post), and a key issued on
+	// the console route.
+	type world struct{ env, session, file, work, toolUse, key string }
 	provision := func(kind string) world {
 		t.Helper()
 		body := map[string]any{"name": "lanes-" + kind}
@@ -92,6 +94,7 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		// The file the session mounts is its own copy (#578), which is what
 		// a worker reads.
 		sessionID, fileID := sess["id"].(string), mountedFileID(t, sess)
+		toolUseID := appendToolUse(t, s, sessionID, domain.EventAgentToolUse)
 		if _, err := queue.New(s.pool).Enqueue(ctx, s.pool, domain.ID(envID), domain.ID(sessionID), queue.ToolExec); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
@@ -99,7 +102,7 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		if err := s.pool.QueryRow(ctx, `SELECT id FROM work_items WHERE session_id = $1 AND kind = 'tool_exec'`, sessionID).Scan(&workID); err != nil {
 			t.Fatalf("read the work item: %v", err)
 		}
-		return world{envID, sessionID, fileID, workID, issueViaConsole(t, s, envID, "lanes-"+kind)}
+		return world{envID, sessionID, fileID, workID, toolUseID, issueViaConsole(t, s, envID, "lanes-"+kind)}
 	}
 	cloud, selfHosted := provision("cloud"), provision("self_hosted")
 
@@ -129,10 +132,9 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		"POST /v1/environments/{id}/work/{work_id}/stop": {body: map[string]any{"force": true},
 			status: http.StatusNotFound, errType: "not_found_error"},
 		// The session lane and the file content download: refused.
-		"GET /v1/sessions/{id}":        refused,
-		"GET /v1/sessions/{id}/events": refused,
-		"POST /v1/sessions/{id}/events": {body: map[string]any{"events": []any{userMessage("from a cloud key")}},
-			status: http.StatusNotFound, errType: "not_found_error", refused: true, selfHostedServed: true},
+		"GET /v1/sessions/{id}":               refused,
+		"GET /v1/sessions/{id}/events":        refused,
+		"POST /v1/sessions/{id}/events":       refused,
 		"GET /v1/sessions/{id}/events/stream": refused,
 		"GET /v1/files/{id}/content": {status: http.StatusNotFound, errType: "not_found_error",
 			refused: true, refusal: "Not found", selfHostedServed: true},
@@ -153,11 +155,18 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 		send := func(w world) (int, map[string]any) {
 			t.Helper()
 			path := fillRoute(template, w.env, w.session, w.file, w.work, skill["id"].(string), skill["latest_version_id"].(string))
+			reqBody := route.body
+			if pattern == "POST /v1/sessions/{id}/events" {
+				reqBody = map[string]any{"events": []any{map[string]any{
+					"type": "user.tool_result", "tool_use_id": w.toolUse,
+					"content": []any{map[string]any{"type": "text", "text": "from worker"}},
+				}}}
+			}
 			// Bounded, because the event stream holds its response open: the
 			// status is all this needs, and it arrives with the headers.
 			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			res, err := s.roundTrip(reqCtx, method, path+route.query, route.body, asBearer(w.key))
+			res, err := s.roundTrip(reqCtx, method, path+route.query, reqBody, asBearer(w.key))
 			if err != nil {
 				t.Fatalf("%s: %v", pattern, err)
 			}
@@ -229,11 +238,11 @@ func TestACloudEnvironmentKeyReachesOnlyWhatTheReferenceServesIt(t *testing.T) {
 	// Nothing the cloud key sent landed: no event on its session, and its
 	// work item is as it was enqueued.
 	var events int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE session_id = $1 AND type = 'user.message'`, cloud.session).Scan(&events); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE session_id = $1 AND type = 'user.tool_result'`, cloud.session).Scan(&events); err != nil {
 		t.Fatalf("count events: %v", err)
 	}
 	if events != 0 {
-		t.Errorf("the cloud session holds %d user.message events after the cloud key's post; want none", events)
+		t.Errorf("the cloud session holds %d user.tool_result events after the cloud key's post; want none", events)
 	}
 	var state string
 	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_items WHERE id = $1`, cloud.work).Scan(&state); err != nil {

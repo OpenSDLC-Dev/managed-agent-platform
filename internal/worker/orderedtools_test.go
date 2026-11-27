@@ -6,11 +6,31 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
+
+func managementClient(t *testing.T, h *harness) sdk.Client {
+	t.Helper()
+	ctx := context.Background()
+	owner := domain.NewID(domain.PrefixPrincipal).String()
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO principals(id,issuer,subject,kind,role) VALUES ($1,'worker-test',$1,'service_account','admin')`,
+		owner); err != nil {
+		t.Fatal(err)
+	}
+	const mgmtKey = "sk-map-worker-test-mgmt-key"
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO api_keys(id,name,owned_key_hash,owner_principal_id,created_by,partial_key_hint) VALUES ($1,'test',$2,$3,$3,'...-key')`,
+		domain.NewID(domain.PrefixAPIKey).String(), apikey.Hash(mgmtKey), owner); err != nil {
+		t.Fatal(err)
+	}
+	return sdk.NewClient(option.WithBaseURL(h.serverURL), option.WithAPIKey(mgmtKey))
+}
 
 func TestWorkerExecutesWhileIdleBeforeCustomReply(t *testing.T) {
 	for _, workerFirst := range []bool{false, true} {
@@ -47,7 +67,8 @@ func TestWorkerExecutesWhileIdleBeforeCustomReply(t *testing.T) {
 			if h.liveModelTurns(t) != 0 {
 				t.Fatal("model resumed before custom reply")
 			}
-			_, err = h.client.Beta.Sessions.Events.Send(ctx, h.sid.String(), sdk.BetaSessionEventSendParams{Events: []sdk.BetaManagedAgentsEventParamsUnion{{OfUserCustomToolResult: &sdk.BetaManagedAgentsUserCustomToolResultEventParams{Type: sdk.BetaManagedAgentsUserCustomToolResultEventParamsTypeUserCustomToolResult, CustomToolUseID: custom[0].ID.String(), Content: []sdk.BetaManagedAgentsUserCustomToolResultEventParamsContentUnion{{OfText: &sdk.BetaManagedAgentsTextBlockParam{Type: sdk.BetaManagedAgentsTextBlockTypeText, Text: "approved"}}}}}}})
+			mgmt := managementClient(t, h)
+			_, err = mgmt.Beta.Sessions.Events.Send(ctx, h.sid.String(), sdk.BetaSessionEventSendParams{Events: []sdk.BetaManagedAgentsEventParamsUnion{{OfUserCustomToolResult: &sdk.BetaManagedAgentsUserCustomToolResultEventParams{Type: sdk.BetaManagedAgentsUserCustomToolResultEventParamsTypeUserCustomToolResult, CustomToolUseID: custom[0].ID.String(), Content: []sdk.BetaManagedAgentsUserCustomToolResultEventParamsContentUnion{{OfText: &sdk.BetaManagedAgentsTextBlockParam{Type: sdk.BetaManagedAgentsTextBlockTypeText, Text: "approved"}}}}}}})
 			if err != nil {
 				t.Fatal(err)
 			}

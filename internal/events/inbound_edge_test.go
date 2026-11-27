@@ -9,11 +9,12 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 )
 
-// norm normalizes under a worker's credential, the one no event type refuses,
-// so a case isolates the rule it is about.
+// norm normalizes under a management credential, which admits every inbound
+// event type except user.tool_result, so wire-shape cases isolate the rule
+// they are about.
 func norm(t *testing.T, envKind string, evs ...string) ([]events.NewEvent, error) {
 	t.Helper()
-	return normAs(t, envKind, events.EnvironmentCredential, evs...)
+	return normAs(t, envKind, events.ManagementCredential, evs...)
 }
 
 func normAs(t *testing.T, envKind string, cred events.Credential, evs ...string) ([]events.NewEvent, error) {
@@ -47,11 +48,14 @@ func TestNormalizeInboundToolResultCredential(t *testing.T) {
 	if _, err := normAs(t, "self_hosted", events.Credential(0), result); !errors.Is(err, events.ErrEnvironmentCredentialRequired) {
 		t.Errorf("zero credential: err = %v, want ErrEnvironmentCredentialRequired", err)
 	}
-	// Every other type is the credential's to send.
+	// Every other type is the management credential's to send.
 	if _, err := normAs(t, "cloud", events.ManagementCredential, msg,
 		`{"type":"user.custom_tool_result","custom_tool_use_id":"c"}`,
 		`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu"}`,
-		`{"type":"user.interrupt"}`); err != nil {
+		`{"type":"user.define_outcome","description":"d","rubric":{"type":"text","content":"r"}}`,
+		`{"type":"user.interrupt"}`,
+		msg,
+		`{"type":"system.message","content":[{"type":"text","text":"sys"}]}`); err != nil {
 		t.Errorf("management batch without a tool_result: %v", err)
 	}
 	_, err := normAs(t, "cloud", events.EnvironmentCredential, result)
@@ -60,6 +64,66 @@ func TestNormalizeInboundToolResultCredential(t *testing.T) {
 	}
 	if _, err := normAs(t, "self_hosted", events.EnvironmentCredential, result); err != nil {
 		t.Errorf("self_hosted, environment credential: %v", err)
+	}
+}
+
+// TestNormalizeInboundManagementOnlyCredential: every inbound event type except
+// user.tool_result requires ManagementCredential. Under an environment
+// credential (a worker's environment key or sessions token) each is refused
+// before its fields are read, with ErrManagementCredentialRequired carrying
+// the event's index and type.
+func TestNormalizeInboundManagementOnlyCredential(t *testing.T) {
+	const result = `{"type":"user.tool_result","tool_use_id":"tu"}`
+	cases := []struct {
+		typ string
+		ev  string
+	}{
+		{"user.tool_confirmation", `{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu"}`},
+		{"user.message", `{"type":"user.message","content":[{"type":"text","text":"hi"}]}`},
+		{"user.interrupt", `{"type":"user.interrupt"}`},
+		{"user.define_outcome", `{"type":"user.define_outcome","description":"d","rubric":{"type":"text","content":"r"}}`},
+		{"user.custom_tool_result", `{"type":"user.custom_tool_result","custom_tool_use_id":"c"}`},
+		{"system.message", `{"type":"system.message","content":[{"type":"text","text":"sys"}]}`},
+	}
+	for _, kind := range []string{"self_hosted", "cloud"} {
+		for _, tc := range cases {
+			_, err := normAs(t, kind, events.EnvironmentCredential, tc.ev)
+			if !errors.Is(err, events.ErrManagementCredentialRequired) ||
+				!strings.HasPrefix(err.Error(), "events[0]: `"+tc.typ+"` ") {
+				t.Errorf("%s, env cred, %s: err = %v, want events[0]: `%s` ErrManagementCredentialRequired", kind, tc.typ, err, tc.typ)
+			}
+		}
+	}
+	// Mixed batch under EnvironmentCredential: a valid user.tool_result ahead
+	// of a management-only event (including system.message, which would
+	// otherwise satisfy the adjacency rule) is refused at index 1.
+	for _, tc := range cases {
+		_, err := normAs(t, "self_hosted", events.EnvironmentCredential, result, tc.ev)
+		if !errors.Is(err, events.ErrManagementCredentialRequired) ||
+			!strings.HasPrefix(err.Error(), "events[1]: `"+tc.typ+"` ") {
+			t.Errorf("mixed batch, env cred, %s: err = %v, want events[1]: `%s` ErrManagementCredentialRequired", tc.typ, err, tc.typ)
+		}
+	}
+	// Refused before fields are read: a malformed management event under an
+	// environment credential draws the credential refusal, not a 400.
+	for _, bad := range []string{
+		`{"type":"user.tool_confirmation","bogus":1}`,
+		`{"type":"user.message","bogus":1}`,
+		`{"type":"user.interrupt","session_thread_id":"sth_bad"}`,
+		`{"type":"user.define_outcome","bogus":1}`,
+		`{"type":"user.custom_tool_result","bogus":1}`,
+		`{"type":"system.message","bogus":1}`,
+	} {
+		if _, err := normAs(t, "self_hosted", events.EnvironmentCredential, bad); !errors.Is(err, events.ErrManagementCredentialRequired) {
+			t.Errorf("malformed %s under env cred: err = %v, want ErrManagementCredentialRequired", bad, err)
+		}
+	}
+	// Unknown credential values fail closed for every event type.
+	if _, err := normAs(t, "self_hosted", events.Credential(99), result); !errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+		t.Errorf("unknown cred, tool_result: err = %v, want ErrEnvironmentCredentialRequired", err)
+	}
+	if _, err := normAs(t, "self_hosted", events.Credential(99), cases[0].ev); !errors.Is(err, events.ErrManagementCredentialRequired) {
+		t.Errorf("unknown cred, tool_confirmation: err = %v, want ErrManagementCredentialRequired", err)
 	}
 }
 
@@ -153,15 +217,20 @@ func TestNormalizeInboundRejections(t *testing.T) {
 // refused.
 func TestNormalizeInboundDropsAnAnswersThreadClaim(t *testing.T) {
 	for _, claim := range []string{`"sth_x"`, `"sesn_x"`, `"sthr_` + strings.Repeat("0", 25) + `"`, `"sthr_01UnknownThreadIdXXXXXXXXX"`} {
-		evs, err := norm(t, "self_hosted",
+		mgmtEvs, err := normAs(t, "self_hosted", events.ManagementCredential,
 			`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","session_thread_id":`+claim+`}`,
-			`{"type":"user.tool_result","tool_use_id":"tu","session_thread_id":`+claim+`}`,
 			`{"type":"user.custom_tool_result","custom_tool_use_id":"c","session_thread_id":`+claim+`}`,
 		)
 		if err != nil {
-			t.Fatalf("claim %s: %v", claim, err)
+			t.Fatalf("claim %s (management): %v", claim, err)
 		}
-		for _, ev := range evs {
+		workerEvs, err := normAs(t, "self_hosted", events.EnvironmentCredential,
+			`{"type":"user.tool_result","tool_use_id":"tu","session_thread_id":`+claim+`}`,
+		)
+		if err != nil {
+			t.Fatalf("claim %s (worker): %v", claim, err)
+		}
+		for _, ev := range append(mgmtEvs, workerEvs...) {
 			if ev.ThreadID != "" {
 				t.Errorf("claim %s: %s carries ThreadID %q out of normalization", claim, ev.Type, ev.ThreadID)
 			}
@@ -182,20 +251,30 @@ func TestNormalizeInboundDropsAnAnswersThreadClaim(t *testing.T) {
 			t.Errorf("%s: err = %v, want the type refusal", ev, err)
 		}
 	}
+	if _, err := normAs(t, "self_hosted", events.EnvironmentCredential,
+		`{"type":"user.tool_result","tool_use_id":"tu","session_thread_id":7}`); err == nil ||
+		err.Error() != "events[0]: session_thread_id must be a string or null" {
+		t.Errorf("tool_result bad session_thread_id: err = %v, want the type refusal", err)
+	}
 }
 
 func TestNormalizeInboundNullHandling(t *testing.T) {
 	// Explicit nulls behave like absence for every nullable field.
-	evs, err := norm(t, "self_hosted",
+	mgmtEvs, err := normAs(t, "self_hosted", events.ManagementCredential,
 		`{"type":"user.interrupt","session_thread_id":null}`,
 		`{"type":"user.tool_confirmation","result":"allow","tool_use_id":"tu","deny_message":null,"session_thread_id":null}`,
+	)
+	if err != nil {
+		t.Fatalf("explicit nulls rejected (management): %v", err)
+	}
+	workerEvs, err := normAs(t, "self_hosted", events.EnvironmentCredential,
 		`{"type":"user.tool_result","tool_use_id":"tu","content":null,"is_error":null,"session_thread_id":null}`,
 	)
 	if err != nil {
-		t.Fatalf("explicit nulls rejected: %v", err)
+		t.Fatalf("explicit nulls rejected (worker): %v", err)
 	}
 	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(evs[2].Payload, &payload); err != nil {
+	if err := json.Unmarshal(workerEvs[0].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"content", "is_error", "session_thread_id"} {
@@ -205,7 +284,7 @@ func TestNormalizeInboundNullHandling(t *testing.T) {
 	}
 
 	// Confirmation with deny and no message: deny_message normalizes to null.
-	if err := json.Unmarshal(evs[1].Payload, &payload); err != nil {
+	if err := json.Unmarshal(mgmtEvs[1].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
 	if string(payload["deny_message"]) != "null" {

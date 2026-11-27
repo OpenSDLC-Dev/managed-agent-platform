@@ -104,8 +104,9 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// user.tool_result is valid only under a worker's credential and only on
-	// self_hosted environments, so the batch is validated against both.
+	// Inbound event types are partitioned by credential: user.tool_result is
+	// valid only under a worker's credential on self_hosted environments, and
+	// every other inbound type requires a management credential.
 	var envKind, status string
 	var envID domain.ID
 	var sessionArchivedAt *time.Time
@@ -129,10 +130,11 @@ func (s *server) sendSessionEvents(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	// A management credential's user.tool_result is the reference's 403, on
-	// every session (#662); the transaction rolls back, so nothing lands.
+	// Credential mismatches answer 403 permission_error: management callers
+	// cannot post user.tool_result (#662), and worker credentials cannot post
+	// any other inbound event type; the transaction rolls back, so nothing lands.
 	newEvents, err := events.NormalizeInbound(envKind, credentialFrom(ctx), rawEvents)
-	if errors.Is(err, events.ErrEnvironmentCredentialRequired) {
+	if errors.Is(err, events.ErrEnvironmentCredentialRequired) || errors.Is(err, events.ErrManagementCredentialRequired) {
 		return nil, errForbidden(err.Error())
 	}
 	if err != nil {
