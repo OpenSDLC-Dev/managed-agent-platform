@@ -7,7 +7,7 @@ Run the whole thing on-prem or in your own VPC — **your data and your compute 
 > **Status: v0.6.0.** A `v*` tag publishes container images and the Helm chart to GHCR. The GitHub Release includes worker binaries and release notes. See [the release process](./docs/RELEASING.md).
 
 The control plane and model gateway require native login configuration. Public
-management APIs authorize an issued key using its owner's current Default workspace grant. Private
+management APIs authorize an issued key using its owner's current grant in the bound workspace. Private
 APIs and gateway administration require browser sessions.
 Gateway inference accepts workspace developer credentials or delegated tokens for an eligible initiator.
 Organization budgets share each public model alias across keys and protocols.
