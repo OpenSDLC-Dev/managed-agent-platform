@@ -83,7 +83,10 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 		return nil, notFound
 	}
 	var kind, status, org string
-	err := tx.QueryRow(r.Context(), `SELECT kind,status,org_id FROM principals WHERE id=$1`, id).Scan(&kind, &status, &org)
+	var issuerRole identity.Role
+	err := tx.QueryRow(r.Context(), `SELECT owner.kind,owner.status,owner.org_id,issuer.role
+		FROM principals owner JOIN principals issuer ON issuer.id=$2 WHERE owner.id=$1`, id, caller.ID).
+		Scan(&kind, &status, &org, &issuerRole)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound
 	}
@@ -99,8 +102,8 @@ func resolveAPIKeyOwner(r *http.Request, tx pgx.Tx, caller identityPrincipal, al
 	if kind != "service_account" {
 		return nil, errForbidden("API keys cannot be created for another user")
 	}
-	if caller.Role != identity.RoleAdmin {
-		return nil, errForbidden("an admin browser session is required to assign a service account")
+	if issuerRole != identity.RoleAdmin {
+		return nil, errForbidden("an organization admin browser session is required to assign a service account")
 	}
 	return &id, requireKeyOwnerGrant(r, tx, id)
 }

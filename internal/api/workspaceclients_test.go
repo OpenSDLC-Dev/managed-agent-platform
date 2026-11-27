@@ -72,10 +72,13 @@ func TestTwoWorkspaceClients(t *testing.T) {
 		t.Fatalf("CLI workspace: %v", grant)
 	}
 	bearer := asBearer(tokens["access_token"].(string))
+	if status, errBody := a.decode(a.doRaw("GET", "/v1/organizations/workspaces?workspace_id="+research, nil, bearer)); status != http.StatusBadRequest {
+		t.Fatalf("unsupported workspace filter: %d %v", status, errBody)
+	}
 	for _, tc := range []struct {
 		suffix string
 		want   int
-	}{{"", 1}, {"?include_default=true", 2}, {"?include_default=true&ids%5B%5D=" + workspace.DefaultPublicID, 1}, {"?include_default=true&ids%5B%5D=missing", 0}} {
+	}{{"", 1}, {"?include_default=true", 2}, {"?include_default=true&ids%5B%5D=" + workspace.DefaultPublicID, 1}, {"?include_default=true&ids%5B%5D=missing", 0}, {"?include_default=true&ids=" + research + "&ids=" + workspace.DefaultPublicID, 2}, {"?include_default=true&ids%5B%5D=" + research + "&ids%5B%5D=" + workspace.DefaultPublicID, 2}} {
 		status, ws := a.decode(a.doRaw("GET", "/v1/organizations/workspaces"+tc.suffix, nil, bearer))
 		if status != 200 || len(listData(t, ws)) != tc.want {
 			t.Errorf("organization workspaces %s %d %v", tc.suffix, status, ws)

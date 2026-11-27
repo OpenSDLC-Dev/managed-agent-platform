@@ -187,6 +187,17 @@ func TestOwnedKeyAssignment(t *testing.T) {
 			})
 		}
 	}
+	t.Run("workspace-admin-service", func(t *testing.T) {
+		manager := seedMember(t, s, "workspace-manager", "user", "console")
+		grantFixture(t, s.pool, manager, "admin")
+		headers := ownedCookie(t, s, manager)
+		issueOwnedHTTP(t, s, headers, "manager-personal", nil)
+		before := ownedSnapshot(t, s)
+		expectManagement(t, s, "POST", consoleAPIKeysPath, fmt.Sprintf(`{"name":"service","principal_id":%q}`, principal.PublicID(sa, "service_account")), headers, 403)
+		if before != ownedSnapshot(t, s) {
+			t.Fatal("workspace administrator issued a service-account key")
+		}
+	})
 	t.Run("developer-service", func(t *testing.T) {
 		before := ownedSnapshot(t, s)
 		expectManagement(t, s, "POST", consoleAPIKeysPath, fmt.Sprintf(`{"name":"refused","principal_id":%q}`, principal.PublicID(sa, "service_account")), ownedCookie(t, s, developer), 403)

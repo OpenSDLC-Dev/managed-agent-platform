@@ -20,9 +20,15 @@ type auditWorkspace struct {
 }
 
 func (s *server) cliWorkspaces(r *http.Request) (any, error) {
-	q, err := managementQuery(r, "after_id", "before_id", "limit", "include_default", "include_archived")
+	singletons := []string{"after_id", "before_id", "limit", "include_default", "include_archived"}
+	q, err := managementQuery(r, singletons...)
 	if err != nil {
 		return nil, err
+	}
+	for key := range q {
+		if key != "ids" && key != "ids[]" && !slices.Contains(singletons, key) {
+			return nil, errInvalid("unsupported workspace query parameter %q", key)
+		}
 	}
 	limit, err := managementLimit(q, 1000)
 	if err != nil {

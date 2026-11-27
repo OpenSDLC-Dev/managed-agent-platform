@@ -454,7 +454,7 @@ Existing key-management paths mirror the reference console's recorded paths;
 
 Private routes accept browser sessions only. API-key and Authorization headers are
 refused, even beside a valid cookie; incidental proxy assertions supply no authority.
-Workspace developers manage their own API keys. Workspace admins also manage other principals' keys and environment keys in that workspace. Organization admins manage membership, service accounts and deployment initiators. Historical
+Workspace developers manage their own API keys. Workspace admins also manage existing key records and environment keys in that workspace. Issuing a service-account key requires an organization admin. Organization admins manage membership, service accounts and deployment initiators. Historical
 preset rows remain immutable. The resource proxy requires developer and preserves
 each resource's role floor. [Security invariants](#security-invariants) describes
 native login, cookie boundaries and public machine credentials.
@@ -476,8 +476,8 @@ CLI consent binds its grant to one active workspace. Owned keys, CLI grants, Pla
 
 ### Default workspace upgrade
 
-The first startup on migration 0071 requires a maintenance window. Drain requests
-and stop the old control planes, gateways, brains, executors and any other process
+Use a maintenance window when crossing migrations 0071, 0072 or 0073. Migration 0073 changes the daily usage key. Drain in-flight Gateway requests and stop every previous Gateway replica before applying it so each completed call is recorded.
+Drain requests and stop the old control planes, gateways, brains, executors and any other process
 that opens this database or authorizes work. Preserve Postgres, object storage and
 their volumes. Take a database backup, start the new control plane to migrate, then
 start the matching workers and gateway before restoring traffic. An old binary
