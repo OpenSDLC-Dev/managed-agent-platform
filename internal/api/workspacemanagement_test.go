@@ -109,7 +109,7 @@ func TestWorkspaceManagementLifecycle(t *testing.T) {
 		t.Errorf("archived key HTTP %d", status)
 	}
 	var ended bool
-	if err := s.pool.QueryRow(t.Context(), `SELECT d.paused_at IS NOT NULL AND w.state='stopped' AND w.lease_expires_at IS NULL FROM deployments d,work_items w WHERE d.id=$1 AND w.id=$2`, dep["id"], wid).Scan(&ended); err != nil || !ended {
+	if err := s.pool.QueryRow(t.Context(), `SELECT d.paused_at IS NOT NULL AND d.paused_kind='error' AND d.paused_error_type='workspace_archived_error' AND d.updated_at=d.paused_at AND w.state='stopped' AND w.lease_expires_at IS NULL FROM deployments d,work_items w WHERE d.id=$1 AND w.id=$2`, dep["id"], wid).Scan(&ended); err != nil || !ended {
 		t.Errorf("archive work cleanup: %v, %v", ended, err)
 	}
 	var closed bool
