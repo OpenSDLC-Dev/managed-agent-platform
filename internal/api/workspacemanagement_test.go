@@ -11,6 +11,36 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
 
+func TestWorkspaceArchivePreservesDeploymentHistory(t *testing.T) {
+	for _, action := range []string{"archive", "pause"} {
+		t.Run(action, func(t *testing.T) {
+			s := newTestServer(t)
+			b := secondWorkspace(t, s)
+			agent, env := readableFixture(t, b)
+			deployment := createDeployment(t, b, deploymentBody(agent, env))["id"].(string)
+			if status, row := b.do("POST", "/v1/deployments/"+deployment+"/"+action, nil); status != http.StatusOK {
+				t.Fatalf("%s deployment: %d %v", action, status, row)
+			}
+			history := func() string {
+				t.Helper()
+				var row string
+				if err := s.pool.QueryRow(t.Context(), `SELECT to_jsonb(d)::text FROM deployments d WHERE id=$1`, deployment).Scan(&row); err != nil {
+					t.Fatal(err)
+				}
+				return row
+			}
+			before := history()
+			const path = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/archive"
+			if status, row := s.doCookie("POST", path, nil); status != http.StatusOK {
+				t.Fatalf("archive workspace: %d %v", status, row)
+			}
+			if history() != before {
+				t.Errorf("workspace archival changed the previously %sd deployment", action)
+			}
+		})
+	}
+}
+
 func TestWorkspaceManagementLifecycle(t *testing.T) {
 	s := newTestServer(t)
 	const path = "/api/console/organizations/default/workspaces"

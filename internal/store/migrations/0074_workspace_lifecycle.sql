@@ -11,7 +11,7 @@ BEGIN
     UPDATE environment_keys SET revoked_at = NEW.archived_at WHERE workspace_id = NEW.id AND revoked_at IS NULL;
     UPDATE deployments SET paused_at = NEW.archived_at, paused_kind = 'error',
         paused_error_type = 'workspace_archived_error', updated_at = NEW.archived_at
-        WHERE workspace_id = NEW.id AND paused_at IS NULL;
+        WHERE workspace_id = NEW.id AND archived_at IS NULL AND paused_at IS NULL;
     UPDATE work_items SET state = 'stopped', stopped_at = NEW.archived_at, updated_at = NEW.archived_at,
         stop_requested_at = coalesce(stop_requested_at, NEW.archived_at), lease_expires_at = NULL
         WHERE workspace_id = NEW.id AND state <> 'stopped';
