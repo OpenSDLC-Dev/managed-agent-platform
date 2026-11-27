@@ -185,6 +185,24 @@ func TestGateConcurrentRequestAndTunnelLimits(t *testing.T) {
 	}
 }
 
+// Signal on the read after the held upload's chunk. The gate has accounted
+// for the previous read by then and the client still holds back the final chunk.
+type heldUploadBody struct {
+	io.ReadCloser
+	remaining int
+	ready     chan struct{}
+}
+
+func (b *heldUploadBody) Read(p []byte) (int, error) {
+	if b.remaining == 0 && b.ready != nil {
+		close(b.ready)
+		b.ready = nil
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= n
+	return n, err
+}
+
 func TestGateAggregateBodyBufferBudget(t *testing.T) {
 	streamStart := make(chan struct{}, 1)
 	releaseStream := make(chan struct{})
@@ -223,7 +241,13 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 			Body:        true,
 		}},
 	})
-	gsrv := httptest.NewServer(g)
+	budgetHeld := make(chan struct{})
+	gsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			r.Body = &heldUploadBody{ReadCloser: r.Body, remaining: 1024, ready: budgetHeld}
+		}
+		g.ServeHTTP(w, r)
+	}))
 	defer gsrv.Close()
 	client := proxyClient(t, gsrv.URL, nil)
 
@@ -235,26 +259,21 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer holdConn.Close()
-	fmt.Fprintf(holdConn, "POST %s/fast HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n%s\r\n",
+	fmt.Fprintf(holdConn, "POST %s/hold HTTP/1.1\r\nHost: %s\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n%s\r\n",
 		origin.URL, host, strings.Repeat("A", 1024))
 
-	// Wait until the gate has read and accounted Request 1's 1024-byte chunk
-	// (observed when a 1024-byte declared POST receives 503). Give loaded CI
-	// runners headroom to schedule Request 1's handler goroutine.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		probe, err := client.Post(origin.URL+"/fast", "text/plain", strings.NewReader(strings.Repeat("B", 1024)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		probe.Body.Close()
-		if probe.StatusCode == http.StatusServiceUnavailable {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("aggregate budget never observed Request 1's 1024-byte chunk; last status = %d", probe.StatusCode)
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-budgetHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gate did not finish reading the held chunk")
+	}
+	probe, err := client.Post(origin.URL+"/fast", "text/plain", strings.NewReader(strings.Repeat("B", 1024)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Body.Close()
+	if probe.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("over-budget declared body status = %d, want 503", probe.StatusCode)
 	}
 
 	// Request 3 (chunked, unknown Content-Length -1) exceeds remaining budget while reading → 503.
@@ -372,7 +391,7 @@ func TestGateAggregateBodyBufferBudget(t *testing.T) {
 	}()
 	waitSignal(t, streamStart, streamErrs, "streaming origin")
 
-	deadline = time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for {
 		r2, err := client.Post(origin.URL+"/fast", "text/plain", strings.NewReader(strings.Repeat("G", 1024)))
 		if err != nil {
