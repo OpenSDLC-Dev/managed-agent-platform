@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 )
 
 func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
@@ -57,6 +58,55 @@ func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
 	}
 	if status, _ := s.doCookie("GET", defaultOwners+"?limit=1&page="+orgCursor, nil); status != http.StatusBadRequest {
 		t.Fatalf("organization directory cursor in Default returned HTTP %d", status)
+	}
+}
+
+func TestWorkspaceArchiveDuringWorkerSettlement(t *testing.T) {
+	s := newTestServer(t)
+	b := secondWorkspace(t, s)
+	agent, env := readableFixture(t, b)
+	status, row := b.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create session: %d %v", status, row)
+	}
+	sid := domain.ID(row["id"].(string))
+	ctx := t.Context()
+	settle, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer settle.Rollback(ctx)
+	// A driver appends its results under the session lock and enqueues the next turn in this transaction.
+	if _, err := settle.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, sid.String()); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		status, _ := s.doCookie("POST", "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/archive", nil)
+		done <- status
+	}()
+	waitForWorkspaceLock(t, s.pool, int(settle.Conn().PgConn().PID()))
+	created, err := queue.New(s.pool).EnqueueThread(ctx, settle, domain.ID(env), sid, "", queue.ModelTurn)
+	if err != nil || !created {
+		t.Fatalf("worker settlement enqueue: created=%v, err=%v", created, err)
+	}
+	// The archive has released its registry lock. This new session must be picked up on the retry.
+	status, late := b.do("POST", "/v1/sessions", map[string]any{"agent": agent, "environment_id": env})
+	if status != http.StatusOK {
+		t.Fatalf("create concurrent session: %d %v", status, late)
+	}
+	if err := settle.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	awaitWorkspaceStatus(t, done, http.StatusOK)
+	var closed bool
+	if err := s.pool.QueryRow(ctx, `SELECT s.status='terminated' AND w.state='stopped' AND ws.archived_at IS NOT NULL
+ FROM sessions s JOIN work_items w ON w.session_id=s.id JOIN workspaces ws ON ws.id=s.workspace_id
+ WHERE s.id=$1 AND w.kind='model_turn'`, sid.String()).Scan(&closed); err != nil || !closed {
+		t.Fatalf("archival lost the settled work or failed to close it: %v %v", closed, err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT status='terminated' FROM sessions WHERE id=$1`, late["id"]).Scan(&closed); err != nil || !closed {
+		t.Fatalf("session admitted while waiting was not closed: %v %v", closed, err)
 	}
 }
 

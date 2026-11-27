@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"errors"
@@ -171,26 +172,14 @@ func (s *server) archiveWorkspace(r *http.Request) (any, error) {
 	if err := emptyWorkspaceMutation(r); err != nil {
 		return nil, err
 	}
-	tx, _, err := s.beginPrincipalMutation(r)
+	ctx := r.Context()
+	space := workspace.ID(ctx)
+	tx, err := s.beginWorkspaceArchive(r, space)
 	if err != nil {
 		return nil, err
 	}
-	ctx := r.Context()
 	defer tx.Rollback(ctx)
-	space := workspace.ID(ctx)
-	if space == workspace.Default {
-		return nil, errInvalid("Default workspace cannot be archived")
-	}
-	// Take the workspace write fence before sessions, then retire leases. A request
-	// already holding the fence finishes before we enumerate its sessions.
-	var locked string
-	if err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, space).Scan(&locked); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errWorkspaceNotFound
-		}
-		return nil, err
-	}
-	rows, err := tx.Query(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND archived_at IS NULL AND status<>'terminated' ORDER BY id FOR UPDATE`, space)
+	rows, err := tx.Query(ctx, `SELECT id FROM sessions WHERE workspace_id=$1 AND archived_at IS NULL AND status<>'terminated' ORDER BY id`, space)
 	if err != nil {
 		return nil, err
 	}
@@ -234,6 +223,56 @@ func (s *server) archiveWorkspace(r *http.Request) (any, error) {
 		events.RecordSessionStatus(ctx, status)
 	}
 	return w, nil
+}
+
+// A worker holds its session while acquiring the workspace fence to enqueue its next turn.
+// When a session is busy, release all archive locks before waiting for that worker, then
+// recheck the caller and enumerate again so newly committed sessions are included.
+func (s *server) beginWorkspaceArchive(r *http.Request, space string) (pgx.Tx, error) {
+	ctx := r.Context()
+	for {
+		tx, _, err := s.beginPrincipalMutation(r)
+		if err != nil {
+			return nil, err
+		}
+		busy, err := lockArchiveSessions(ctx, tx, space)
+		if err == nil && busy == "" {
+			return tx, nil
+		}
+		_ = tx.Rollback(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.pool.Exec(ctx, `SELECT id FROM sessions WHERE id=$1 FOR UPDATE`, busy); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func lockArchiveSessions(ctx context.Context, tx pgx.Tx, space string) (string, error) {
+	if space == workspace.Default {
+		return "", errInvalid("Default workspace cannot be archived")
+	}
+	var id string
+	if err := tx.QueryRow(ctx, `SELECT id FROM workspaces WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, space).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", errWorkspaceNotFound
+		}
+		return "", err
+	}
+	// Closed sessions can still have a final harvest in flight.
+	err := tx.QueryRow(ctx, `WITH targets AS MATERIALIZED (
+		SELECT s.id FROM sessions s WHERE s.workspace_id=$1 AND (
+			(s.archived_at IS NULL AND s.status<>'terminated') OR EXISTS (
+				SELECT FROM work_items w WHERE w.session_id=s.id AND w.state<>'stopped'))
+	), locked AS (
+		SELECT s.id FROM sessions s JOIN targets t ON t.id=s.id FOR UPDATE OF s SKIP LOCKED
+	)
+	SELECT id FROM targets EXCEPT SELECT id FROM locked LIMIT 1`, space).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 type workspaceMember struct {
