@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -10,6 +11,45 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
 )
+
+func TestWorkspaceKeyOwnerDirectory(t *testing.T) {
+	s := newTestServer(t)
+	secondWorkspace(t, s)
+	const path = "/api/console/organizations/default/workspaces/wrkspc_00000000000000000000000002/service_accounts"
+	// Only service accounts with resource grants in Research are eligible.
+	for i, role := range []string{"developer", "limited_developer", "user", ""} {
+		raw := ownedPrincipalFixture(t, s.pool, "service_account", "developer")
+		if role != "" {
+			if _, err := s.pool.Exec(t.Context(), `INSERT INTO workspace_memberships VALUES ('research',$1,$2)`, raw, role); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := s.pool.Exec(t.Context(), `UPDATE principals SET display_name=$2 WHERE id=$1`, raw, fmt.Sprintf("Worker %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstStatus, first := s.doCookie("GET", path+"?limit=1", nil)
+	if firstStatus != 200 {
+		t.Fatalf("directory HTTP %d", firstStatus)
+	}
+	rows := listData(t, first)
+	cursor, _ := first["next_page"].(string)
+	if len(rows) != 1 || cursor == "" {
+		t.Fatalf("first page %v", first)
+	}
+	st, next := s.doCookie("GET", path+"?limit=1&page="+cursor, nil)
+	if st != 200 || len(listData(t, next)) != 1 || next["next_page"] != nil {
+		t.Fatalf("next page: %d %v", st, next)
+	}
+	firstRow, secondRow := rows[0], listData(t, next)[0]
+	names := map[any]bool{firstRow["name"]: true, secondRow["name"]: true}
+	if !names["Worker 0"] || !names["Worker 1"] || len(firstRow) != 2 || len(secondRow) != 2 {
+		t.Fatalf("unexpected workspace directory fields or membership: %v %v", firstRow, secondRow)
+	}
+	if status, _ := s.doCookie("GET", "/api/console/organizations/default/workspaces/default/service_accounts?limit=1&page="+cursor, nil); status == 200 {
+		t.Fatal("accepted a foreign workspace cursor")
+	}
+}
 
 func TestWorkspaceArchivePreservesDeploymentHistory(t *testing.T) {
 	for _, action := range []string{"archive", "pause"} {

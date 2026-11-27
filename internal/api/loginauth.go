@@ -129,7 +129,7 @@ func (s *server) requireCookie(next *http.ServeMux) http.Handler {
 					role = identity.RoleAdmin
 				}
 			}
-		case consoleWorkspacePath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath:
+		case consoleWorkspacePath, consoleWorkspaceKeyOwnersPath, consoleWorkspaceMembersPath, consoleWorkspaceMemberPath:
 			role = session.WorkspaceRole.ResourceRole()
 		case consoleAPIKeysPath, consoleOrgAPIKeyPath, consoleAPIKeyPath:
 			role = keyManagerRole(session)

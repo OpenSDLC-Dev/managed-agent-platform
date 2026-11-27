@@ -332,6 +332,7 @@ var consoleRoutePaths = map[string]string{
 	"consoleRevokePath":                "/api/oauth/organizations/default/environments/{id}/tokens/{token_id}/revoke",
 	"consoleWorkspacesPath":            "/api/console/organizations/default/workspaces",
 	"consoleWorkspaceArchivePath":      "/api/console/organizations/default/workspaces/default/archive",
+	"consoleWorkspaceKeyOwnersPath":    "/api/console/organizations/default/workspaces/default/service_accounts",
 	"consoleWorkspaceMembersPath":      "/api/console/organizations/default/workspaces/default/members",
 	"consoleWorkspaceMemberPath":       "/api/console/organizations/default/workspaces/default/members/{member_id}",
 	"consoleWorkspacePath":             "/api/console/organizations/default/workspaces/default",

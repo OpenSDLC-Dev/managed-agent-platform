@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
@@ -18,10 +19,11 @@ import (
 )
 
 const (
-	consoleWorkspaceArchivePath = consoleWorkspacePath + "/archive"
-	consoleWorkspaceMembersPath = consoleWorkspacePath + "/members"
-	consoleWorkspaceMemberPath  = consoleWorkspaceMembersPath + "/{member_id}"
-	workspaceColumns            = "public_id, name, created_at, archived_at, display_color"
+	consoleWorkspaceArchivePath   = consoleWorkspacePath + "/archive"
+	consoleWorkspaceKeyOwnersPath = consoleWorkspacePath + "/service_accounts"
+	consoleWorkspaceMembersPath   = consoleWorkspacePath + "/members"
+	consoleWorkspaceMemberPath    = consoleWorkspaceMembersPath + "/{member_id}"
+	workspaceColumns              = "public_id, name, created_at, archived_at, display_color"
 )
 
 var displayColor = regexp.MustCompile("^#[0-9a-fA-F]{6}$")
@@ -240,6 +242,67 @@ type workspaceMember struct {
 	Name      string `json:"name"`
 	Role      string `json:"role"`
 	Inherited bool   `json:"inherited"`
+}
+
+// workspaceKeyOwners lists eligible service accounts without organization directory metadata.
+func (s *server) workspaceKeyOwners(r *http.Request) (any, error) {
+	if err := consoleOrganization(r); err != nil {
+		return nil, err
+	}
+	q, err := managementQuery(r, "page", "limit")
+	if err != nil {
+		return nil, err
+	}
+	for key := range q {
+		if key != "page" && key != "limit" {
+			return nil, errInvalid("unsupported key-owner query parameter %q", key)
+		}
+	}
+	space := workspace.ID(r.Context())
+	p, err := parsePageWith(space, q, 20, 100)
+	if err != nil {
+		return nil, err
+	}
+	var at *time.Time
+	var id string
+	if p.cur != nil {
+		if p.cur.foreignToTime(cursorServiceAccounts) || p.cur.dir != dirNext || !domain.WellFormedID(p.cur.id, domain.PrefixPrincipal) {
+			return nil, errPageCursor
+		}
+		at, id = &p.cur.t, p.cur.id
+	}
+	rows, err := s.pool.Query(r.Context(), `SELECT p.id,coalesce(nullif(p.display_name,''),p.subject),p.created_at FROM principals p
+ WHERE p.org_id='default' AND p.kind='service_account' AND p.status='active'
+ AND workspace_role(p.id,$1) IN ('limited_developer','developer','admin')
+ AND ($2::timestamptz IS NULL OR (p.created_at,p.id)<($2,$3)) ORDER BY p.created_at DESC,p.id DESC LIMIT $4`, space, at, id, p.limit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type candidate struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	page := struct {
+		Data []candidate `json:"data"`
+		Next *string     `json:"next_page"`
+	}{Data: []candidate{}}
+	var lastID string
+	var lastTime time.Time
+	for rows.Next() {
+		if len(page.Data) == p.limit {
+			next := encodeTimeCursor(space, cursorServiceAccounts, dirNext, lastTime, lastID)
+			page.Next = &next
+			break
+		}
+		var item candidate
+		if err := rows.Scan(&lastID, &item.Name, &lastTime); err != nil {
+			return nil, err
+		}
+		item.ID = principal.PublicID(lastID, "service_account")
+		page.Data = append(page.Data, item)
+	}
+	return page, rows.Err()
 }
 
 func (s *server) workspaceMembers(r *http.Request) (any, error) {
