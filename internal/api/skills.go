@@ -19,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -164,7 +165,7 @@ var errSkillVersionMiss = errors.New("skill version slot resolves to no version"
 func (s *server) skillVersionNotFound(ctx context.Context, skillID, slot string) error {
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM skills WHERE id = $1)`, skillID).Scan(&exists); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM skills WHERE id = $1 AND (workspace_id = $2 OR source = 'anthropic'))`, skillID, workspace.ID(ctx)).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {
@@ -184,7 +185,7 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 	case slot == skills.LatestAlias:
 		var latest *string
 		err := s.pool.QueryRow(ctx,
-			`SELECT latest_version FROM skills WHERE id = $1`, skillID).Scan(&latest)
+			`SELECT latest_version FROM skills WHERE (skills.workspace_id = $2 OR skills.source = 'anthropic') AND id = $1`, skillID, workspace.ID(ctx)).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && latest == nil) {
 			return "", errSkillVersionMiss
 		}
@@ -195,8 +196,9 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 	case skillVersionIDRe.MatchString(slot):
 		var version string
 		err := s.pool.QueryRow(ctx,
-			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,
-			skillID, slot).Scan(&version)
+			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+			skillID, slot, workspace.ID(ctx)).Scan(&version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errSkillVersionMiss
 		}
@@ -209,45 +211,10 @@ func (s *server) resolveSkillVersion(ctx context.Context, skillID, slot string) 
 	}
 }
 
-// checkAnthropicSkillRefs refuses, at agent create, a `type: "anthropic"`
-// skills entry that names nothing, as the reference was recorded refusing one
-// (2026-09-02 batch2 #419 `agent.create.skill-ref.anthropic-version-1`, "Agent
-// has invalid configuration: `skill_id` `xlsx` version `1` not found"; #421
-// `.anthropic-unknown-id`, "… `skill_id` `no-such-skill` not found"). The
-// two sentences part on whether the entry names a version: one that does is
-// the version's miss, whatever is missing (2026-09-04 batch1 #110, `latest` on
-// a deleted skill), and one that does not is the skill's. raw is the
-// request's `skills`, already shape-checked by parseSkills, so an absent
-// version is still told apart from an explicit "latest", entry by entry.
-//
-// An entry naming one of the reference's own prebuilt skills
-// (skills.IsReferencePrebuilt) is checked for its version's form alone, a
-// version of none (skills.PinNone) taking the version's sentence. This
-// platform cannot know the reference's versions of those skills: its catalog
-// holds what the operator imported, if anything, under versions the import
-// mints, so a version the reference minted, or a skill never imported, would
-// be refused although the reference accepts it. Such an entry is accepted,
-// with one Warn per create for the ones this catalog does not resolve, and
-// left to resolve or not at materialization. That accepts #419's own `xlsx`
-// at version `1`, a deliberate divergence (docs/DIVERGENCES.md). Every other
-// anthropic entry is checked against this catalog as recorded: the skill
-// looked up by id whatever its source, as the reference accepted an anthropic
-// entry naming a custom skill's id (2026-09-04 batch1 #104), its version
-// resolved as a stored pin is (skills.ClassifyPin), so an unknown id and an
-// unresolvable version of a skill this catalog holds — a custom one an
-// anthropic entry names included — are both refused. A custom entry is not
-// checked at all, though the reference refuses one the same way: that
-// permissiveness is registered too and is #78's to settle. Only agent create
-// was recorded checking, so neither an agent update nor a session override
-// runs this.
-//
-// The check is a read, best-effort against a concurrent delete: a skill or
-// version deleted between it and the create's commit leaves the agent
-// holding a dangling reference, which materialization skips as it skips one a
-// later delete leaves (errSkillNotFound in the executor). It takes no lock,
-// so an agent create never waits on a version upload or an import, both of
-// which hold the skill row while they store an archive.
-func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage) error {
+// validateSkillRefs resolves pins against this workspace and the public Anthropic
+// catalog before storing a definition or a session snapshot. An unimported
+// reference prebuilt may still materialize later when the operator imports it.
+func validateSkillRefs(ctx context.Context, tx querier, raw json.RawMessage) error {
 	if raw == nil || isNull(raw) {
 		return nil
 	}
@@ -261,16 +228,14 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 	}
 	type entry struct {
 		skillID, version string
+		builtin          bool
 		form             skills.PinForm
 		named            bool // the request supplied the version
 		resolves         bool
 	}
 	var checked []entry
 	for _, r := range refs {
-		if r.Type != "anthropic" {
-			continue
-		}
-		e := entry{skillID: r.SkillID, version: skills.LatestAlias}
+		e := entry{skillID: r.SkillID, version: skills.LatestAlias, builtin: r.Type == "anthropic" && skills.IsReferencePrebuilt(r.SkillID)}
 		if r.Version != nil && *r.Version != "" {
 			e.version, e.named = *r.Version, true
 		}
@@ -292,11 +257,11 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 		rows, err := tx.Query(ctx,
 			`SELECT r.ord FROM unnest($1::int[], $2::text[], $3::text[], $4::int[]) AS r(ord, skill_id, version, form)
 			   JOIN skills s ON s.id = r.skill_id
-			  WHERE EXISTS (SELECT 1 FROM skill_versions v WHERE v.skill_id = s.id AND
+			  WHERE (s.workspace_id = $7 OR s.source = 'anthropic') AND EXISTS (SELECT 1 FROM skill_versions v WHERE v.skill_id = s.id AND
 			          CASE r.form WHEN $5 THEN v.version = s.latest_version
 			                      WHEN $6 THEN v.id = r.version
 			                      ELSE v.version = r.version END)`,
-			ords, ids, versions, forms, int32(skills.PinLatest), int32(skills.PinID))
+			ords, ids, versions, forms, int32(skills.PinLatest), int32(skills.PinID), workspace.ID(ctx))
 		if err != nil {
 			return err
 		}
@@ -316,7 +281,7 @@ func checkAnthropicSkillRefs(ctx context.Context, tx pgx.Tx, raw json.RawMessage
 	for _, e := range checked {
 		switch {
 		case e.resolves:
-		case skills.IsReferencePrebuilt(e.skillID) && e.form != skills.PinNone:
+		case e.builtin && e.form != skills.PinNone:
 			if !slices.Contains(unresolved, e.skillID) {
 				unresolved = append(unresolved, e.skillID)
 			}
@@ -455,7 +420,7 @@ func (s *server) createSkill(r *http.Request) (any, error) {
 // last. The only orphan window is a failed commit after a successful put,
 // cleaned best-effort.
 func (s *server) insertSkill(ctx context.Context, id, vid, displayName, version string, bundle *skills.Bundle) (time.Time, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -464,9 +429,9 @@ func (s *server) insertSkill(ctx context.Context, id, vid, displayName, version 
 	// display_title is the 0007 column name; only the wire field was renamed
 	// to display_name (migration 0033 says why the column keeps its spelling).
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO skills (id, source, display_title, latest_version)
-		 VALUES ($1, 'custom', $2, $3) RETURNING created_at`,
-		id, displayName, version).Scan(&createdAt); err != nil {
+		`INSERT INTO skills (workspace_id, id, source, display_title, latest_version)
+		 VALUES ($4, $1, 'custom', $2, $3) RETURNING created_at`,
+		id, displayName, version, workspace.ID(ctx)).Scan(&createdAt); err != nil {
 		return time.Time{}, err
 	}
 	if _, err := tx.Exec(ctx,
@@ -499,7 +464,7 @@ func (s *server) getSkill(r *http.Request) (any, error) {
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT s.display_title, `+skillLatestVersionIDExpr+`, s.source, s.created_at, s.updated_at
-		 FROM skills s WHERE s.id = $1`, id).
+		 FROM skills s WHERE (s.workspace_id = $2 OR s.source = 'anthropic') AND s.id = $1`, id, workspace.ID(ctx)).
 		Scan(&displayName, &latestVersionID, &source, &createdAt, &updatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errSkillNotFound(id)
@@ -532,8 +497,8 @@ func (s *server) listSkills(r *http.Request) (any, error) {
 	}
 
 	query := `SELECT s.id, s.display_title, ` + skillLatestVersionIDExpr +
-		`, s.source, s.created_at, s.updated_at FROM skills s WHERE true`
-	var args []any
+		`, s.source, s.created_at, s.updated_at FROM skills s WHERE (s.workspace_id = $1 OR s.source = 'anthropic')`
+	args := []any{workspace.ID(ctx)}
 	if source != "" {
 		args = append(args, source)
 		query += fmt.Sprintf(` AND s.source = $%d`, len(args))
@@ -604,6 +569,9 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockResourceWrite(ctx, tx); err != nil {
+		return nil, err
+	}
 	// Lock the parent row before reading its versions, as insertSkillVersion
 	// and deleteSkillVersion do: a concurrent version create then blocks here,
 	// so the set this delete sweeps cannot grow behind it and strand an archive
@@ -612,7 +580,7 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	// The imported anthropic catalog is not API-manageable (its versions
 	// already refuse create); an accidental DELETE must not empty it.
 	var source string
-	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&source); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE (skills.workspace_id = $2 OR skills.source = 'anthropic') AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&source); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errSkillNotFound(id)
 		}
@@ -639,7 +607,7 @@ func (s *server) deleteSkill(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM skills WHERE id = $1`, id); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM skills WHERE skills.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)); err != nil {
 		return nil, err
 	}
 	// Every version's archive, owed by the commit that removes the rows naming
@@ -676,7 +644,7 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 	}
 	// Resolve the skill before touching the (potentially large) body.
 	var source string
-	err := s.pool.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1`, id).Scan(&source)
+	err := s.pool.QueryRow(ctx, `SELECT source FROM skills WHERE (skills.workspace_id = $2 OR skills.source = 'anthropic') AND id = $1`, id, workspace.ID(ctx)).Scan(&source)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errSkillNotFound(id)
 	}
@@ -738,13 +706,13 @@ func (s *server) createSkillVersion(r *http.Request) (any, error) {
 // traffic and can never overwrite or delete the winner's archive — put before
 // commit, commit last.
 func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string, bundle *skills.Bundle) (time.Time, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var have string
-	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&have); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM skills WHERE (skills.workspace_id = $2 OR skills.source = 'anthropic') AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&have); err != nil {
 		return time.Time{}, err // pgx.ErrNoRows when the skill vanished
 	}
 	// The frontmatter name is one skill's forever, and a version that renames
@@ -788,10 +756,10 @@ func (s *server) insertSkillVersion(ctx context.Context, id, vid, version string
 	// winner's newer latest_version.
 	if _, err := tx.Exec(ctx,
 		`UPDATE skills SET latest_version = $2, updated_at = now()
-		 WHERE id = $1 AND (latest_version IS NULL
+		 WHERE skills.workspace_id = $3 AND id = $1 AND (latest_version IS NULL
 		   OR length($2::text) > length(latest_version)
 		   OR (length($2::text) = length(latest_version) AND $2 > latest_version))`,
-		id, version); err != nil {
+		id, version, workspace.ID(ctx)); err != nil {
 		return time.Time{}, err
 	}
 	key := skillBlobKey(id, version)
@@ -819,7 +787,7 @@ func (s *server) listSkillVersions(r *http.Request) (any, error) {
 	}
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM skills WHERE id = $1)`, id).Scan(&exists); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM skills WHERE id = $1 AND (workspace_id = $2 OR source = 'anthropic'))`, id, workspace.ID(ctx)).Scan(&exists); err != nil {
 		return nil, err
 	}
 	if !exists {
@@ -900,7 +868,8 @@ func (s *server) getSkillVersion(r *http.Request) (any, error) {
 	)
 	err = s.pool.QueryRow(ctx,
 		`SELECT id, name, description, created_at FROM skill_versions
-		 WHERE skill_id = $1 AND version = $2`, id, version).
+		 WHERE skill_id = $1 AND version = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`, id, version, workspace.ID(ctx)).
 		Scan(&vid, &name, &description, &createdAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, s.skillVersionNotFound(ctx, id, slot)
@@ -935,13 +904,16 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockResourceWrite(ctx, tx); err != nil {
+		return nil, err
+	}
 	// Lock the parent row before touching versions, mirroring
 	// insertSkillVersion: without it, a delete blocked behind a concurrent
 	// version create would recompute latest_version on a pre-create snapshot
 	// (READ COMMITTED evaluates the subquery against the statement snapshot)
 	// and could blank latest_version while a live version exists.
 	var source string
-	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE id = $1 FOR UPDATE`, id).Scan(&source); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT source FROM skills WHERE (skills.workspace_id = $2 OR skills.source = 'anthropic') AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&source); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errSkillNotFound(id)
 		}
@@ -983,7 +955,7 @@ func (s *server) deleteSkillVersion(r *http.Request) (any, error) {
 		`UPDATE skills SET latest_version = (
 		    SELECT version FROM skill_versions WHERE skill_id = $1
 		    ORDER BY length(version) DESC, version DESC LIMIT 1
-		 ), updated_at = now() WHERE id = $1`, id); err != nil {
+		 ), updated_at = now() WHERE id = $1 AND workspace_id = $2`, id, workspace.ID(ctx)); err != nil {
 		return nil, err
 	}
 	// The archive, owed by the commit that removes the row naming it. The
@@ -1071,8 +1043,9 @@ func (s *server) downloadSkillVersion(w http.ResponseWriter, r *http.Request) {
 		sha  *string
 	)
 	err = s.pool.QueryRow(ctx,
-		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-		id, version).Scan(&name, &sha)
+		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+		id, version, workspace.ID(ctx)).Scan(&name, &sha)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, errSkillNotFound(id))
 		return

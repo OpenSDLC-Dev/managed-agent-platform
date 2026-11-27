@@ -311,8 +311,8 @@ func (s *server) createSetupLocalAdmin(r *http.Request) (string, error) {
 		return "", errInvalid("invalid or expired setup code")
 	}
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(ctx, `INSERT INTO principals(id,issuer,subject,role,role_source,workspace_grants_initialized)
-		VALUES ($1,$2,$3,'admin','console',true)`, id, login.LocalIssuer, name)
+	_, err = tx.Exec(ctx, `INSERT INTO principals(id,issuer,subject,role,role_source)
+		VALUES ($1,$2,$3,'admin','console')`, id, login.LocalIssuer, name)
 	var pe *pgconn.PgError
 	if errors.As(err, &pe) && pe.Code == "23505" {
 		return "", errConflict("this login name is unavailable")

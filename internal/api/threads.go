@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -201,14 +202,14 @@ func (s *server) listThreads(r *http.Request) (any, error) {
 // through the join, nothing else).
 func loadThread(ctx context.Context, db querier, sessionID, threadID string, forUpdate bool) (threadRow, error) {
 	q := `SELECT ` + threadColumns + ` FROM session_threads t JOIN sessions s ON s.id = t.session_id
-	 WHERE t.session_id = $1 AND t.id = $2`
+	 WHERE t.session_id = $1 AND t.id = $2 AND s.workspace_id = $3`
 	if forUpdate {
 		q += ` FOR UPDATE OF t`
 	}
-	row, err := scanThread(db.QueryRow(ctx, q, sessionID, threadID))
+	row, err := scanThread(db.QueryRow(ctx, q, sessionID, threadID, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		var n int
-		if err := db.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1`, sessionID).Scan(&n); errors.Is(err, pgx.ErrNoRows) {
+		if err := db.QueryRow(ctx, `SELECT 1 FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, sessionID, workspace.ID(ctx)).Scan(&n); errors.Is(err, pgx.ErrNoRows) {
 			return threadRow{}, errNotFound("session %s not found", sessionID)
 		} else if err != nil {
 			return threadRow{}, err
@@ -266,7 +267,7 @@ func (s *server) archiveThread(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +345,7 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 		opts.Then = func(ctx context.Context, tx pgx.Tx) error {
 			var envID string
 			if err := tx.QueryRow(ctx,
-				`SELECT environment_id FROM sessions WHERE id = $1`, sid.String()).Scan(&envID); err != nil {
+				`SELECT environment_id FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, sid.String(), workspace.ID(ctx)).Scan(&envID); err != nil {
 				return err
 			}
 			_, err := s.queue.Enqueue(ctx, tx, domain.ID(envID), sid, queue.ModelTurn)
@@ -358,7 +359,7 @@ func (s *server) notifyThreadArchived(ctx context.Context, tx pgx.Tx, row thread
 // lockSession takes the session row lock (404 when the session is gone).
 func (s *server) lockSession(ctx context.Context, tx pgx.Tx, id string) error {
 	var one int
-	err := tx.QueryRow(ctx, `SELECT 1 FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&one)
+	err := tx.QueryRow(ctx, `SELECT 1 FROM sessions WHERE sessions.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("session %s not found", id)
 	}
@@ -510,8 +511,8 @@ func terminateLiveChildren(ctx context.Context, tx pgx.Tx, log *events.Log, sess
 // creation order. The session row is the caller's to lock first.
 func liveChildThreads(ctx context.Context, tx pgx.Tx, sessionID string) ([]threadRow, error) {
 	rows, err := tx.Query(ctx, `SELECT `+threadColumns+` FROM session_threads t JOIN sessions s ON s.id = t.session_id
-	 WHERE t.session_id = $1 AND t.parent_thread_id IS NOT NULL AND t.archived_at IS NULL
-	 ORDER BY t.created_at, t.id FOR UPDATE OF t`, sessionID)
+	 WHERE t.session_id = $1 AND s.workspace_id = $2 AND t.parent_thread_id IS NOT NULL AND t.archived_at IS NULL
+	 ORDER BY t.created_at, t.id FOR UPDATE OF t`, sessionID, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}

@@ -310,8 +310,8 @@ func (s *server) createMember(r *http.Request) (any, error) {
 	}
 	defer tx.Rollback(r.Context())
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,display_name,role,created_by,workspace_grants_initialized)
-		VALUES ($1,$2,$3,$4,$5,$6,true)`, id, login.LocalIssuer, name, display, role, actor.PrincipalID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,display_name,role,created_by)
+		VALUES ($1,$2,$3,$4,$5,$6)`, id, login.LocalIssuer, name, display, role, actor.PrincipalID)
 	if err := principalNameConflict(err); err != nil {
 		return nil, err
 	}

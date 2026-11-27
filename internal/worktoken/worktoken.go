@@ -62,10 +62,11 @@ type DB interface {
 // requested more than queue.WindDown ago: its worker has only the stop left
 // to finish, so the lane admits it on the item's heartbeat and stop alone.
 type Principal struct {
-	WorkID        string
-	SessionID     string
-	EnvironmentID string
-	StopOnly      bool
+	WorkspaceID, WorkspacePublicID string
+	WorkID                         string
+	SessionID                      string
+	EnvironmentID                  string
+	StopOnly                       bool
 }
 
 // Mint issues the token for workID's claim of sessionID's item and stores its
@@ -120,18 +121,19 @@ func Secret(token string) string {
 func Authenticate(ctx context.Context, pool *pgxpool.Pool, token string) (Principal, error) {
 	var p Principal
 	err := pool.QueryRow(ctx,
-		`SELECT t.work_id, t.session_id, w.environment_id,
-		        w.state = 'stopping' AND w.stop_requested_at <= now() - make_interval(secs => $2)
+		`SELECT t.work_id, t.session_id, w.environment_id, ws.id, ws.public_id,
+		        ws.archived_at IS NOT NULL OR (w.state = 'stopping' AND w.stop_requested_at <= now() - make_interval(secs => $2))
 		   FROM work_session_tokens t
 		   JOIN work_items w ON w.id = t.work_id AND w.session_id = t.session_id
-		   JOIN sessions s ON s.id = t.session_id
+		   JOIN sessions s ON s.id = t.session_id AND s.workspace_id = w.workspace_id
+		   JOIN workspaces ws ON ws.id=s.workspace_id
 		  WHERE t.token_hash = $1
 		    AND CASE w.state
 		             WHEN 'stopping' THEN true
 		             WHEN 'stopped' THEN w.stop_requested_at > now() - make_interval(secs => $2)
 		             ELSE w.lease_expires_at > now() END
 		    AND s.archived_at IS NULL`,
-		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID, &p.StopOnly)
+		gatetoken.HashToken(token), queue.WindDown.Seconds()).Scan(&p.WorkID, &p.SessionID, &p.EnvironmentID, &p.WorkspaceID, &p.WorkspacePublicID, &p.StopOnly)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, nil
 	}

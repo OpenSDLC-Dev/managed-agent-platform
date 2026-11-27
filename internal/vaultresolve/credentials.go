@@ -10,6 +10,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/egress"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // Credential is one resolved environment_variable credential ready for the
@@ -149,8 +150,8 @@ func winnersFor(ctx context.Context, q Querier, vaultIDs []string) ([]credRow, e
 		    FROM vault_credentials c
 		    JOIN vaults v ON v.id = c.vault_id
 		  WHERE c.vault_id = ANY($1) AND c.auth_type = 'environment_variable'
-		    AND c.archived_at IS NULL AND v.archived_at IS NULL`,
-		vaultIDs)
+		    AND v.workspace_id = $2 AND c.archived_at IS NULL AND v.archived_at IS NULL`,
+		vaultIDs, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}

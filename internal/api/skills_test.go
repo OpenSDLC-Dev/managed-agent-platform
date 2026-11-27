@@ -145,7 +145,7 @@ func wantOnlyFields(t *testing.T, obj map[string]any, keys ...string) {
 func (s *tserver) doForm(method, path, contentType, body string) (int, map[string]any) {
 	s.t.Helper()
 	res := s.doRaw(method, path, body, map[string]string{
-		"x-api-key": testKey, "Content-Type": contentType,
+		"x-api-key": s.managementKey(), "Content-Type": contentType,
 	})
 	defer res.Body.Close()
 	raw, err := io.ReadAll(res.Body)
@@ -1644,7 +1644,7 @@ func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
 		{"type": "anthropic", "skill_id": "alpha-notes", "version": "20260101"},
 		{"type": "anthropic", "skill_id": "alpha-notes", "version": versionID},
 		{"type": "anthropic", "skill_id": customID},
-		{"type": "custom", "skill_id": "skill_01DoesNotExistXXXXXXXXXXX"},
+		{"type": "custom", "skill_id": customID},
 	} {
 		status, obj := create(skill)
 		if status != http.StatusOK {
@@ -1662,13 +1662,11 @@ func TestAgentCreateRefusesAnAnthropicSkillThatNamesNothing(t *testing.T) {
 	refused(map[string]any{"type": "anthropic", "skill_id": customID, "version": "skver_01AsBoL6YhmcKN4PUSpPtmw3"},
 		"Agent has invalid configuration: `skill_id` `"+customID+"` version `skver_01AsBoL6YhmcKN4PUSpPtmw3` not found")
 
-	// Unchecked where no recording reaches: an update and a session override.
+	// Updates validate the workspace binding before saving the new version.
 	agent := createAgent(t, s, map[string]any{"name": "plain", "model": "claude-haiku-4-5-20251001"})
 	agentID, _ := agent["id"].(string)
 	status, obj = s.do(http.MethodPost, "/v1/agents/"+agentID, map[string]any{
 		"version": 1, "skills": []any{map[string]any{"type": "anthropic", "skill_id": "no-such-skill"}},
 	})
-	if status != http.StatusOK {
-		t.Errorf("update naming an unknown anthropic skill: %d %v, want 200 (unchecked)", status, obj)
-	}
+	wantErrMsg(t, status, obj, http.StatusBadRequest, "invalid_request_error", "Agent has invalid configuration: `skill_id` `no-such-skill` not found")
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/cron"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // The deployment scheduler (plan 37 §4): a controlplane background sweep — a
@@ -453,27 +454,28 @@ func (s *server) fireScheduledTx(ctx context.Context, f deploymentFire) (outcome
 	// stored form is what carries the sealed tokens: the cipher is never
 	// dialed here.
 	var (
-		name, envID, agentID  string
-		agentVersion          int
-		vaultIDs              []string
-		initial, rawResources []byte
-		curExpr, curTZ        *string
-		curResumedAt          time.Time
+		name, envID, agentID, workspaceID string
+		agentVersion                      int
+		vaultIDs                          []string
+		initial, rawResources             []byte
+		curExpr, curTZ                    *string
+		curResumedAt                      time.Time
 	)
 	err = tx.QueryRow(ctx, `
-		SELECT name, environment_id, agent_id, agent_version, vault_ids, initial_events, resources,
-		       schedule_expression, schedule_timezone, schedule_resumed_at
-		  FROM deployments
-		 WHERE id = $1 AND archived_at IS NULL AND paused_at IS NULL
+		SELECT d.name, environment_id, agent_id, agent_version, vault_ids, initial_events, resources,
+		       schedule_expression, schedule_timezone, schedule_resumed_at, workspace_id
+		  FROM deployments d JOIN workspaces ws ON ws.id=d.workspace_id AND ws.archived_at IS NULL
+		 WHERE d.id = $1 AND d.archived_at IS NULL AND paused_at IS NULL
 		 FOR SHARE`, f.deploymentID).
 		Scan(&name, &envID, &agentID, &agentVersion, &vaultIDs, &initial, &rawResources,
-			&curExpr, &curTZ, &curResumedAt)
+			&curExpr, &curTZ, &curResumedAt, &workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) || isLostRace(err) {
 		return fireOutcomeLost, "", nil
 	}
 	if err != nil {
 		return "", "", err
 	}
+	ctx = workspace.WithID(ctx, workspaceID)
 	// The scheduling state may have moved in the same window: an update can
 	// have replaced or removed the schedule this occurrence was computed
 	// from, and a pause/unpause round-trip restamps the resume floor above

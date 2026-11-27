@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -1030,8 +1031,8 @@ func snapshotMemoryStore(ctx context.Context, db querier, in resourceInput) (mem
 	var name, description string
 	var archivedAt *time.Time
 	err := db.QueryRow(ctx,
-		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 FOR SHARE`,
-		in.memoryStoreID).Scan(&name, &description, &archivedAt)
+		`SELECT name, description, archived_at FROM memory_stores WHERE memory_stores.workspace_id = $2 AND id = $1 FOR SHARE`,
+		in.memoryStoreID, workspace.ID(ctx)).Scan(&name, &description, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// A missing store is §5.2's "other resource gone" arm; only an
 		// archived one has a type of its own.
@@ -1081,7 +1082,7 @@ func errSelfHostedRepository(envID string) error {
 // own lookup, which answers in the reference's words.
 func refuseSelfHostedRepository(ctx context.Context, db querier, envID string) error {
 	var kind string
-	err := db.QueryRow(ctx, `SELECT kind FROM environments WHERE id = $1`+notInternal, envID).Scan(&kind)
+	err := db.QueryRow(ctx, `SELECT kind FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal, envID, workspace.ID(ctx)).Scan(&kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -1153,9 +1154,9 @@ func mountFileCopy(ctx context.Context, db querier, sessionID, fileID string) (s
 		                    downloadable, scope_type, scope_id, expires_at, object_key, source_file_id)
 		 SELECT $1, org_id, workspace_id, project_id, filename, mime_type, size_bytes,
 		        false, 'session', $2, expires_at, `+store.FileObjectKeySQL+`, id
-		   FROM files WHERE id = $3 AND `+store.FileLiveSQL+` FOR SHARE
+		   FROM files WHERE id = $3 AND workspace_id = $4 AND `+store.FileLiveSQL+` FOR SHARE
 		 RETURNING id`,
-		domain.NewID(domain.PrefixFile).String(), sessionID, fileID).Scan(&copyID)
+		domain.NewID(domain.PrefixFile).String(), sessionID, fileID, workspace.ID(ctx)).Scan(&copyID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errFileGone(fileID)
 	}
@@ -1178,8 +1179,34 @@ func lockFileRows(ctx context.Context, tx pgx.Tx, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := tx.Exec(ctx, `SELECT 1 FROM files WHERE id = ANY($1) ORDER BY id FOR SHARE`, ids)
+	_, err := tx.Exec(ctx, `SELECT 1 FROM files WHERE files.workspace_id = $2 AND id = ANY($1) ORDER BY id FOR SHARE`, ids, workspace.ID(ctx))
 	return err
+}
+
+// Validate event and deployment file references before persisting them. The
+// shared row locks keep uploads live through the enclosing transaction.
+func validateLiveFileIDs(ctx context.Context, tx pgx.Tx, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM files WHERE workspace_id=$1 AND id=ANY($2) AND `+store.FileLiveSQL+` ORDER BY id FOR SHARE`, workspace.ID(ctx), ids)
+	if err != nil {
+		return err
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	available := make(map[string]bool, len(found))
+	for _, id := range found {
+		available[id] = true
+	}
+	for _, id := range ids {
+		if !available[id] {
+			return errFileGone(id)
+		}
+	}
+	return nil
 }
 
 // mountSourceIDs is the files a create's inputs mint copies of.
@@ -1213,7 +1240,7 @@ func mountSourceIDs(inputs []resourceInput) []string {
 func fileMustExist(ctx context.Context, db querier, fileID string) error {
 	var exists bool
 	err := db.QueryRow(ctx,
-		`SELECT true FROM files WHERE id = $1 AND `+store.FileLiveSQL, fileID).Scan(&exists)
+		`SELECT true FROM files WHERE files.workspace_id = $2 AND id = $1 AND `+store.FileLiveSQL, fileID, workspace.ID(ctx)).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errFileGone(fileID)
 	}
@@ -1233,12 +1260,12 @@ func errFileGone(fileID string) error {
 // serializes; reads pass false and may use the pool directly. A missing session
 // surfaces as pgx.ErrNoRows for the caller to map to a 404.
 func sessionResourceRows(ctx context.Context, db querier, id string, forUpdate bool) (resources []json.RawMessage, archivedAt *time.Time, err error) {
-	q := `SELECT resources, archived_at FROM sessions WHERE id = $1`
+	q := `SELECT resources, archived_at FROM sessions WHERE id = $1 AND workspace_id = $2`
 	if forUpdate {
 		q += ` FOR UPDATE`
 	}
 	var raw []byte
-	if err = db.QueryRow(ctx, q, id).Scan(&raw, &archivedAt); err != nil {
+	if err = db.QueryRow(ctx, q, id, workspace.ID(ctx)).Scan(&raw, &archivedAt); err != nil {
 		return nil, nil, err
 	}
 	if err = json.Unmarshal(raw, &resources); err != nil {
@@ -1266,7 +1293,7 @@ func sessionResourceRows(ctx context.Context, db querier, id string, forUpdate b
 func requireReadTool(ctx context.Context, tx pgx.Tx, id string) error {
 	var tools []json.RawMessage
 	if err := tx.QueryRow(ctx,
-		`SELECT COALESCE(resolved_agent->'tools', '[]') FROM sessions WHERE id = $1`, id).Scan(&tools); err != nil {
+		`SELECT COALESCE(resolved_agent->'tools', '[]') FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).Scan(&tools); err != nil {
 		return err
 	}
 	// An entry stored before a policy it carries stopped resolving offers no
@@ -1292,7 +1319,7 @@ func updateSessionResources(ctx context.Context, tx pgx.Tx, id string, resources
 		return err
 	}
 	_, err = tx.Exec(ctx,
-		`UPDATE sessions SET resources = $2, updated_at = now() WHERE id = $1`, id, raw)
+		`UPDATE sessions SET resources = $2, updated_at = now() WHERE sessions.workspace_id = $3 AND id = $1`, id, raw, workspace.ID(ctx))
 	return err
 }
 
@@ -1408,7 +1435,7 @@ func (s *server) addSessionResourceTx(ctx context.Context, id string, r *http.Re
 		return fileResourceJSON{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return fileResourceJSON{}, err
 	}
@@ -1482,7 +1509,7 @@ func (s *server) deleteSessionResourceTx(ctx context.Context, id, rid string) er
 	if err := checkResourceID(rid); err != nil {
 		return err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -1580,7 +1607,7 @@ func (s *server) rotateResourceTokenTx(ctx context.Context, id, rid string, r *h
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -478,6 +478,12 @@ start the matching workers and gateway before restoring traffic. An old binary
 uses organization roles for resource access. A rollback to that version requires
 the pre-upgrade database and coordinated restoration of the old services.
 
+Migration 0072 makes resource workspace ownership immutable. Resource writers acquire a
+shared lock on the registry entry and recheck the subject's grant inside the transaction.
+Membership edits and archival serialize against that lock. Workers resolve ownership
+from the session, deployment or dream that supplied their work. The SQL inventory
+records the queries that derive authority from that parent.
+
 The registry maps `default` to the existing CLI public ID. Migration preserves
 owners, initiators, credentials and usage history. It reports unexpected scope
 triples with the affected tables and counts and rolls back for reconciliation.

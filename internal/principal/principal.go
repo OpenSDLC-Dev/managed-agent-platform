@@ -69,9 +69,9 @@ func Resolve(ctx context.Context, db Querier, id identity.Identity) (Principal, 
 	}
 	var p Principal
 	err := db.QueryRow(ctx, `
-		INSERT INTO principals (id, issuer, subject, email, display_name, role, role_source, workspace_grants_initialized)
+		INSERT INTO principals (id, issuer, subject, email, display_name, role, role_source)
 		VALUES ($1, $2, $3, $4, $5, coalesce($6::text, 'user'),
-		        CASE WHEN $6::text IS NULL THEN 'console' ELSE 'idp' END, true)
+		        CASE WHEN $6::text IS NULL THEN 'console' ELSE 'idp' END)
 		ON CONFLICT (issuer, subject) DO UPDATE
 		SET email = EXCLUDED.email,
 		    display_name = EXCLUDED.display_name,

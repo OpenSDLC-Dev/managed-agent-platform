@@ -116,22 +116,23 @@ func TestAdminAPIKeyPagingAndProjection(t *testing.T) {
 	if _, err := s.pool.Exec(ctx, `INSERT INTO workspaces (id,public_id,name) VALUES ('another','wrkspc_00000000000000000000000002','Another')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE api_keys SET workspace_id='another' WHERE id=$1`, legacy); err != nil {
+	foreign := domain.NewID(domain.PrefixAPIKey).String()
+	if _, err := s.pool.Exec(ctx, `INSERT INTO api_keys(id,name,workspace_id,created_by,owner_principal_id,owned_key_hash) VALUES ($1,'other','another',$2,$2,'fixture-other-hash')`, foreign, issuer); err != nil {
 		t.Fatal(err)
 	}
 	visible, err := keys.List(ctx, anthropic.BetaOrganizationAPIKeyListParams{Status: "archived", CreatedByUserID: anthropic.String(user)})
-	if err != nil || len(visible.Data) != len(ids) {
-		t.Fatalf("archived keys in the granted organization: %v", err)
+	if err != nil || len(visible.Data) != len(ids)+1 {
+		t.Fatalf("archived owned and historical keys: got %d, want %d: %v", len(visible.Data), len(ids)+1, err)
 	}
 	auth := asBearer(token)
-	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?after_id=" + legacy, "?limit=1&before_id=", "?limit=1&after_id="} {
+	for _, path := range []string{"?status=active&workspace_id=missing", "?status=archived&created_by_user_id=invalid", "?status=inactive", "?after_id=" + foreign, "?limit=1&before_id=", "?limit=1&after_id="} {
 		status, body := s.decode(s.doRaw("GET", auditKeysPath+path, nil, auth))
 		data, ok := body["data"].([]any)
 		if status != 200 || !ok || len(data) != 0 || body["first_id"] != nil || body["last_id"] != nil || body["has_more"] != false {
 			t.Errorf("unexpected empty page for %s: HTTP %d", path, status)
 		}
 	}
-	for _, id := range []string{legacy, domain.NewID(domain.PrefixAPIKey).String()} {
+	for _, id := range []string{foreign, domain.NewID(domain.PrefixAPIKey).String()} {
 		status, _ := s.decode(s.doRaw("GET", auditKeysPath+"/"+id, nil, auth))
 		if status != 404 {
 			t.Errorf("hidden or unknown key returned HTTP %d", status)

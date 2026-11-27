@@ -15,6 +15,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,7 +79,7 @@ func credByName(creds []vaultresolve.Credential) map[string]vaultresolve.Credent
 
 func TestCredentialsResolvesAndDecrypts(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 
@@ -150,7 +151,7 @@ func TestCredentialsResolvesAndDecrypts(t *testing.T) {
 
 func TestCredentialsBindingsParity(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 
@@ -198,7 +199,7 @@ func TestCredentialsBindingsParity(t *testing.T) {
 
 func TestCredentialsDecryptFailureFailsClosed(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 
@@ -320,7 +321,7 @@ func (l leakyCipher) Decrypt(context.Context, []byte, string) ([]byte, error) {
 
 func TestCredentialsErrorNeverEchoesCipherError(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	sess := domain.NewID("sesn").String()
 	const marker = "SECRET-INSIDE-CIPHER-ERROR"
 
@@ -345,7 +346,7 @@ func TestCredentialsErrorNeverEchoesCipherError(t *testing.T) {
 
 func TestCredentialsCorruptNetworkingErrors(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 
@@ -367,7 +368,7 @@ func TestCredentialsCorruptNetworkingErrors(t *testing.T) {
 
 func TestCredentialsUnknownNetworkingTypeRejected(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 
@@ -418,7 +419,7 @@ func (erroringRow) Scan(...any) error {
 
 func TestCredentialsNilCipher(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	sess := domain.NewID("sesn").String()
 
 	// Winners exist + nil cipher → error: a vault-attached session on a
@@ -445,7 +446,7 @@ func TestCredentialsNilCipher(t *testing.T) {
 
 func TestCredentialsDestinationBinding(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 	sess := domain.NewID("sesn").String()
 

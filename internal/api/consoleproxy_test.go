@@ -249,6 +249,7 @@ func TestPrivateProxyDoesNotReplayIAPSignIn(t *testing.T) {
 	if _, err := s.pool.Exec(context.Background(), `INSERT INTO principals(id,issuer,subject,role,role_source,email,display_name,last_seen_at) VALUES ($1,$2,$3,'developer','idp','current@example.test','Current profile','2026-01-01T00:00:00Z')`, id, s.idp.Issuer(), claims["sub"]); err != nil {
 		t.Fatal(err)
 	}
+	grantFixture(t, s.pool, id, "developer")
 	cookie, _ := s.issue(id)
 	assertion := s.idp.Mint(t, claims)
 	for _, offered := range []string{assertion, "not-even-a-valid-assertion"} {

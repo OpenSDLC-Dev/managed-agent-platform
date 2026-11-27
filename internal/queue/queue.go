@@ -95,6 +95,7 @@ var ErrWorkStalled = errors.New("queue: work item stalled")
 type Item struct {
 	ID            domain.ID
 	EnvironmentID domain.ID
+	WorkspaceID   string
 	SessionID     domain.ID
 	// ThreadID is the thread a model_turn belongs to; empty for the primary
 	// thread and for every session-keyed exec kind.
@@ -231,8 +232,10 @@ func (q *Queue) EnqueueThread(ctx context.Context, db DB, envID, sessionID, thre
 		traceCtx = traceContextArg(ctx)
 	}
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context, started_at)
-		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, now())
+		`INSERT INTO work_items (id, environment_id, session_id, thread_id, kind, trace_context, started_at, workspace_id)
+		 VALUES ($1, $2, $3, $4, $5, $6::jsonb, now(),
+		   (SELECT s.workspace_id FROM sessions s JOIN workspaces ws ON ws.id=s.workspace_id AND ws.archived_at IS NULL
+		    WHERE s.id=$3 AND s.environment_id=$2 FOR SHARE OF ws))
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
 		domain.NewID("work"), envID, sessionID, nullableThread(threadID), kind, traceCtx)
@@ -276,8 +279,10 @@ func (q *Queue) EnqueueArchiveHarvest(ctx context.Context, db DB, envID, session
 
 func (q *Queue) enqueueHarvest(ctx context.Context, db DB, envID, sessionID domain.ID, chainGrading, archiveHarvest bool) (bool, error) {
 	tag, err := db.Exec(ctx,
-		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool, 'archive_harvest', $7::bool))
+		`INSERT INTO work_items (id, environment_id, session_id, kind, trace_context, metadata, workspace_id)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, jsonb_build_object('chain_grading', $6::bool, 'archive_harvest', $7::bool),
+		   (SELECT s.workspace_id FROM sessions s JOIN workspaces ws ON ws.id=s.workspace_id AND ws.archived_at IS NULL
+		    WHERE s.id=$3 AND s.environment_id=$2 FOR SHARE OF ws))
 		 ON CONFLICT (session_id, thread_id, kind) WHERE state IN ('queued', 'starting', 'active')
 		 DO NOTHING`,
 		domain.NewID("work"), envID, sessionID, OutputsHarvest, traceContextArg(ctx), chainGrading, archiveHarvest)
@@ -342,12 +347,13 @@ func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) 
 		`WITH picked AS (
 		    SELECT w.id, w.state FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
+		    JOIN workspaces ws ON ws.id = w.workspace_id AND ws.archived_at IS NULL
 		    WHERE w.kind = $1
 		      AND (w.kind <> 'tool_exec' OR e.kind = 'cloud')
 		      AND ((w.state = 'queued' AND (w.lease_expires_at IS NULL OR w.lease_expires_at < now()))
 		           OR (w.state = 'active' AND w.lease_expires_at < now()))
 		    ORDER BY w.created_at
-		    FOR UPDATE OF w SKIP LOCKED
+		    FOR SHARE OF ws SKIP LOCKED FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items w
@@ -361,9 +367,9 @@ func (q *Queue) claim(ctx context.Context, db DB, kind Kind, ttl time.Duration) 
 		           CASE WHEN jsonb_typeof(w.metadata->'settlement_chain') = 'number'
 		                THEN (w.metadata->>'settlement_chain')::int ELSE 0 END,
 		           COALESCE((w.metadata->>'chain_grading')::bool, false),
-		           COALESCE(w.metadata @> '{"archive_harvest":true}', false), w.inference_generation`,
+		           COALESCE(w.metadata @> '{"archive_harvest":true}', false), w.inference_generation, w.workspace_id`,
 		kind, ttl.Seconds()).Scan(&it.ID, &it.EnvironmentID, &it.SessionID, &it.ThreadID, &it.Kind, &it.Lease,
-		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading, &it.ArchiveHarvest, &generation)
+		&prevState, &it.TraceContext, &it.Chain, &it.ChainGrading, &it.ArchiveHarvest, &generation, &it.WorkspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -492,6 +498,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		`WITH picked AS (
 		    SELECT w.id AS pid FROM work_items w
 		    JOIN environments e ON e.id = w.environment_id
+		    JOIN workspaces ws ON ws.id = w.workspace_id AND ws.archived_at IS NULL
 		    WHERE w.environment_id = $1 AND e.kind = 'self_hosted'
 		      AND w.kind = 'tool_exec'
 		      AND (
@@ -499,7 +506,7 @@ func (q *Queue) PollOn(ctx context.Context, db DB, envID domain.ID, reclaim time
 		         OR (w.state IN ('starting', 'active') AND w.lease_expires_at < now())
 		      )
 		    ORDER BY w.created_at
-		    FOR UPDATE OF w SKIP LOCKED
+		    FOR SHARE OF ws SKIP LOCKED FOR UPDATE OF w SKIP LOCKED
 		    LIMIT 1
 		 )
 		 UPDATE work_items t

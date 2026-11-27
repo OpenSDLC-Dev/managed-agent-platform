@@ -32,6 +32,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets/local"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -1345,7 +1346,7 @@ func TestMaterializationReportsProgressPerItem(t *testing.T) {
 	h := newHarness(t, sb)
 	h.seedSkill(t, "skill_progressa", "20260101", "alpha", map[string]string{"SKILL.md": "---\nname: alpha\n---\n"})
 	h.seedSkill(t, "skill_progressb", "20260101", "beta", map[string]string{"SKILL.md": "---\nname: beta\n---\n"})
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	var reports int
 	count := func() { reports++ }

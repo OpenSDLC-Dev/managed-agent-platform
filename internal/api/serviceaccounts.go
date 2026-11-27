@@ -191,8 +191,8 @@ func (s *server) createServiceAccount(r *http.Request) (any, error) {
 	}
 	defer tx.Rollback(r.Context())
 	id := domain.NewID(domain.PrefixPrincipal).String()
-	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by,workspace_grants_initialized)
-		VALUES ($1,$2,$3,'service_account',$4,$5,$6,true)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO principals(id,issuer,subject,kind,role,description,created_by)
+		VALUES ($1,$2,$3,'service_account',$4,$5,$6)`, id, login.ServiceAccountIssuer, name, role, description, actor.PrincipalID)
 	if err := principalNameConflict(err); err != nil {
 		return nil, err
 	}

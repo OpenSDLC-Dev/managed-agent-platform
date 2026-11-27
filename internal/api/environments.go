@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/unknownkey"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -476,7 +477,7 @@ func (s *server) createEnvironment(r *http.Request) (any, error) {
 	}
 	id := domain.NewID(domain.PrefixEnvironment).String()
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +492,7 @@ func (s *server) createEnvironment(r *http.Request) (any, error) {
 	var row environmentRow
 	if err := tx.QueryRow(ctx,
 		`SELECT name, description, config, metadata, created_at, updated_at
-		 FROM environments WHERE id = $1`, id).
+		 FROM environments WHERE environments.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt); err != nil {
 		return nil, err
@@ -553,9 +554,9 @@ func (s *server) insertEnvironmentInTx(ctx context.Context, tx pgx.Tx, body json
 	}
 
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO environments (id, name, kind, config, description, metadata, internal)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
-		id, name, kind, config, description, metadata, internal)
+		`INSERT INTO environments (workspace_id, id, name, kind, config, description, metadata, internal)
+		 VALUES ($8, $1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
+		id, name, kind, config, description, metadata, internal, workspace.ID(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -578,7 +579,7 @@ func (s *server) getEnvironment(r *http.Request) (any, error) {
 	var row environmentRow
 	err := s.pool.QueryRow(ctx,
 		`SELECT name, description, config, metadata, created_at, updated_at, archived_at
-		 FROM environments WHERE id = $1`+notInternal, id).
+		 FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -612,7 +613,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +623,7 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	var kind string
 	err = tx.QueryRow(ctx,
 		`SELECT name, kind, description, config, metadata, created_at, updated_at, archived_at
-		 FROM environments WHERE id = $1`+notInternal+` FOR UPDATE`, id).
+		 FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal+` FOR UPDATE`, id, workspace.ID(ctx)).
 		Scan(&row.name, &kind, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -684,8 +685,8 @@ func (s *server) updateEnvironment(r *http.Request) (any, error) {
 	if err := tx.QueryRow(ctx,
 		`UPDATE environments SET name = $2, kind = $3, config = $4, description = $5,
 		   metadata = $6, updated_at = now()
-		 WHERE id = $1 RETURNING updated_at`,
-		id, row.name, kind, row.config, row.description, metadata).Scan(&row.updatedAt); err != nil {
+		 WHERE environments.workspace_id = $7 AND id = $1 RETURNING updated_at`,
+		id, row.name, kind, row.config, row.description, metadata, workspace.ID(ctx)).Scan(&row.updatedAt); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -708,8 +709,8 @@ func (s *server) listEnvironments(r *http.Request) (any, error) {
 	}
 
 	query := `SELECT id, name, description, config, metadata, created_at, updated_at, archived_at
-	          FROM environments WHERE true` + notInternal
-	var args []any
+	          FROM environments WHERE workspace_id = $1` + notInternal
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 	}
@@ -777,12 +778,17 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 		return nil, noRetry(err)
 	}
 	var row environmentRow
-	err := s.pool.QueryRow(ctx,
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx,
 		`UPDATE environments SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1`+notInternal+`
-		 RETURNING name, description, config, metadata, created_at, updated_at, archived_at`, id).
+		 WHERE environments.workspace_id = $2 AND id = $1`+notInternal+`
+		 RETURNING name, description, config, metadata, created_at, updated_at, archived_at`, id, workspace.ID(ctx)).
 		Scan(&row.name, &row.description, &row.config, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -793,6 +799,9 @@ func (s *server) archiveEnvironment(r *http.Request) (any, error) {
 	}
 	metadata := map[string]string{}
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return renderEnvironment(id, row.name, row.description, row.config, metadata,
@@ -843,15 +852,15 @@ func environmentStillReferenced(ctx context.Context, db querier, envID string, f
 	var envArchived bool
 	var named []string
 	if err := db.QueryRow(ctx,
-		`SELECT (SELECT count(*) FROM sessions WHERE environment_id = $1),
-		        (SELECT count(*) FROM deployments WHERE environment_id = $1),
+		`SELECT (SELECT count(*) FROM sessions WHERE environment_id = $1 AND workspace_id = $3),
+		        (SELECT count(*) FROM deployments WHERE environment_id = $1 AND workspace_id = $3),
 		        (SELECT count(*) FROM deployments
-		          WHERE environment_id = $1 AND archived_at IS NOT NULL),
-		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1), false),
+		          WHERE environment_id = $1 AND workspace_id = $3 AND archived_at IS NOT NULL),
+		        COALESCE((SELECT archived_at IS NOT NULL FROM environments WHERE id = $1 AND workspace_id = $3), false),
 		        COALESCE((SELECT array_agg(id) FROM
-		          (SELECT id FROM deployments WHERE environment_id = $1
+		          (SELECT id FROM deployments WHERE environment_id = $1 AND workspace_id = $3
 		            ORDER BY (archived_at IS NULL), created_at, id LIMIT $2) t), '{}')`,
-		envID, blockingDeploymentsNamed).
+		envID, blockingDeploymentsNamed, workspace.ID(ctx)).
 		Scan(&sessions, &deployments, &stuck, &envArchived, &named); err != nil {
 		return err
 	}
@@ -968,9 +977,15 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 			return nil, err
 		}
 	}
-	tag, err := s.pool.Exec(ctx, `DELETE FROM environments WHERE id = $1`+notInternal, id)
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM environments WHERE environments.workspace_id = $2 AND id = $1`+notInternal, id, workspace.ID(ctx))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation
+		_ = tx.Rollback(ctx)
 		if !force {
 			if err := s.selfHostedQueueRefusal(ctx, id); err != nil {
 				return nil, err
@@ -983,6 +998,9 @@ func (s *server) deleteEnvironment(r *http.Request) (any, error) {
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, noRetry(errEnvironmentNotFound(id))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return map[string]string{"id": id, "type": "environment_deleted"}, nil
 }

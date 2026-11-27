@@ -15,7 +15,9 @@ The first delivery migrated the Console's Default page URLs. Stage 2 registers
 Default, binds credentials, migrates existing grants and enables independent
 Default roles. The owner selected a maintenance cutover on 2026-11-27. Stop the
 old authority readers before migration 0071. See the [upgrade procedure](../ARCHITECTURE.md#default-workspace-upgrade).
-Stages 3–5 cover scoped storage, multi-workspace clients and activation of a second workspace.
+Stage 3 binds resource storage, background execution and worker reads to their owning workspace.
+The owner approved coordinated upgrades. Migration 0072 retires the old writer initialization trigger.
+Stages 4 and 5 cover clients, reporting and workspace activation.
 [Plan 69](./69_principal-bound-auth.md) and [Playground grants](./73_console-playground.md)
 
 ## Identity, roles and membership

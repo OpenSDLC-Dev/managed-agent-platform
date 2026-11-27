@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // TestSessionCreateRefusalsAreWordedPerCaller pins the refusals the three
@@ -22,7 +23,7 @@ import (
 // back instead of settling a run.
 func TestSessionCreateRefusalsAreWordedPerCaller(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	ghostStore := domain.NewID(domain.PrefixMemoryStore).String()
 	archivedStore := domain.NewID(domain.PrefixMemoryStore).String()
 	ghostFile := domain.NewID(domain.PrefixFile).String()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -46,7 +47,7 @@ const notInternal = ` AND NOT internal`
 func requireNotDreamOwned(ctx context.Context, db querier, sessionID string) error {
 	var dreamID string
 	err := db.QueryRow(ctx,
-		`SELECT id FROM dreams WHERE session_id = $1 AND closed_at IS NULL`, sessionID).Scan(&dreamID)
+		`SELECT id FROM dreams WHERE dreams.workspace_id = $2 AND session_id = $1 AND closed_at IS NULL`, sessionID, workspace.ID(ctx)).Scan(&dreamID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}

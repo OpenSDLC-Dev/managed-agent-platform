@@ -23,6 +23,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // The dream runner (plan 41 §4.1): a controlplane background sweep beside the
@@ -199,20 +200,20 @@ func sweepBudget(pool *pgxpool.Pool) chan struct{} {
 // dreamRow is what step reads: the dream's own columns, and the pipeline
 // session's status, archive mark and usage where one exists (§4.1).
 type dreamRow struct {
-	id, status       string
-	stage, attempts  int
-	createdAt        time.Time
-	sessionID        *string
-	inputStoreID     string
-	inputSessionIDs  []string
-	instructions     *string
-	model            []byte
-	outputs          []byte
-	sessionFound     bool
-	sessionStatus    string
-	sessionArchived  *time.Time
-	sessionUsage     []byte
-	sessionCreatedAt time.Time
+	id, status, workspaceID string
+	stage, attempts         int
+	createdAt               time.Time
+	sessionID               *string
+	inputStoreID            string
+	inputSessionIDs         []string
+	instructions            *string
+	model                   []byte
+	outputs                 []byte
+	sessionFound            bool
+	sessionStatus           string
+	sessionArchived         *time.Time
+	sessionUsage            []byte
+	sessionCreatedAt        time.Time
 	// targetStoreID is the update_existing target, and the whole of what makes
 	// a dream in-place: set, the runner consolidates that store itself rather
 	// than a clone of it (§5.3). Nil on every create_new dream.
@@ -399,7 +400,7 @@ func (s *server) dreamArmTx(ctx context.Context, id string, now time.Time, cfg D
 	if h := dreamHookAfterLock; h != nil {
 		h()
 	}
-	res, err := s.dreamStep(ctx, tx, d, now, cfg)
+	res, err := s.dreamStep(workspace.WithID(ctx, d.workspaceID), tx, d, now, cfg)
 	if err != nil {
 		return dreamStepResult{}, err
 	}
@@ -423,16 +424,16 @@ var dreamHookAfterLock func()
 func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamRow, bool, error) {
 	var d dreamRow
 	err := tx.QueryRow(ctx, `
-		SELECT id, status, stage, attempts, created_at, session_id, input_memory_store_id,
+		SELECT d.id, status, stage, attempts, d.created_at, session_id, input_memory_store_id,
 		       input_session_ids, instructions, model, outputs, target_memory_store_id,
-		       initiator_principal_id, initiator_api_key_id
-		  FROM dreams
-		 WHERE id = $1 AND closed_at IS NULL
-		   AND NOT (status = 'pending' AND attempts > 0 AND updated_at > $2)
-		 FOR UPDATE SKIP LOCKED`, id, now.Add(-dreamStartLease)).
+		       initiator_principal_id, initiator_api_key_id, workspace_id
+		  FROM dreams d JOIN workspaces ws ON ws.id=d.workspace_id AND ws.archived_at IS NULL
+		 WHERE d.id = $1 AND closed_at IS NULL
+		   AND NOT (status = 'pending' AND attempts > 0 AND d.updated_at > $2)
+		 FOR SHARE OF ws SKIP LOCKED FOR UPDATE OF d SKIP LOCKED`, id, now.Add(-dreamStartLease)).
 		Scan(&d.id, &d.status, &d.stage, &d.attempts, &d.createdAt, &d.sessionID,
 			&d.inputStoreID, &d.inputSessionIDs, &d.instructions, &d.model, &d.outputs,
-			&d.targetStoreID, &d.initiatorPrincipalID, &d.initiatorAPIKeyID)
+			&d.targetStoreID, &d.initiatorPrincipalID, &d.initiatorAPIKeyID, &d.workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, false, nil
 	}
@@ -448,7 +449,7 @@ func lockDream(ctx context.Context, tx pgx.Tx, id string, now time.Time) (dreamR
 		  FROM sessions s
 		  LEFT JOIN session_threads t
 		    ON t.session_id = s.id AND t.parent_thread_id IS NULL
-		 WHERE s.id = $1`, *d.sessionID).
+		 WHERE s.id = $1 AND s.workspace_id = $2`, *d.sessionID, d.workspaceID).
 		Scan(&d.sessionStatus, &d.sessionArchived, &d.sessionUsage, &d.sessionCreatedAt, &stop)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Unreachable through the API — the gate refuses a delete while the
@@ -622,7 +623,7 @@ func (s *server) dreamAdvanceArm(ctx context.Context, tx store.ObjectDeleteTx, d
 func dreamStoreMount(ctx context.Context, db querier, sessionID string) (string, error) {
 	var raw []byte
 	if err := db.QueryRow(ctx,
-		`SELECT resources FROM sessions WHERE id = $1`, sessionID).Scan(&raw); err != nil {
+		`SELECT resources FROM sessions WHERE id = $1 AND workspace_id = $2`, sessionID, workspace.ID(ctx)).Scan(&raw); err != nil {
 		return "", err
 	}
 	var refs []memoryResourceJSON
@@ -875,7 +876,7 @@ func (s *server) dreamUnavailable(ctx context.Context, tx pgx.Tx, d dreamRow) (e
 // §4.6).
 func memoryStoreLive(ctx context.Context, db querier, id string) (bool, error) {
 	var archivedAt *time.Time
-	err := db.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 FOR SHARE`, id).Scan(&archivedAt)
+	err := db.QueryRow(ctx, `SELECT archived_at FROM memory_stores WHERE id = $1 AND workspace_id = $2 FOR SHARE`, id, workspace.ID(ctx)).Scan(&archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -888,7 +889,7 @@ func memoryStoreLive(ctx context.Context, db querier, id string) (bool, error) {
 // missingSessions names the first input session that is gone, in the dream's
 // own order so the message points at a stable one.
 func missingSessions(ctx context.Context, db querier, ids []string) (string, error) {
-	rows, err := db.Query(ctx, `SELECT id FROM sessions WHERE id = ANY($1)`, ids)
+	rows, err := db.Query(ctx, `SELECT id FROM sessions WHERE id = ANY($1) AND workspace_id = $2`, ids, workspace.ID(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -1083,8 +1084,8 @@ func mirrorDreamUsage(ctx context.Context, tx pgx.Tx, d dreamRow) error {
 func enqueueDreamBlobs(ctx context.Context, tx store.ObjectDeleteTx, dreamID string) error {
 	rows, err := tx.Query(ctx,
 		`DELETE FROM files
-		  WHERE id IN (SELECT id FROM files WHERE dream_id = $1 ORDER BY id FOR UPDATE)
-		 RETURNING `+store.FileObjectKeySQL, dreamID)
+		  WHERE id IN (SELECT id FROM files WHERE dream_id = $1 AND workspace_id = $2 ORDER BY id FOR UPDATE)
+		 RETURNING `+store.FileObjectKeySQL, dreamID, workspace.ID(ctx))
 	if err != nil {
 		return err
 	}

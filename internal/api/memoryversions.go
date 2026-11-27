@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -95,8 +96,9 @@ func (s *server) getMemoryVersion(r *http.Request) (any, error) {
 	}
 	var row memoryVersionRow
 	err = row.scan(s.pool.QueryRow(ctx,
-		`SELECT `+memoryVersionColumns+` FROM memory_versions WHERE id = $1 AND memory_store_id = $2`,
-		versionID, storeID))
+		`SELECT `+memoryVersionColumns+` FROM memory_versions WHERE id = $1 AND memory_store_id = $2
+		 AND EXISTS (SELECT 1 FROM memory_stores WHERE id = $2 AND workspace_id = $3)`,
+		versionID, storeID, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("memory version %s not found", versionID)
 	}
@@ -141,8 +143,9 @@ func (s *server) listMemoryVersions(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	query := `SELECT ` + memoryVersionColumns + ` FROM memory_versions WHERE memory_store_id = $1`
-	args := []any{storeID}
+	query := `SELECT ` + memoryVersionColumns + ` FROM memory_versions WHERE memory_store_id = $1
+	         AND EXISTS (SELECT 1 FROM memory_stores WHERE id = $1 AND workspace_id = $2)`
+	args := []any{storeID, workspace.ID(ctx)}
 	// A malformed id can never name a stored row, so it is rejected on shape
 	// rather than bound into the query (#135).
 	for _, filter := range []struct{ param, column string }{
@@ -271,7 +274,7 @@ func (s *server) redactMemoryVersion(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}

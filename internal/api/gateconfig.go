@@ -19,6 +19,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/gateconfig"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -47,6 +48,7 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var spaceID, publicID string
 	var configJSON, mcpServersJSON []byte
 	var vaultIDs []string
 	err = tx.QueryRow(ctx,
@@ -54,11 +56,12 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 		// a gate re-fetches this every poll for the life of a session, and the
 		// rest of an agent spec — system prompt, tools, skills — is bytes nothing
 		// here reads.
-		`SELECT e.config, s.resolved_agent->'mcp_servers', s.vault_ids
+		`SELECT e.config, s.resolved_agent->'mcp_servers', s.vault_ids, w.id, w.public_id
 		   FROM sessions s JOIN environments e ON e.id = s.environment_id
+		  JOIN workspaces w ON w.id = s.workspace_id AND w.archived_at IS NULL
 		  WHERE s.id = $1 AND s.archived_at IS NULL
-		  FOR SHARE OF s`,
-		sessionID).Scan(&configJSON, &mcpServersJSON, &vaultIDs)
+		  FOR SHARE OF s, w`,
+		sessionID).Scan(&configJSON, &mcpServersJSON, &vaultIDs, &spaceID, &publicID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Authenticated, but the session was archived or deleted between auth and
 		// this read — re-auth (fail-closed), never a partial config.
@@ -67,6 +70,10 @@ func (s *server) getGateConfig(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), publicID) {
+		return nil, errForbidden("workspace is not served by this platform")
+	}
+	ctx = workspace.WithID(ctx, spaceID)
 
 	var cfg domain.EnvironmentConfig
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {

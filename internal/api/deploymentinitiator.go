@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/principal"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 const consoleDeploymentInitiatorPath = "/api/console/organizations/{org}/deployments/{id}/initiator"
@@ -25,7 +26,7 @@ func readDeploymentInitiator(r *http.Request, db principal.Querier) (deploymentI
 	var kind string
 	err := db.QueryRow(r.Context(), `SELECT d.initiator_principal_id,d.initiator_api_key_id,coalesce(p.kind,'user')
 		FROM deployments d LEFT JOIN principals p ON p.id=d.initiator_principal_id
-		WHERE d.id=$1 AND d.archived_at IS NULL`, r.PathValue("id")).Scan(&out.PrincipalID, &out.APIKeyID, &kind)
+		WHERE d.workspace_id = $2 AND d.id=$1 AND d.archived_at IS NULL`, r.PathValue("id"), workspace.ID(r.Context())).Scan(&out.PrincipalID, &out.APIKeyID, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, errNotFound("deployment not found")
 	}
@@ -74,7 +75,7 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	// Principal first, then deployment: the membership setting and scheduling
 	// snapshot cannot interleave. Session initiators are never rewritten.
 	var deploymentID string
-	err = tx.QueryRow(ctx, `SELECT id FROM deployments WHERE id=$1 AND archived_at IS NULL FOR UPDATE`, r.PathValue("id")).Scan(&deploymentID)
+	err = tx.QueryRow(ctx, `SELECT id FROM deployments WHERE deployments.workspace_id = $2 AND id=$1 AND archived_at IS NULL FOR UPDATE`, r.PathValue("id"), workspace.ID(ctx)).Scan(&deploymentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("deployment not found")
 	}
@@ -92,8 +93,8 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	}
 	var status string
 	var eligible bool
-	err = tx.QueryRow(ctx, `SELECT status,coalesce(workspace_role(id,'default') IN ('admin','developer','limited_developer'),false)
-		FROM principals WHERE id=$1 AND kind='service_account' AND org_id='default'`, id).Scan(&status, &eligible)
+	err = tx.QueryRow(ctx, `SELECT status,coalesce(workspace_role(id,$2) IN ('admin','developer','limited_developer'),false)
+		FROM principals WHERE id=$1 AND kind='service_account' AND org_id='default'`, id, workspace.ID(ctx)).Scan(&status, &eligible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("service account not found")
 	}
@@ -106,7 +107,7 @@ func (s *server) setDeploymentInitiator(r *http.Request) (any, error) {
 	if !eligible {
 		return nil, errInvalid("service account requires developer access to this workspace")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE deployments SET initiator_principal_id=$1,initiator_api_key_id=NULL,updated_at=now() WHERE id=$2`, id, deploymentID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE deployments SET initiator_principal_id=$1,initiator_api_key_id=NULL,updated_at=now() WHERE deployments.workspace_id = $3 AND id=$2`, id, deploymentID, workspace.ID(ctx)); err != nil {
 		return nil, err
 	}
 	out, err := readDeploymentInitiator(r, tx)

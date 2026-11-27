@@ -20,6 +20,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/store"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/toolset"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -368,7 +369,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 	}
 	if version == 0 {
 		err := db.QueryRow(ctx,
-			`SELECT name, version, spec, archived_at FROM agents WHERE id = $1`+hidden, agentID).
+			`SELECT name, version, spec, archived_at FROM agents WHERE agents.workspace_id = $2 AND id = $1`+hidden, agentID, workspace.ID(ctx)).
 			Scan(&name, &version, &specJSON, &archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return snap, errNotFound("agent %s not found", agentID)
@@ -380,7 +381,7 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		err := db.QueryRow(ctx,
 			`SELECT v.name, v.spec, a.archived_at
 			 FROM agent_versions v JOIN agents a ON a.id = v.agent_id
-			 WHERE v.agent_id = $1 AND v.version = $2`+hidden, agentID, version).
+			 WHERE v.agent_id = $1 AND v.version = $2 AND a.workspace_id = $3`+hidden, agentID, version, workspace.ID(ctx)).
 			Scan(&name, &specJSON, &archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return snap, errNotFound("agent %s version %d not found", agentID, version)
@@ -455,6 +456,11 @@ func (s *server) resolveAgent(ctx context.Context, db querier, raw json.RawMessa
 		return snap, err
 	}
 
+	if len(spec.Skills) > 0 {
+		if err := validateSkillRefs(ctx, db, mustJSON(spec.Skills)); err != nil {
+			return snap, err
+		}
+	}
 	snap = sessionAgentJSON{
 		Type: "agent", ID: domain.ID(agentID), Version: version, Name: name,
 		AgentSpec: spec,
@@ -499,7 +505,7 @@ func validateAttachedVaults(ctx context.Context, tx pgx.Tx, ids []string) error 
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `SELECT id, archived_at FROM vaults WHERE id = ANY($1) FOR SHARE`, ids)
+	rows, err := tx.Query(ctx, `SELECT id, archived_at FROM vaults WHERE vaults.workspace_id = $2 AND id = ANY($1) FOR SHARE`, ids, workspace.ID(ctx))
 	if err != nil {
 		return err
 	}
@@ -691,7 +697,7 @@ func (s *server) createSession(r *http.Request) (any, error) {
 	// One transaction around check → resolve → insert: FOR SHARE on the
 	// environment row blocks a concurrent delete/archive from slipping in
 	// between the check and the insert.
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -853,7 +859,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		hidden = ""
 	}
 	err := tx.QueryRow(ctx,
-		`SELECT archived_at, kind, config FROM environments WHERE id = $1`+hidden+` FOR SHARE`, in.envID).
+		`SELECT archived_at, kind, config FROM environments WHERE environments.workspace_id = $2 AND id = $1`+hidden+` FOR SHARE`, in.envID, workspace.ID(ctx)).
 		Scan(&envArchivedAt, &envKind, &envConfig)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return createdSession{}, errSessionEnvironmentNotFound(in.envID)
@@ -952,12 +958,12 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		deploymentID: in.deploymentID,
 	}
 	err = tx.QueryRow(ctx,
-		`INSERT INTO sessions (id, agent_id, agent_version, resolved_agent, environment_id,
+		`INSERT INTO sessions (workspace_id, id, agent_id, agent_version, resolved_agent, environment_id,
 		   status, title, metadata, resources, vault_ids, created_by, deployment_id,
 		   initiator_principal_id, initiator_api_key_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		 VALUES ($15, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING created_at, updated_at`,
-		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy, in.deploymentID, in.initiatorPrincipalID, in.initiatorAPIKeyID).
+		id, agent.ID, agent.Version, agentJSON, in.envID, row.status, in.title, in.metadata, resourcesJSON, in.vaultIDs, createdBy, in.deploymentID, in.initiatorPrincipalID, in.initiatorAPIKeyID, workspace.ID(ctx)).
 		Scan(&row.createdAt, &row.updatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation backstop
@@ -974,9 +980,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	// id derived from the session's, no agent of its own (read through
 	// resolved_agent), status and timestamps the session's.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $5)`,
-		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt); err != nil {
+		`INSERT INTO session_threads (id, session_id, agent_name, status, created_at, updated_at, workspace_id)
+		 VALUES ($1, $2, $3, $4, $5, $5, $6)`,
+		domain.PrimaryThreadID(domain.ID(id)).String(), id, agent.Name, row.status, row.createdAt, workspace.ID(ctx)); err != nil {
 		return createdSession{}, err
 	}
 	// After the session INSERT (the rows FK it), inside the same transaction:
@@ -992,6 +998,9 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 	}
 
 	if len(initialEvents) > 0 {
+		if err := validateEventFileSources(ctx, tx, initialEvents); err != nil {
+			return createdSession{}, err
+		}
 		err := defsErr
 		if err == nil {
 			err = events.ValidateDefineOutcomes(ctx, tx, domain.ID(id), defs, false)
@@ -1038,7 +1047,7 @@ func (s *server) createSessionInTx(ctx context.Context, tx pgx.Tx, in createSess
 		}
 		row.outcomesJSON = nil // re-read below: MutateOutcomes moved it
 		if err := tx.QueryRow(ctx,
-			`SELECT outcome_evaluations, updated_at FROM sessions WHERE id = $1`, id).
+			`SELECT outcome_evaluations, updated_at FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).
 			Scan(&row.outcomesJSON, &row.updatedAt); err != nil {
 			return createdSession{}, err
 		}
@@ -1149,7 +1158,7 @@ func (s *server) getSession(r *http.Request) (any, error) {
 		return nil, errNotFound("Session not found: %s", id)
 	}
 	row, err := scanSession(s.pool.QueryRow(ctx,
-		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1`, id))
+		`SELECT `+sessionColumns+` FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("Session not found: %s", id)
 	}
@@ -1179,14 +1188,14 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	row, err := scanSession(tx.QueryRow(ctx,
-		`SELECT `+sessionColumns+` FROM sessions WHERE id = $1 FOR UPDATE`, id))
+		`SELECT `+sessionColumns+` FROM sessions WHERE sessions.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("session %s not found", id)
 	}
@@ -1296,8 +1305,8 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 		// which is what the dial is there for.
 		if _, named := patch["mcp_servers"]; named {
 			var envConfig []byte
-			if err := tx.QueryRow(ctx, `SELECT config FROM environments WHERE id = $1`,
-				row.environmentID).Scan(&envConfig); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT config FROM environments WHERE environments.workspace_id = $2 AND id = $1`,
+				row.environmentID, workspace.ID(ctx)).Scan(&envConfig); err != nil {
 				return nil, err
 			}
 			if err := admitMCPServers(envConfig, agent.MCPServers); err != nil {
@@ -1349,8 +1358,8 @@ func (s *server) updateSession(r *http.Request) (any, error) {
 
 	if err := tx.QueryRow(ctx,
 		`UPDATE sessions SET resolved_agent = $2, title = $3, metadata = $4, updated_at = now()
-		 WHERE id = $1 RETURNING updated_at`,
-		id, row.agentJSON, row.title, row.metaJSON).Scan(&row.updatedAt); err != nil {
+		 WHERE sessions.workspace_id = $5 AND id = $1 RETURNING updated_at`,
+		id, row.agentJSON, row.title, row.metaJSON, workspace.ID(ctx)).Scan(&row.updatedAt); err != nil {
 		return nil, err
 	}
 
@@ -1422,8 +1431,8 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 		}
 	}
 
-	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE true`
-	var args []any
+	query := `SELECT ` + sessionColumns + ` FROM sessions WHERE workspace_id = $1`
+	args := []any{workspace.ID(ctx)}
 	if !includeArchived {
 		query += ` AND archived_at IS NULL`
 		if len(statuses) == 0 {
@@ -1606,7 +1615,7 @@ func (s *server) listSessions(r *http.Request) (any, error) {
 // and never its row, so it has no order to keep (claimWork, #643).
 func requireNotRunning(ctx context.Context, tx pgx.Tx, id string, refusal func() error) error {
 	var status string
-	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE id = $1 FOR UPDATE`, id).Scan(&status)
+	err := tx.QueryRow(ctx, `SELECT status FROM sessions WHERE sessions.workspace_id = $2 AND id = $1 FOR UPDATE`, id, workspace.ID(ctx)).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errNotFound("session %s not found", id)
 	}
@@ -1625,7 +1634,7 @@ func (s *server) archiveSession(r *http.Request) (any, error) {
 	if err := checkID(id, "session"); err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1676,7 +1685,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string, c
 	var alreadyArchived bool
 	var priorStatus string
 	if err := tx.QueryRow(ctx,
-		`SELECT archived_at IS NOT NULL, status FROM sessions WHERE id = $1`, id).Scan(&alreadyArchived, &priorStatus); err != nil {
+		`SELECT archived_at IS NOT NULL, status FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)).Scan(&alreadyArchived, &priorStatus); err != nil {
 		return sessionRow{}, nil, err
 	}
 	moves, err := terminateLiveChildren(ctx, tx, s.log, id)
@@ -1734,7 +1743,7 @@ func (s *server) archiveSessionInTx(ctx context.Context, tx pgx.Tx, id string, c
 		`UPDATE sessions SET
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1 RETURNING `+sessionColumns, id))
+		 WHERE sessions.workspace_id = $2 AND id = $1 RETURNING `+sessionColumns, id, workspace.ID(ctx)))
 	if err != nil {
 		return sessionRow{}, nil, err
 	}
@@ -1765,7 +1774,7 @@ func (s *server) queueArchiveHarvest(ctx context.Context, tx pgx.Tx, id string) 
 	var envID domain.ID
 	var kind domain.EnvironmentKind
 	if err := tx.QueryRow(ctx, `SELECT e.id, e.kind FROM sessions s
-		JOIN environments e ON e.id = s.environment_id WHERE s.id = $1`, id).Scan(&envID, &kind); err != nil {
+		JOIN environments e ON e.id = s.environment_id WHERE s.id = $1 AND s.workspace_id = $2`, id, workspace.ID(ctx)).Scan(&envID, &kind); err != nil {
 		return err
 	}
 	if kind != domain.EnvCloud {
@@ -1819,6 +1828,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockResourceWrite(ctx, tx); err != nil {
+		return nil, err
+	}
 	if err := requireNotDreamOwned(ctx, tx, id); err != nil {
 		return nil, err
 	}
@@ -1852,7 +1864,7 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 		return nil, err
 	}
 	// Its sessions tokens go with the row by migration 0043's trigger.
-	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE sessions.workspace_id = $2 AND id = $1`, id, workspace.ID(ctx)); err != nil {
 		return nil, err
 	}
 	// The checkpoint marker row goes in the same transaction — it carries no
@@ -1900,9 +1912,9 @@ func (s *server) deleteSession(r *http.Request) (any, error) {
 	// hold one it waits for while it waits for the other.
 	deliverables, err := tx.Query(ctx,
 		`DELETE FROM files
-		  WHERE id IN (SELECT id FROM files WHERE scope_type = 'session' AND scope_id = $1
+		  WHERE id IN (SELECT id FROM files WHERE scope_type = 'session' AND scope_id = $1 AND workspace_id = $2
 		                ORDER BY id FOR UPDATE)
-		 RETURNING `+store.FileObjectKeySQL, id)
+		 RETURNING `+store.FileObjectKeySQL, id, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}

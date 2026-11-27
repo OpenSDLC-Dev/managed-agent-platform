@@ -14,7 +14,14 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/events"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
+
+type environmentCredential struct {
+	id                    string
+	kind                  domain.EnvironmentKind
+	workspaceID, publicID string
+}
 
 // authenticateEnvironmentKey resolves a Bearer token to the environment it is
 // scoped to and that environment's kind, or "" if the key is unknown, revoked,
@@ -32,28 +39,28 @@ import (
 // query on every poll would be its price. A key dies with its environment (ON
 // DELETE CASCADE) and a kind never changes (updateEnvironment), so the join
 // drops no live key and the kind cannot go stale within a request.
-func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (envID string, kind domain.EnvironmentKind, revoked bool, err error) {
-	var k string
-	var expired bool
-	err = pool.QueryRow(ctx,
-		`SELECT k.environment_id, e.kind, k.revoked_at IS NOT NULL,
+func authenticateEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, key string) (environmentCredential, bool, error) {
+	var keyScope environmentCredential
+	var revoked, expired bool
+	err := pool.QueryRow(ctx,
+		`SELECT k.environment_id, e.kind, w.id, w.public_id, k.revoked_at IS NOT NULL,
 		        k.expires_at IS NOT NULL AND k.expires_at <= now()
 		   FROM environment_keys k
 		   JOIN environments e ON e.id = k.environment_id AND (e.org_id,e.workspace_id)=(k.org_id,k.workspace_id)
-		   JOIN workspaces w ON (w.org_id,w.id)=(k.org_id,k.workspace_id) AND w.id='default' AND w.archived_at IS NULL
+		   JOIN workspaces w ON (w.org_id,w.id)=(k.org_id,k.workspace_id) AND w.archived_at IS NULL
 		  WHERE k.key_hash = $1`,
-		apikey.Hash(key)).Scan(&envID, &k, &revoked, &expired)
+		apikey.Hash(key)).Scan(&keyScope.id, &keyScope.kind, &keyScope.workspaceID, &keyScope.publicID, &revoked, &expired)
 	switch {
 	case err == pgx.ErrNoRows:
-		return "", "", false, nil
+		return environmentCredential{}, false, nil
 	case err != nil:
-		return "", "", false, err
+		return environmentCredential{}, false, err
 	case revoked:
-		return "", "", true, nil
+		return environmentCredential{}, true, nil
 	case expired:
-		return "", "", false, nil
+		return environmentCredential{}, false, nil
 	}
-	return envID, domain.EnvironmentKind(k), false, nil
+	return keyScope, false, nil
 }
 
 // errRevokedEnvironmentKey is the 401 a revoked environment key gets, in the
@@ -86,15 +93,15 @@ func bearerToken(r *http.Request) (token string, ok bool) {
 // errRevokedEnvironmentKey, the one place that answer is chosen; why the
 // prefix decides it is docs/DIVERGENCES.md's *Environment key revocation and
 // expiry*. Any other error is a failed lookup, the lane's to answer.
-func lookupEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, token string) (envID string, kind domain.EnvironmentKind, err error) {
-	envID, kind, revoked, err := authenticateEnvironmentKey(ctx, pool, token)
+func lookupEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, token string) (environmentCredential, error) {
+	keyScope, revoked, err := authenticateEnvironmentKey(ctx, pool, token)
 	switch {
 	case err != nil:
-		return "", "", err
+		return environmentCredential{}, err
 	case revoked && strings.HasPrefix(token, environmentKeySecretPrefix):
-		return "", "", errRevokedEnvironmentKey
+		return environmentCredential{}, errRevokedEnvironmentKey
 	}
-	return envID, kind, nil
+	return keyScope, nil
 }
 
 // resolveEnvironmentKey authenticates a request's Authorization: Bearer
@@ -106,28 +113,32 @@ func lookupEnvironmentKey(ctx context.Context, pool *pgxpool.Pool, token string)
 // lane it looks up any Bearer, prefixed or not, since a grandfathered key is
 // still a worker's credential here; and a failed lookup is the 500 an outage
 // is on every authenticating lane.
-func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (envID string, kind domain.EnvironmentKind, ok bool) {
+func resolveEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.Pool) (environmentCredential, bool) {
 	token, hasBearer := bearerToken(r)
 	if !hasBearer || token == "" {
 		writeError(w, r, errAuth("missing Authorization: Bearer environment key"))
-		return "", "", false
+		return environmentCredential{}, false
 	}
-	envID, kind, err := lookupEnvironmentKey(r.Context(), pool, token)
+	keyScope, err := lookupEnvironmentKey(r.Context(), pool, token)
 	switch {
 	case err != nil:
 		// The revoked 401, or an outage's 500.
 		writeError(w, r, err)
-		return "", "", false
-	case envID == "":
+		return environmentCredential{}, false
+	case keyScope.id == "":
 		// `x-should-retry: false`, as the reference marks the Bearer it does
 		// not take on its work and skill routes (2026-09-02 batch2
 		// `work.list.via-console-org-auth`, `work.poll.via-console-org-auth`;
 		// 2026-09-03 batch2 `envkey.dead-key-verify`; #842).
 		writeError(w, r, noRetry(errAuth("invalid environment key")))
-		return "", "", false
+		return environmentCredential{}, false
+	}
+	if !workspace.Matches(r.Header.Values("anthropic-workspace-id"), keyScope.publicID) {
+		writeError(w, r, errForbidden("workspace is not served by this platform"))
+		return environmentCredential{}, false
 	}
 	markVerified(r.Context())
-	return envID, kind, true
+	return keyScope, true
 }
 
 // answerEnvironmentKey is the management lane's answer to an environment key
@@ -156,7 +167,7 @@ func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 	if !ok || !strings.HasPrefix(token, environmentKeySecretPrefix) {
 		return false
 	}
-	envID, _, err := lookupEnvironmentKey(r.Context(), pool, token)
+	keyScope, err := lookupEnvironmentKey(r.Context(), pool, token)
 	switch {
 	case errors.Is(err, errRevokedEnvironmentKey):
 		writeError(w, r, err)
@@ -165,7 +176,7 @@ func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 		slog.Log(r.Context(), lookupFailureLevel(err), "management lane: environment key lookup failed; answering as for no key",
 			"request_id", requestIDFrom(r.Context()), "err", err)
 		return false
-	case envID == "":
+	case keyScope.id == "":
 		return false
 	}
 	// ServeMux.Handler names the pattern a non-canonical path (/v1//agents,
@@ -181,7 +192,7 @@ func answerEnvironmentKey(w http.ResponseWriter, r *http.Request, pool *pgxpool.
 	}
 	markVerified(r.Context())
 	slog.InfoContext(r.Context(), "management route refused: environment key",
-		"request_id", requestIDFrom(r.Context()), "environment_id", envID, "route", pattern)
+		"request_id", requestIDFrom(r.Context()), "environment_id", keyScope.id, "route", pattern)
 	writeError(w, r, refusal)
 	return true
 }
@@ -281,11 +292,11 @@ func errNotSelfHostedKey(envID string) error {
 // served, as recorded (2026-09-05 batch2 idx 57, 59, 62).
 func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
+		keyScope, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))
+		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(workspace.WithID(r.Context(), keyScope.workspaceID), keyScope.id, keyScope.kind)))
 	})
 }
 
@@ -299,17 +310,17 @@ func requireEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 // operator's, in the log.
 func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
+		keyScope, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		if kind != domain.EnvSelfHosted {
+		if keyScope.kind != domain.EnvSelfHosted {
 			slog.InfoContext(r.Context(), "file download refused: environment key is not self_hosted",
-				"request_id", requestIDFrom(r.Context()), "environment_id", envID, "environment_kind", kind)
+				"request_id", requestIDFrom(r.Context()), "environment_id", keyScope.id, "environment_kind", keyScope.kind)
 			writeError(w, r, noRetry(errNotFound("Not found")))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(r.Context(), envID, kind)))
+		next.ServeHTTP(w, r.WithContext(withEnvironmentKey(workspace.WithID(r.Context(), keyScope.workspaceID), keyScope.id, keyScope.kind)))
 	})
 }
 
@@ -328,12 +339,12 @@ func requireSelfHostedEnvironmentKey(pool *pgxpool.Pool, next http.Handler) http
 // any session.
 func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envID, kind, ok := resolveEnvironmentKey(w, r, pool)
+		keyScope, ok := resolveEnvironmentKey(w, r, pool)
 		if !ok {
 			return
 		}
-		if kind != domain.EnvSelfHosted {
-			writeError(w, r, errNotSelfHostedKey(envID))
+		if keyScope.kind != domain.EnvSelfHosted {
+			writeError(w, r, errNotSelfHostedKey(keyScope.id))
 			return
 		}
 		// Extract the id from the decoded path so that, for a real (slashless)
@@ -352,8 +363,8 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 		}
 		var sessEnv string
 		err := pool.QueryRow(r.Context(),
-			`SELECT environment_id FROM sessions WHERE id = $1`, sid).Scan(&sessEnv)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && sessEnv != envID) {
+			`SELECT environment_id FROM sessions WHERE id = $1 AND workspace_id=$2`, sid, keyScope.workspaceID).Scan(&sessEnv)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && sessEnv != keyScope.id) {
 			writeError(w, r, errNotFound("session %s not found", sid))
 			return
 		}
@@ -361,7 +372,7 @@ func requireEnvironmentKeyForSession(pool *pgxpool.Pool, next http.Handler) http
 			writeError(w, r, err)
 			return
 		}
-		ctx := withEnvironmentKey(r.Context(), envID, kind)
+		ctx := withEnvironmentKey(workspace.WithID(r.Context(), keyScope.workspaceID), keyScope.id, keyScope.kind)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, ctxKeyCredential, events.EnvironmentCredential)))
 	})
 }

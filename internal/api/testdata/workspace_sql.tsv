@@ -1,0 +1,228 @@
+# Site, normalized SQL fingerprints, and authorization boundary. A changed or new statement requires review.
+internal/api/adminapikeys.go.getAdminAPIKey	41edf399fd7957bf	Organization audit endpoint; its shared key predicate constrains visibility and cursor resolution.
+internal/api/adminapikeys.go.listAdminAPIKeys	27a0efe193527141 688dd0eb0b8e6c5b	Organization audit endpoint; its shared key predicate constrains visibility and cursor resolution.
+internal/api/agents.go.insertAgentInTx	bc807887eb22ac7b	Agent version belongs to the agent already inserted or loaded in this workspace.
+internal/api/agents.go.listAgentVersions	c9daf9a1e313d0c0	Agent version belongs to the agent already inserted or loaded in this workspace.
+internal/api/agents.go.updateAgent	64322649237a3ec6	Agent version belongs to the agent already inserted or loaded in this workspace.
+internal/api/apikeys.go.listManagementKeys	495538eca10e9ab3	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
+internal/api/apikeys.go.updateManagementKey	0f25732a6bd5ed90	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
+internal/api/consoleapikeys.go.updateAPIKeyIn	0148f130676fb290 5fba309df56d816b b97ed1cda8d68c31	Private key-management transaction checks its browser actor and the target key; client generalization is Plan 42 stage 4.
+internal/api/deploymentparse.go.resolveDeploymentAgent	853b1568260fc75b	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
+internal/api/deploymentruns.go.runDeployment	9e799ed15bdef035 bad381678af9f64b f406acd17c62a052	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
+internal/api/deployments.go.fillScheduleTimestamps	8c00533d6a8e6da9	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
+internal/api/deployments.go.setDeploymentPause	a5036f0c888a6673 cb0a0def1fcf6152	Scoped deployment or agent resolution supplies the parent for this version, run or scheduling update.
+internal/api/deploymentscheduler.go.deploymentTick	1f60a5e86e47c44e	Scheduler discovers candidates globally, re-locks the deployment, then runs under its stored workspace.
+internal/api/deploymentscheduler.go.fireScheduledTx	3d2f22ec0ef9b055 8a7f6df133fe1380 bad381678af9f64b 4bed179f78da1319 d051515ccfdb327c f406acd17c62a052	Scheduler discovers candidates globally, re-locks the deployment, then runs under its stored workspace.
+internal/api/dreamrunner.go.dreamAdvanceArm	d2611568bf16ffea	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamClaim	f74cbc9007e38661	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamClosingArm	99afd0ee48b34261 fd9b233f8ea4ee73	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamSecretInVersions	c4e80b6b7924874f	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamSettle	4817bdc37fa75c62	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamStageFailure	a6f8c7e9717fdbd7	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.dreamStageTurns	9e4b7c18d26f83a7 a5e7f59e43c77659	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.lastSessionError	940f3793365efcf8	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.lockDream	1627d75b63e4ab58	Dream sweep discovers a candidate and recovers its workspace before acting.
+internal/api/dreamrunner.go.mirrorDreamUsage	447bd1e0ecbbe249	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamrunner.go.scanDreamCandidates	de56b96065c7642d	Dream sweep discovers a candidate and recovers its workspace before acting.
+internal/api/dreamstart.go.cloneDreamStore	33237ba33aee490b 566d690ed63dfbf2 91116faecac7936f	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamstart.go.dreamStartChecks	393a6c379d65a90e 8b8686350bfbce07	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamstart.go.settleExhaustedDream	b2779a8e007a7ae1	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/dreamstart.go.writeDreamStart	3c25a1b1e7a39335 ccd7977535be16c2 e6a311f20c0f47a7	The runner operates on its locked dream, its scoped inputs, or the pipeline session created for it.
+internal/api/envauth.go.authenticateEnvironmentKey	e4c7bca8f256bc8f	Secret digest resolves the live credential, its principal and its workspace.
+internal/api/envkeys.go.ListEnvironmentKeys	677e8eb6f1ae1597 e3da37c6b2daede9	The credential API checks the owning environment before listing or revoking its keys.
+internal/api/envkeys.go.RevokeEnvironmentKey	0aa628c5ba2d37a2	The credential API checks the owning environment before listing or revoking its keys.
+internal/api/events.go.sendSessionEvents	0e9c3b1e2b7095d8 eca99a7d213d1d9f	Session event admission or replay follows a scoped session lookup.
+internal/api/events.go.streamEvents	154c4dd34869b8a0	Session event admission or replay follows a scoped session lookup.
+internal/api/fileretention.go.purgeExpiredFiles	be66ec256cc45b7e	Installation-wide expiry job deletes retired objects or versions.
+internal/api/gateconfig.go.emitUnreachableCredentials	065a82cb2a7b0320	Gate token binds the session and its live workspace before configuration or advisory emission.
+internal/api/gateconfig.go.getGateConfig	4828d8ee592cb7bc bd953529ed97b145	Gate token binds the session and its live workspace before configuration or advisory emission.
+internal/api/members.go	06286a07af470b08	Organization membership administration acts on an explicitly named grant.
+internal/api/memories.go.createMemory	187fe318f3b416fa cda5ca281800580b	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memories.go.deleteMemory	69fd1b179327b587 c7bb31a4344316ec	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memories.go.insertMemoryVersion	0dcf95786a7aa0d2	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memories.go.listMemories	63de1eb49d3293ad d3cbd636efbd3ed7	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memories.go.occupiedBy	db866534875be9fd	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memories.go.updateMemory	43a5457d8b1b87a7 c7bb31a4344316ec	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/memoryretention.go.pruneMemoryVersions	6acf9481ec5d005e	Installation-wide expiry job deletes retired objects or versions.
+internal/api/memoryversions.go.redactMemoryVersion	0d83a47cf10aa30c 17678708fa0ab721 74a2030d1acc9330	The memory store is scoped before child reads, redaction or mutation in the same request.
+internal/api/ownedkeyauth.go.authenticateManagementKey	3b03b62bfbb4d45e	Secret digest resolves the live credential, its principal and its workspace.
+internal/api/serviceaccounts.go	565f41987cb514de	Organization membership administration acts on an explicitly named grant.
+internal/api/sessionresources.go.insertSessionResourceCredentials	225dc7669c0d492d	The checked session supplies the repository token or catalog parent.
+internal/api/sessionresources.go.rotateResourceTokenTx	0108839e81113eba	The checked session supplies the repository token or catalog parent.
+internal/api/sessions.go.updateSession	c775c872fa00ecc1	The checked session supplies the repository token or catalog parent.
+internal/api/skills.go	2dec6ab9ce40665b	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skills.go.deleteSkill	7c5c7573474d2218	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skills.go.deleteSkillVersion	83c3cc9725d6b83c 8a71536ceac4254d	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skills.go.insertSkill	00dbefe1351795b2	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skills.go.insertSkillVersion	7c2341605d41a5a9 b92ef1ebd3d786fe	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skills.go.listSkillVersions	f4654388691643ea	Version belongs to the scoped or explicitly public catalog parent.
+internal/api/skillsimport.go.importSkillDir	00dbefe1351795b2 487383455a9a9d27 70774af569089494 e874384f00abb44b	The operator imports the reserved global Anthropic catalog and its versions.
+internal/api/threads.go.listThreads	f1046363e14718e7	The scoped, authorized session fixes the owning thread set.
+internal/api/threads.go.terminateThread	834e10a0aebdace1 dc66bd274ae22b68	The scoped, authorized session fixes the owning thread set.
+internal/api/threadstate.go.liveThreads	e0011af1edf0c7ad	The scoped, authorized session fixes the owning thread set.
+internal/api/vaultcredentials.go.createVaultCredential	b78f90098480c922 d424562f2f7f1636	Child access follows the authorized vault or the locked credential's scoped parent.
+internal/api/vaultcredentials.go.listVaultCredentials	b82c220dd64e47c0	Child access follows the authorized vault or the locked credential's scoped parent.
+internal/api/vaultcredentials.go.updateVaultCredential	17ba47c3475f5f24	Child access follows the authorized vault or the locked credential's scoped parent.
+internal/api/vaults.go.archiveVault	1b309ac37113579f	Child access follows the authorized vault or the locked credential's scoped parent.
+internal/api/vaultvalidate.go.validateVaultCredential	0f55443396a02d16	Child access follows the authorized vault or the locked credential's scoped parent.
+internal/api/workapi.go.claimWork	50b8859f30a381bf	The worker credential or lease supplies the environment and session used for settlement.
+internal/api/workapi.go.finalizeAbandoned	1e1cd20d5ae48c51	The worker credential or lease supplies the environment and session used for settlement.
+internal/api/workapi.go.stopWork	38ec8c99af7127e4	The worker credential or lease supplies the environment and session used for settlement.
+internal/api/workspacemembership.go.updateDefaultGrant	4865d76a0baa0dc0	Organization membership administration acts on an explicitly named grant.
+internal/brain/brain.go.claimLiveSession	b5e203c7b1b62ea8	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/brain.go.commitUnderLock	38ec8c99af7127e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/brain.go.pendingInput	fedb60f36a80f530	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/brain.go.settle	38ec8c99af7127e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/brain.go.threadHead	801c8420241814a9	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.chainInput	739db936e5d88680	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.commitDelegatedTurn	6287f6393e3b908e	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.createAgent	1b8946e3b286dd4f	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.cutExhaustedRun	3355675f4e9ef205 38ec8c99af7127e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.liveChildren	2c6bba2cd7378d10	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/delegate.go.sessionStatusNow	1f0e46b08445adec	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.childEndedNotice	4e48f8a3391bb9e2	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.gradingHistory	154c4dd34869b8a0	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.liveChildMessage	d034d3c11ae67b0b	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.settleEndTurn	d3200ad6575230ab	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.settleGraderError	38ec8c99af7127e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/grader.go.settleVerdict	23c47036b52e7936	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/mcptools.go.loadMCPCatalog	85608a4a8b3e36e4	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/mcptools.go.reportUnsupportedNames	8bcca3f953feff33	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/repos.go.cloneFailures	ca4949763996f402	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/reposkills.go.nestedSkillBlocks	c66228208b997246	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/reposkills.go.repoSkillsFor	693a38ac5eeed0c0	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/brain/reposkills.go.suspendForRepoSkills	0406fefb6e59aff8	Claimed model turn supplies the session and its threads; stored events, tools and catalogs belong to that session.
+internal/clioauth/oauth.go.Authenticate	ccdaefb5c397adb9	The OAuth grant or token hash identifies the credential and its workspace.
+internal/clioauth/oauth.go.Exchange	13c09c3885dbbe31 5a69ae2744161335	The OAuth grant or token hash identifies the credential and its workspace.
+internal/clioauth/oauth.go.Prune	5cc18aa6e1f8c4f8	Installation-wide expiry of OAuth grants and tokens.
+internal/clioauth/oauth.go.Refresh	4f75c7bc69b48d6b bbd53cb25a6cf929 caf1db500af38267 fdedba2142599001	The OAuth grant or token hash identifies the credential and its workspace.
+internal/clioauth/oauth.go.mintTokens	1d15c2f8587679d6 b8acbf48ad0ed6e6	Token rows belong to the authorized grant being issued.
+internal/events/approvalmetric.go.ClearedApprovalWait	60706cf89ac4f74a	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/approvalmetric.go.PendingApprovalThreads	71b0e9865867eac2	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/log.go.AppendInTx	02299fa309774871 0fa56dd1038d987a 14daa129c16bcb20 21617878e7381faf 431476b3b009dc61 86a6bf4313f3cf8f 9f24709b7900c5db a1ffeb0caf579942 a8b70a32ada95a2c bca88631c8f7aae7 f68b73080c91e31f	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/log.go.List	7cb2f5317c3c4244 a91ccf37b6c677ed	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.AdvanceThreadTools	1e5a24d4f53d51df	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.SettleTransition	51755d2b39369b26 9f82e6b0b59726eb	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.StampConfirmations	240d4d9d53aef5f0	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.StampSupersededAnswers	1c1bb15b893577ee	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.ToolFlowThreads	ee34738c3d04428a	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.threadCalls	f3baeb22b72e3414	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/orderedtools.go.threadCallsOf	4f33f311085ff00c	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/outcomes.go.BeginOutcomeWork	6bef7fe8eaf16bf0	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/outcomes.go.InterruptOutcomes	1c7c121805c39c81 a1ffeb0caf579942	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/outcomes.go.ValidateDefineOutcomes	a1ffeb0caf579942	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/route.go.RouteInbound	3a213cc80a6f615b 4afd089a09d7fa40	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/status.go.AppendTransition	1f0e46b08445adec a3a74328c37891d9	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/status.go.TransitionThread	1f0e46b08445adec 21617878e7381faf 282a5aec04850963	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/status.go.foldSession	aa6f9693f5843d12	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/status.go.idsInSeqOrder	65547952d2d2abf9	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/status.go.threadWakes	f7af3479e04bf750	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/thinking.go.DropThinking	1ee0bf4ce34025fa	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/thinking.go.ThinkingBlocks	3e16d25bbbb7b857	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/thinking.go.insertThinking	f863b374ccae1a7f	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/threadmsg.go.BusyChild	93da3125ff7ff7b0	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/threadmsg.go.wakeOnThreadEnded	0775a155a0b30f6d	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/threadmsg.go.wakeThread	16a242d6e0f80de2	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go	5ca40c6faf31b2ac 969a7b2cd85f2975 a3e4b28d3447801d	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.Answered	683e3904166603e5	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.AnsweredSet	455d7c44579903c8	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.HasRunnableMCPToolUse	c81bb28448d5f9cc	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.HasUnansweredThreadToolUse	cfe639ec73db35bd	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.ResumableThreads	90968b1458a11380	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.RunnableExecClass	9618d0c9365b3915	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.RunnableToolUses	501bf423d41807e6	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.UnansweredThreadToolUses	9993675af94473b7	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.UnansweredToolUses	b8a91dafc873eb55	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.ValidateToolConfirmations	4bdb9bfe9caffbcf	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.ValidateToolResults	f71cbe9bd8856dcd	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.hasUnansweredToolUse	c81bb28448d5f9cc	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.platformToolNames	5de576985dcc4e61	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.toolAnswer	cc3e004b01792167	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.toolUsesByID	5cbc6b7d74b081aa	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/toolflow.go.unconfirmedAskEvents	de55cbc3bfb96280	Internal event-log operation for the authorized session or its locked worker claim.
+internal/events/usage.go.writeSessionClock	acb74d4f3cc3f6ac	Internal event-log operation for the authorized session or its locked worker claim.
+internal/executor/checkpoint.go.captureCheckpoint	19a0e8064e462ffd	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/drain.go.commitResults	38ec8c99af7127e4 9a37412bf8dd4668	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/drain.go.settleDrain	c33104a1158159c6	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/executor.go.sessionForRun	15429254c2597fdc 6a2cbd191ae573d8 bbe4455f6d75de33	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/harvest.go.settleHarvest	23c47036b52e7936	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/mcpwork.go.announcedServers	908c86618eb77c2f	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/mcpwork.go.liveThreadMCPServers	2364c00463a33b31	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/mcpwork.go.readyEndpoints	4d1e7bbeec979650	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/mcpwork.go.settleMCP	370b6b39630f2448 8c62bef9d732ced2	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/mcpwork.go.threadMCPServers	2303938d9235db32	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/memory.go.insertSessionVersion	0dcf95786a7aa0d2	Store writes follow the scoped store lock; reads materialize the store resolved for the claimed session.
+internal/executor/memory.go.materializeStore	5537e6f1bd6cf04a	Store writes follow the scoped store lock; reads materialize the store resolved for the claimed session.
+internal/executor/memory.go.pushMemory	b1f09a646f371082 baddef3145fe6d59 f52450e213350a9d	Store writes follow the scoped store lock; reads materialize the store resolved for the claimed session.
+internal/executor/memory.go.settleStore	6e882a0b30a93a44 96c0936cca05e8a8 aaf6086b2aa3a4ac	Store writes follow the scoped store lock; reads materialize the store resolved for the claimed session.
+internal/executor/memory.go.syncMemoryNow	38ec8c99af7127e4	Store writes follow the scoped store lock; reads materialize the store resolved for the claimed session.
+internal/executor/memory.go.syncMemoryStandalone	854b4bf7476e46ba	The reaper recovers the workspace from the sandbox session before syncing its stores.
+internal/executor/nestedskills.go.recordNestedSkills	cc93097dd8dac118	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/nestedskills.go.toldNestedSkills	28e391ae1f50e202	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/packages.go.emitPackageInstallError	5c732f0166ae1573	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/reaper.go.classifyForReap	79efadefbe7f6157	Host-wide sandbox reaper identifies its session and terminal state.
+internal/executor/repos.go.emitRepoCloneError	1392141367b30198	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/repos.go.repoToken	d0f1b985d1c50341	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/reposkills.go.recordRepoSkills	21193ac8c3037a0e	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/executor/webprovenance.go.webFetchSource	a1647fe051bfb062	The executor claim fixes the session and environment for its output, events and resource credentials.
+internal/gatetoken/gatetoken.go	de9e56d9587e6c8c	Internal credential lifecycle is keyed by its owning session, claim or generation.
+internal/gatetoken/gatetoken.go.Authenticate	d46064bfca1836e8	Hash authentication resolves a machine credential and its owning session.
+internal/gatetoken/gatetoken.go.Ensure	8dba0cd9f68d098f ffd832f541cdf55b	Internal credential lifecycle is keyed by its owning session, claim or generation.
+internal/gatetoken/gatetoken.go.RevokeIfCurrent	38ec8c99af7127e4	Internal credential lifecycle is keyed by its owning session, claim or generation.
+internal/inferencetoken/inferencetoken.go.Authenticate	51753117e89dda34	Hash authentication resolves a machine credential and its owning session.
+internal/inferencetoken/inferencetoken.go.Mint	d1e856ed76d5c8fa	Internal credential lifecycle is keyed by its owning session, claim or generation.
+internal/modelgateway/auth.go.authenticate	2a3a564eddc445ab	Credential hash resolves its owner and registered binding.
+internal/modelgateway/store/aliases.go.CreateAlias	caf42f01e6545d28	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.DeleteAlias	8983fb31a9eb2da6 a7aa0e97913e5074	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.UpdateAlias	f4a23d413fcb86f0	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.getAlias	d6fc77f9eeeddd9b	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.listAliases	006752ca3c102af4	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.loadTargets	32b010b5854f5dc3	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.targetsKind	1926a5c95b10282d	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/aliases.go.writeTargets	0cf74b5e3e57ead8 97a0654d00828087	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.CreateCredential	09559856d465da1f	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.DeleteCredential	310f7ea79e54477c	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.GetCredential	d5283c728aebbcbc	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.UpdateCredential	3f3f8ef6d2e04790 7cb84a7775a40a9a	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.listCredentials	e542ea22e4283786	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/credentials.go.lockProvider	65b0533d96d157df	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/deployments.go.CreateDeployment	d90205978e58e21c	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/deployments.go.DeleteDeployment	c14fc86b54ea5ee1 f8b7fd7761194a6e	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/deployments.go.GetDeployment	439e6fb4f465af6c	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/deployments.go.UpdateDeployment	fb69a8ae567d30c8	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/deployments.go.listDeployments	438f40c2b210e998	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/providers.go.CreateProvider	5bc2ae97fb617d0a	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/providers.go.DeleteProvider	310c872d6e04de14 b93ea53ce00ddcee	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/providers.go.GetProvider	1690395fe2e15a4c	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/providers.go.UpdateProvider	274f100c9665da1b e1dfbb3152b0c97f	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/providers.go.listProviders	9d75028d9c15130d	Organization-operated model catalog and provider configuration.
+internal/modelgateway/store/usage.go.ListDailyUsage	7332de9e50479b56 a66d938fe78b7f10	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
+internal/modelgateway/store/usage.go.ListUsage	60dcaccd57d5b4ed	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
+internal/modelgateway/store/usage.go.SweepUsage	d65126a88c739203	Accounting jobs and organization reports; workspace reporting is the next Plan 42 stage.
+internal/queue/lifecycle.go	46c3df1b8edc99b3	The internal caller supplies an authorized session, environment or lease.
+internal/queue/lifecycle.go.Ack	af223073056ad7ad	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/lifecycle.go.GetWork	a11d4c3c561c3b1b	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/lifecycle.go.Heartbeat	0c03de55e5bee888 dd1cd8bd2d937cd3	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/lifecycle.go.ListWork	eb8a8cb513d6966f	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/lifecycle.go.StopWith	19f447399a9a4866 1c5e47cbace78d68 a11d4c3c561c3b1b	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/lifecycle.go.UpdateMetadata	756dec1e8988ba2b	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/metrics.go.selfHostedEnvIDs	9d448f8e2827614c	Installation-wide environment queue metrics.
+internal/queue/queue.go.Assert	e7c9ef234fb54b17	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.CancelSession	7b6c07eb05e8c133	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.CancelThread	3ef6c39fbbf8d38b	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.Complete	2207e9da1e88a3b5	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.Extend	1e42f4802759e832	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.FinalizeAbandoned	b646d99810e53154	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/queue.go.ListAbandoned	3872b9f1458423d3	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/queue.go.PollOn	689b3f2765a00980	Claim discovery selects live work and locks its owner workspace.
+internal/queue/queue.go.RequeueAsGrading	44662e1ef8487801	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.claim	624a2c5cc18451a6 d440bdb2a3b0c637	Claim discovery selects live work and locks its owner workspace.
+internal/queue/queue.go.renewLive	afd81713037fcc30	The internal caller supplies an authorized session, environment or lease.
+internal/queue/queue.go.requeue	b47f781663bd0948	The internal caller supplies an authorized session, environment or lease.
+internal/queue/stats.go.RecordPoll	b53f1043be3660da	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/queue/stats.go.Stats	19586d6345822788	The authenticated worker fixes its environment; a work item must belong to that environment.
+internal/store/store.go	4b095bd79385aca0	Tombstone records the session being deleted inside its checked transaction.
+internal/vaultresolve/mcprefresh.go.persistRotation	0f55443396a02d16	OAuth rotation follows a credential selected from an attached vault in the claim workspace; the update compares the prior ciphertext.
+internal/vaultresolve/mcprefresh.go.rotatedElsewhere	a28902d5308ea146	OAuth rotation follows a credential selected from an attached vault in the claim workspace; the update compares the prior ciphertext.
+internal/worktoken/worktoken.go.Authenticate	6e62c7b0c26ab747	Hash authentication resolves a machine credential and its owning session.
+internal/worktoken/worktoken.go.Mint	c84f26ed1523116d	Internal credential lifecycle is keyed by its owning session, claim or generation.

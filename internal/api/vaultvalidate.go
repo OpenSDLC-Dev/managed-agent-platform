@@ -17,6 +17,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/oauthrefresh"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -103,7 +104,7 @@ func (s *server) validateVaultCredential(r *http.Request) (any, error) {
 	row := &credentialRow{}
 	err = s.pool.QueryRow(ctx,
 		`SELECT vault_id, auth_type, auth, secret_ciphertext, secret_key_id, archived_at
-		 FROM vault_credentials WHERE id = $1`, credID).
+		 FROM vault_credentials WHERE id = $1 AND EXISTS (SELECT 1 FROM vaults v WHERE v.id=vault_credentials.vault_id AND v.workspace_id=$2)`, credID, workspace.ID(ctx)).
 		Scan(&row.vaultID, &row.authType, &row.authDoc, &row.ciphertext, &row.keyID, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.vaultID != vaultID) {
 		return nil, errNotFound("credential %s not found in vault %s", credID, vaultID)
@@ -167,11 +168,19 @@ func (s *server) validateVaultCredential(r *http.Request) (any, error) {
 			// clobbers a newer write or resurrects an archived credential; if it
 			// affects no row, the probe result still returns (a point-in-time
 			// snapshot, exactly the reference's re-resolution semantics).
-			if _, err := s.pool.Exec(ctx,
+			tx, err := s.beginResourceWrite(ctx)
+			if err != nil {
+				return nil, err
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx,
 				`UPDATE vault_credentials SET auth = $2, secret_ciphertext = $3, secret_key_id = $4,
 				   updated_at = now()
 				 WHERE id = $1 AND archived_at IS NULL AND secret_ciphertext = $5`,
 				credID, newAuthDoc, ciphertext, keyID, row.ciphertext); err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
 		}

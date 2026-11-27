@@ -185,13 +185,9 @@ func TestResourcesAddMintsACopy(t *testing.T) {
 // every top-level table reserves are carried from the upload rather than left
 // at their single-tenant defaults (store's package doc).
 func TestACopyKeepsItsSourcesTenancy(t *testing.T) {
-	s := newTestServer(t)
+	s := secondWorkspace(t, newTestServer(t))
 	agentID, envID := readableFixture(t, s)
 	uploadID := uploadOneFile(t, s, "tenant.txt")
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE files SET org_id = 'org_a', workspace_id = 'ws_b', project_id = 'proj_c' WHERE id = $1`, uploadID); err != nil {
-		t.Fatal(err)
-	}
 	copyID := mountedFileID(t, createSession(t, s, map[string]any{
 		"agent": agentID, "environment_id": envID,
 		"resources": []any{map[string]any{"type": "file", "file_id": uploadID}},
@@ -201,7 +197,7 @@ func TestACopyKeepsItsSourcesTenancy(t *testing.T) {
 		`SELECT org_id, workspace_id, project_id FROM files WHERE id = $1`, copyID).Scan(&org, &ws, &proj); err != nil {
 		t.Fatal(err)
 	}
-	if org != "org_a" || ws != "ws_b" || proj != "proj_c" {
+	if org != "default" || ws != "research" || proj != "default" {
 		t.Errorf("copy tenancy = %s/%s/%s, want the upload's org_a/ws_b/proj_c", org, ws, proj)
 	}
 }

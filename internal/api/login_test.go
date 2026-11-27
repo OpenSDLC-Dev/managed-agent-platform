@@ -139,6 +139,9 @@ func (s *nativeServer) seedLocal(name, role, status string) string {
 	if err != nil {
 		s.t.Fatal(err)
 	}
+	if role == "developer" && status == "active" {
+		grantFixture(s.t, s.pool, id, "developer")
+	}
 	_, err = s.pool.Exec(context.Background(), `INSERT INTO local_accounts(principal_id,password_hash) VALUES ($1,$2)`, id, hash)
 	if err != nil {
 		s.t.Fatal(err)

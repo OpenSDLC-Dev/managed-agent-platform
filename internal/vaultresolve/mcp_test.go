@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/vaultresolve"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -72,7 +73,7 @@ func insertMCPCred(t *testing.T, pool *pgxpool.Pool, vaultID, authType, serverUR
 // an empty token and dial unauthenticated with a credential in hand.
 func TestMCPCredentialReadsTheTokenFieldItsTypeNames(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	for _, row := range []struct{ authType, token string }{
@@ -100,7 +101,7 @@ func TestMCPCredentialReadsTheTokenFieldItsTypeNames(t *testing.T) {
 // first could not pass both halves.
 func TestMCPCredentialFirstVaultWithAMatchWins(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	v1, v2 := newVault(t, pool, false), newVault(t, pool, false)
@@ -133,7 +134,7 @@ func TestMCPCredentialFirstVaultWithAMatchWins(t *testing.T) {
 // in a way it does not still does not.
 func TestMCPCredentialMatchesTheServerAcrossNormalizedSpellings(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	for _, row := range []struct {
@@ -168,7 +169,7 @@ func TestMCPCredentialMatchesTheServerAcrossNormalizedSpellings(t *testing.T) {
 // archiving purges the secret, so resolving one would dial with nothing.
 func TestMCPCredentialSkipsArchivedCredentialsAndVaults(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	archivedVault := newVault(t, pool, true)
@@ -191,7 +192,7 @@ func TestMCPCredentialSkipsArchivedCredentialsAndVaults(t *testing.T) {
 // borrowing another server's token.
 func TestMCPCredentialResolvesNothingForAnUnregisteredServer(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	v := newVault(t, pool, false)
@@ -212,7 +213,7 @@ func TestMCPCredentialResolvesNothingForAnUnregisteredServer(t *testing.T) {
 // dial out anonymously on a session an operator configured a credential for.
 func TestMCPCredentialAWinningVaultWithAPurgedSecretFailsRatherThanFallsThrough(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	purged, live := newVault(t, pool, false), newVault(t, pool, false)
@@ -236,7 +237,7 @@ func TestMCPCredentialAWinningVaultWithAPurgedSecretFailsRatherThanFallsThrough(
 // takes. A session with no matching credential needs no cipher at all.
 func TestMCPCredentialNilCipherFailsClosedOnlyOnAMatch(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	v := newVault(t, pool, false)
@@ -264,7 +265,7 @@ func TestMCPCredentialNilCipherFailsClosedOnlyOnAMatch(t *testing.T) {
 // error a caller can log — the same guarantee Credentials makes.
 func TestMCPCredentialErrorNeverEchoesCipherError(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 
 	v := newVault(t, pool, false)
 	insertMCPCred(t, pool, v, "static_bearer", mcpServer, []byte("ciphertext"), "test-key", false)
@@ -285,7 +286,7 @@ func TestMCPCredentialErrorNeverEchoesCipherError(t *testing.T) {
 // the type filter is the guard against, since the API cannot write one.
 func TestMCPCredentialIgnoresARowOfAnotherType(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	sealed, err := json.Marshal(map[string]string{"secret_value": "an-env-var-secret"})
@@ -328,7 +329,7 @@ func TestMCPCredentialIgnoresARowOfAnotherType(t *testing.T) {
 // a bare "Authorization: Bearer" and read as a credential that was applied.
 func TestMCPCredentialRefusesASealedSecretMissingItsTokenField(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	// A static_bearer sealed under mcp_oauth's field name, and the reverse.
@@ -366,7 +367,7 @@ func TestMCPCredentialRefusesASealedSecretMissingItsTokenField(t *testing.T) {
 // nothing about the credential that is actually wrong.
 func TestMCPCredentialRefusesATokenNoHeaderCanCarry(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	for _, row := range []struct {
@@ -412,7 +413,7 @@ func TestMCPCredentialRefusesATokenNoHeaderCanCarry(t *testing.T) {
 // with the query planner — asserted by resolving repeatedly.
 func TestMCPCredentialBreaksAnIntraVaultTieDeterministically(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	cipher := testCipher(t)
 
 	v := newVault(t, pool, false)

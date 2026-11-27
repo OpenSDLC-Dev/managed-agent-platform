@@ -49,6 +49,15 @@ func TestPlaygroundApprovalIsSeparateFromTheMemberRole(t *testing.T) {
 
 func seedMember(t *testing.T, s *nativeServer, subject, role, source string) string {
 	t.Helper()
+	id := seedOrganizationMember(t, s, subject, role, source)
+	if role == "developer" {
+		grantFixture(t, s.pool, id, role)
+	}
+	return id
+}
+
+func seedOrganizationMember(t *testing.T, s *nativeServer, subject, role, source string) string {
+	t.Helper()
 	id := domain.NewID(domain.PrefixPrincipal).String()
 	_, err := s.pool.Exec(context.Background(), `INSERT INTO principals(id,issuer,subject,role,role_source,email,display_name)
 		VALUES ($1,'https://idp.example',$2,$3,$4,$5,$2)`, id, subject, role, source, subject+"@example.test")

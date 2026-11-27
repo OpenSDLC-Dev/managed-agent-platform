@@ -100,7 +100,7 @@ func importSkillDir(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store, d
 	// impossible by shape; the source check guards a re-run against a row
 	// something else created.
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO skills (id, source, display_title) VALUES ($1, 'anthropic', $2)
+		`INSERT INTO skills (id, source, display_title, workspace_id) VALUES ($1, 'anthropic', $2, 'default')
 		 ON CONFLICT (id) DO NOTHING`, name, name); err != nil {
 		return name, err
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/sandbox"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/skills"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -191,7 +192,7 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 	case skills.PinLatest:
 		var latest *string
 		err := e.pool.QueryRow(ctx,
-			`SELECT latest_version FROM skills WHERE id = $1`, ref.SkillID).Scan(&latest)
+			`SELECT latest_version FROM skills WHERE id = $1 AND (workspace_id = $2 OR source = 'anthropic')`, ref.SkillID, workspace.ID(ctx)).Scan(&latest)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errSkillNotFound
 		}
@@ -205,8 +206,9 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 	case skills.PinID:
 		var version string
 		err := e.pool.QueryRow(ctx,
-			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2`,
-			ref.SkillID, ref.Version).Scan(&version)
+			`SELECT version FROM skill_versions WHERE skill_id = $1 AND id = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+			ref.SkillID, ref.Version, workspace.ID(ctx)).Scan(&version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("%w: version id %s", errSkillNotFound, ref.Version)
 		}
@@ -231,8 +233,9 @@ func (e *Executor) resolveSkillVersion(ctx context.Context, ref skillRef) (strin
 func (e *Executor) skillVersionMeta(ctx context.Context, skillID, version string) (name, sha256 string, err error) {
 	var stored *string
 	err = e.pool.QueryRow(ctx,
-		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2`,
-		skillID, version).Scan(&name, &stored)
+		`SELECT name, sha256 FROM skill_versions WHERE skill_id = $1 AND version = $2
+			 AND EXISTS (SELECT 1 FROM skills s WHERE s.id = skill_id AND (s.workspace_id = $3 OR s.source = 'anthropic'))`,
+		skillID, version, workspace.ID(ctx)).Scan(&name, &stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", fmt.Errorf("%w: version %s", errSkillNotFound, version)
 	}

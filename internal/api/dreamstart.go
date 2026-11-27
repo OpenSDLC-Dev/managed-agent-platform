@@ -17,6 +17,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/transcript"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // The start arm (plan 41 §4.2), in three phases because its network I/O may
@@ -27,16 +28,12 @@ import (
 // row free and lands at once — which is what §2.6 promises for a pending
 // dream.
 
-// dreamAgentID and dreamEnvID are the platform-owned rows every dream's
-// pipeline session runs on (§4.3): created lazily by the first dream on a
-// fresh platform and found by every later one, hidden from every list and
-// every id-addressed route, and resolvable by the runner alone. Fixed rather
-// than minted, so the pair is one row each however many replicas race to
-// create it — ON CONFLICT DO NOTHING then makes the second writer a no-op.
-const (
-	dreamAgentID = "agent_dreamrunner"
-	dreamEnvID   = "env_dreamrunner"
-)
+// Each workspace has its own hidden environment and agent. The permanent registry
+// key gives competing runners the same IDs and keeps every byte wire-safe.
+func dreamInternalIDs(space string) (agent, environment string) {
+	token := fmt.Sprintf("dreamrunner%x", space)
+	return "agent_" + token, "env_" + token
+}
 
 // dreamAgentBody and dreamEnvBody are what POST /v1/agents and
 // POST /v1/environments accept, handed to the handlers' own insert bodies
@@ -134,6 +131,8 @@ func (f dreamFile) key() string { return blob.FilesKey(f.id) }
 // this replica's to log and the next tick's to retry, and the attempt that
 // exhausts dreamStartAttempts settles the dream itself.
 func (s *server) startDream(ctx context.Context, d dreamRow, cfg DreamRunnerConfig) {
+	ctx = workspace.WithID(ctx, d.workspaceID)
+	dreamAgentID, dreamEnvID := dreamInternalIDs(d.workspaceID)
 	// Minted here because step 4's cloned versions are attributed to a session
 	// that does not exist yet. A collision fails the session INSERT like any
 	// other unique violation and the next attempt mints a fresh one.
@@ -269,7 +268,7 @@ func dreamFileKeys(files []dreamFile) []string {
 // here renders a zero time and is settled by the write transaction's own
 // existence check (step 2), which is the one place the absence is classified.
 func sessionCreationTimes(ctx context.Context, db querier, ids []string) (map[string]time.Time, error) {
-	rows, err := db.Query(ctx, `SELECT id, created_at FROM sessions WHERE id = ANY($1)`, ids)
+	rows, err := db.Query(ctx, `SELECT id, created_at FROM sessions WHERE id = ANY($1) AND workspace_id=$2`, ids, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +303,10 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 
 	var status string
 	if err := tx.QueryRow(ctx,
-		`SELECT status FROM dreams WHERE id = $1 FOR UPDATE`, d.id).Scan(&status); err != nil {
+		`SELECT d.status FROM dreams d JOIN workspaces ws ON ws.id=d.workspace_id AND ws.archived_at IS NULL
+		 WHERE d.id=$1 FOR SHARE OF ws FOR UPDATE OF d`, d.id).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		return createdSession{}, false, nil
+	} else if err != nil {
 		return createdSession{}, false, err
 	}
 	if h := dreamStartHookInWrite; h != nil {
@@ -354,9 +356,9 @@ func (s *server) writeDreamStart(ctx context.Context, d dreamRow, sessionID stri
 	}
 	for _, f := range files { // step 5
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, dream_id)
-			VALUES ($1, $2, $3, $4, false, $5)`,
-			f.id, f.filename, dreamFileMIME, int64(len(f.data)), d.id); err != nil {
+			INSERT INTO files (id, filename, mime_type, size_bytes, downloadable, dream_id, workspace_id)
+			VALUES ($1, $2, $3, $4, false, $5, $6)`,
+			f.id, f.filename, dreamFileMIME, int64(len(f.data)), d.id, d.workspaceID); err != nil {
 			return createdSession{}, false, err
 		}
 	}
@@ -397,8 +399,8 @@ func dreamStartChecks(ctx context.Context, tx pgx.Tx, d dreamRow, cfg DreamRunne
 	}
 	var archivedAt *time.Time
 	err := tx.QueryRow(ctx,
-		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 FOR SHARE`,
-		d.inputStoreID).Scan(&in.name, &in.description, &archivedAt)
+		`SELECT name, description, archived_at FROM memory_stores WHERE id = $1 AND workspace_id=$2 FOR SHARE`,
+		d.inputStoreID, d.workspaceID).Scan(&in.name, &in.description, &archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && archivedAt != nil) {
 		return in, "input_memory_store_unavailable",
 			"input memory store " + d.inputStoreID + " is missing or archived", nil
@@ -433,6 +435,7 @@ func dreamStartChecks(ctx context.Context, tx pgx.Tx, d dreamRow, cfg DreamRunne
 // and an archived row is this caller's to notice, because DO NOTHING cannot
 // replace one.
 func (s *server) ensureDreamInternalRows(ctx context.Context, tx pgx.Tx) error {
+	dreamAgentID, dreamEnvID := dreamInternalIDs(workspace.ID(ctx))
 	if _, err := s.insertEnvironmentInTx(ctx, tx, json.RawMessage(dreamEnvBody), dreamEnvID, true); err != nil {
 		return err
 	}
@@ -444,7 +447,7 @@ func (s *server) ensureDreamInternalRows(ctx context.Context, tx pgx.Tx) error {
 	} {
 		var archivedAt *time.Time
 		if err := tx.QueryRow(ctx,
-			`SELECT archived_at FROM `+q.table+` WHERE id = $1`, q.id).Scan(&archivedAt); err != nil {
+			`SELECT archived_at FROM `+q.table+` WHERE id = $1 AND workspace_id=$2`, q.id, workspace.ID(ctx)).Scan(&archivedAt); err != nil {
 			return err
 		}
 		if archivedAt != nil {
@@ -462,8 +465,8 @@ func (s *server) ensureDreamInternalRows(ctx context.Context, tx pgx.Tx) error {
 func (s *server) cloneDreamStore(ctx context.Context, tx pgx.Tx, d dreamRow, in dreamInputStore, sessionID string) (string, error) {
 	cloneID := domain.NewID(domain.PrefixMemoryStore).String()
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO memory_stores (id, name, description, metadata) VALUES ($1, $2, $3, '{}'::jsonb)`,
-		cloneID, dreamCloneName(in.name, d.id), in.description); err != nil {
+		INSERT INTO memory_stores (id, name, description, metadata, workspace_id) VALUES ($1, $2, $3, '{}'::jsonb, $4)`,
+		cloneID, dreamCloneName(in.name, d.id), in.description, d.workspaceID); err != nil {
 		return "", err
 	}
 
@@ -591,6 +594,7 @@ func (s *server) createDreamSession(ctx context.Context, tx pgx.Tx, d dreamRow, 
 	if d.instructions != nil {
 		instructions = *d.instructions
 	}
+	dreamAgentID, dreamEnvID := dreamInternalIDs(d.workspaceID)
 	agent := map[string]any{
 		"type":   "agent_with_overrides",
 		"id":     dreamAgentID,

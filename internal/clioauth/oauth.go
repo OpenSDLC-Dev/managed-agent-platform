@@ -43,6 +43,7 @@ type Authority struct {
 	Role          identity.Role
 	WorkspaceRole workspace.Role
 	WorkspaceID   string
+	WorkspaceKey  string
 	Scopes        []string
 }
 
@@ -221,14 +222,14 @@ func Authenticate(ctx context.Context, db querier, token string) (Authority, err
 		return Authority{}, ErrInvalidGrant
 	}
 	var a Authority
-	err := db.QueryRow(ctx, `SELECT p.id, p.role, g.scopes, w.public_id, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_tokens t
+	err := db.QueryRow(ctx, `SELECT p.id, p.role, g.scopes, w.public_id, w.id, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_tokens t
 		JOIN cli_oauth_grants g ON g.id=t.grant_id
 		JOIN principals p ON p.id=g.principal_id
-		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.id='default' AND w.archived_at IS NULL
+		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.archived_at IS NULL
 		WHERE t.access_hash=$1 AND NOT t.spent AND t.access_expires_at>clock_timestamp()
 		  AND NOT g.revoked AND g.expires_at>clock_timestamp()
 		  AND p.org_id='default' AND p.kind='user' AND p.status='active'`, hash(token)).
-		Scan(&a.PrincipalID, &a.Role, &a.Scopes, &a.WorkspaceID, &a.WorkspaceRole)
+		Scan(&a.PrincipalID, &a.Role, &a.Scopes, &a.WorkspaceID, &a.WorkspaceKey, &a.WorkspaceRole)
 	return a, grantError(err)
 }
 
@@ -243,7 +244,7 @@ func mintTokens(ctx context.Context, tx pgx.Tx, grantID string) (Tokens, error) 
 	if err := tx.QueryRow(ctx, `SELECT md5(p.id)::uuid::text, p.email, p.role, g.scopes,
 		w.public_id, w.name, coalesce(workspace_role(p.id,w.id),'') FROM cli_oauth_grants g
 		JOIN principals p ON p.id=g.principal_id
-		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.id='default' AND w.archived_at IS NULL
+		JOIN workspaces w ON w.id=g.workspace_id AND w.org_id=p.org_id AND w.archived_at IS NULL
 		WHERE g.id=$1::uuid AND p.org_id='default' AND p.kind='user' AND p.status='active'`, grantID).
 		Scan(&out.Account.ID, &out.Account.Email, &role, &scopes, &out.Workspace.ID, &out.Workspace.Name, &grant); err != nil {
 		return Tokens{}, grantError(err)

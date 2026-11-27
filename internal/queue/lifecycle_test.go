@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/queue"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -1213,7 +1214,7 @@ func TestFinalizeAbandonedRechecksUnderTheTransaction(t *testing.T) {
 // gets its own case, since a single queued self_hosted tool_exec satisfies them
 // all at once and would pin none of them.
 func TestHasUndrainedWork(t *testing.T) {
-	ctx := context.Background()
+	ctx := workspace.WithID(t.Context(), workspace.Default)
 	pool := pgtest.NewPool(t)
 	q := queue.New(pool)
 

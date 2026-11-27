@@ -9,6 +9,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/pgtest"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -20,7 +21,7 @@ import (
 // 409 rosterLockErr promises, and the survivor resolves.
 func TestResolveRosterDeadlockIs409(t *testing.T) {
 	pool := pgtest.NewPool(t)
-	ctx := context.Background()
+	ctx := workspace.WithID(context.Background(), workspace.Default)
 	ids := [2]string{domain.NewID(domain.PrefixAgent).String(), domain.NewID(domain.PrefixAgent).String()}
 	for _, id := range ids {
 		if _, err := pool.Exec(ctx,

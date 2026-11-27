@@ -12,6 +12,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/blob"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/dialguard"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 )
 
 // AllowLoopbackProbeForTest relaxes the validate probe's SSRF guard to permit
@@ -248,6 +249,7 @@ func DeploymentPausingErrorTypesForTest() []string {
 // a caller-chosen id, and the internal flag no request can carry. It commits
 // its own transaction and reports whether the id was new. Test binary only.
 func InsertAgentForTest(ctx context.Context, pool *pgxpool.Pool, body, id string, internal bool) (bool, error) {
+	ctx = workspace.WithID(ctx, workspace.Default)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -263,6 +265,7 @@ func InsertAgentForTest(ctx context.Context, pool *pgxpool.Pool, body, id string
 // InsertEnvironmentForTest is InsertAgentForTest for environments
 // (insertEnvironmentInTx). Test binary only.
 func InsertEnvironmentForTest(ctx context.Context, pool *pgxpool.Pool, body, id string, internal bool) (bool, error) {
+	ctx = workspace.WithID(ctx, workspace.Default)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -281,6 +284,7 @@ func InsertEnvironmentForTest(ctx context.Context, pool *pgxpool.Pool, body, id 
 // environment. An empty id mints one, as a wire create does. Returns the
 // created session's id. Test binary only.
 func CreateSessionForTest(ctx context.Context, pool *pgxpool.Pool, id, envID, agentRaw string, internal bool) (string, error) {
+	ctx = workspace.WithID(ctx, workspace.Default)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return "", err
@@ -302,6 +306,7 @@ func CreateSessionForTest(ctx context.Context, pool *pgxpool.Pool, id, envID, ag
 // cancel and tick call (interruptSessionInTx), committing its transaction.
 // Test binary only.
 func InterruptSessionForTest(ctx context.Context, pool *pgxpool.Pool, sessionID string) error {
+	ctx = workspace.WithID(ctx, workspace.Default)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -324,7 +329,7 @@ func DreamTickForTest(ctx context.Context, pool *pgxpool.Pool, blobs blob.Store,
 // DreamInternalIDsForTest exposes the fixed ids of the runner's hidden agent
 // and environment, so a test asserts against the constants rather than a copy
 // of their values. Test binary only.
-func DreamInternalIDsForTest() (agentID, envID string) { return dreamAgentID, dreamEnvID }
+func DreamInternalIDsForTest() (agentID, envID string) { return dreamInternalIDs(workspace.Default) }
 
 // DreamInternalBodiesForTest exposes the request bodies the runner hands the
 // two insert helpers, so a test can write the same bodies through the public

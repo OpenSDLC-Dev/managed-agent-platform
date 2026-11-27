@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/secrets"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -142,14 +143,14 @@ func (s *server) createVaultCredential(r *http.Request) (any, error) {
 		return nil, sealFailed(err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var vaultArchived *time.Time
-	err = tx.QueryRow(ctx, `SELECT archived_at FROM vaults WHERE id = $1 FOR UPDATE`, vaultID).Scan(&vaultArchived)
+	err = tx.QueryRow(ctx, `SELECT archived_at FROM vaults WHERE vaults.workspace_id = $2 AND id = $1 FOR UPDATE`, vaultID, workspace.ID(ctx)).Scan(&vaultArchived)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("vault %s not found", vaultID)
 	}
@@ -214,7 +215,7 @@ var errCredentialNotFound = errNotFound("Credential not found.")
 // credential archived on its own, never recorded, keeps ours.
 func archivedCredentialRefusal(ctx context.Context, db querier, vaultID, credID string) error {
 	var vaultArchived *time.Time
-	err := db.QueryRow(ctx, `SELECT archived_at FROM vaults WHERE id = $1`, vaultID).Scan(&vaultArchived)
+	err := db.QueryRow(ctx, `SELECT archived_at FROM vaults WHERE vaults.workspace_id = $2 AND id = $1`, vaultID, workspace.ID(ctx)).Scan(&vaultArchived)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The vault, and its credentials with it, was deleted since the read.
 		return errCredentialNotFound
@@ -265,7 +266,7 @@ func (s *server) getVaultCredential(r *http.Request) (any, error) {
 	row := &credentialRow{}
 	err = s.pool.QueryRow(ctx,
 		`SELECT vault_id, display_name, auth_type, auth, metadata, created_at, updated_at, archived_at
-		 FROM vault_credentials WHERE id = $1`, credID).
+		 FROM vault_credentials WHERE id = $1 AND EXISTS (SELECT 1 FROM vaults WHERE vaults.id = vault_credentials.vault_id AND vaults.workspace_id = $2)`, credID, workspace.ID(ctx)).
 		Scan(&row.vaultID, &row.displayName, &row.authType, &row.authDoc, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.vaultID != vaultID) {
@@ -312,7 +313,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 		base := &credentialRow{}
 		err = s.pool.QueryRow(ctx,
 			`SELECT vault_id, auth_type, auth, secret_ciphertext, secret_key_id, archived_at
-			 FROM vault_credentials WHERE id = $1`, credID).
+			 FROM vault_credentials WHERE id = $1 AND EXISTS (SELECT 1 FROM vaults WHERE vaults.id = vault_credentials.vault_id AND vaults.workspace_id = $2)`, credID, workspace.ID(ctx)).
 			Scan(&base.vaultID, &base.authType, &base.authDoc, &base.ciphertext, &base.keyID, &base.archivedAt)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && base.vaultID != vaultID) {
 			return nil, errCredentialNotFound
@@ -334,7 +335,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.beginResourceWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +345,7 @@ func (s *server) updateVaultCredential(r *http.Request) (any, error) {
 	err = tx.QueryRow(ctx,
 		`SELECT vault_id, display_name, auth_type, auth, secret_ciphertext, secret_key_id,
 		        metadata, created_at, updated_at, archived_at
-		 FROM vault_credentials WHERE id = $1 FOR UPDATE`, credID).
+		 FROM vault_credentials WHERE id = $1 AND EXISTS (SELECT 1 FROM vaults WHERE vaults.id = vault_credentials.vault_id AND vaults.workspace_id = $2) FOR UPDATE`, credID, workspace.ID(ctx)).
 		Scan(&row.vaultID, &row.displayName, &row.authType, &row.authDoc, &row.ciphertext, &row.keyID,
 			&row.metaJSON, &row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && row.vaultID != vaultID) {
@@ -468,7 +469,7 @@ func (s *server) listVaultCredentials(r *http.Request) (any, error) {
 	// A list on a missing vault is a 404, not an empty page.
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT true FROM vaults WHERE id = $1`, vaultID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
+		`SELECT true FROM vaults WHERE vaults.workspace_id = $2 AND id = $1`, vaultID, workspace.ID(ctx)).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound("vault %s not found", vaultID)
 	} else if err != nil {
 		return nil, err
@@ -545,13 +546,18 @@ func (s *server) archiveVaultCredential(r *http.Request) (any, error) {
 	// Scope the mutation to the path's vault: a wrong-vault archive must 404
 	// without destroying anything, so the vault_id is in the WHERE, not a
 	// post-hoc check on a row already purged.
-	err = s.pool.QueryRow(ctx,
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx,
 		`UPDATE vault_credentials SET
 		   secret_ciphertext = NULL, secret_key_id = NULL,
 		   updated_at  = CASE WHEN archived_at IS NULL THEN now() ELSE updated_at END,
 		   archived_at = COALESCE(archived_at, now())
-		 WHERE id = $1 AND vault_id = $2
-		 RETURNING vault_id, display_name, auth, metadata, created_at, updated_at, archived_at`, credID, vaultID).
+		 WHERE id = $1 AND vault_id = $2 AND EXISTS (SELECT 1 FROM vaults WHERE vaults.id = vault_credentials.vault_id AND vaults.workspace_id = $3)
+		 RETURNING vault_id, display_name, auth, metadata, created_at, updated_at, archived_at`, credID, vaultID, workspace.ID(ctx)).
 		Scan(&row.vaultID, &row.displayName, &row.authDoc, &row.metaJSON,
 			&row.createdAt, &row.updatedAt, &row.archivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -564,6 +570,9 @@ func (s *server) archiveVaultCredential(r *http.Request) (any, error) {
 	if err := json.Unmarshal(row.metaJSON, &metadata); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return renderCredential(credID, vaultID, row.displayName, row.authDoc, metadata,
 		row.createdAt, row.updatedAt, row.archivedAt), nil
 }
@@ -574,13 +583,21 @@ func (s *server) deleteVaultCredential(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2`, credID, vaultID)
+	tx, err := s.beginResourceWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM vault_credentials WHERE id = $1 AND vault_id = $2 AND EXISTS (SELECT 1 FROM vaults WHERE vaults.id = vault_credentials.vault_id AND vaults.workspace_id = $3)`, credID, vaultID, workspace.ID(ctx))
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, errCredentialNotFound
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return map[string]string{"id": credID, "type": "vault_credential_deleted"}, nil
 }

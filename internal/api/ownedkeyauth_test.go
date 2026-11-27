@@ -39,6 +39,11 @@ func ownedPrincipalFixture(t *testing.T, pool *pgxpool.Pool, kind, role string) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if role == "developer" {
+		if _, err := pool.Exec(t.Context(), `INSERT INTO workspace_memberships VALUES ('default',$1,'developer')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return id
 }
 
