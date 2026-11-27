@@ -2,10 +2,22 @@ package api
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/identity"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/workspace"
 	"github.com/jackc/pgx/v5"
 )
+
+type writeRoleKey struct{}
+
+// The dispatcher's admin minimum strengthens any Console-specific minimum.
+func withWriteFloor(r *http.Request, min identity.Role) *http.Request {
+	if min == identity.RoleAdmin {
+		return r.WithContext(context.WithValue(r.Context(), writeRoleKey{}, workspace.Admin))
+	}
+	return r
+}
 
 // Recheck the authenticated subject inside the write transaction. The registry
 // lock orders this commit against archival and membership edits. Machine lanes
@@ -17,8 +29,9 @@ func lockResourceWrite(ctx context.Context, tx pgx.Tx) error {
 	} else if principal, ok := identityFrom(ctx); ok {
 		subject = principal.ID
 	}
+	min, _ := ctx.Value(writeRoleKey{}).(workspace.Role)
 	var allowed bool
-	if err := tx.QueryRow(ctx, `SELECT lock_workspace_write($1,$2,$3)`, workspace.ID(ctx), subject, keyID).Scan(&allowed); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT lock_workspace_write($1,$2,$3,$4)`, workspace.ID(ctx), subject, keyID, min).Scan(&allowed); err != nil {
 		return err
 	}
 	if !allowed {

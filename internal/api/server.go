@@ -745,7 +745,7 @@ func roleGate(min identity.Role, h http.HandlerFunc) http.HandlerFunc {
 			writeError(w, r, err)
 			return
 		}
-		h(w, r)
+		h(w, withWriteFloor(r, min))
 	}
 }
 
@@ -768,7 +768,7 @@ func (s *server) handle(min identity.Role, fn func(*http.Request) (any, error)) 
 			writeError(w, r, err)
 			return
 		}
-		v, err := fn(r)
+		v, err := fn(withWriteFloor(r, min))
 		if err != nil {
 			writeError(w, r, err)
 			return
@@ -785,7 +785,7 @@ func (s *server) handleNoContent(min identity.Role, fn func(*http.Request) error
 			writeError(w, r, err)
 			return
 		}
-		if err := fn(r); err != nil {
+		if err := fn(withWriteFloor(r, min)); err != nil {
 			writeError(w, r, err)
 			return
 		}

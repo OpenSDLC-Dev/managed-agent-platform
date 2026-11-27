@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +54,9 @@ func (s *server) serveConsoleProxy(next http.Handler) http.HandlerFunc {
 		}
 		ctx, stop := s.login.WatchAuthority(w, r, allowed)
 		defer stop()
+		if !consoleResourceAllowed(workspace.LimitedDeveloper, r.Method, decoded) {
+			ctx = context.WithValue(ctx, writeRoleKey{}, workspace.Developer)
+		}
 		forwarded := r.Clone(ctx)
 		forwarded.URL.Path, _ = url.PathUnescape(target)
 		forwarded.URL.RawPath = target

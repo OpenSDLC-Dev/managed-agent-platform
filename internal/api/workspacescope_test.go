@@ -11,6 +11,7 @@ import (
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/api"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/apikey"
 	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/domain"
+	"github.com/OpenSDLC-Dev/managed-agent-platform/internal/login"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -251,35 +252,11 @@ func TestWorkspaceConcurrentResourceWrite(t *testing.T) {
 			}
 			done := make(chan int, 1)
 			go func() { status, _ := b.do("POST", "/v1/agents", agentBody(nil)); done <- status }()
-			wait, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			ticks := time.NewTicker(10 * time.Millisecond)
-			defer ticks.Stop()
-			for {
-				var waiting bool
-				if err = b.pool.QueryRow(wait, `SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND $1::int = ANY(pg_blocking_pids(pid)))`, int(tx.Conn().PgConn().PID())).Scan(&waiting); err != nil {
-					t.Fatal(err)
-				}
-				if waiting {
-					break
-				}
-				select {
-				case <-wait.Done():
-					t.Fatal("request did not reach the workspace write fence")
-				case <-ticks.C:
-				}
-			}
+			waitForWorkspaceLock(t, b.pool, int(tx.Conn().PgConn().PID()))
 			if err = tx.Commit(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			select {
-			case got := <-done:
-				if got != http.StatusForbidden {
-					t.Fatalf("write after %s: HTTP %d", action, got)
-				}
-			case <-wait.Done():
-				t.Fatal("write did not settle after the workspace grant change")
-			}
+			awaitWorkspaceStatus(t, done, http.StatusForbidden)
 			var n int
 			if err := b.pool.QueryRow(t.Context(), `SELECT count(*) FROM agents WHERE workspace_id='research'`).Scan(&n); err != nil || n != 0 {
 				t.Fatalf("unauthorized writes: %d, %v", n, err)
@@ -488,5 +465,70 @@ func TestWorkspaceMessageFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func waitForWorkspaceLock(t *testing.T, pool *pgxpool.Pool, blocker int) {
+	t.Helper()
+	wait, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ticks := time.NewTicker(10 * time.Millisecond)
+	defer ticks.Stop()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(wait, `SELECT EXISTS(SELECT FROM pg_stat_activity WHERE datname=current_database() AND $1::int = ANY(pg_blocking_pids(pid)))`, blocker).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case <-wait.Done():
+			t.Fatal("request did not reach the workspace write fence")
+		case <-ticks.C:
+		}
+	}
+}
+
+func awaitWorkspaceStatus(t *testing.T, done <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-done:
+		if got != want {
+			t.Fatalf("mutation returned %d, want %d", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mutation did not settle after the workspace grant change")
+	}
+}
+
+func TestWorkspaceConsoleDemotionDuringWrite(t *testing.T) {
+	s := newNativeServer(t, login.ModePassword)
+	actor := seedMember(t, s, "console-writer", "developer", "console")
+	s.key, _ = ownedKeyFixture(t, s.pool, actor, actor)
+	agent, env := fixture(t, s.tserver)
+	dep := createDeployment(t, s.tserver, deploymentBody(agent, env))["id"].(string)
+	headers := ownedCookie(t, s, actor)
+	tx, err := s.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if _, err = tx.Exec(t.Context(), `UPDATE workspace_memberships SET role='limited_developer' WHERE principal_id=$1 AND workspace_id='default'`, actor); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		res, _ := s.request("POST", privateProxy+"/deployments/"+dep, `{"name":"must be refused"}`, headers)
+		done <- res.StatusCode
+	}()
+	waitForWorkspaceLock(t, s.pool, int(tx.Conn().PgConn().PID()))
+	if err = tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	awaitWorkspaceStatus(t, done, http.StatusForbidden)
+	var name string
+	if err = s.pool.QueryRow(t.Context(), `SELECT name FROM deployments WHERE id=$1`, dep).Scan(&name); err != nil || name == "must be refused" {
+		t.Fatalf("deployment was modified: %q %v", name, err)
 	}
 }

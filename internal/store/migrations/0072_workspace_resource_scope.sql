@@ -81,7 +81,7 @@ CREATE TRIGGER retire_principal_runs AFTER UPDATE OF status ON principals
 -- Writers share the workspace row with other writers and hold it through commit.
 -- An archive or grant mutation takes the incompatible lock. Re-read permissions
 -- after acquiring it so a waiter observes the winning administration change.
-CREATE FUNCTION lock_workspace_write(space text, actor_id text, key_id text) RETURNS boolean
+CREATE FUNCTION lock_workspace_write(space text, actor_id text, key_id text, required_role text) RETURNS boolean
 LANGUAGE plpgsql VOLATILE AS $$
 BEGIN
     IF actor_id <> '' THEN
@@ -95,7 +95,11 @@ BEGIN
             AND (expires_at IS NULL OR expires_at > clock_timestamp()) FOR SHARE;
         IF NOT FOUND THEN RETURN false; END IF;
     END IF;
-    RETURN actor_id = '' OR coalesce(workspace_role(actor_id, space) IN ('developer','limited_developer','admin'), false);
+    RETURN actor_id = '' OR CASE workspace_role(actor_id, space)
+        WHEN 'admin' THEN true
+        WHEN 'developer' THEN required_role <> 'admin'
+        WHEN 'limited_developer' THEN required_role NOT IN ('developer','admin')
+        ELSE false END;
 END $$;
 
 CREATE FUNCTION lock_workspace_membership_change() RETURNS trigger LANGUAGE plpgsql AS $$
